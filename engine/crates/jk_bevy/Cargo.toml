@@ -1,0 +1,31 @@
+[package]
+name = "jk_bevy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+jk_core = { path = "../jk_core" }
+jk_wall = { path = "../jk_wall" }
+# No audio yet (also: containers rarely have ALSA); explicit feature set.
+bevy = { version = "0.15", default-features = false, features = [
+    "bevy_asset",
+    "bevy_scene",
+    "bevy_gltf",
+    "bevy_animation",
+    "bevy_pbr",
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_winit",
+    "bevy_ui",
+    "bevy_text",
+    "bevy_state",
+    "multi_threaded",
+    "x11",
+    "png",
+    "jpeg",
+    "ktx2",
+    "zstd",
+    "tonemapping_luts",
+    "default_font",
+] }

@@ -1,0 +1,10 @@
+[package]
+name = "jk_spike"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+jk_core = { path = "../jk_core" }
+jk_wall = { path = "../jk_wall" }
+image = { workspace = true }

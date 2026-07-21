@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/jk_core", "crates/jk_wall", "crates/jk_spike", "crates/jk_client", "crates/jk_bevy", "crates/jk_tdm"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+rapier3d = { version = "0.22", features = ["enhanced-determinism"] }
+nalgebra = "0.33"
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
