@@ -209,6 +209,16 @@ work, not a per-task add-on, and was not attempted this session.
   the pre-dodge velocity), so wiring it correctly needs a new sim-side
   snapshot field — a real scope decision, not a same-pass tweak. Sprint
   start and mech side-step also remain unwired.
-- **Config externalization (R4)** — every tunable above is a Rust
-  `const`, not a `config/*.ron` file, for the same reason noted in Brief
-  VII v2's handback.
+- **Config externalization (R4)** — a first real slice landed after this
+  report was first written: `config/camera_tuning.txt` (hand-rolled
+  `key=value` text, not `.ron` — no serde dependency, same convention as
+  the Forge saves) now overrides the third-person camera's 7 feel
+  constants at startup via a new `CameraTuning` resource; a missing
+  file/key/bad value is provably a no-op (4 unit tests + a live check:
+  temp-set `tp_boom=7.0`, confirmed via a real capture that the camera
+  visibly pulled back off the fighter, then restored the default and
+  confirmed framing matched exactly). Still NOT externalized: every
+  other tunable in the table above (`MECH_SCALE` especially — several
+  other `sim.rs` consts derive from it at compile time, so converting it
+  is a bigger, separate job), the elastic-load/spring/chain constants,
+  and the mech palette.
