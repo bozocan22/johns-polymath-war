@@ -1,0 +1,25 @@
+# R4 config externalization - third-person camera feel.
+#
+# Every line is `key = value`. Blank lines and lines starting with # are
+# ignored. Any key you don't set (or delete/comment out) keeps its
+# compiled-in default - the values below ARE those defaults, so this
+# file changes nothing until you actually edit a number.
+#
+# Missing file, missing key, or a value that doesn't parse as a plain
+# number are all treated the same way: fall back to the default. There
+# is no way to make the game fail to start by editing this file.
+
+# Hip-fire boom: how far back the camera sits (m), how far up (m), how
+# far to the screen-right of the head pivot (m).
+tp_boom = 2.2
+tp_up = 0.12
+tp_right = 0.45
+
+# Sprinting eases the boom out to this distance, over this many seconds.
+tp_boom_sprint = 2.5
+tp_sprint_lag_s = 0.12
+
+# Aiming (RMB in third person) pulls the boom in to this distance and
+# shifts further right, easing with the same ADS blend as the FOV zoom.
+tp_boom_aim = 1.35
+tp_right_aim = 0.55

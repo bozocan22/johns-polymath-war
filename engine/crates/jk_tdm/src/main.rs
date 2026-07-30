@@ -156,6 +156,89 @@ const TP_RIGHT_AIM: f32 = 0.55;
 /// §5.2: upper-body additive aim before the legs turn-in-place catch up.
 const TORSO_AIM_LIMIT_DEG: f32 = 60.0;
 
+/// R4 (Brief VII v2 / MISSION doc): config externalization, first real
+/// slice of it. Every field here mirrors one of the TP_* consts above -
+/// those consts remain the shipped DEFAULT (and `CamCtl::default()`'s
+/// one-frame fallback, corrected by `camera_system` on the very next
+/// tick), while `camera_system` itself now reads these off a `Resource`
+/// loaded once at startup from `config/camera_tuning.txt` if present.
+/// A missing file, missing key, or unparseable value all fall back to
+/// the exact same compiled-in number - zero behavior change out of the
+/// box, real behavior change if a human edits the file. Deliberately
+/// scoped to the camera-feel constants only (not `TORSO_AIM_LIMIT_DEG`,
+/// which lives in a separate pure function with its own test, and not
+/// `sim.rs`'s `MECH_SCALE`, which several OTHER consts derive from at
+/// compile time - converting that one is a bigger, riskier job left for
+/// its own pass).
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+struct CameraTuning {
+    tp_boom: f32,
+    tp_up: f32,
+    tp_right: f32,
+    tp_boom_sprint: f32,
+    tp_sprint_lag_s: f32,
+    tp_boom_aim: f32,
+    tp_right_aim: f32,
+}
+
+impl Default for CameraTuning {
+    fn default() -> Self {
+        CameraTuning {
+            tp_boom: TP_BOOM,
+            tp_up: TP_UP,
+            tp_right: TP_RIGHT,
+            tp_boom_sprint: TP_BOOM_SPRINT,
+            tp_sprint_lag_s: TP_SPRINT_LAG_S,
+            tp_boom_aim: TP_BOOM_AIM,
+            tp_right_aim: TP_RIGHT_AIM,
+        }
+    }
+}
+
+fn camera_tuning_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("config/camera_tuning.txt")
+}
+
+fn load_camera_tuning() -> CameraTuning {
+    match std::fs::read_to_string(camera_tuning_path()) {
+        Ok(text) => parse_camera_tuning(&text),
+        Err(_) => CameraTuning::default(),
+    }
+}
+
+/// `key = value` per line, `#` comments and blank lines ignored, same
+/// hand-rolled-text convention as the Forge saves (no serde dependency
+/// for seven numbers). Any key that's absent, misspelled, or fails to
+/// parse as f32 just keeps its compiled-in default - this can never be
+/// the reason the game fails to start. Pure/no I/O, so it's directly
+/// testable without touching the filesystem.
+fn parse_camera_tuning(text: &str) -> CameraTuning {
+    let mut t = CameraTuning::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let Ok(v) = val.trim().parse::<f32>() else {
+            continue;
+        };
+        match key.trim() {
+            "tp_boom" => t.tp_boom = v,
+            "tp_up" => t.tp_up = v,
+            "tp_right" => t.tp_right = v,
+            "tp_boom_sprint" => t.tp_boom_sprint = v,
+            "tp_sprint_lag_s" => t.tp_sprint_lag_s = v,
+            "tp_boom_aim" => t.tp_boom_aim = v,
+            "tp_right_aim" => t.tp_right_aim = v,
+            _ => {}
+        }
+    }
+    t
+}
+
 /// §5.2 (Brief VII v2): the torso's additive aim yaw RELATIVE to the
 /// legs' facing - clamped to +/-60deg. Beyond the clamp, the excess
 /// is what should drive a turn-in-place (the legs catching up to face
@@ -1901,6 +1984,9 @@ fn main() {
         )
         .insert_resource(ClearColor(Color::srgb(0.58, 0.63, 0.72)))
         .init_resource::<CamCtl>()
+        // R4: loaded once here, held fixed for the whole run - same
+        // lifetime as the consts it can override.
+        .insert_resource(load_camera_tuning())
         .init_state::<GameState>()
         // §0 (Brief VII): the capture helper - inert unless JK_CAPTURE is set
         .init_resource::<CaptureMode>()
@@ -6353,6 +6439,7 @@ fn camera_system(
     time: Res<Time>,
     game: Res<Game>,
     mut cam_ctl: ResMut<CamCtl>,
+    cam_tuning: Res<CameraTuning>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainCam>>,
 ) {
     cam_ctl.recoil = (cam_ctl.recoil - time.delta_secs() * 5.0).max(0.0);
@@ -6417,17 +6504,18 @@ fn camera_system(
     // below - this lag is a lighter, faster settle by design) and ADS
     // still pulls IN from whichever hip base is currently active.
     let sp = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
-    let sprint_target = if sp > SPRINT_SPEED * 0.9 { TP_BOOM_SPRINT } else { TP_BOOM };
+    let sprint_target = if sp > SPRINT_SPEED * 0.9 { cam_tuning.tp_boom_sprint } else { cam_tuning.tp_boom };
     cam_ctl.sprint_boom +=
-        (sprint_target - cam_ctl.sprint_boom) * (dt / TP_SPRINT_LAG_S).min(1.0);
+        (sprint_target - cam_ctl.sprint_boom) * (dt / cam_tuning.tp_sprint_lag_s).min(1.0);
     // Task 4: the boom distance ALSO needs to grow with a taller subject
     // - otherwise the corrected anchor height still sits close enough to
     // clip the mech's own wide hull at the old 2.2m hip distance.
     let height_boom_mult = (p.height() / BODY_HEIGHT).max(1.0);
-    let boom_target =
-        (cam_ctl.sprint_boom + (TP_BOOM_AIM - cam_ctl.sprint_boom) * ads_e) * height_boom_mult;
-    let lift = TP_UP + (0.22 - TP_UP) * ads_e;
-    let right_amt = TP_RIGHT + (TP_RIGHT_AIM - TP_RIGHT) * ads_e;
+    let boom_target = (cam_ctl.sprint_boom
+        + (cam_tuning.tp_boom_aim - cam_ctl.sprint_boom) * ads_e)
+        * height_boom_mult;
+    let lift = cam_tuning.tp_up + (0.22 - cam_tuning.tp_up) * ads_e;
+    let right_amt = cam_tuning.tp_right + (cam_tuning.tp_right_aim - cam_tuning.tp_right) * ads_e;
     let bp = cam_ctl.pitch.clamp(-1.2, 1.2);
     let bfwd = Vec3::new(sy * bp.cos(), -bp.sin(), cy * bp.cos());
     // §10: auto-mirror the shoulder when hugging a wall on the camera
@@ -9761,6 +9849,47 @@ mod camera_v2_tests {
         assert_eq!(TP_BOOM_SPRINT, 2.5, "sprint boom eases to 2.5m");
         assert_eq!(TP_BOOM_AIM, 1.35, "aim boom 1.35m");
         assert_eq!(TP_RIGHT_AIM, 0.55, "aim right 0.55m");
+    }
+}
+
+/// R4 - config externalization's completion gate (camera-tuning slice).
+#[cfg(test)]
+mod config_tuning_tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_missing_text_yields_exactly_the_compiled_in_defaults() {
+        let t = parse_camera_tuning("");
+        let d = CameraTuning::default();
+        assert_eq!(t.tp_boom, d.tp_boom);
+        assert_eq!(t.tp_up, d.tp_up);
+        assert_eq!(t.tp_right, d.tp_right);
+        assert_eq!(t.tp_boom_sprint, d.tp_boom_sprint);
+        assert_eq!(t.tp_sprint_lag_s, d.tp_sprint_lag_s);
+        assert_eq!(t.tp_boom_aim, d.tp_boom_aim);
+        assert_eq!(t.tp_right_aim, d.tp_right_aim);
+    }
+
+    #[test]
+    fn a_real_edit_overrides_exactly_that_one_key() {
+        let t = parse_camera_tuning("tp_boom = 9.5\n");
+        assert_eq!(t.tp_boom, 9.5, "the edited key must take effect");
+        assert_eq!(t.tp_up, CameraTuning::default().tp_up, "untouched keys keep their default");
+    }
+
+    #[test]
+    fn comments_blank_lines_and_whitespace_are_all_ignored() {
+        let t = parse_camera_tuning(
+            "\n  # a comment\n   tp_right   =   1.25   \n\n# tp_up = 99.0 (commented out)\n",
+        );
+        assert_eq!(t.tp_right, 1.25);
+        assert_eq!(t.tp_up, CameraTuning::default().tp_up, "a commented-out line must not apply");
+    }
+
+    #[test]
+    fn garbage_lines_and_unknown_keys_never_panic_and_never_apply() {
+        let t = parse_camera_tuning("not a valid line at all\ntp_boom = not_a_number\nfake_key = 5.0\n");
+        assert_eq!(t, CameraTuning::default(), "nothing here should have parsed");
     }
 }
 
