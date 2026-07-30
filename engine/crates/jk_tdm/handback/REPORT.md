@@ -97,8 +97,9 @@ to a render). What changed structurally toward the art: 1.7× scale
 per A3's own compression logic), olive-drab palette replacing gunmetal.
 What did NOT change: part count (still the pre-existing plate-bitmask
 damage system, not 20 separate authored meshes), weapon loadout (still
-the missile pod, not gatling+autocannon), stance (no forward hull pitch
-added), knee/waist mechanism exposure (no new geometry added).
+the missile pod, not gatling+autocannon). Forward hull pitch and exposed
+knee/waist mechanism plates were added in a later pass — see the
+Task 5.4/5.7 addenda in §8 below.
 
 ## 6. Every tunable introduced
 
@@ -160,17 +161,45 @@ work, not a per-task add-on, and was not attempted this session.
   individual detach/debris physics is a large asset-authoring task this
   session's procedural-primitive pipeline was not extended to cover.
 - **Stance change** (hull pitched nose-down, hips high, knee-forward
-  lean) — not implemented; the mech still stands upright.
-- **Exposed knee/waist mechanism geometry, hazard chevrons, wear masking,
-  stencils** — not implemented; palette changed, geometry did not.
+  lean) — implemented after this report was first written: `mech_pitch`
+  (0.085 rad forward hull pitch, cosmetic-only) applied whenever
+  `armor_set == RobotSuit && hull > 0.0`. Hazard chevrons, wear masking,
+  and stencils are still not implemented.
+- **Exposed knee/waist mechanism geometry** — implemented: 4 new
+  `mech_metal` plate entries (knee actuator stubs + waist linkage block)
+  in `spawn_armor_rig`'s `plates` array (26 -> 30 entries), verified in
+  a new capture beat (`03-mech-knee-waist-detail.png`, steep downward
+  pitch). Deliberately small-scale per the doc's own framing ("exposed
+  mechanism," not a new silhouette element) — reads as detail texture at
+  normal third-person distance, not a dramatic shape change. Hazard
+  chevrons, wear masking, and stencils are still not implemented.
+- **Capture-harness bug found and fixed in the same pass**: the §1.2
+  first-run "GOOD TO KNOW" tutorial card (added after this report's
+  first draft, dismissed by any keypress) was silently blocking every
+  `mech_scale` snap, including the two already committed under Brief
+  VII v2's handback — the script only synthesizes camera-look beats, no
+  keypress, so the card never cleared. `capture_quick_deploy` now
+  force-dismisses `FirstRunCard` for every capture script. Both existing
+  screenshots were retaken and now show the mech unobstructed.
 - **Task 1's literal deliverable** (12-20 committed image files) — not
   achievable with this session's tools (no image-download capability).
   Real research was done and written into `NOTES.md` with sources
   instead.
-- **Kinetic chain sequencing** — built and tested as a pure utility, not
-  wired into any specific animated move yet (the spec's own consumer
-  list: spear throw release, spear thrust, dodge launch, sprint start,
-  mech side-step — none of these route through it yet).
+- **Kinetic chain sequencing** — wired into a real consumer after this
+  report was first written: `torso_coil_yaw`'s post-action follow-
+  through branch (covers BOTH a spear throw's release and a thrust's
+  recovery — they already shared one branch) now drives its settle curve
+  off `spear_followthrough_yaw`, which uses the chain's tip segment
+  (`CHAIN_ONSET_OFFSETS`/`CHAIN_PEAK_SCALE`/`chain_segment_scale`/
+  `chain_peak_tick`) instead of the `jerk` gun-recoil proxy it used
+  before. New test: `spear_followthrough_yaw_is_silent_then_snaps_then_
+  settles`. `counter_movement_bonus` (Rule 3's SSC bonus) was
+  investigated for jump/dodge launch but NOT wired: the "prior movement
+  direction" it needs is overwritten by sim.rs the same frame a dodge
+  triggers (`f.vel = roll_dir * speed` fires before the client ever sees
+  the pre-dodge velocity), so wiring it correctly needs a new sim-side
+  snapshot field — a real scope decision, not a same-pass tweak. Sprint
+  start and mech side-step also remain unwired.
 - **Config externalization (R4)** — every tunable above is a Rust
   `const`, not a `config/*.ron` file, for the same reason noted in Brief
   VII v2's handback.
