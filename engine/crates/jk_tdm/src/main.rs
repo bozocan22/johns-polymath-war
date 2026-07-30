@@ -1333,7 +1333,13 @@ fn main() {
         // §12 (Brief IV): ejected shell casings — pooled, physical, brief
         .add_systems(
             Update,
-            (spawn_casings, update_casings, spin_minigun_barrels, grenade_arc)
+            (
+                spawn_casings,
+                update_casings,
+                spin_minigun_barrels,
+                grenade_arc,
+                crosshair_kill_pop,
+            )
                 .run_if(in_state(GameState::Playing)),
         )
         .run();
@@ -6514,7 +6520,10 @@ fn hud_system(
         Query<&mut Text, With<PanelAmmoText>>,
         Query<&mut Text, With<RangeText>>,
     )>,
-    mut cross: Query<(&mut Text, &mut TextColor), With<CrosshairText>>,
+    // TextColor ONLY — a &mut Text here aliases the ParamSet's eight
+    // Text queries and trips B0001 at schedule init (startup crash).
+    // The glyph swap lives in `crosshair_kill_pop`, its own system.
+    mut cross: Query<&mut TextColor, With<CrosshairText>>,
 ) {
     let simr = &game.sim;
     let p = &simr.fighters[simr.player];
@@ -6722,20 +6731,17 @@ fn hud_system(
     // crosshair flash: white → gold on a fresh headshot, red on a fresh
     // hit; §5.3 amber when the muzzle→crosshair path is blocked close-by
     // (the shot will hit YOUR cover — not a mystery, a warning)
-    if let Ok((mut tx, mut tc)) = cross.get_single_mut() {
+    if let Ok(mut tc) = cross.get_single_mut() {
         let fresh = simr
             .hits
             .iter()
             .rev()
             .find(|(ev, ttl)| ev.shooter == simr.player && *ttl > 2.0);
-        // a fresh KILL pops the crosshair into an ✕ for a beat — the
-        // confirm reads without looking at the feed
         let fresh_kill = simr
             .kill_feed
             .iter()
             .rev()
             .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
-        **tx = if fresh_kill { "✕".to_string() } else { "+".to_string() };
         *tc = TextColor(match fresh {
             _ if fresh_kill => Color::srgb(1.0, 0.55, 0.2),
             Some((ev, _)) if ev.zone == HitZone::Head => Color::srgb(1.0, 0.85, 0.2),
@@ -6743,6 +6749,24 @@ fn hud_system(
             None if cam.blocked && p.alive() => Color::srgba(1.0, 0.55, 0.1, 0.9),
             None => Color::srgba(1.0, 1.0, 1.0, 0.9),
         });
+    }
+}
+
+/// The kill-confirm glyph pop, in its OWN system: the crosshair `+`
+/// becomes an ✕ for half a second after your kill. Separate from
+/// `hud_system` because two &mut Text accesses in one system alias.
+fn crosshair_kill_pop(game: Res<Game>, mut q: Query<&mut Text, With<CrosshairText>>) {
+    let simr = &game.sim;
+    let fresh_kill = simr
+        .kill_feed
+        .iter()
+        .rev()
+        .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
+    if let Ok(mut tx) = q.get_single_mut() {
+        let want = if fresh_kill { "✕" } else { "+" };
+        if **tx != want {
+            **tx = want.to_string();
+        }
     }
 }
 
