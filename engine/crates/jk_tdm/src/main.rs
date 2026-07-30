@@ -89,6 +89,10 @@ struct CamCtl {
     land_dip: f32,
     prev_vy: f32,
     prev_grounded: bool,
+    /// §5.2 (Brief VI): scoped-class zoom stage — 0 unscoped, 1 = 40°,
+    /// 2 = 10°. RMB cycles; every shot auto-unscopes.
+    zoom_stage: u8,
+    prev_fire_cd: f32,
 }
 
 impl Default for CamCtl {
@@ -109,6 +113,8 @@ impl Default for CamCtl {
             land_dip: 0.0,
             prev_vy: 0.0,
             prev_grounded: true,
+            zoom_stage: 0,
+            prev_fire_cd: 0.0,
         }
     }
 }
@@ -457,8 +463,86 @@ const N_WEAPONS: usize = 11;
 /// §2.3: render layer for the first-person viewmodel — seen only by the
 /// dedicated fixed-FOV viewmodel camera, never by the world camera.
 const VIEWMODEL_LAYER: usize = 1;
-/// Viewmodel camera FOV (fixed regardless of world/ADS FOV).
-const VM_FOV_DEG: f32 = 55.0;
+/// Viewmodel camera FOV. §1.2 (Brief VI): CS:GO Classic preset = 68°.
+const VM_FOV_DEG: f32 = 68.0;
+// ---- §1.3 (Brief VI): the no-bounce contract ------------------------------
+/// Below this fraction of sprint speed the bob is EXACTLY zero — the
+/// CS:GO property: the bob clock freezes when you stop.
+const VM_BOB_DEADZONE: f32 = 0.05;
+/// Airborne bob multiplier (CS:GO's exact ÷5).
+const VM_AIR_BOB: f32 = 0.2;
+/// Mouse-sway rotational cap, degrees (Brief VI: 0.3°).
+const VM_SWAY_CAP_DEG: f32 = 0.3;
+/// Fire back-slide: ≤ 1.5 cm along the barrel, returned in ≤ 120 ms.
+const VM_KICK_SLIDE_M: f32 = 0.015;
+const VM_KICK_RETURN_S: f32 = 0.12;
+/// §1.4a screen-intrusion budgets: every weapon's geometry must fit a
+/// two-part envelope around the vm root — a RECEIVER box (wide but low)
+/// and a MAST (sights/scope: tall but narrow). The sweep test proves the
+/// ROOT can never carry either part across the vertical midline or into
+/// the central 12%-of-screen-height circle. Current widest receiver =
+/// minigun cluster (0.069 left); tallest mast = AWM scope (0.085 up).
+const VM_RECEIVER_LEFT: f32 = 0.09;
+const VM_RECEIVER_UP: f32 = 0.05;
+const VM_MAST_LEFT: f32 = 0.03;
+const VM_MAST_UP: f32 = 0.09;
+
+/// §1.3 (Brief VI): the carry-motion CORE — pure. The viewmodel root's
+/// translation offset (camera space, meters) from bob/kick/sprint/dip.
+/// Shared verbatim by `fp_viewmodel` and the §1.4 no-bounce tests, so
+/// the tests measure the real motion, not a copy of it.
+fn carry_offset(
+    speed_frac: f32,
+    theta: f32,
+    grounded: bool,
+    kick: f32,
+    sprint_e: f32,
+    dip: f32,
+    wind: f32,
+) -> Vec3 {
+    let s = if speed_frac < VM_BOB_DEADZONE {
+        0.0 // standing = frozen bob clock = zero positional motion
+    } else {
+        speed_frac
+    };
+    let air = if grounded { 1.0 } else { VM_AIR_BOB };
+    let bob = Vec2::new(
+        0.0065 * s * theta.sin(),
+        0.004 * s * (2.0 * theta).sin(),
+    ) * air;
+    Vec3::new(
+        bob.x + sprint_e * 0.02 + wind * 0.07,
+        // the run-lower and the landing dip pull DOWN, never up
+        bob.y - dip - sprint_e * 0.06 + wind * 0.09,
+        kick * VM_KICK_SLIDE_M + wind * 0.30,
+    )
+}
+
+/// §1.1 Rule 2 (Brief VI): while a scoped-class weapon is zoomed the
+/// viewmodel is NOT RENDERED at all — pure predicate, shared by the
+/// render path and the scope-hide test.
+fn vm_hidden_while_scoped(gun_is_scoped: bool, ads: bool) -> bool {
+    gun_is_scoped && ads
+}
+
+/// §1.2 (Brief VI): one segment of the on-weapon ammo bar — an emissive
+/// tick on the LEFT receiver face, viewmodel only. Segments extinguish
+/// as the magazine drains; all pulse once when a reload completes.
+#[derive(Component)]
+struct AmmoBarSeg {
+    idx: usize,
+}
+const AMMO_BAR_SEGS: usize = 8;
+
+/// Left-face standoff for the bar, per receiver width.
+fn ammo_bar_x(kind: GunKind) -> f32 {
+    match kind {
+        GunKind::Glock | GunKind::Deagle => -0.030,
+        GunKind::M249 => -0.044,
+        GunKind::Minigun => -0.072,
+        _ => -0.032,
+    }
+}
 
 fn weapon_slot(kind: GunKind) -> Option<usize> {
     match kind {
@@ -506,6 +590,52 @@ fn ammo_kind(kind: GunKind) -> &'static str {
         GunKind::Bow => "ARROWS",
         GunKind::Spear => "WAR SPEARS",
         GunKind::Minigun => "7.62 BELT",
+    }
+}
+
+// ---- §3 (Brief VI): the four-corner HUD, data-driven ----------------------
+// Each corner carries exactly ONE info cluster; the center stays empty
+// except the crosshair and transients. Anchors are normalized [0..1]
+// screen fractions + pixel offsets, consumed by the spawn code and
+// asserted by the layout test at three resolutions.
+/// 5% safe area: nothing sits closer than this to any screen edge.
+const HUD_SAFE_FRAC: f32 = 0.05;
+/// (name, anchor [x,y] in 0..1, offset as SCREEN FRACTIONS — fractional
+/// offsets keep the 5% safe area at every resolution by construction)
+const HUD_ANCHORS: &[(&str, [f32; 2], [f32; 2])] = &[
+    ("vitals", [0.0, 1.0], [0.06, -0.09]),     // bottom-left
+    ("ammo", [1.0, 1.0], [-0.06, -0.09]),      // bottom-right
+    ("minimap-kd", [0.0, 0.0], [0.06, 0.06]),  // top-left
+    ("timer-score", [0.5, 0.0], [0.0, 0.055]), // top-center
+    ("killfeed", [1.0, 0.0], [-0.06, 0.06]),   // top-right
+];
+
+/// §3.1: vitals color — white nominal, RED at ≤25, pulsing at ≤20.
+/// Pure, shared by the HUD system and the threshold test.
+fn vitals_color(hp: f32, t: f32) -> Color {
+    if hp <= 20.0 {
+        let a = 0.75 + 0.25 * (t * 6.0).sin().abs();
+        Color::srgba(1.0, 0.18, 0.15, a)
+    } else if hp <= 25.0 {
+        Color::srgb(1.0, 0.18, 0.15)
+    } else {
+        Color::srgb(0.95, 0.96, 0.98)
+    }
+}
+
+/// §3.2: the magazine number turns red at ≤25% of the mag.
+fn ammo_is_low(ammo: u32, mag: u32) -> bool {
+    mag > 0 && (ammo as f32) <= mag as f32 * 0.25
+}
+
+/// §3.5: killfeed modifier glyphs. Implemented: headshot (✛). The other
+/// CS:GO glyphs (wallbang, noscope, through-smoke, blind, flash-assist)
+/// need sim events this game does not track yet — deferred, documented.
+fn feed_glyphs(headshot: bool) -> &'static str {
+    if headshot {
+        " ✛ "
+    } else {
+        "  "
     }
 }
 
@@ -668,6 +798,8 @@ struct ModelKit {
     mech_shadow: Handle<StandardMaterial>,
     mech_metal: Handle<StandardMaterial>,
     mech_red: Handle<StandardMaterial>,
+    /// §4.2 (Brief VI): yellow-black hazard accents.
+    mech_hazard: Handle<StandardMaterial>,
 }
 
 /// §2.1 tone slots of the weapon palette.
@@ -1029,8 +1161,8 @@ struct Bind {
 const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "W A S D", action: "Move", essential: false },
     Bind { key: "MOUSE", action: "Look", essential: false },
-    Bind { key: "LMB", action: "Aim down sights (zoom)", essential: false },
-    Bind { key: "RMB", action: "Fire", essential: false },
+    Bind { key: "LMB", action: "Fire", essential: false },
+    Bind { key: "RMB", action: "Alt: scope zoom (heavy rifle) / draw (bow, spear) — rifles have NO aim-down-sights", essential: false },
     Bind { key: "T", action: "Inspect weapon", essential: false },
     Bind { key: "SHIFT", action: "Sprint", essential: false },
     Bind { key: "SPACE", action: "Jump  (HOLD mid-air: Mech thrusters)", essential: true },
@@ -1043,6 +1175,8 @@ const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "G", action: "Cycle throwable (frag/flash/smoke/molotov)", essential: true },
     Bind { key: "H / Mouse4", action: "HOLD: aim throw (arc previews, power charges) — release: throw", essential: true },
     Bind { key: "B", action: "Cancel aimed throw (keeps the grenade)", essential: false },
+    Bind { key: "U", action: "Dismount the mech (chassis is scrapped; the pad respawns)", essential: false },
+    Bind { key: "Y (hold)", action: "Mech missile pod: hold to LOCK a mech (1.3s), release to fire — tap: dumb-fire. Never locks infantry", essential: false },
     Bind { key: "1 2 3", action: "Weapon slots", essential: false },
     Bind { key: "R", action: "Reload", essential: false },
     Bind { key: "Z / X", action: "Lean left / right", essential: false },
@@ -1339,6 +1473,9 @@ fn main() {
                 spin_minigun_barrels,
                 grenade_arc,
                 crosshair_kill_pop,
+                ammo_bar_sync,
+                hud_colors,
+                sync_rockets,
             )
                 .run_if(in_state(GameState::Playing)),
         )
@@ -1445,7 +1582,8 @@ struct Casing {
 }
 
 const CASING_CAP: usize = 96;
-const CASING_TTL_S: f32 = 8.0;
+/// §5.1 (Brief VI): casings persist ≥ 10 s.
+const CASING_TTL_S: f32 = 10.0;
 
 /// Detect fresh shots by each fighter's fire_cd jumping UP, and eject a
 /// casing from beside the action. Bows, spears, and fists leave none.
@@ -1558,6 +1696,26 @@ struct TriggerFinger {
 /// spin_t (the player's own barrels; world models stay still).
 #[derive(Component)]
 struct MinigunSpinner;
+
+/// §5.3 (Brief VI): one pooled pod-missile visual.
+#[derive(Component)]
+struct RocketVis(usize);
+
+/// §5.3: place the pooled missile visuals on the sim's live rockets.
+fn sync_rockets(game: Res<Game>, mut q: Query<(&RocketVis, &mut Transform, &mut Visibility)>) {
+    for (rv, mut tf, mut vis) in &mut q {
+        if let Some(r) = game.sim.rockets.get(rv.0) {
+            tf.translation = Vec3::from_array(r.pos);
+            let v = Vec3::from_array(r.vel);
+            if v.length_squared() > 1e-3 {
+                tf.look_to(v.normalize(), Vec3::Y);
+            }
+            *vis = Visibility::Visible;
+        } else {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
 
 /// §2.1 (Brief II): a fully articulated fingered hand — palm, four
 /// two-jointed fingers, two-jointed thumb. VIEWMODEL ONLY: it lives on
@@ -1928,6 +2086,27 @@ fn spawn_weapon_model(
         }
         e.set_parent(root);
     }
+    // §1.2 (Brief VI): the on-weapon ammo bar — 8 emissive ticks on the
+    // left receiver face, VIEWMODEL ONLY, driven by `ammo_bar_sync`
+    if with_hands
+        && !matches!(
+            kind,
+            GunKind::Fists | GunKind::Bow | GunKind::Spear
+        )
+    {
+        let bx = ammo_bar_x(kind);
+        for i in 0..AMMO_BAR_SEGS {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.med_glow.clone()),
+                    Transform::from_xyz(bx, 0.015, -0.01 + i as f32 * 0.017)
+                        .with_scale(Vec3::new(0.004, 0.009, 0.012)),
+                    AmmoBarSeg { idx: i },
+                ))
+                .set_parent(root);
+        }
+    }
     // §2.1: the viewmodel's hands are FULLY FINGERED — trigger finger,
     // grip wrap, thumb-over — where the world model wears mittens
     if with_hands {
@@ -2015,7 +2194,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 14] = [
+    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 26] = [
         // chest: two canted khaki facets meeting on the centerline
         (kit.mech_khaki.clone(), Vec3::new(0.13, 0.34, 0.10),
          Quat::from_rotation_y(-0.22), Vec3::new(0.30, 0.46, 0.16)),
@@ -2043,7 +2222,8 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
          Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
         (kit.mech_shadow.clone(), Vec3::new(-0.36, 0.50, 0.0),
          Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
-        // helm cowl over the head + the RED SENSOR SLIT
+        // §4.2 (Brief VI): NO head — an angular recessed SENSOR VISOR
+        // slit across the hull front, emissive red (Brief IV language)
         (kit.mech_khaki.clone(), Vec3::new(0.0, 0.90, -0.01),
          Quat::from_rotation_x(0.08), Vec3::new(0.26, 0.16, 0.24)),
         (kit.mech_red.clone(), Vec3::new(0.0, 0.885, 0.115),
@@ -2051,6 +2231,35 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // pelvis skirt plate
         (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.02, 0.10),
          Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
+        // §4.2: hazard chevrons — pod cover + knee plates ONLY
+        (kit.mech_hazard.clone(), Vec3::new(-0.36, 0.685, 0.02),
+         Quat::from_rotation_z(0.12), Vec3::new(0.20, 0.02, 0.22)),
+        (kit.mech_hazard.clone(), Vec3::new(0.14, -0.32, 0.12),
+         Quat::from_rotation_x(-0.2), Vec3::new(0.10, 0.06, 0.02)),
+        (kit.mech_hazard.clone(), Vec3::new(-0.14, -0.32, 0.12),
+         Quat::from_rotation_x(-0.2), Vec3::new(0.10, 0.06, 0.02)),
+        // §4.2: knee plates under the chevrons
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.14, -0.36, 0.10),
+         Quat::from_rotation_x(-0.2), Vec3::new(0.12, 0.14, 0.06)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(-0.14, -0.36, 0.10),
+         Quat::from_rotation_x(-0.2), Vec3::new(0.12, 0.14, 0.06)),
+        // §4.2/§5.3: LEFT-shoulder 4-tube missile pod — tube caps
+        // visible, one status light per tube
+        (kit.mech_khaki_dk.clone(), Vec3::new(-0.36, 0.62, 0.04),
+         Quat::IDENTITY, Vec3::new(0.18, 0.12, 0.20)),
+        (kit.mech_shadow.clone(), Vec3::new(-0.315, 0.645, 0.145),
+         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
+        (kit.mech_shadow.clone(), Vec3::new(-0.405, 0.645, 0.145),
+         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
+        (kit.mech_shadow.clone(), Vec3::new(-0.315, 0.595, 0.145),
+         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
+        (kit.mech_shadow.clone(), Vec3::new(-0.405, 0.595, 0.145),
+         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
+        (kit.mech_red.clone(), Vec3::new(-0.27, 0.62, 0.145),
+         Quat::IDENTITY, Vec3::new(0.015, 0.09, 0.01)),
+        // §4.2: antenna mast, rear-left
+        (kit.mech_metal.clone(), Vec3::new(-0.20, 0.86, -0.24),
+         Quat::from_rotation_x(-0.12), Vec3::new(0.015, 0.34, 0.015)),
     ];
     for (mat, tr, rot, sc) in plates {
         commands
@@ -2878,12 +3087,16 @@ fn setup(
         }),
         // the robot's mitten: matte white shell, same as the body (§1.4)
         hand: materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42)),
-        // §11: khaki military plates — matte, board-game-mini flat
-        mech_khaki: materials.add(flat(0x8C7F5E)),
-        mech_khaki_dk: materials.add(flat(0x5E563F)),
-        mech_khaki_lt: materials.add(flat(0xB7AB86)),
-        mech_shadow: materials.add(flat(0x2B2A26)),
+        // §4.2 (Brief VI): faceted GUNMETAL plates, matte (roughness
+        // 0.6–0.8) — the concept art's material language at 1.15×
+        mech_khaki: materials.add(metal(Color::srgb_u8(0x4A, 0x4E, 0x55), 0.35, 0.7)),
+        mech_khaki_dk: materials.add(metal(Color::srgb_u8(0x33, 0x36, 0x3B), 0.35, 0.75)),
+        mech_khaki_lt: materials.add(metal(Color::srgb_u8(0x5E, 0x64, 0x6C), 0.35, 0.65)),
+        mech_shadow: materials.add(flat(0x24262A)),
         mech_metal: materials.add(metal(Color::srgb_u8(0x4A, 0x4A, 0x48), 0.7, 0.45)),
+        // §4.2: hazard chevrons — shoulder-pod cover and knee plates
+        // ONLY (≤10% of surface; an accent, not a paint job)
+        mech_hazard: materials.add(flat(0xD9A916)),
         mech_red: materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0xC2, 0x3B, 0x2E),
             emissive: LinearRgba::new(1.6, 0.25, 0.12, 1.0),
@@ -3262,6 +3475,16 @@ fn setup(
         post: gpost,
         ring: gring,
     });
+    // §5.3 (Brief VI): pooled pod-missile visuals (≤ 8 in flight)
+    for i in 0..8 {
+        commands.spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.mech_red.clone()),
+            Transform::from_scale(Vec3::new(0.14, 0.14, 0.34)),
+            Visibility::Hidden,
+            RocketVis(i),
+        ));
+    }
 
     // ---- HUD ------------------------------------------------------------
     commands.spawn((
@@ -3371,27 +3594,34 @@ fn setup(
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(14.0),
-            top: Val::Px(10.0),
+            left: Val::Percent(HUD_ANCHORS[2].2[0] * 100.0),
+            top: Val::Percent(HUD_ANCHORS[2].2[1] * 100.0),
             ..default()
         },
         HudText,
     ));
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 22.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 1.0)),
-        Node {
+    // §3.4: timer + score — TRUE top-center via a full-width centering
+    // rail (data-driven top offset from HUD_ANCHORS)
+    commands
+        .spawn(Node {
             position_type: PositionType::Absolute,
-            left: Val::Percent(38.0),
-            top: Val::Px(8.0),
+            left: Val::Px(0.0),
+            top: Val::Percent(HUD_ANCHORS[3].2[1] * 100.0 - 1.5),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
             ..default()
-        },
-        ScoreTimerText,
-    ));
+        })
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 1.0)),
+                ScoreTimerText,
+            ));
+        });
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -3401,8 +3631,8 @@ fn setup(
         TextColor(Color::srgb(0.95, 0.95, 0.95)),
         Node {
             position_type: PositionType::Absolute,
-            right: Val::Px(14.0),
-            top: Val::Px(10.0),
+            right: Val::Percent(-HUD_ANCHORS[4].2[0] * 100.0),
+            top: Val::Percent(HUD_ANCHORS[4].2[1] * 100.0),
             ..default()
         },
         FeedText,
@@ -3490,31 +3720,49 @@ fn setup(
             DmgEdge(idx),
         ));
     }
-    // your status panel — weapon, ammo, HP/armor — bottom right
+    // §3 (Brief VI): the four-corner anatomy. BOTTOM-LEFT = vitals
+    // (HP largest text on screen, armor beside); BOTTOM-RIGHT = ammo.
+    // Anchors come from HUD_ANCHORS — the layout test asserts them.
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(16.0),
-                bottom: Val::Px(16.0),
+                left: Val::Percent(HUD_ANCHORS[0].2[0] * 100.0),
+                bottom: Val::Percent(-HUD_ANCHORS[0].2[1] * 100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                row_gap: Val::Px(5.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.5)),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 34.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.96, 0.98)),
+                PanelInfoText,
+            ));
+        });
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Percent(-HUD_ANCHORS[1].2[0] * 100.0),
+                bottom: Val::Percent(-HUD_ANCHORS[1].2[1] * 100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::FlexEnd,
                 row_gap: Val::Px(5.0),
                 padding: UiRect::all(Val::Px(12.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.72)),
+            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.5)),
         ))
         .with_children(|p| {
-            p.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: 19.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.85, 0.4)),
-                PanelInfoText,
-            ));
             p.spawn((
                 Text::new(""),
                 TextFont {
@@ -3524,9 +3772,6 @@ fn setup(
                 TextColor(Color::WHITE),
                 PanelAmmoText,
             ));
-            // §7 (Brief III): CS:GO-minimal — numerals only, NO bars.
-            // (The old fill bars are gone; health/armor read as numbers
-            // in the panel text above.)
         });
     // scoreboard (TAB)
     commands
@@ -4027,20 +4272,48 @@ fn input_and_step(
     // SPACE jump, Q roll (or tap crouch at a sprint), E shield,
     // O or V first/third person, Z/X lean, 1-3 weapon slots, M minimap.
     // Edge inputs latch until a sim step runs.
+    // §1 (Brief VI): CS:GO grammar — LEFT fires, always. RIGHT is an ALT
+    // function that only exists on scoped weapons (camera zoom, Rule 2)
+    // and projectile draws (bow/spear, Brief II grammar). Standard guns
+    // have NO aim-down-sights state of any kind. swap_mouse still swaps.
     let (aim_btn, fire_btn) = if settings.swap_mouse {
-        (MouseButton::Right, MouseButton::Left)
-    } else {
         (MouseButton::Left, MouseButton::Right)
+    } else {
+        (MouseButton::Right, MouseButton::Left)
     };
-    let ads = buttons.pressed(aim_btn);
+    let p_gun = game.sim.fighters[game.sim.player].gun;
+    let scoped_gun = gun(p_gun).scoped;
+    let alt_capable = scoped_gun || gun(p_gun).projectile.is_some();
+    // §5.2 (Brief VI): scoped-class zoom is a two-stage CYCLE (40° →
+    // 10° → out), and EVERY shot auto-unscopes — the bolt is cycled
+    // out of the glass
+    if scoped_gun && buttons.just_pressed(aim_btn) {
+        cam.zoom_stage = (cam.zoom_stage + 1) % 3;
+    }
+    if !scoped_gun {
+        cam.zoom_stage = 0;
+    }
+    let pf = game.sim.fighters[game.sim.player].fire_cd;
+    if scoped_gun && pf > cam.prev_fire_cd + 1e-6 {
+        cam.zoom_stage = 0;
+    }
+    cam.prev_fire_cd = pf;
+    let ads = if scoped_gun {
+        cam.zoom_stage > 0
+    } else {
+        buttons.pressed(aim_btn) && alt_capable
+    };
     cam.ads = ads;
     // §3.4: ADS progress advances framerate-independently; the sim's ADS
     // benefits (spread ×0.32, ADS walk speed) key off ads_t > 0.9 so
     // frame 1 of the zoom doesn't get full accuracy.
     {
         let dir = if ads { 1.0 } else { -1.0 };
-        // §6: Recon Weave aims in 40% faster
-        let ads_time = if game.sim.fighters[game.sim.player].armor_set == ArmorSet::Recon {
+        // §6: Recon Weave aims in 40% faster; §5.2 (Brief VI): the
+        // scope transition is 0.05 s per step
+        let ads_time = if scoped_gun {
+            0.05
+        } else if game.sim.fighters[game.sim.player].armor_set == ArmorSet::Recon {
             ADS_TIME_S / 1.4
         } else {
             ADS_TIME_S
@@ -4109,6 +4382,10 @@ fn input_and_step(
         throw_hold: keys.pressed(KeyCode::KeyH) || buttons.pressed(MouseButton::Back),
         // §1 (Brief V): B cancels the aimed throw, grenade kept
         throw_cancel: keys.just_pressed(KeyCode::KeyB),
+        // §4.6 (Brief VI): U dismounts the mech
+        exit_mech: keys.just_pressed(KeyCode::KeyU),
+        // §5.3 (Brief VI): Y holds missile targeting; release launches
+        pod_aim: keys.pressed(KeyCode::KeyY),
         cycle_throw: game.pending_cycle_throw,
         // §5/§6 (Brief III): F is the KNIFE now; the armor ability
         // (brace / flame / repulsor) moved to held C
@@ -5304,8 +5581,16 @@ fn camera_system(
         let dir = if cam_ctl.first_person { -1.0 } else { 1.0 };
         cam_ctl.person_t = (cam_ctl.person_t + dir * dt / PERSON_BLEND_S).clamp(0.0, 1.0);
     }
-    let (sy, cy) = (cam_ctl.yaw.sin(), cam_ctl.yaw.cos());
-    let (sp, cp) = (cam_ctl.pitch.sin(), cam_ctl.pitch.cos());
+    // §2 channel 2 (Brief VI): the camera shows punch × 2.0 × 0.45 —
+    // 45% of the true deflection. The crosshair is screen-anchored and
+    // never moves; impacts drifting above it is the skill expression.
+    let vp = p.punch;
+    let view_pitch = cam_ctl.pitch
+        - (vp[0] * RECOIL_SCALE * VIEW_RECOIL_TRACKING).to_radians();
+    let view_yaw = cam_ctl.yaw
+        + (vp[1] * RECOIL_SCALE * VIEW_RECOIL_TRACKING).to_radians();
+    let (sy, cy) = (view_yaw.sin(), view_yaw.cos());
+    let (sp, cp) = (view_pitch.sin(), view_pitch.cos());
     let fwd = Vec3::new(sy * cp, -sp, cy * cp);
     let right = Vec3::new(cy, 0.0, -sy);
     // an ADS'd AWM ALWAYS looks through the glass: even in third person
@@ -5412,6 +5697,28 @@ fn camera_system(
         let d = Vec3::from_array(b.at).distance(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
         shake += (1.0 - d / 22.0).max(0.0) * 0.09 * ((*ttl - 1.55) / 0.45);
     }
+    // §4.4 (Brief VI): a walking mech THUMPS — soldiers within 6 m of
+    // its footfalls feel a subtle 0.2-intensity shake
+    for (fi, f2) in game.sim.fighters.iter().enumerate() {
+        if fi == game.sim.player
+            || !(f2.armor_set == ArmorSet::RobotSuit && f2.hull > 0.0)
+            || !f2.alive()
+        {
+            continue;
+        }
+        let sp2 = (f2.vel[0] * f2.vel[0] + f2.vel[1] * f2.vel[1]).sqrt();
+        if sp2 < 0.5 {
+            continue;
+        }
+        let dx = f2.pos[0] - p.pos[0];
+        let dz = f2.pos[2] - p.pos[2];
+        let d = (dx * dx + dz * dz).sqrt();
+        if d < 6.0 {
+            // periodic thump matched to the walk cadence
+            let pulse = (game.sim.t * std::f32::consts::TAU * 1.7).sin().max(0.0).powi(6);
+            shake += 0.2 * 0.09 * (1.0 - d / 6.0) * pulse;
+        }
+    }
     let shake = shake.min(0.14);
     let sh = if shake > 0.0 {
         let n = game.sim.t * 113.0;
@@ -5431,8 +5738,13 @@ fn camera_system(
     // §3.4: FOV rides ads_t (ease-out, framerate-independent) — never the
     // `+= (target-fov)*k` exponential that stalls and never arrives
     if let Projection::Perspective(persp) = &mut *proj {
+        // §5.2 (Brief VI): scoped-class two-stage zoom — 40° then 10°
         let zoom = if p.armed() && !p.shield_up {
-            gun(p.gun).zoom_deg
+            if gun(p.gun).scoped && cam_ctl.zoom_stage == 2 {
+                10.0
+            } else {
+                gun(p.gun).zoom_deg
+            }
         } else {
             FOV_HIP_DEG
         };
@@ -5672,17 +5984,17 @@ fn fp_viewmodel(
     let supp = 1.0 - cam_ctl.ads_t * 0.85;
     // §2.3 (Brief IV): MINIMAL bob — half the old amplitudes. CS:GO's
     // gun barely bobs; steadiness is what reads as professional.
+    // §1.3 (Brief VI): the bob CLOCK only advances while moving — theta
+    // frozen at standstill; the offsets flow through `carry_offset`, the
+    // same pure fn the no-bounce tests measure.
     st.theta += speed * dt * 4.4;
-    let s = (speed / SPRINT_SPEED).clamp(0.0, 1.0);
-    let bob = Vec2::new(
-        0.0065 * s * st.theta.sin(),
-        0.004 * s * (2.0 * st.theta).sin(),
-    ) * supp;
-    // sway: the gun lags the camera — critically damped spring (ω = 14,
-    // ζ = 1), stepped with the CLOSED FORM so 60 fps and 240 fps agree
+    let s = (speed / SPRINT_SPEED).clamp(0.0, 1.0) * supp;
+    // sway: the gun lags the camera — critically damped spring (ω = 14 →
+    // ~0.1 s lag), CLOSED FORM so 60 fps and 240 fps agree. §1.3 caps
+    // the amplitude at 0.3°.
     let tgt = Vec2::new(
-        (-mdelta.x * 0.02).clamp(-3.5, 3.5),
-        (-mdelta.y * 0.02).clamp(-3.5, 3.5),
+        (-mdelta.x * 0.02).clamp(-VM_SWAY_CAP_DEG, VM_SWAY_CAP_DEG),
+        (-mdelta.y * 0.02).clamp(-VM_SWAY_CAP_DEG, VM_SWAY_CAP_DEG),
     );
     let w = 14.0_f32;
     let decay = (-w * dt).exp();
@@ -5729,8 +6041,10 @@ fn fp_viewmodel(
     // §2.3: ROTATIONAL recoil that SNAPS back — kick is ~70% pitch-up /
     // 30% roll, recovered inside 140 ms regardless of the gun's cadence;
     // translation kick capped at 1.5 cm. The gun never wanders.
+    // §1.3 (Brief VI): return window tightened to 120 ms
     let kick_vm = if p.armed() && p.fire_cd > 0.0 {
-        ((0.14 - (spec.fire_period - p.fire_cd)) / 0.14).clamp(0.0, 1.0)
+        ((VM_KICK_RETURN_S - (spec.fire_period - p.fire_cd)) / VM_KICK_RETURN_S)
+            .clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -5824,17 +6138,20 @@ fn fp_viewmodel(
     } else {
         0.0
     };
-    if let Ok((mut tf, _)) = q.get_mut(vm.root) {
+    if let Ok((mut tf, mut vmvis)) = q.get_mut(vm.root) {
+        // §1.1 Rule 2 (Brief VI): zoomed scoped-class weapon → the
+        // viewmodel is not rendered at all; unscope restores next frame
+        *vmvis = if vm_hidden_while_scoped(spec.scoped, cam_ctl.ads) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         tf.translation = ads_shift
             + Vec3::new(-0.06, -0.02, 0.06) * ie
             + rl_t
             + mel_t
             + Vec3::new(0.03, 0.035, -0.05) * gr
-            + Vec3::new(
-                bob.x + sp * 0.02 + wind * 0.07,
-                bob.y - dip - sp * 0.06 + wind * 0.09,
-                kick_vm * 0.015 + wind * 0.30, // ≤1.5 cm translation kick
-            );
+            + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind);
         tf.rotation = Quat::from_rotation_y(
             sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y,
         ) * Quat::from_rotation_x(
@@ -6358,9 +6675,9 @@ fn sfx_system(
     // the reserve says — an empty chamber clicks until you reload)
     st.click_cd = (st.click_cd - elapsed).max(0.0);
     let fire_held = if settings.swap_mouse {
-        buttons.pressed(MouseButton::Left)
-    } else {
         buttons.pressed(MouseButton::Right)
+    } else {
+        buttons.pressed(MouseButton::Left)
     } || keys.pressed(KeyCode::KeyT);
     if fire_held
         && p.alive()
@@ -6588,13 +6905,17 @@ fn hud_system(
 
     if let Ok(mut t) = texts.p2().get_single_mut() {
         let mut s = String::new();
-        // §7: killfeed capped at three entries
-        for (ev, _) in simr.kill_feed.iter().rev().take(3) {
+        // §3.5 (Brief VI): newest at the BOTTOM, max 5 rows, modifier
+        // glyphs, and rows involving the local player marked ▶
+        let rows: Vec<_> = simr.kill_feed.iter().rev().take(5).collect();
+        for (ev, _) in rows.into_iter().rev() {
+            let me = ev.killer == simr.player || ev.victim == simr.player;
             s += &format!(
-                "{} killed {}{}\n",
+                "{}{} {}▶ {}\n",
+                if me { "▌" } else { "" },
                 simr.fighters[ev.killer].name,
+                feed_glyphs(ev.headshot),
                 simr.fighters[ev.victim].name,
-                if ev.headshot { "  (HEADSHOT)" } else { "" }
             );
         }
         **t = s;
@@ -6626,6 +6947,9 @@ fn hud_system(
         **t = match simr.winner {
             Some(Team::Blue) => "BLUE WINS — rematch shortly".to_string(),
             Some(Team::Red) => "RED WINS — rematch shortly".to_string(),
+            // §5.3 (Brief VI): the victim's warning, live from lock
+            // START — counterplay begins before the missile exists
+            None if p.lock_warn_t > 0.0 => "⚠ MISSILE LOCK ⚠".to_string(),
             None => String::new(),
         };
     }
@@ -6649,16 +6973,24 @@ fn hud_system(
                     "   [ ]".to_string()
                 }
             };
-            // §9.1: the slots line moved to the right-edge strip
+            // §3.1 (Brief VI): vitals cluster, bottom-left — HP is the
+            // largest number on screen; armor status beside it
             format!(
-                "{}{}\nHP {:.0}{regen}{}",
-                gun(p.gun).name.to_uppercase(),
-                if p.shield_up { "  [SHIELD]" } else { "" },
+                "✚ {:.0}{regen}{}{}",
                 p.health.max(0.0),
+                if p.shield_up { "  [SHIELD]" } else { "" },
                 match p.armor_set {
                     ArmorSet::None => String::new(),
                     ArmorSet::RobotSuit => {
-                        format!("  MECH — HULL {:.0} · POWER {:.0}", p.hull, p.armor)
+                        // §4.6/§5.3: hull, power, the 4-tube indicator,
+                        // and the dismount hint
+                        let tubes: String = (0..POD_TUBES)
+                            .map(|i| if i < p.pod_ammo { '▮' } else { '▯' })
+                            .collect();
+                        format!(
+                            "  MECH — HULL {:.0} · POWER {:.0} · POD {tubes} · U: dismount",
+                            p.hull, p.armor
+                        )
                     }
                     ArmorSet::Pyro => format!("  PYRO — FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
@@ -6707,8 +7039,8 @@ fn hud_system(
                 p.grenades[p.throw_sel as usize]
             )
         } else {
-            // §7 (Brief III): CS:GO-minimal — numerals ONLY, no per-bullet
-            // blocks. The selected throwable rides below in small type.
+            // §3.2 (Brief VI): the ammo cluster — weapon name above,
+            // mag / reserve as the numerals, throwable below
             let k = ThrowKind::ALL[p.throw_sel as usize];
             format!(
                 "{} / {}\n{} x{}",
@@ -6742,13 +7074,86 @@ fn hud_system(
             .iter()
             .rev()
             .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
+        // §5.2 (Brief VI): scoped-class weapons draw NO crosshair while
+        // unscoped — the no-scope prayer is the tradeoff
+        let noscope_hidden = gun(p.gun).scoped && !cam.ads;
         *tc = TextColor(match fresh {
+            _ if noscope_hidden => Color::srgba(0.0, 0.0, 0.0, 0.0),
             _ if fresh_kill => Color::srgb(1.0, 0.55, 0.2),
             Some((ev, _)) if ev.zone == HitZone::Head => Color::srgb(1.0, 0.85, 0.2),
             Some(_) => Color::srgb(1.0, 0.3, 0.25),
             None if cam.blocked && p.alive() => Color::srgba(1.0, 0.55, 0.1, 0.9),
             None => Color::srgba(1.0, 1.0, 1.0, 0.9),
         });
+    }
+}
+
+/// §3 (Brief VI): the semantic color pass — vitals red at ≤25 / pulsing
+/// at ≤20, ammo red at ≤25% of the magazine, the timer red inside the
+/// final 0:10. ParamSet because three &mut TextColor queries in one
+/// system would alias (the B0001 lesson, learned the hard way).
+fn hud_colors(
+    game: Res<Game>,
+    mut q: ParamSet<(
+        Query<&mut TextColor, With<PanelInfoText>>,
+        Query<&mut TextColor, With<PanelAmmoText>>,
+        Query<&mut TextColor, With<ScoreTimerText>>,
+    )>,
+) {
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+    if let Ok(mut c) = q.p0().get_single_mut() {
+        *c = TextColor(vitals_color(p.health.max(0.0), simr.t));
+    }
+    if let Ok(mut c) = q.p1().get_single_mut() {
+        *c = TextColor(if ammo_is_low(p.ammo, gun(p.gun).mag) {
+            Color::srgb(1.0, 0.18, 0.15)
+        } else {
+            Color::WHITE
+        });
+    }
+    if let Ok(mut c) = q.p2().get_single_mut() {
+        *c = TextColor(if simr.match_t <= 10.0 && simr.round_over_t.is_none() {
+            Color::srgb(1.0, 0.18, 0.15)
+        } else {
+            Color::srgb(0.95, 0.95, 1.0)
+        });
+    }
+}
+
+/// §1.2 (Brief VI): the on-weapon ammo bar — segments track the live
+/// magazine fraction; a completed reload pulses the whole bar once.
+/// Cosmetic only; reads the same sim ammo the HUD reads.
+fn ammo_bar_sync(
+    game: Res<Game>,
+    time: Res<Time>,
+    mut q: Query<(&AmmoBarSeg, &mut Visibility, &mut Transform)>,
+    mut prev_reload: Local<f32>,
+    mut pulse_t: Local<f32>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    // reload completion edge → one 0.5 s pulse
+    if *prev_reload > 0.0 && p.reload_t <= 0.0 {
+        *pulse_t = 0.5;
+    }
+    *prev_reload = p.reload_t;
+    *pulse_t = (*pulse_t - time.delta_secs()).max(0.0);
+    let mag = gun(p.gun).mag.max(1) as f32;
+    let frac = (p.ammo as f32 / mag).clamp(0.0, 1.0);
+    let pulse = if *pulse_t > 0.0 {
+        1.0 + 0.35 * (PI * (1.0 - *pulse_t / 0.5)).sin()
+    } else {
+        1.0
+    };
+    for (seg, mut vis, mut tf) in &mut q {
+        let lit = *pulse_t > 0.0
+            || (seg.idx as f32 + 0.5) / AMMO_BAR_SEGS as f32 <= frac;
+        *vis = if lit {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        tf.scale = Vec3::new(0.004, 0.009 * pulse, 0.012 * pulse);
     }
 }
 
@@ -6779,6 +7184,14 @@ fn health_vignette(
     let Ok(mut bg) = q.get_single_mut() else {
         return;
     };
+    // §3.7 (Brief VI): NO persistent low-HP screen vignette — CS:GO
+    // doesn't have one and it keeps the center clean. Danger reads
+    // through the vitals color (hud_colors) instead.
+    if true {
+        *bg = BackgroundColor(Color::srgba(0.5, 0.02, 0.02, 0.0));
+        return;
+    }
+    #[allow(unreachable_code)]
     let p = &game.sim.fighters[game.sim.player];
     let low = (1.0 - p.health / 35.0).clamp(0.0, 1.0);
     let regening =
@@ -7928,6 +8341,183 @@ fn menu_buttons(
 #[cfg(test)]
 mod band_tests {
     use super::*;
+
+    /// §1.4 (Brief VI) — the no-bounce gates, measured on the render
+    /// path's OWN `carry_offset` (not a copy of its math).
+    #[test]
+    fn vm_never_bounces() {
+        // standing still: ZERO positional motion at every bob phase
+        for th in 0..100 {
+            let o = carry_offset(0.0, th as f32 * 0.37, true, 0.0, 0.0, 0.0, 0.0);
+            assert_eq!(o, Vec3::ZERO, "standing = frozen bob: {o:?}");
+        }
+        // ...and anywhere below the dead-zone
+        let o = carry_offset(VM_BOB_DEADZONE * 0.9, 1.3, true, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(o, Vec3::ZERO, "sub-deadzone speed must not bob");
+        // bounce meter: the whole fire-kick envelope at a standstill —
+        // no lateral or vertical translation, rear slide ≤ 2 cm
+        for ph in 0..=20 {
+            let kick = ph as f32 / 20.0;
+            let o = carry_offset(0.0, 0.0, true, kick, 0.0, 0.0, 0.0);
+            assert!(
+                o.x == 0.0 && o.y == 0.0,
+                "firing adds ZERO lateral/vertical translation: {o:?}"
+            );
+            assert!(
+                (0.0..=0.02).contains(&o.z),
+                "back-slide stays ≤ 2 cm, rearward only: {}",
+                o.z
+            );
+        }
+        // after the envelope: exactly rest (≤ 2 mm demanded, 0 delivered)
+        let rest = carry_offset(0.0, 0.0, true, 0.0, 0.0, 0.0, 0.0);
+        assert!(rest.length() <= 0.002, "rest within 2 mm after the spray");
+        // the kick return window is the ≤ 120 ms contract
+        assert!(VM_KICK_RETURN_S <= 0.12 + 1e-6);
+        // run-lower: full sprint pulls the weapon DOWN, never up
+        for th in 0..50 {
+            let o = carry_offset(1.0, th as f32 * 0.41, true, 0.0, 1.0, 0.0, 0.0);
+            assert!(o.y < 0.0, "sprint must lower the weapon: {o:?}");
+        }
+        // airborne: bob is exactly ÷ 5
+        let g = carry_offset(0.8, 1.1, true, 0.0, 0.0, 0.0, 0.0);
+        let a = carry_offset(0.8, 1.1, false, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            (a.x / g.x - VM_AIR_BOB).abs() < 1e-5
+                && (a.y / g.y - VM_AIR_BOB).abs() < 1e-5,
+            "airborne bob must be exactly the CS:GO ÷5"
+        );
+    }
+
+    /// §1.4a screen-intrusion: across stances × phases × fire × air, the
+    /// root motion can never carry the weapon envelope (receiver box +
+    /// sight mast) across the vertical midline nor into the central
+    /// circle of radius 12% of screen height (vm FOV 68°).
+    #[test]
+    fn vm_envelope_clears_midline_and_center() {
+        // circle radius in camera space at depth z: 12% of the full
+        // screen height = 0.12 · 2·z·tan(fov/2)
+        let r_at = |z: f32| 0.24 * z * (VM_FOV_DEG.to_radians() * 0.5).tan();
+        for sf in [0.0_f32, 0.3, 0.6, 1.0] {
+            for th in 0..80 {
+                for (kick, sp) in [(0.0_f32, 0.0_f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    for grounded in [true, false] {
+                        let o = carry_offset(
+                            sf,
+                            th as f32 * 0.173,
+                            grounded,
+                            kick,
+                            sp,
+                            0.04,
+                            0.0,
+                        );
+                        let (x, y, z) = (0.11 + o.x, -0.13 + o.y, 0.32 + o.z);
+                        let sway = z * VM_SWAY_CAP_DEG.to_radians().tan();
+                        // midline: the widest part stays right of center
+                        let recv_left = x - VM_RECEIVER_LEFT - sway;
+                        let mast_left = x - VM_MAST_LEFT - sway;
+                        assert!(
+                            recv_left > 0.0,
+                            "receiver crosses the midline: sf {sf} th {th}"
+                        );
+                        // center circle: nearest corner of each envelope
+                        // part stays outside the 12% circle
+                        let r = r_at(z);
+                        for (dx, dy) in [
+                            (recv_left, y + VM_RECEIVER_UP),
+                            (mast_left, y + VM_MAST_UP),
+                        ] {
+                            let d = (dx * dx + dy * dy).sqrt();
+                            assert!(
+                                d > r,
+                                "envelope corner inside the center circle: \
+                                 d {d:.3} ≤ r {r:.3} (sf {sf} th {th})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// §3.9 (Brief VI): the four-corner layout holds at 1920×1080,
+    /// 2560×1440, and 1280×720 — every cluster inside the 5% safe area,
+    /// anchored to its own quadrant, no two clusters colliding.
+    #[test]
+    fn hud_layout_holds_at_three_resolutions() {
+        for (w, h) in [(1920.0_f32, 1080.0_f32), (2560.0, 1440.0), (1280.0, 720.0)] {
+            let mut pts: Vec<(&str, f32, f32)> = Vec::new();
+            for (name, anchor, off) in HUD_ANCHORS {
+                let x = (anchor[0] + off[0]) * w;
+                let y = (anchor[1] + off[1]) * h;
+                // 5% safe area on both axes
+                assert!(
+                    x >= w * HUD_SAFE_FRAC - 1.0 && x <= w * (1.0 - HUD_SAFE_FRAC) + 1.0,
+                    "{name} x={x} outside safe area at {w}x{h}"
+                );
+                assert!(
+                    y >= h * HUD_SAFE_FRAC - 1.0 && y <= h * (1.0 - HUD_SAFE_FRAC) + 1.0,
+                    "{name} y={y} outside safe area at {w}x{h}"
+                );
+                // the offset must pull INTO the screen from its anchor
+                if anchor[0] == 0.0 {
+                    assert!(off[0] > 0.0, "{name} must hang rightward");
+                }
+                if anchor[0] == 1.0 {
+                    assert!(off[0] < 0.0, "{name} must hang leftward");
+                }
+                if anchor[1] == 1.0 {
+                    assert!(off[1] < 0.0, "{name} must hang upward");
+                }
+                pts.push((name, x, y));
+            }
+            // no two clusters within 12% of screen width of each other
+            for i in 0..pts.len() {
+                for j in (i + 1)..pts.len() {
+                    let dx = pts[i].1 - pts[j].1;
+                    let dy = pts[i].2 - pts[j].2;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    assert!(
+                        d > w * 0.12,
+                        "{} and {} collide at {w}x{h}: {d:.0}px apart",
+                        pts[i].0,
+                        pts[j].0
+                    );
+                }
+            }
+        }
+    }
+
+    /// §3.9: the semantic thresholds flip at EXACTLY the specified
+    /// values, and the killfeed glyph mapping renders from a scripted
+    /// event stream.
+    #[test]
+    fn hud_thresholds_and_glyphs() {
+        // vitals: white above 25, red at ≤25, pulsing (alpha < 1) at ≤20
+        assert_eq!(vitals_color(25.1, 0.0), Color::srgb(0.95, 0.96, 0.98));
+        assert_eq!(vitals_color(25.0, 0.0), Color::srgb(1.0, 0.18, 0.15));
+        let pulsing = vitals_color(20.0, 0.4);
+        assert!(pulsing.alpha() < 1.0, "≤20 HP must PULSE");
+        // ammo: red at exactly ≤25% of the magazine
+        assert!(!ammo_is_low(8, 30)); // 26.7%
+        assert!(ammo_is_low(7, 30)); // 23.3%
+        assert!(ammo_is_low(5, 20)); // exactly 25%
+        assert!(!ammo_is_low(0, 0)); // fists: never "low"
+        // killfeed glyphs from a scripted stream
+        let stream = [(true, " ✛ "), (false, "  ")];
+        for (hs, want) in stream {
+            assert_eq!(feed_glyphs(hs), want);
+        }
+    }
+
+    /// §1.4 Rule-2 gate: scoped + zoomed = the viewmodel is not rendered.
+    #[test]
+    fn vm_hides_while_scoped() {
+        assert!(vm_hidden_while_scoped(true, true));
+        assert!(!vm_hidden_while_scoped(true, false));
+        assert!(!vm_hidden_while_scoped(false, true));
+        assert!(!vm_hidden_while_scoped(false, false));
+    }
 
     /// §5 (Brief IV): the interpenetration sweep — for every weapon in
     /// every firearm stance, the rear point (grip + stock) must land

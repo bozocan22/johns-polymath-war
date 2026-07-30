@@ -99,7 +99,7 @@ pub const SHIELD_BLOCK_STAND: f32 = 0.65;
 pub const SHIELD_BLOCK_CROUCH: f32 = 0.95;
 pub const SHIELD_SPEED_MULT: f32 = 0.55;
 /// AWM scoped-in crawl.
-pub const SCOPED_SPEED_MULT: f32 = 0.35;
+pub const SCOPED_SPEED_MULT: f32 = 0.5; // §5.2 (Brief VI): 50% scoped
 // ---- projectile draw (§4 overhaul): freedom with a steadiness cost -------
 // A drawn bow / cocked spear no longer pins you in place. Instead, turning
 // fast or moving fast while drawn SPOILS the shot: a stability factor
@@ -343,17 +343,18 @@ pub fn gun(kind: GunKind) -> GunSpec {
         GunKind::Awm => GunSpec {
             name: "AWM",
             class: GunClass::Special,
-            fire_period: 1.6, // the bolt: slow re-chamber
+            // §5.2 (Brief VI): AWP-class, Valve's shipped numbers
+            fire_period: 1.455,
             mag: 5,
-            reserve: 20,
-            reload_s: 3.0,
-            spread: 0.0009,
-            spread_move: 0.050,
-            kick: 0.0120,
-            // owner's table: ONLY the head is instant. 70 torso → 2 body
-            // shots; limbs ×0.75 → 52.5 → still 2; head ×4 → oblivion.
-            damage: 70.0,
-            zoom_deg: 16.0,
+            reserve: 10,
+            reload_s: 3.7,
+            // hip = prayer (tan 0.081); scoped overrides to 0.002 in
+            // try_fire; moving adds the 0.176 hard-miss penalty
+            spread: 0.081,
+            spread_move: 0.176,
+            kick: 0.0087, // table magnitude 78 unscoped (× 25/78 scoped)
+            damage: 115.0, // head ×4 one-shot; legs ×0.75 never one-shot
+            zoom_deg: 40.0, // stage 1; stage 2 = 10° (client cycles)
             scoped: true,
             ..base
         },
@@ -373,15 +374,15 @@ pub fn gun(kind: GunKind) -> GunSpec {
         GunKind::Minigun => GunSpec {
             name: "M134 Minigun",
             class: GunClass::Special,
-            fire_period: 0.0364, // ~1650 rpm once the barrels are up
+            fire_period: 0.06, // §5.1 (Brief VI): 1000 RPM
             mag: 400,
             reserve: 0, // no reloads — the pad is the reload
             reload_s: 3.0,
-            spread: 0.026,
+            spread: MINIGUN_SPREAD_COLD, // widens with heat in try_fire
             spread_move: 0.020,
             kick: 0.0008, // the mass eats the recoil; heat is the cost
-            damage: 18.0,
-            zoom_deg: 58.0,
+            damage: 8.0, // §5.1: high ROF, low per-round
+            zoom_deg: 58.0, // §5.1: no scope, no zoom — hip only
             ..base
         },
         GunKind::Bow => GunSpec {
@@ -1290,6 +1291,23 @@ pub struct Fighter {
     pub spin_cmd: f32,
     /// §7: the primary the minigun pickup displaced — restored on death.
     pub prev_primary: GunKind,
+    /// §2 (Brief VI): the punch channels — (pitch°, yaw°) angle and its
+    /// velocity. Bullets fly at punch × RECOIL_SCALE; the camera shows
+    /// 45% of that; the crosshair never moves.
+    pub punch: [f32; 2],
+    pub punch_vel: [f32; 2],
+    /// Deterministic spray-table index (decays while not firing).
+    pub spray_i: f32,
+    pub last_shot_at: f32,
+    /// §5.3 (Brief VI): the mech's missile pod — tubes left, relaunch
+    /// cooldown, the acquiring lock (target index, seconds held), and
+    /// the VICTIM-side warning timer (set from lock START).
+    pub pod_ammo: u8,
+    pub pod_cd: f32,
+    pub pod_lock_t: f32,
+    pub pod_lock_id: i32,
+    pub pod_aim_held: bool,
+    pub lock_warn_t: f32,
     /// §3: spear windup clock (counts down to the release), the aim
     /// tracked through the wind, and the charge the trigger locked in.
     pub spear_wind_t: f32,
@@ -1407,6 +1425,11 @@ pub struct PlayerCmd {
     /// §1 (Brief V): cancel the aimed throw — exits aim mode without
     /// throwing and without consuming the grenade. Edge-triggered.
     pub throw_cancel: bool,
+    /// §4.6 (Brief VI): dismount the mech (U). Edge-triggered.
+    pub exit_mech: bool,
+    /// §5.3 (Brief VI): HOLD = missile targeting (lock acquires on
+    /// mechs); RELEASE locked = launch; a quick tap dumb-fires.
+    pub pod_aim: bool,
     /// §5: cycle the selected throwable (G). Edge-triggered.
     pub cycle_throw: bool,
     /// §6: armor ability held (now C — §5 took F) — Folk brace / Pyro
@@ -1606,6 +1629,127 @@ pub const THROW_SHIELD_CHARGE_MULT: f32 = 0.8;
 /// §1 mech variant: the launcher fires hotter and flatter — no wind-up
 /// pose, no movement penalty, same preview code path.
 pub const MECH_LAUNCHER_V_MULT: f32 = 1.35;
+
+// ---- §5.3 (Brief VI): the shoulder missile pod (BF4 lock-on numbers) -----
+// Locks on MECHS ONLY — never infantry (the anti-oppression rule).
+// The victim is warned from lock START; proportional navigation with a
+// hard turn cap and a TTL means cover and side-steps beat it.
+pub const POD_TUBES: u8 = 4;
+pub const POD_LOCK_S: f32 = 1.3;
+pub const POD_CONE_COS: f32 = 0.9945; // cos 6°
+pub const POD_RANGE_M: f32 = 250.0;
+pub const POD_RELAUNCH_S: f32 = 1.5;
+pub const ROCKET_SPEED: f32 = 60.0;
+pub const ROCKET_ACCEL: f32 = 50.0;
+pub const ROCKET_TURN_CAP: f32 = 4.363; // 250°/s
+pub const ROCKET_TTL_S: f32 = 7.0;
+pub const ROCKET_LOS_BREAK_S: f32 = 0.4;
+pub const ROCKET_DMG: f32 = 270.0;
+pub const ROCKET_PN_N: f32 = 3.0;
+pub const ROCKET_PROX_M: f32 = 1.2;
+pub const ROCKET_SOLDIER_KILL_M: f32 = 2.0;
+
+/// §5.3: one pod missile in flight. `target = -1` → ballistic (dumb
+/// fire, dead target, or a broken lock — it never re-acquires).
+#[derive(Clone, Debug)]
+pub struct Rocket {
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub target: i32,
+    pub shooter: usize,
+    pub team: Team,
+    pub t: f32,
+    pub los_lost: f32,
+    pub prev_los: [f32; 3],
+}
+
+/// Rotate `dir` toward `want` by at most `max_ang` radians — the PN
+/// steering step, deterministic f32 throughout.
+pub fn rotate_toward(dir: [f32; 3], want: [f32; 3], max_ang: f32) -> [f32; 3] {
+    let dot = (dir[0] * want[0] + dir[1] * want[1] + dir[2] * want[2]).clamp(-1.0, 1.0);
+    let ang = dot.acos();
+    if ang <= max_ang || ang < 1e-5 {
+        return want;
+    }
+    let t = max_ang / ang;
+    // nlerp is fine at these small per-tick angles
+    normalize([
+        dir[0] + (want[0] - dir[0]) * t,
+        dir[1] + (want[1] - dir[1]) * t,
+        dir[2] + (want[2] - dir[2]) * t,
+    ])
+}
+
+// ---- §2 (Brief VI): deterministic spray + the three recoil channels ------
+// Channel 1 (truth): bullets leave at eye + punch × RECOIL_SCALE + cone.
+// Channel 2 (view): the camera shows punch × RECOIL_SCALE × 0.45 — the
+// crosshair itself NEVER moves. Channel 3 (viewmodel): rotational only.
+pub const RECOIL_SCALE: f32 = 2.0;
+pub const VIEW_RECOIL_TRACKING: f32 = 0.45;
+/// Punch-angle decay per tick: ×e^(−8·dt), then −18°·dt toward zero;
+/// punch velocity ×e^(−4.5·dt). Camera at rest ≈0.3–0.5 s after firing.
+pub const PUNCH_DECAY_EXP: f32 = 8.0;
+pub const PUNCH_DECAY_LIN_DEG: f32 = 18.0;
+pub const PUNCH_VEL_DECAY_EXP: f32 = 4.5;
+/// Full-auto smoothing between consecutive table entries.
+pub const SPRAY_LERP: f32 = 0.55;
+/// Spray index decay: starts after cycletime × 1.1 idle, then falls at
+/// this many entries per second (tap-firing resets, holding doesn't).
+pub const SPRAY_INDEX_DECAY: f32 = 2.0;
+/// §2.4: movement inaccuracy ramps from zero at 34% of max speed to
+/// full at 95% — counter-strafing works.
+pub const MOVE_INACC_START: f32 = 0.34;
+pub const MOVE_INACC_FULL: f32 = 0.95;
+
+/// §2.2: the deterministic spray table — entry `i` of `kind`'s pattern,
+/// as (angle from vertical, radians; magnitude, degrees of punch
+/// velocity). Generated by a per-weapon FIXED seed: the same pattern
+/// for every player in every match, learnable, and replay-exact. Pure —
+/// O(i) per call with i ≤ 64, cheap at any fire rate.
+pub fn spray_entry(kind: GunKind, i: usize) -> (f32, f32) {
+    let slot = match kind {
+        GunKind::Fists => 0u64,
+        GunKind::Glock => 1,
+        GunKind::Deagle => 2,
+        GunKind::Mp5 => 3,
+        GunKind::Shotgun => 4,
+        GunKind::Ak47 => 5,
+        GunKind::M4 => 6,
+        GunKind::Awm => 7,
+        GunKind::M249 => 8,
+        GunKind::Bow => 9,
+        GunKind::Spear => 10,
+        GunKind::Minigun => 11,
+    };
+    let mut rng = Pcg32::new(0xC5C0_0000 + slot, 0x5EED);
+    // per-shot punch VELOCITY in °/s — scaled so the table lands on
+    // CS:GO's shipped magnitudes (Deagle 57.6 vs Valve's 58.7, AK 39.6
+    // vs 30, M4 28.8 vs 27.5) against the 8/18/4.5 decay constants
+    let base = gun(kind).kick * 9000.0;
+    let i = i.min(63);
+    let mut angle = 0.0_f32; // 0 = straight up
+    let mut out = (0.0_f32, base);
+    for j in 0..=i {
+        // early shots rise nearly vertical; the pattern then wanders
+        // sideways — the learnable drift
+        let wander = if j < 8 { 0.14 } else { 0.55 };
+        angle = (angle + rng.range(-wander, wander)).clamp(-1.1, 1.1);
+        let mag = base * rng.range(0.88, 1.12);
+        out = (angle, mag);
+    }
+    out
+}
+
+/// Deflect a unit direction by (up_deg, right_deg) — the §2.1 punch
+/// application, shared by the bullet channel and any preview.
+pub fn deflect(d: [f32; 3], up_deg: f32, right_deg: f32) -> [f32; 3] {
+    let d = normalize(d);
+    let yaw = d[0].atan2(d[2]);
+    let pitch = d[1].asin();
+    let ny = yaw + right_deg.to_radians();
+    let np = (pitch + up_deg.to_radians()).clamp(-1.55, 1.55);
+    [np.cos() * ny.sin(), np.sin(), np.cos() * ny.cos()]
+}
 
 /// Charge fraction [0,1] for a hold: tap = the fixed 50% panic throw,
 /// then 0.15 s → 1.2 s maps linearly min → max (no overcharge penalty).
@@ -1814,7 +1958,7 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
             flat_head: 16.0,
             flat_torso: 55.0,
             flat_limb: 55.0,
-            move_mult: 0.78, // §11.3 the walker's pace (×0.88 more, dry)
+            move_mult: 0.85, // §4.3 (Brief VI): 85% of soldier run pace
             explosive_resist: 0.0,
         },
         ArmorSet::Recon => ArmorSpec {
@@ -1864,10 +2008,14 @@ pub const RECON_REGEN_DELAY: f32 = 5.0;
 // between the shot and the mech's BODY FACING (never the camera): a
 // frontal fortress, a flanking objective. The hull is a resource you
 // spend — it never regenerates; at zero the pilot ejects at 25 HP.
-// §11 (Brief IV): pulled down from 2.2× — a 2.7 m POWERED EXOSUIT you
-// fight, not a building you shoot at. The arcs matter more up close.
-pub const MECH_SCALE: f32 = 1.5;
-pub const MECH_HULL: f32 = 450.0;
+// §4.1 (Brief VI, supersedes 1.5×): 1.15× soldier height — 2.05 m. An
+// elite heavy unit that uses the same doors, nav, and cover as
+// soldiers; the concept art's silhouette LANGUAGE, not its scale.
+pub const MECH_SCALE: f32 = 1.15;
+// §4.5 (Brief VI): hull 1000, and the sensor visor is a ×2.0 weak
+// point applied AFTER the angle multiplier (front-arc only).
+pub const MECH_HULL: f32 = 1000.0;
+pub const MECH_VISOR_MULT: f32 = 2.0;
 pub const MECH_RADIUS: f32 = BODY_RADIUS * MECH_SCALE; // cannot fit doorways
 pub const MECH_EJECT_HP: f32 = 25.0;
 /// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
@@ -1877,7 +2025,8 @@ pub const MECH_RED_SIDE: f32 = 0.70;
 /// of it (it attacks cooling, not plating — Pyro's defined role).
 /// §11: the mech TURNS to face a threat — a real, visible, punishable
 /// commitment. The pilot's view is free; the armor follows the body.
-pub const MECH_TURN_RATE: f32 = 2.4; // rad/s
+// §4.3 (Brief VI): 180°/s — a soldier circling close feels the lag
+pub const MECH_TURN_RATE: f32 = 3.1416; // rad/s
 // ---- §10 (Brief III): base health regeneration ---------------------------
 // Every fighter, independent of armor. Deliberately slow: worst case from
 // one bullet to full is 24 s — it rewards disengaging, not trading. ANY
@@ -1922,14 +2071,19 @@ pub const AXE_LUNGE_BACKSTAB: f32 = 999.0;
 // loop: spin-up latency before the stream, heat while it pours, a forced
 // 3 s vent at 100 heat (R vents early on YOUR schedule instead). 400
 // rounds, no reloads — the pad respawn is the reload.
-pub const MINIGUN_SPINUP_S: f32 = 0.6;
-/// 100 heat in ~4 s of continuous fire (110 rounds).
-pub const MINIGUN_HEAT_PER_SHOT: f32 = 0.91;
+pub const MINIGUN_SPINUP_S: f32 = 0.4; // §5.1 (Brief VI)
+/// §5.1: 100 heat in exactly 4 s of continuous fire at 1000 RPM
+/// (66.7 rounds): 1.5 heat per round.
+pub const MINIGUN_HEAT_PER_SHOT: f32 = 1.5;
 pub const MINIGUN_VENT_FORCED_S: f32 = 3.0;
 /// Manual (R) vent clears heat at this rate — 60 heat ≈ 1.4 s.
 pub const MINIGUN_VENT_RATE: f32 = 42.9;
-/// Idle cooling while the trigger is off and no vent is running.
-pub const MINIGUN_HEAT_DECAY: f32 = 8.0;
+/// §5.1: idle cooling — a full 99% cooldown in 6 s.
+pub const MINIGUN_HEAT_DECAY: f32 = 16.5;
+/// §5.1: the spread cone WIDENS with heat — 1.2° → 3.5° half-angle
+/// (as tangents: tan 1.2° = 0.021, tan 3.5° = 0.061).
+pub const MINIGUN_SPREAD_COLD: f32 = 0.021;
+pub const MINIGUN_SPREAD_HOT: f32 = 0.061;
 /// Carrying the mass: ×0.70 walk; barrels spun: ×0.55.
 pub const MINIGUN_MOVE_MULT: f32 = 0.70;
 pub const MINIGUN_SPUN_MOVE_MULT: f32 = 0.55;
@@ -2083,6 +2237,8 @@ pub struct TdmSim {
     pub checkpoints: Vec<Checkpoint>,
     pub pickups: Vec<Pickup>,
     pub missiles: Vec<Missile>,
+    /// §5.3 (Brief VI): pod missiles in flight.
+    pub rockets: Vec<Rocket>,
     /// §3: rested arrows/spears, recoverable by walking over them.
     pub dropped: Vec<DroppedAmmo>,
     /// §5 throwables in flight / at rest with fuses burning.
@@ -2278,6 +2434,16 @@ impl TdmSim {
                     vent_t: 0.0,
                     spin_cmd: 0.0,
                     prev_primary: g0,
+                    punch: [0.0; 2],
+                    punch_vel: [0.0; 2],
+                    spray_i: 0.0,
+                    last_shot_at: -100.0,
+                    pod_ammo: 0,
+                    pod_cd: 0.0,
+                    pod_lock_t: 0.0,
+                    pod_lock_id: -1,
+                    pod_aim_held: false,
+                    lock_warn_t: 0.0,
                     shield_dip_t: 0.0,
                     spear_wind_t: 0.0,
                     spear_aim: [0.0, 0.0, 1.0],
@@ -2330,6 +2496,7 @@ impl TdmSim {
             checkpoints,
             pickups,
             missiles: Vec::new(),
+            rockets: Vec::new(),
             dropped: Vec::new(),
             grenades_air: Vec::new(),
             smokes: Vec::new(),
@@ -2453,6 +2620,8 @@ impl TdmSim {
             f.burn_t = (f.burn_t - DT).max(0.0);
             f.ability_cd = (f.ability_cd - DT).max(0.0);
             f.shield_dip_t = (f.shield_dip_t - DT).max(0.0);
+            f.pod_cd = (f.pod_cd - DT).max(0.0);
+            f.lock_warn_t = (f.lock_warn_t - DT).max(0.0);
             // §7: minigun barrels and heat. `spin_cmd` is the trigger
             // hold-timer (refreshed by try_fire, drained here): live →
             // barrels climb and heat holds; expired → wind down + cool.
@@ -2509,6 +2678,27 @@ impl TdmSim {
             // §9 (Brief III): post-shot spread recovers fast — controlled
             // bursts stay tight (was 0.12/s)
             f.bloom = (f.bloom - 0.02 * DT * 10.0).max(0.0);
+            // §2 (Brief VI): punch decay — the CS:GO exact math. Angle
+            // integrates velocity, decays exponentially THEN linearly;
+            // velocity decays exponentially. Rest ≈0.3–0.5 s.
+            for k in 0..2 {
+                f.punch[k] += f.punch_vel[k] * DT;
+                f.punch[k] *= (-PUNCH_DECAY_EXP * DT).exp();
+                let lin = PUNCH_DECAY_LIN_DEG * DT;
+                f.punch[k] = if f.punch[k].abs() <= lin {
+                    0.0
+                } else {
+                    f.punch[k] - lin * f.punch[k].signum()
+                };
+                f.punch_vel[k] *= (-PUNCH_VEL_DECAY_EXP * DT).exp();
+            }
+            // spray index: holds through full-auto, decays once idle
+            // longer than cycletime × 1.1 — tap-firing resets the pattern
+            if f.armed()
+                && t_now - f.last_shot_at > gun(f.gun).fire_period * 1.1
+            {
+                f.spray_i = (f.spray_i - SPRAY_INDEX_DECAY * DT).max(0.0);
+            }
             // §10 (Brief III): base regen for everyone — 12 s untouched,
             // then 8.33 hp/s (Recon's own earlier regen stacks on top;
             // that's its identity)
@@ -2584,6 +2774,16 @@ impl TdmSim {
                     f.heat = 0.0;
                     f.vent_t = 0.0;
                     f.spin_cmd = 0.0;
+                    f.punch = [0.0; 2];
+                    f.punch_vel = [0.0; 2];
+                    f.spray_i = 0.0;
+                    f.last_shot_at = -100.0;
+                    f.pod_ammo = 0;
+                    f.pod_cd = 0.0;
+                    f.pod_lock_t = 0.0;
+                    f.pod_lock_id = -1;
+                    f.pod_aim_held = false;
+                    f.lock_warn_t = 0.0;
                     f.shield_dip_t = 0.0;
                     f.flip_t = 0.0;
                     f.flip_used = false;
@@ -2686,6 +2886,9 @@ impl TdmSim {
                             f.armor = POWER_MAX;
                             f.hull = MECH_HULL;
                             f.fuel = 0.0;
+                            // §5.3 (Brief VI): 4 tubes per chassis —
+                            // resupply is a fresh chassis, not a pickup
+                            f.pod_ammo = POD_TUBES;
                         }
                         PickupKind::FolkArmor => {
                             let f = &mut self.fighters[i];
@@ -2819,7 +3022,11 @@ impl TdmSim {
             // a crawl — the accuracy cost of moving lives in `try_fire`'s
             // stability model instead of in a movement prohibition
             let drawn = cmd.ads && p_spec.projectile.is_some();
-            let mut speed = if cmd.sprint && !drawn {
+            // §4.3 (Brief VI): the mech does not sprint — its one pace
+            // is the 85% walk; the side-step is the only burst
+            let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
+                && self.fighters[p].hull > 0.0;
+            let mut speed = if cmd.sprint && !drawn && !in_mech {
                 SPRINT_SPEED // sprinting at full draw is genuinely not possible
             } else {
                 MOVE_SPEED
@@ -2969,35 +3176,122 @@ impl TdmSim {
                     f.flip_used = true;
                 }
             }
-            if cmd.jump && self.fighters[p].grounded && self.fighters[p].roll_t <= 0.0 {
+            // §4.3 (Brief VI): the mech CANNOT jump — grounded is its
+            // identity; the braced side-step is its only dash
+            if cmd.jump
+                && self.fighters[p].grounded
+                && self.fighters[p].roll_t <= 0.0
+                && !(self.fighters[p].armor_set == ArmorSet::RobotSuit
+                    && self.fighters[p].hull > 0.0)
+            {
                 let f = &mut self.fighters[p];
                 f.vy = JUMP_SPEED;
                 f.pos[1] += 0.05; // clear the support clamp so the ascent integrates
                 f.grounded = false;
             }
-            // §6 Robot thrusters: hold SPACE airborne — bounded by POWER,
-            // never by a timer. Dry core = ballistic.
+            // §4.3 (Brief VI): FLIGHT IS DELETED. The Brief IV thruster
+            // block (hold SPACE airborne → climb, power-metered) lived
+            // here; the mech never leaves the ground now. jump_held is
+            // dead input for the mech by design.
+            // §4.6 (Brief VI): U dismounts — the pilot steps out on
+            // foot; the spent chassis is scrapped (the pad respawns)
+            if cmd.exit_mech
+                && self.fighters[p].armor_set == ArmorSet::RobotSuit
+                && self.fighters[p].hull > 0.0
             {
-                let t_now = self.t;
                 let f = &mut self.fighters[p];
-                if cmd.jump_held
-                    && f.armor_set == ArmorSet::RobotSuit
-                    && !f.grounded
-                    && f.armor > 0.0
-                    && f.roll_t <= 0.0
-                {
-                    f.vy = (f.vy + 60.0 * DT).min(THRUST_VY * 0.65);
-                    f.armor = (f.armor - THRUST_DRAIN * DT).max(0.0);
-                    f.last_ability_at = t_now;
-                    // thruster lateral authority: 9 m/s toward the stick
-                    let l = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
-                    if l > 0.5 {
-                        f.vel = [
-                            f.vel[0] / l * THRUST_LATERAL,
-                            f.vel[1] / l * THRUST_LATERAL,
-                        ];
+                f.armor_set = ArmorSet::None;
+                f.armor = 0.0;
+                f.hull = 0.0;
+                f.fuel = 0.0;
+            }
+            // §5.3 (Brief VI): the missile pod. HOLD = targeting: a MECH
+            // under the reticle (6° cone, ≤250 m, LOS) accrues lock —
+            // and the VICTIM is warned from lock start, not launch.
+            // RELEASE with a full 1.3 s lock = homing launch; a quick
+            // tap dumb-fires straight. Never locks infantry.
+            {
+                let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
+                    && self.fighters[p].hull > 0.0;
+                let can_pod = in_mech
+                    && self.fighters[p].pod_ammo > 0
+                    && self.fighters[p].pod_cd <= 0.0
+                    && self.fighters[p].alive();
+                if cmd.pod_aim && can_pod {
+                    let eye = self.muzzle_origin(p);
+                    let d = normalize(cmd.aim);
+                    let mut tgt: i32 = -1;
+                    let pteam = self.fighters[p].team;
+                    for (j, g) in self.fighters.iter().enumerate() {
+                        if j == p
+                            || g.team == pteam
+                            || !g.alive()
+                            || !(g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0)
+                        {
+                            continue; // mechs ONLY — never infantry
+                        }
+                        let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
+                        let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
+                        let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2])
+                            .sqrt()
+                            .max(0.01);
+                        let dot =
+                            (to[0] * d[0] + to[1] * d[1] + to[2] * d[2]) / dist;
+                        if dist <= POD_RANGE_M
+                            && dot > POD_CONE_COS
+                            && self.los_clear(eye, c)
+                        {
+                            tgt = j as i32;
+                            break;
+                        }
+                    }
+                    if tgt >= 0 && tgt == self.fighters[p].pod_lock_id {
+                        self.fighters[p].pod_lock_t += DT;
+                    } else {
+                        self.fighters[p].pod_lock_id = tgt;
+                        self.fighters[p].pod_lock_t = 0.0;
+                    }
+                    if tgt >= 0 {
+                        // counterplay begins BEFORE the missile exists
+                        self.fighters[tgt as usize].lock_warn_t = 0.25;
                     }
                 }
+                let released = self.fighters[p].pod_aim_held && !cmd.pod_aim;
+                if released && can_pod {
+                    let locked = self.fighters[p].pod_lock_t >= POD_LOCK_S
+                        && self.fighters[p].pod_lock_id >= 0;
+                    let target = if locked {
+                        self.fighters[p].pod_lock_id
+                    } else {
+                        -1
+                    };
+                    let eye = self.muzzle_origin(p);
+                    let d = normalize(cmd.aim);
+                    let team = self.fighters[p].team;
+                    self.rockets.push(Rocket {
+                        pos: [
+                            eye[0] + d[0] * 0.6,
+                            eye[1] + d[1] * 0.6 + 0.35,
+                            eye[2] + d[2] * 0.6,
+                        ],
+                        vel: [d[0] * 20.0, d[1] * 20.0, d[2] * 20.0],
+                        target,
+                        shooter: p,
+                        team,
+                        t: 0.0,
+                        los_lost: 0.0,
+                        prev_los: d,
+                    });
+                    let f = &mut self.fighters[p];
+                    f.pod_ammo -= 1;
+                    f.pod_cd = POD_RELAUNCH_S;
+                }
+                if !cmd.pod_aim {
+                    let f = &mut self.fighters[p];
+                    f.pod_lock_t = 0.0;
+                    f.pod_lock_id = -1;
+                }
+                self.fighters[p].pod_aim_held = cmd.pod_aim;
             }
             if cmd.reload {
                 self.try_reload(p);
@@ -3578,6 +3872,8 @@ impl TdmSim {
 
         // ---- missiles (arrows / spears) --------------------------------
         self.step_missiles();
+        // ---- §5.3 (Brief VI): pod missiles ------------------------------
+        self.step_rockets();
 
         // ---- §8 the horde ----------------------------------------------
         if self.mode == Mode::Extraction {
@@ -3776,17 +4072,42 @@ impl TdmSim {
             }
         }
         let spec = gun(self.fighters[i].gun);
-        let moving = {
+        // §2.4 (Brief VI): the movement penalty RAMPS from zero at 34%
+        // of max speed to full at 95% — counter-strafe under 34% and
+        // your shot is already clean. Airborne adds jump inaccuracy.
+        let move_frac = {
             let f = &self.fighters[i];
-            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt() > 0.5
+            let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+            ((sp / SPRINT_SPEED - MOVE_INACC_START)
+                / (MOVE_INACC_FULL - MOVE_INACC_START))
+                .clamp(0.0, 1.0)
         };
-        let mut spread =
-            spec.spread + if moving { spec.spread_move } else { 0.0 } + self.fighters[i].bloom;
-        if ads {
-            spread *= ADS_SPREAD_MULT;
-        }
-        if self.fighters[i].crouch {
-            spread *= CROUCH_SPREAD_MULT;
+        let airborne_pen = if self.fighters[i].grounded { 0.0 } else { 1.5 };
+        // §5.1 (Brief VI): the minigun's cone WIDENS with heat instead
+        // of bloom — 1.2° cold to 3.5° at full heat
+        let base_spread = if self.fighters[i].gun == GunKind::Minigun {
+            MINIGUN_SPREAD_COLD
+                + (MINIGUN_SPREAD_HOT - MINIGUN_SPREAD_COLD)
+                    * (self.fighters[i].heat / 100.0)
+        } else {
+            spec.spread
+        };
+        let mut spread = base_spread
+            + spec.spread_move * (move_frac + airborne_pen)
+            + self.fighters[i].bloom;
+        if spec.scoped && ads {
+            // §5.2 (Brief VI): the scoped shot is a LASER — a flat
+            // 0.002 standing / 0.0015 crouched, plus ONLY the movement
+            // penalty (0.176 moving is a hard miss in either mode)
+            spread = if self.fighters[i].crouch { 0.0015 } else { 0.002 }
+                + spec.spread_move * (move_frac + airborne_pen);
+        } else {
+            if ads {
+                spread *= ADS_SPREAD_MULT;
+            }
+            if self.fighters[i].crouch {
+                spread *= CROUCH_SPREAD_MULT;
+            }
         }
         // §4 stability: bow/spear shots taken mid-whip-turn or on the run
         // are spoiled — the cost replaces the old feeling of being pinned.
@@ -3818,6 +4139,29 @@ impl TdmSim {
                 spec.kick
             };
             f.bloom = (f.bloom + kick).min(0.05);
+            // §2 (Brief VI): advance the deterministic spray — the
+            // per-weapon table feeds the punch VELOCITY (first shots
+            // suppressed 0.75 → 1.0, consecutive entries lerped 0.55)
+            if spec.projectile.is_none() && f.gun != GunKind::Fists {
+                let i0 = f.spray_i.max(0.0) as usize;
+                let (a0, m0) = spray_entry(f.gun, i0);
+                let (a1, m1) = spray_entry(f.gun, i0 + 1);
+                let ang = a0 + (a1 - a0) * SPRAY_LERP;
+                // §5.2 (Brief VI): the scoped shot kicks 25 where the
+                // no-scope kicks 78 (Valve's AWP table ratio)
+                let scoped_scale = if spec.scoped && ads { 25.0 / 78.0 } else { 1.0 };
+                let mag = (m0 + (m1 - m0) * SPRAY_LERP)
+                    * scoped_scale
+                    * if i0 < 4 {
+                        0.75 + i0 as f32 * (0.25 / 3.0)
+                    } else {
+                        1.0
+                    };
+                f.punch_vel[0] += ang.cos() * mag; // pitch, up
+                f.punch_vel[1] += ang.sin() * mag; // yaw, right
+                f.spray_i += 1.0;
+            }
+            f.last_shot_at = self.t;
             // §7: every round is heat; 100 forces the 3 s vent
             if f.gun == GunKind::Minigun {
                 f.heat += MINIGUN_HEAT_PER_SHOT;
@@ -3865,6 +4209,21 @@ impl TdmSim {
             self.spawn_missile(o, d, v0, dmg, i, false);
             return true;
         }
+        // §2 channel 1 (Brief VI) — the TRUTH: bullets leave at the aim
+        // deflected by the punch. The player's aim ray was cast through
+        // the PUNCHED camera (it already carries the visible 45%), so
+        // the sim adds the remaining 55% — total ×2.0 vs the original
+        // angles, ×1.1 drift vs the crosshair, the CS:GO arithmetic.
+        // Bots aim from raw geometry, so they take the full ×2.0.
+        let aim = {
+            let f = &self.fighters[i];
+            let k = if i == self.player {
+                RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING)
+            } else {
+                RECOIL_SCALE
+            };
+            deflect(aim, f.punch[0] * k, f.punch[1] * k)
+        };
         // ---- hitscan: one trace per pellet (shotguns fire a cone) ------
         for _pellet in 0..spec.pellets.max(1) {
             let (ex, ey) = (
@@ -4023,7 +4382,12 @@ impl TdmSim {
         };
         // v6 model: per-gun torso damage × zone multiplier. The baseline
         // M4A1 lands the owner's tuned rule: 2 headshots / 8 body shots.
-        let mut dmg = gun(self.fighters[i].gun).damage * zone.mult();
+        // §4.5 (Brief VI): proportional zones do NOT apply to a mech —
+        // the angle model (+ visor ×2, inside apply_armor) replaces them.
+        let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
+            && self.fighters[j].hull > 0.0;
+        let mut dmg = gun(self.fighters[i].gun).damage
+            * if in_mech { 1.0 } else { zone.mult() };
         let from = {
             let f = &self.fighters[i];
             [f.pos[0], f.pos[1] + EYE_REL, f.pos[2]]
@@ -4832,6 +5196,131 @@ impl TdmSim {
         )
     }
 
+    /// §5.3 (Brief VI): pod-missile flight — proportional navigation
+    /// (N = 3) against the LOS rate, turn capped at 250°/s, TTL 7 s.
+    /// Breaking line of sight for > 0.4 s sends it BALLISTIC for good.
+    /// Deterministic f32 throughout; replays reproduce every path.
+    fn step_rockets(&mut self) {
+        let mut booms: Vec<(usize, [f32; 3])> = Vec::new(); // (shooter, at)
+        let mut idx = 0;
+        while idx < self.rockets.len() {
+            let mut r = self.rockets[idx].clone();
+            r.t += DT;
+            let mut done = r.t >= ROCKET_TTL_S;
+            let speed = ((r.vel[0] * r.vel[0]
+                + r.vel[1] * r.vel[1]
+                + r.vel[2] * r.vel[2])
+                .sqrt()
+                + ROCKET_ACCEL * DT)
+                .min(ROCKET_SPEED);
+            let mut dir = normalize(r.vel);
+            if r.target >= 0 {
+                let g = &self.fighters[r.target as usize];
+                if !(g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0 && g.alive()) {
+                    r.target = -1; // the chassis is gone — fly straight
+                } else {
+                    let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
+                    let to = [c[0] - r.pos[0], c[1] - r.pos[1], c[2] - r.pos[2]];
+                    let dl = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2])
+                        .sqrt()
+                        .max(0.01);
+                    let td = [to[0] / dl, to[1] / dl, to[2] / dl];
+                    let clear = self
+                        .grid
+                        .ray_hit(&self.cover, r.pos, td, dl - 0.5)
+                        .is_none();
+                    if clear {
+                        r.los_lost = 0.0;
+                    } else {
+                        r.los_lost += DT;
+                        if r.los_lost > ROCKET_LOS_BREAK_S {
+                            r.target = -1; // hard cover WORKS
+                        }
+                    }
+                    if r.target >= 0 {
+                        // PN: commanded turn = N × LOS rate, hard-capped
+                        let cosl = (td[0] * r.prev_los[0]
+                            + td[1] * r.prev_los[1]
+                            + td[2] * r.prev_los[2])
+                            .clamp(-1.0, 1.0);
+                        let los_rate = cosl.acos() / DT;
+                        let turn =
+                            (ROCKET_PN_N * los_rate).min(ROCKET_TURN_CAP) * DT;
+                        dir = rotate_toward(dir, td, turn);
+                        r.prev_los = td;
+                    }
+                }
+            }
+            r.vel = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
+            let old = r.pos;
+            r.pos = [
+                old[0] + r.vel[0] * DT,
+                old[1] + r.vel[1] * DT,
+                old[2] + r.vel[2] * DT,
+            ];
+            // surfaces: cover or the ground
+            let seg = [r.pos[0] - old[0], r.pos[1] - old[1], r.pos[2] - old[2]];
+            let sl = (seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2])
+                .sqrt()
+                .max(1e-6);
+            let dn = [seg[0] / sl, seg[1] / sl, seg[2] / sl];
+            if self.grid.ray_hit(&self.cover, old, dn, sl).is_some() || r.pos[1] <= 0.0
+            {
+                done = true;
+            }
+            // proximity fuse on any enemy body
+            if !done {
+                for (j, g) in self.fighters.iter().enumerate() {
+                    if j == r.shooter || g.team == r.team || !g.alive() {
+                        continue;
+                    }
+                    let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
+                    let dx = c[0] - r.pos[0];
+                    let dy = c[1] - r.pos[1];
+                    let dz = c[2] - r.pos[2];
+                    if dx * dx + dy * dy + dz * dz < ROCKET_PROX_M * ROCKET_PROX_M {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if done {
+                booms.push((r.shooter, r.pos));
+                self.rockets.remove(idx);
+            } else {
+                self.rockets[idx] = r;
+                idx += 1;
+            }
+        }
+        for (shooter, at) in booms {
+            self.booms.push((
+                Boom {
+                    at,
+                    kind: ThrowKind::Frag,
+                },
+                2.0,
+            ));
+            // §5.3: 270 before angle armor (rear ≈27% of a hull, front
+            // ≈4%); a direct/2 m soldier hit is lethal
+            let team = self.fighters[shooter].team;
+            for j in 0..self.fighters.len() {
+                let g = &self.fighters[j];
+                if j == shooter || g.team == team || !g.alive() {
+                    continue;
+                }
+                let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
+                let dx = c[0] - at[0];
+                let dy = c[1] - at[1];
+                let dz = c[2] - at[2];
+                if dx * dx + dy * dy + dz * dz
+                    < ROCKET_SOLDIER_KILL_M * ROCKET_SOLDIER_KILL_M
+                {
+                    self.apply_plain_damage(shooter, j, ROCKET_DMG, at, false, false);
+                }
+            }
+        }
+    }
+
     /// §5 detonation effects — all sim-side, all deterministic.
     fn detonate(&mut self, g: Grenade) {
         let spec = throw_spec(g.kind);
@@ -4969,13 +5458,15 @@ impl TdmSim {
             let v = &self.fighters[j];
             if v.armor_set == ArmorSet::RobotSuit && v.hull > 0.0 {
                 let mut red = 0.0;
+                let mut front = false;
                 if let Some(fp) = from {
                     let dx = fp[0] - v.pos[0];
                     let dz = fp[2] - v.pos[2];
                     let len = (dx * dx + dz * dz).sqrt().max(1e-3);
                     // BODY facing, never the camera (§11.2 rule 1)
                     let cos = (v.yaw.sin() * dx + v.yaw.cos() * dz) / len;
-                    red = if cos > 0.5 {
+                    front = cos > 0.5;
+                    red = if front {
                         MECH_RED_FRONT
                     } else if cos > -0.5 {
                         MECH_RED_SIDE
@@ -4988,7 +5479,15 @@ impl TdmSim {
                 } else if explosive {
                     red *= 0.5; // grenades are a real frontal answer
                 }
-                let d = dmg * (1.0 - red);
+                // §4.5 (Brief VI): the sensor VISOR is the weak point —
+                // ×2.0 AFTER the angle multiplier, and only where the
+                // visor is exposed (the front arc; a rear shot never
+                // sees it). Front visor: ×0.15×2.0 = 0.30 — rewarded,
+                // not dominant. Fire has no precision to reward.
+                let visor = zone == HitZone::Head && front && !fire;
+                let d = dmg
+                    * (1.0 - red)
+                    * if visor { MECH_VISOR_MULT } else { 1.0 };
                 let f = &mut self.fighters[j];
                 f.hull = (f.hull - d).max(0.0);
                 f.last_dmg_at = self.t;
@@ -5548,22 +6047,23 @@ mod tests {
         );
     }
 
+    /// §5.2 (Brief VI, SUPERSEDES the old 70-dmg "only the head is
+    /// instant" table): AWP-class 115 damage — head AND chest/arms are
+    /// one-shots; only legs (×0.75, no armor reduction) ever survive,
+    /// and even then never for a second hit.
     #[test]
-    fn awm_only_the_head_is_instant() {
+    fn awm_head_and_torso_are_instant_legs_never_are() {
         let awm = gun(GunKind::Awm);
-        // the owner's table: head instant; torso, arms, legs = 2 shots
         assert!(awm.damage * HEAD_MULT >= MAX_HEALTH, "head = oblivion");
-        assert!(awm.damage < MAX_HEALTH, "torso must NOT one-shot");
-        assert_eq!((MAX_HEALTH / awm.damage).ceil() as u32, 2, "torso 2");
-        assert_eq!(
-            (MAX_HEALTH / (awm.damage * ARM_MULT)).ceil() as u32,
-            2,
-            "arms 2"
+        assert!(awm.damage >= MAX_HEALTH, "chest/arms one-shot too — 115");
+        assert!(
+            awm.damage * LEG_MULT < MAX_HEALTH,
+            "legs (86.25) must NOT one-shot"
         );
         assert_eq!(
             (MAX_HEALTH / (awm.damage * LEG_MULT)).ceil() as u32,
             2,
-            "legs 2"
+            "legs take 2"
         );
     }
 
@@ -6057,6 +6557,26 @@ mod tests {
         s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
         let rear = h2 - s.fighters[1].hull;
         assert!((rear - 12.5).abs() < 0.01, "rear arc 100%: took {rear}");
+        // §4.5 (Brief VI): the VISOR is a ×2 weak point AFTER the angle
+        // multiplier, front-arc only (12.5 × 0.15 × 2.0 = 3.75)…
+        s.fighters[1].yaw = std::f32::consts::PI;
+        let hv = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]); // 1.9/2.05 → visor band
+        let visor = hv - s.fighters[1].hull;
+        assert!(
+            (visor - 12.5 * (1.0 - MECH_RED_FRONT) * MECH_VISOR_MULT).abs() < 0.01,
+            "front visor = angle × 2.0: took {visor}"
+        );
+        // …and from BEHIND the visor is not exposed: rear head-band hits
+        // take plain rear damage, no bonus
+        s.fighters[1].yaw = 0.0;
+        let hb = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        let rear_head = hb - s.fighters[1].hull;
+        assert!(
+            (rear_head - 12.5).abs() < 0.01,
+            "no visor from behind: took {rear_head}"
+        );
         // EXPLOSIVES bypass half the frontal cut: 40 × (1 − 0.425) = 23
         s.fighters[1].yaw = std::f32::consts::PI;
         let h3 = s.fighters[1].hull;
@@ -6349,8 +6869,9 @@ mod tests {
         assert!(!early, "no rounds before the barrels are up");
         assert!(vented, "4 s of held trigger must FORCE the vent");
         assert!(
-            (240..=310).contains(&ammo),
-            "8 s hold ≈ one heat cycle of fire: ammo left {ammo}"
+            (300..=345).contains(&ammo),
+            "8 s hold ≈ one §5.1 heat cycle at 1000 RPM (0.42 s spin +
+             ~4.0 s to 100 heat + 3 s vent + refire): ammo left {ammo}"
         );
         assert_eq!(
             run(),
@@ -6844,6 +7365,375 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// §2 (Brief VI): the deterministic spray — a 30-round M4 magazine
+    /// replays BIT-IDENTICALLY (punch trace and impact digest), the
+    /// pattern climbs (early entries near-vertical), and the camera
+    /// channel is back at rest within 0.5 s of the last shot.
+    #[test]
+    fn spray_replays_exactly_climbs_and_recovers() {
+        let run = || -> (u64, f32, f32, f32) {
+            let mut s = range(0xC5C0);
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let mut fold = |v: f32| {
+                digest ^= v.to_bits() as u64;
+                digest = digest.wrapping_mul(0x0000_0100_0000_01B3);
+            };
+            let mut peak_pitch = 0.0_f32;
+            let mut peak_yaw = 0.0_f32;
+            // hold the trigger through the full 30-round magazine
+            for _ in 0..330 {
+                s.step(PlayerCmd {
+                    shoot: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+                s.fighters[1].vel = [0.0, 0.0];
+                let f = &s.fighters[0];
+                fold(f.punch[0]);
+                fold(f.punch[1]);
+                peak_pitch = peak_pitch.max(f.punch[0]);
+                peak_yaw = peak_yaw.max(f.punch[1].abs());
+            }
+            for (im, _) in &s.impacts {
+                fold(im.at[0]);
+                fold(im.at[1]);
+                fold(im.at[2]);
+            }
+            // release and let the punch decay for 0.5 s
+            for _ in 0..(SIM_HZ as usize / 2) {
+                s.step(PlayerCmd::default());
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            }
+            let rest = s.fighters[0].punch[0].abs().max(s.fighters[0].punch[1].abs());
+            (digest, peak_pitch, peak_yaw, rest)
+        };
+        let (d1, climb, yaw_drift, rest) = run();
+        let (d2, ..) = run();
+        assert_eq!(d1, d2, "a full-magazine spray must replay bit-identically");
+        assert!(climb > 0.5, "the pattern must CLIMB: peak pitch {climb:.2}°");
+        assert!(
+            yaw_drift < climb,
+            "early pattern is vertical-dominant: yaw {yaw_drift:.2}° vs pitch {climb:.2}°"
+        );
+        assert!(
+            rest < 0.05,
+            "camera channel at rest within 0.5 s: {rest:.3}°"
+        );
+        // the table itself is fixed: same entries on every call
+        for i in 0..32 {
+            assert_eq!(
+                spray_entry(GunKind::Ak47, i),
+                spray_entry(GunKind::Ak47, i),
+                "spray table must be pure"
+            );
+        }
+        // tap-firing resets: idle past cycletime × 1.1 decays the index
+        let mut s = range(0xC5C1);
+        s.fighters[1].pos = [-30.0, 0.0, -30.0];
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        for i in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd {
+                shoot: i < 40,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+        }
+        assert!(
+            s.fighters[0].spray_i < 4.0,
+            "idle must decay the spray index: {}",
+            s.fighters[0].spray_i
+        );
+    }
+
+    /// §4.7 (Brief VI) — the anti-"specified twice, never shipped"
+    /// gate: the mech is REACHED (pad grant), at SCALE (1.15× ±2%),
+    /// GROUNDED (a 60 s seeded fuzz with jump/thruster inputs never
+    /// lifts it), DISMOUNTABLE (U), and KILLABLE (hull → pilot eject).
+    #[test]
+    fn mech_exists_at_scale_grounded_and_dismounts() {
+        let mut s = range(0x4EC4);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.armor = POWER_MAX;
+            f.hull = MECH_HULL;
+        }
+        // SCALE: 1.15 × soldier, ±2%
+        let h = s.fighters[0].height();
+        let want = BODY_HEIGHT * 1.15;
+        assert!(
+            (h / want - 1.0).abs() < 0.02,
+            "mech height {h:.3} vs {want:.3}"
+        );
+        // GROUNDED: seeded fuzz drive with jump AND held-thrust inputs —
+        // the mech must never gain upward velocity (flight is deleted)
+        let mut rng = Pcg32::new(77, 99);
+        for i in 0..(60 * SIM_HZ as usize) {
+            let (jx, jz) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+            s.step(PlayerCmd {
+                move_x: jx,
+                move_z: jz,
+                sprint: i % 100 < 50,
+                jump: i % 37 == 0,
+                jump_held: i % 3 == 0,
+                dodge: i % 200 == 5,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            assert!(
+                s.fighters[0].vy <= 0.01,
+                "the mech must NEVER gain height: vy {} at tick {i}",
+                s.fighters[0].vy
+            );
+        }
+        // DISMOUNT: U sheds the chassis, pilot on foot
+        s.step(PlayerCmd {
+            exit_mech: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.fighters[0].armor_set,
+            ArmorSet::None,
+            "U must dismount the mech"
+        );
+        // KILLABLE: re-board with a scrap hull, burn it → eject at ≤25
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = 5.0;
+        s.fighters[0].yaw = 0.0;
+        s.apply_plain_damage(1, 0, 40.0, [0.0, 1.0, -3.0], false, false);
+        assert_eq!(s.fighters[0].armor_set, ArmorSet::None, "hull death ejects");
+        assert!(
+            s.fighters[0].health <= MECH_EJECT_HP + 0.01,
+            "pilot ejects at ≤{MECH_EJECT_HP} HP"
+        );
+    }
+
+    /// §5.4 (Brief VI): the AWP one-shot matrix — head and chest delete
+    /// a soldier, legs NEVER one-shot; against a mech the angle armor
+    /// rules (front ≈17, visor ≈34.5, rear 115): flanks kill mechs.
+    #[test]
+    fn awp_matrix_one_shot_rules() {
+        let arm_awp = |s: &mut TdmSim| {
+            let f = &mut s.fighters[0];
+            f.active = 2;
+            f.gun = GunKind::Awm; // DEFAULT_LOADOUT special slot
+            f.ammo = 5;
+            f.reserve = 10;
+        };
+        let mut s = range(0xA3);
+        arm_awp(&mut s);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        // LEGS: 115 × 0.75 = 86.25 — never a one-shot
+        s.apply_hit(0, 1, 0.2, [0.0, 0.2, 5.0]);
+        assert!(
+            s.fighters[1].alive(),
+            "legs never one-shot: hp {}",
+            s.fighters[1].health
+        );
+        assert!((s.fighters[1].health - (100.0 - 115.0 * 0.75)).abs() < 0.01);
+        // CHEST: 115 ×1 — lethal on a 100 HP soldier
+        s.fighters[1].health = 100.0;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        assert!(!s.fighters[1].alive(), "chest one-shots");
+        // HEAD: ×4 — lethal, armored or not
+        s.fighters[1].health = 100.0;
+        s.fighters[1].respawn_t = 0.0;
+        s.apply_hit(0, 1, 1.7, [0.0, 1.7, 5.0]);
+        assert!(!s.fighters[1].alive(), "head one-shots");
+        // VS MECH, three angles + visor
+        let mut s = range(0xA4);
+        arm_awp(&mut s);
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].yaw = std::f32::consts::PI; // facing the shooter
+        let h0 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        assert!(
+            (h0 - s.fighters[1].hull - 115.0 * 0.15).abs() < 0.01,
+            "an AWP does NOT counter a mech frontally"
+        );
+        let h1 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]); // visor band
+        assert!(
+            (h1 - s.fighters[1].hull - 115.0 * 0.15 * 2.0).abs() < 0.01,
+            "front visor ≈ 34.5"
+        );
+        s.fighters[1].yaw = 0.0; // back turned
+        let h2 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        assert!(
+            (h2 - s.fighters[1].hull - 115.0).abs() < 0.01,
+            "the rear arc takes the full 115"
+        );
+    }
+
+    /// §5.4 (Brief VI): the missile pod — never locks infantry, warns
+    /// the victim from lock START, needs the full 1.3 s, launches on
+    /// release, obeys the 250°/s PN cap, and goes BALLISTIC when line
+    /// of sight breaks for > 0.4 s.
+    #[test]
+    fn missile_pod_locks_warns_breaks_and_caps() {
+        let setup = || {
+            let mut s = range(0xA0D5);
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = ArmorSet::RobotSuit;
+                f.armor = POWER_MAX;
+                f.hull = MECH_HULL;
+                f.pod_ammo = POD_TUBES;
+            }
+            s
+        };
+        let aim_at = |s: &TdmSim| -> [f32; 3] {
+            let e = s.muzzle_origin(0);
+            let g = &s.fighters[1];
+            let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
+            normalize([c[0] - e[0], c[1] - e[1], c[2] - e[2]])
+        };
+        // 1) NO LOCK ON INFANTRY — a soldier under the reticle never
+        // starts a lock
+        let mut s = setup();
+        for _ in 0..(SIM_HZ as usize) {
+            let aim = aim_at(&s);
+            s.step(PlayerCmd {
+                pod_aim: true,
+                aim,
+                ..Default::default()
+            });
+            s.fighters[1].pos = [0.0, 0.0, 5.0];
+            s.fighters[1].vel = [0.0, 0.0];
+        }
+        assert_eq!(s.fighters[0].pod_lock_id, -1, "infantry is NEVER locked");
+        // 2) a MECH locks in 1.3 s, and the victim is warned from START
+        let mut s = setup();
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        let mut warned_early = false;
+        for i in 0..((1.3 * SIM_HZ as f32) as usize + 4) {
+            let aim = aim_at(&s);
+            s.step(PlayerCmd {
+                pod_aim: true,
+                aim,
+                ..Default::default()
+            });
+            s.fighters[1].pos = [0.0, 0.0, 5.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            s.fighters[1].yaw = std::f32::consts::PI;
+            if i == (0.4 * SIM_HZ as f32) as usize {
+                assert!(
+                    s.fighters[0].pod_lock_t < POD_LOCK_S,
+                    "lock takes the FULL 1.3 s"
+                );
+                warned_early = s.fighters[1].lock_warn_t > 0.0;
+            }
+        }
+        assert!(warned_early, "the victim is warned from lock START");
+        assert!(s.fighters[0].pod_lock_t >= POD_LOCK_S, "full lock reached");
+        // 3) release → homing launch; PN turn stays under the cap; the
+        // hit lands with FRONT angle armor (270 × 0.15 = 40.5)
+        let h0 = s.fighters[1].hull;
+        let aim = aim_at(&s);
+        s.step(PlayerCmd {
+            pod_aim: false,
+            aim,
+            ..Default::default()
+        });
+        assert_eq!(s.fighters[0].pod_ammo, POD_TUBES - 1, "one tube spent");
+        assert_eq!(s.rockets.len(), 1, "the bird is away");
+        assert_eq!(s.rockets[0].target, 1, "homing on the locked mech");
+        let mut prev_dir = normalize(s.rockets[0].vel);
+        for _ in 0..(3 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            s.fighters[1].pos = [0.0, 0.0, 5.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            s.fighters[1].yaw = std::f32::consts::PI;
+            if let Some(r) = s.rockets.first() {
+                let d = normalize(r.vel);
+                let cosang = (d[0] * prev_dir[0] + d[1] * prev_dir[1]
+                    + d[2] * prev_dir[2])
+                    .clamp(-1.0, 1.0);
+                let rate = cosang.acos() / DT;
+                assert!(
+                    rate <= ROCKET_TURN_CAP + 0.2,
+                    "PN turn rate under 250°/s: {rate:.2} rad/s"
+                );
+                prev_dir = d;
+            } else {
+                break;
+            }
+        }
+        assert!(s.rockets.is_empty(), "the missile resolves");
+        assert!(
+            (h0 - s.fighters[1].hull - ROCKET_DMG * 0.15).abs() < 0.5,
+            "front hit ≈ 40.5 hull: took {}",
+            h0 - s.fighters[1].hull
+        );
+        // 4) LOS break > 0.4 s → ballistic, forever
+        let mut s = setup();
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].pos = [0.0, 0.0, 60.0];
+        for _ in 0..((1.4 * SIM_HZ as f32) as usize) {
+            let aim = aim_at(&s);
+            s.step(PlayerCmd {
+                pod_aim: true,
+                aim,
+                ..Default::default()
+            });
+            s.fighters[1].pos = [0.0, 0.0, 60.0];
+            s.fighters[1].vel = [0.0, 0.0];
+        }
+        let aim = aim_at(&s);
+        s.step(PlayerCmd {
+            pod_aim: false,
+            aim,
+            ..Default::default()
+        });
+        assert_eq!(s.rockets.len(), 1);
+        // drop a wall between missile and target, mid-flight
+        s.cover.push(Aabb {
+            min: [-8.0, 0.0, 25.0],
+            max: [8.0, 12.0, 27.0],
+        });
+        s.cover_kind.push(CoverKind::Stone);
+        s.rebuild_grid();
+        let mut went_ballistic = false;
+        for _ in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            s.fighters[1].pos = [0.0, 0.0, 60.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            if let Some(r) = s.rockets.first() {
+                if r.target == -1 {
+                    went_ballistic = true;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(
+            went_ballistic,
+            "hard cover for > 0.4 s must send the missile ballistic"
+        );
     }
 
     /// §10 (Brief III): regen waits 12 s, heals at 8.33/s, and ANY new
