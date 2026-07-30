@@ -173,6 +173,15 @@ work, not a per-task add-on, and was not attempted this session.
   mechanism," not a new silhouette element) — reads as detail texture at
   normal third-person distance, not a dramatic shape change. Hazard
   chevrons, wear masking, and stencils are still not implemented.
+- **Hazard chevrons / wear masking** — partially addressed: the pod
+  cover was the only hazard-striped part on the whole hull (an
+  asymmetric, "half-finished" read), so a matching stripe was added to
+  the right shoulder pod, plus a power-pack warning band and one bare-
+  metal abdomen scuff patch (30 -> 33 plate entries). A real stencil/
+  decal system (unit numbers, ownership marks, worn-edge masking that
+  follows UVs rather than being hand-placed per plate) is still not
+  built — this was 3 more hand-placed primitives in the same style as
+  the rest of the rig, not new tooling.
 - **Capture-harness bug found and fixed in the same pass**: the §1.2
   first-run "GOOD TO KNOW" tutorial card (added after this report's
   first draft, dismissed by any keypress) was silently blocking every
