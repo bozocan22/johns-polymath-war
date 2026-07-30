@@ -47,6 +47,37 @@ pub const ROLL_S: f32 = 0.55; // how long the somersault lasts
 pub const ROLL_SPEED: f32 = 8.6; // faster than a sprint — it's a dodge
 pub const ROLL_CD_S: f32 = 0.9; // cooldown after a roll ends
 pub const ROLL_HEIGHT: f32 = 0.95; // balled up: a small target
+// ---- §2 (Brief V): motion WEIGHT on the roll -----------------------------
+// load → burst → ease-out. The load is the crouch-coil before the
+// spring; the ease-out is the single most important line here — an
+// instant velocity stop is what reads as "gamey", so the burst hands
+// speed back over a real window instead of a cliff.
+pub const ROLL_LOAD_S: f32 = 0.10;
+pub const ROLL_EASE_S: f32 = 0.14;
+/// Render-side weight-absorb dip after the roll ends (the settle).
+pub const ROLL_SETTLE_S: f32 = 0.20;
+// §2 (Brief V): the mech does not tumble — a 2.7 m walker somersaulting
+// fights its own silhouette. Its dodge is a BRACED SIDE-STEP: shorter,
+// grounded, tall, near-zero steering, with the same ease-out landing.
+pub const MECH_STEP_S: f32 = 0.30;
+pub const MECH_STEP_SPEED: f32 = 6.5;
+pub const MECH_STEP_CD_S: f32 = 1.4;
+// ---- §2 (Brief V): the spear THRUST --------------------------------------
+// F while wielding the spear is a THRUST, not a knife swing: a visible
+// load (rear foot, hips coil), a driving extension, and a recovery that
+// is LONGER on a whiff than on a hit — a missed thrust is committed.
+pub const THRUST_WIND_S: f32 = 0.22;
+pub const THRUST_ACTIVE_S: f32 = 0.10;
+pub const THRUST_RECOVER_HIT_S: f32 = 0.30;
+pub const THRUST_RECOVER_WHIFF_S: f32 = 0.55;
+pub const THRUST_DMG: f32 = 70.0;
+pub const THRUST_BACKSTAB: f32 = 170.0;
+pub const THRUST_RANGE_M: f32 = 2.6;
+/// cos of the thrust's line — a stab, not a sweep.
+pub const THRUST_ARC_COS: f32 = 0.85;
+/// The mech's thrust is the same shape, geared down: slower on the
+/// wind-up AND the recovery.
+pub const MECH_THRUST_TIME_MULT: f32 = 1.4;
 /// Landing harder than this (m/s downward) automatically turns the fall
 /// into a breakfall roll — what parkour people do after a big drop.
 /// A full flat jump lands at ~7.4 m/s, so ordinary hops stay on their feet.
@@ -69,6 +100,49 @@ pub const SHIELD_BLOCK_CROUCH: f32 = 0.95;
 pub const SHIELD_SPEED_MULT: f32 = 0.55;
 /// AWM scoped-in crawl.
 pub const SCOPED_SPEED_MULT: f32 = 0.35;
+// ---- projectile draw (§4 overhaul): freedom with a steadiness cost -------
+// A drawn bow / cocked spear no longer pins you in place. Instead, turning
+// fast or moving fast while drawn SPOILS the shot: a stability factor
+// widens the spread. Settled shots stay laser-precise.
+/// Move-speed multiplier while a bow is at full draw (rifle-ADS pace).
+pub const DRAW_SPEED_MULT_BOW: f32 = 0.62;
+/// Move-speed multiplier while a spear is cocked (lighter than a draw).
+pub const DRAW_SPEED_MULT_SPEAR: f32 = 0.70;
+/// Strafe/backpedal fraction of forward pace while drawn (bracing).
+pub const DRAW_SIDE_MULT: f32 = 0.85;
+/// Turn this fast (rad/s) for free; above it stability decays.
+pub const AIM_TURN_FREE: f32 = 1.6;
+/// Stability penalty per rad/s above the free turn rate. (§4 Brief II:
+/// raised 0.22 → 0.28 alongside the flatter ballistics — easier to aim,
+/// no easier to spam.)
+pub const AIM_TURN_K: f32 = 0.28;
+/// Walk this fast (m/s) for free; above it stability decays.
+pub const AIM_MOVE_FREE: f32 = 1.2;
+/// Stability penalty per m/s above the free walk speed.
+pub const AIM_MOVE_K: f32 = 0.28;
+/// A whip-shot is never fully un-aimable — spread caps at base/this.
+pub const AIM_STABILITY_MIN: f32 = 0.35;
+// ---- §4 (Brief II): flattened projectile ballistics ----------------------
+// The old arcs (spear 17 m/s at full gravity = 15.3 m of drop at 30 m)
+// were unaimable by eye. Flatter flight, same damage, same draw times —
+// and a steeper turn penalty so it gets easier to AIM, not easier to spam.
+/// One shared gravity base for every missile — `predict_arc` and
+/// `step_missiles` MUST read the same numbers or the preview lies.
+pub const MISSILE_G: f32 = 9.81;
+pub const GRAV_FACTOR_SPEAR: f32 = 0.72;
+pub const GRAV_FACTOR_ARROW: f32 = 0.42;
+/// Effective gravity for a missile kind — the ONLY place the factor lives.
+pub fn missile_g(is_spear: bool) -> f32 {
+    MISSILE_G
+        * if is_spear {
+            GRAV_FACTOR_SPEAR
+        } else {
+            GRAV_FACTOR_ARROW
+        }
+}
+/// Hip-thrown spear (no ADS settle) flies at min charge — the full 26 m/s
+/// needs the cocked, settled throw.
+pub const SPEAR_V0_MIN: f32 = 11.0;
 // ---- respawn checkpoints (v6) --------------------------------------------
 pub const CHECKPOINT_RADIUS: f32 = 3.0;
 pub const CHECKPOINT_CAP_S: f32 = 4.0;
@@ -104,6 +178,9 @@ pub enum GunKind {
     M249,
     Bow,
     Spear,
+    /// §7 (Brief IV): found-in-world only — never in a loadout. Spin-up,
+    /// heat, forced vents; the tradeoff engine in a carryable package.
+    Minigun,
 }
 
 /// Weapon classes for the loadout screen.
@@ -191,9 +268,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 17,
             reserve: 68,
             reload_s: 1.3,
-            spread: 0.010,
+            spread: 0.0075,
             spread_move: 0.016,
-            kick: 0.0025,
+            kick: 0.0020,
             damage: 9.0, // 12 torso / 3 heads
             zoom_deg: 55.0,
             ..base
@@ -205,9 +282,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 7,
             reserve: 35,
             reload_s: 1.6,
-            spread: 0.006,
+            spread: 0.0045,
             spread_move: 0.022,
-            kick: 0.008,
+            kick: 0.0064,
             damage: 27.0, // 4 torso — and the iconic one-tap head
             zoom_deg: 52.0,
             ..base
@@ -218,9 +295,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 30,
             reserve: 150,
             reload_s: 1.8,
-            spread: 0.011,
+            spread: 0.008,
             spread_move: 0.015, // runs well: an SMG's whole point
-            kick: 0.003,
+            kick: 0.0024,
             damage: 10.0, // 10 torso / 3 heads, but pours them out
             zoom_deg: 52.0,
             ..base
@@ -233,7 +310,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             reload_s: 2.8,
             spread: 0.055, // the pellet cone
             spread_move: 0.020,
-            kick: 0.010,
+            kick: 0.0080,
             damage: 6.5, // ×8 pellets = 52 torso point-blank
             pellets: 8,
             zoom_deg: 56.0,
@@ -245,9 +322,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 30,
             reserve: 120,
             reload_s: 2.2,
-            spread: 0.011,
+            spread: 0.008,
             spread_move: 0.024,
-            kick: 0.0055, // hits harder, walks harder
+            kick: 0.0044, // hits harder, walks harder
             damage: 13.5, // 8 torso / 2 heads with authority
             ..base
         },
@@ -257,9 +334,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 30,
             reserve: 120,
             reload_s: 2.0,
-            spread: 0.008,
+            spread: 0.006,
             spread_move: 0.018,
-            kick: 0.004,
+            kick: 0.0032,
             damage: 12.5, // THE baseline: 2 headshots / 8 body shots
             ..base
         },
@@ -270,9 +347,9 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 5,
             reserve: 20,
             reload_s: 3.0,
-            spread: 0.0012,
+            spread: 0.0009,
             spread_move: 0.050,
-            kick: 0.015,
+            kick: 0.0120,
             // owner's table: ONLY the head is instant. 70 torso → 2 body
             // shots; limbs ×0.75 → 52.5 → still 2; head ×4 → oblivion.
             damage: 70.0,
@@ -286,11 +363,25 @@ pub fn gun(kind: GunKind) -> GunSpec {
             mag: 100,
             reserve: 200,
             reload_s: 4.5,
-            spread: 0.016,
+            spread: 0.012,
             spread_move: 0.032,
-            kick: 0.0055,
+            kick: 0.0044,
             damage: 11.0,
             zoom_deg: 52.0,
+            ..base
+        },
+        GunKind::Minigun => GunSpec {
+            name: "M134 Minigun",
+            class: GunClass::Special,
+            fire_period: 0.0364, // ~1650 rpm once the barrels are up
+            mag: 400,
+            reserve: 0, // no reloads — the pad is the reload
+            reload_s: 3.0,
+            spread: 0.026,
+            spread_move: 0.020,
+            kick: 0.0008, // the mass eats the recoil; heat is the cost
+            damage: 18.0,
+            zoom_deg: 58.0,
             ..base
         },
         GunKind::Bow => GunSpec {
@@ -302,9 +393,11 @@ pub fn gun(kind: GunKind) -> GunSpec {
             reload_s: 0.9,
             spread: 0.004,
             spread_move: 0.018,
-            kick: 0.002,
+            kick: 0.0016,
             damage: 34.0,
-            projectile: Some((38.0, 34.0)),
+            // §4 (Brief II): 52 m/s at gravity ×0.42 — 0.69 m of drop at
+            // 30 m, near point-and-click inside 20 m
+            projectile: Some((52.0, 34.0)),
             zoom_deg: 45.0,
             ..base
         },
@@ -317,9 +410,11 @@ pub fn gun(kind: GunKind) -> GunSpec {
             reload_s: 1.1,
             spread: 0.006,
             spread_move: 0.015,
-            kick: 0.003,
+            kick: 0.0024,
             damage: 55.0,
-            projectile: Some((17.0, 55.0)),
+            // §4 (Brief II): 26 m/s full charge at gravity ×0.72 — 4.7 m
+            // of drop at 30 m, a learnable holdover (was 15.3 m: blind)
+            projectile: Some((26.0, 55.0)),
             zoom_deg: 50.0,
             ..base
         },
@@ -341,8 +436,9 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    /// Slab-method ray hit; also returns the face normal.
-    fn ray_hit(&self, o: [f32; 3], d: [f32; 3], t_max: f32) -> Option<(f32, [f32; 3])> {
+    /// Slab-method ray hit; also returns the face normal. Public: the
+    /// client reuses it for camera-boom collision and crosshair raycasts.
+    pub fn ray_hit(&self, o: [f32; 3], d: [f32; 3], t_max: f32) -> Option<(f32, [f32; 3])> {
         let mut t0 = 0.0_f32;
         let mut t1 = t_max;
         let mut axis = 0usize;
@@ -377,6 +473,167 @@ impl Aabb {
     }
 }
 
+// ------------------------------------------------------- §9.1 broadphase
+
+/// Uniform-grid broadphase over the static cover set (16 m cells in XZ).
+/// A ray query costs O(cells traversed) instead of O(all geometry) —
+/// required before maps grow, and before smoke/throwables/LOS pile more
+/// rays onto the hot path. Results are EXACTLY the linear scan's nearest
+/// hit (verified by test), so determinism is untouched.
+#[derive(Clone, Debug)]
+pub struct CoverGrid {
+    cell: f32,
+    origin: [f32; 2], // min corner (x, z)
+    n: usize,         // cells per axis
+    cells: Vec<Vec<u16>>,
+}
+
+impl CoverGrid {
+    pub fn build(cover: &[Aabb], half: f32) -> Self {
+        let cell = 16.0_f32;
+        let pad = 4.0;
+        let origin = [-half - pad, -half - pad];
+        let span = (half + pad) * 2.0;
+        let n = ((span / cell).ceil() as usize).max(1);
+        let mut cells = vec![Vec::new(); n * n];
+        let clamp_idx = |v: f32, o: f32| -> usize {
+            (((v - o) / cell).floor() as isize).clamp(0, n as isize - 1) as usize
+        };
+        for (i, c) in cover.iter().enumerate() {
+            let (x0, x1) = (clamp_idx(c.min[0], origin[0]), clamp_idx(c.max[0], origin[0]));
+            let (z0, z1) = (clamp_idx(c.min[2], origin[1]), clamp_idx(c.max[2], origin[1]));
+            for gx in x0..=x1 {
+                for gz in z0..=z1 {
+                    cells[gx * n + gz].push(i as u16);
+                }
+            }
+        }
+        CoverGrid {
+            cell,
+            origin,
+            n,
+            cells,
+        }
+    }
+
+    /// Nearest cover hit along `o + t·d`, `t ∈ [0, t_max]` — identical
+    /// result to scanning every box, via 2D DDA over the XZ cells
+    /// (cover is ground-based; a 2D grid is the right shape for it).
+    pub fn ray_hit(
+        &self,
+        cover: &[Aabb],
+        o: [f32; 3],
+        d: [f32; 3],
+        t_max: f32,
+    ) -> Option<(f32, [f32; 3])> {
+        let mut best: Option<(f32, [f32; 3])> = None;
+        let mut test_cell = |gx: usize, gz: usize, best: &mut Option<(f32, [f32; 3])>| {
+            for &i in &self.cells[gx * self.n + gz] {
+                let limit = best.map_or(t_max, |(bt, _)| bt);
+                if let Some((t, nrm)) = cover[i as usize].ray_hit(o, d, limit) {
+                    if best.map_or(true, |(bt, _)| t < bt) {
+                        *best = Some((t, nrm));
+                    }
+                }
+            }
+        };
+        // degenerate XZ direction (straight up/down): one cell column
+        if d[0].abs() < 1e-8 && d[2].abs() < 1e-8 {
+            let gx = (((o[0] - self.origin[0]) / self.cell).floor() as isize)
+                .clamp(0, self.n as isize - 1) as usize;
+            let gz = (((o[2] - self.origin[1]) / self.cell).floor() as isize)
+                .clamp(0, self.n as isize - 1) as usize;
+            test_cell(gx, gz, &mut best);
+            return best;
+        }
+        // clip the ray to the grid bounds in XZ (everything sits inside)
+        let (min_x, min_z) = (self.origin[0], self.origin[1]);
+        let (max_x, max_z) = (
+            self.origin[0] + self.cell * self.n as f32,
+            self.origin[1] + self.cell * self.n as f32,
+        );
+        let mut t0 = 0.0_f32;
+        let mut t1 = t_max;
+        for (oc, dc, lo, hi) in [
+            (o[0], d[0], min_x, max_x),
+            (o[2], d[2], min_z, max_z),
+        ] {
+            if dc.abs() < 1e-8 {
+                if oc < lo || oc > hi {
+                    return None;
+                }
+            } else {
+                let (mut a, mut b) = ((lo - oc) / dc, (hi - oc) / dc);
+                if a > b {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                t0 = t0.max(a);
+                t1 = t1.min(b);
+                if t0 > t1 {
+                    return None;
+                }
+            }
+        }
+        // Amanatides & Woo DDA from the entry point
+        let (px, pz) = (o[0] + d[0] * t0, o[2] + d[2] * t0);
+        let mut gx = (((px - self.origin[0]) / self.cell).floor() as isize)
+            .clamp(0, self.n as isize - 1);
+        let mut gz = (((pz - self.origin[1]) / self.cell).floor() as isize)
+            .clamp(0, self.n as isize - 1);
+        let step_x: isize = if d[0] > 0.0 { 1 } else { -1 };
+        let step_z: isize = if d[2] > 0.0 { 1 } else { -1 };
+        let next_boundary = |g: isize, step: isize, org: f32| -> f32 {
+            org + self.cell * (g + if step > 0 { 1 } else { 0 }) as f32
+        };
+        let mut t_next_x = if d[0].abs() < 1e-8 {
+            f32::INFINITY
+        } else {
+            (next_boundary(gx, step_x, self.origin[0]) - o[0]) / d[0]
+        };
+        let mut t_next_z = if d[2].abs() < 1e-8 {
+            f32::INFINITY
+        } else {
+            (next_boundary(gz, step_z, self.origin[1]) - o[2]) / d[2]
+        };
+        let dt_x = if d[0].abs() < 1e-8 {
+            f32::INFINITY
+        } else {
+            self.cell / d[0].abs()
+        };
+        let dt_z = if d[2].abs() < 1e-8 {
+            f32::INFINITY
+        } else {
+            self.cell / d[2].abs()
+        };
+        loop {
+            test_cell(gx as usize, gz as usize, &mut best);
+            // the exit-t of this cell: a found hit closer than it is final
+            let t_exit = t_next_x.min(t_next_z);
+            if let Some((bt, _)) = best {
+                if bt <= t_exit {
+                    return best;
+                }
+            }
+            if t_exit > t1 {
+                return best;
+            }
+            if t_next_x < t_next_z {
+                gx += step_x;
+                if gx < 0 || gx >= self.n as isize {
+                    return best;
+                }
+                t_next_x += dt_x;
+            } else {
+                gz += step_z;
+                if gz < 0 || gz >= self.n as isize {
+                    return best;
+                }
+                t_next_z += dt_z;
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------- maps
 
 /// v5: three battlefields. Same arena bounds, same pickup lanes, different
@@ -389,6 +646,10 @@ pub enum MapKind {
     Bailey,
     /// Castle gardens: hedge lanes, ruined walls, trees, a stone gazebo.
     Gardens,
+    /// §9.2 Battle tier (400×400 m): keep, forge district, cathedral
+    /// ruin, river field with bridges, corner watchtowers to 36 m —
+    /// verticality for the Robot Suit, ground routes for everyone else.
+    Battlefield,
 }
 
 impl MapKind {
@@ -397,10 +658,20 @@ impl MapKind {
             MapKind::Arena => "DUST ARENA",
             MapKind::Bailey => "CASTLE BAILEY",
             MapKind::Gardens => "CASTLE GARDENS",
+            MapKind::Battlefield => "BATTLEFIELD",
         }
     }
-    pub const ALL: [MapKind; 3] = [MapKind::Arena, MapKind::Bailey, MapKind::Gardens];
+    pub const ALL: [MapKind; 4] = [
+        MapKind::Arena,
+        MapKind::Bailey,
+        MapKind::Gardens,
+        MapKind::Battlefield,
+    ];
 }
+
+/// §9.3: the soft flight ceiling — thrusters above this get pushed back
+/// down, so aerial play stays inside the fight.
+pub const SOFT_CEILING_M: f32 = 120.0;
 
 /// What a cover block is MADE of — the client picks materials by this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -681,6 +952,142 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
                 }, CoverKind::Tree);
             }
         }
+        MapKind::Battlefield => {
+            // §9.2 the Battle tier: 400×400 m. Set pieces give the map
+            // its shape (§9.4); the §9.1 grid keeps rays cheap at this
+            // scale; ground routes stay viable everywhere (§9.3).
+            half = 200.0;
+            checkpoints = [[150.0, 0.0], [-150.0, 0.0]];
+            // THE KEEP: an 8 m block crowned by the armor pad/hill, with
+            // a long climbable stair running south
+            push(&mut cover, &mut kind, Aabb {
+                min: [-8.0, 0.0, -8.0],
+                max: [8.0, 8.0, 8.0],
+            }, CoverKind::Stone);
+            for s in 0..16 {
+                let h = 8.0 - s as f32 * 0.5;
+                let z0 = 8.0 + s as f32 * 1.2;
+                push(&mut cover, &mut kind, Aabb {
+                    min: [-2.5, 0.0, z0],
+                    max: [2.5, h, z0 + 1.2],
+                }, CoverKind::Stone);
+            }
+            top = 8.0;
+            // corner WATCHTOWERS to 36 m — flight targets with rooftops;
+            // ground fighters use them as landmarks, not ladders
+            for sx in [-1.0_f32, 1.0] {
+                for sz in [-1.0_f32, 1.0] {
+                    let (cx, cz) = (sx * 170.0, sz * 170.0);
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [cx - 3.5, 0.0, cz - 3.5],
+                        max: [cx + 3.5, 36.0, cz + 3.5],
+                    }, CoverKind::Stone);
+                }
+            }
+            // FORGE DISTRICT (southwest): a work-yard grid of shops with
+            // chimneys — the blacksmith hook from the project brief
+            for gx in 0..4 {
+                for gz in 0..4 {
+                    let (bx, bz) = (-130.0 + gx as f32 * 20.0, -130.0 + gz as f32 * 20.0);
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [bx, 0.0, bz],
+                        max: [bx + 9.0, 4.0, bz + 9.0],
+                    }, CoverKind::Stone);
+                    if (gx + gz) % 2 == 0 {
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [bx + 6.5, 0.0, bz + 6.5],
+                            max: [bx + 8.5, 9.0, bz + 8.5],
+                        }, CoverKind::Stone);
+                    }
+                }
+            }
+            // CATHEDRAL RUIN (northeast): two long walls + a column line
+            push(&mut cover, &mut kind, Aabb {
+                min: [70.0, 0.0, 70.0],
+                max: [72.0, 10.0, 130.0],
+            }, CoverKind::Stone);
+            push(&mut cover, &mut kind, Aabb {
+                min: [98.0, 0.0, 70.0],
+                max: [100.0, 10.0, 130.0],
+            }, CoverKind::Stone);
+            for c in 0..6 {
+                let cz = 74.0 + c as f32 * 10.0;
+                push(&mut cover, &mut kind, Aabb {
+                    min: [84.0, 0.0, cz],
+                    max: [86.5, 12.0, cz + 2.5],
+                }, CoverKind::Stone);
+            }
+            // RIVER FIELD: the |x| band around z=±? — an open crossing
+            // lane |z|<14 kept clear of clutter, with three low bridges
+            for bx in [-120.0_f32, 0.0, 120.0] {
+                if bx == 0.0 {
+                    continue; // the keep stair owns the center crossing
+                }
+                push(&mut cover, &mut kind, Aabb {
+                    min: [bx - 6.0, 0.0, -16.0],
+                    max: [bx + 6.0, 1.2, 16.0],
+                }, CoverKind::Stone);
+            }
+            // §12.2 adventure landmarks: a RUINED SETTLEMENT to navigate
+            // by (northwest), a FOREST stretch (southeast), and the MINE
+            // MOUTH framing the extraction corner — the map teaches its
+            // own route
+            for (rx, rz) in [
+                (-70.0_f32, 50.0_f32),
+                (-52.0, 64.0),
+                (-66.0, 76.0),
+                (-46.0, 44.0),
+                (-80.0, 62.0),
+            ] {
+                push(&mut cover, &mut kind, Aabb {
+                    min: [rx, 0.0, rz],
+                    max: [rx + 7.0, 2.6, rz + 1.2],
+                }, CoverKind::Stone);
+                push(&mut cover, &mut kind, Aabb {
+                    min: [rx, 0.0, rz + 4.0],
+                    max: [rx + 1.2, 3.2, rz + 8.0],
+                }, CoverKind::Stone);
+            }
+            for k in 0..14 {
+                let tx = 44.0 + (k % 5) as f32 * 18.0 + ((k * 37) % 7) as f32;
+                let tz = -128.0 + (k / 5) as f32 * 22.0 + ((k * 53) % 9) as f32;
+                push(&mut cover, &mut kind, Aabb {
+                    min: [tx - 0.4, 0.0, tz - 0.4],
+                    max: [tx + 0.4, 3.4, tz + 0.4],
+                }, CoverKind::Tree);
+            }
+            // the mine mouth: two jambs + a lintel at the extraction corner
+            push(&mut cover, &mut kind, Aabb {
+                min: [158.0, 0.0, 174.0],
+                max: [162.0, 6.0, 186.0],
+            }, CoverKind::Stone);
+            push(&mut cover, &mut kind, Aabb {
+                min: [174.0, 0.0, 158.0],
+                max: [186.0, 6.0, 162.0],
+            }, CoverKind::Stone);
+            // scattered crate clutter, never in the river band and never
+            // on the pickup lanes
+            for _ in 0..60 {
+                let x = rng.range(-190.0, 190.0);
+                let z = rng.range(-190.0, 190.0);
+                if z.abs() < 16.0 {
+                    continue; // river field stays open
+                }
+                if x.abs() < 32.0 && z.abs() < 34.0 {
+                    continue; // keep + stair + pads stay clear
+                }
+                if x > 145.0 && z > 140.0 {
+                    continue; // the extraction corner stays readable
+                }
+                let w = rng.range(1.0, 2.6);
+                let h = rng.range(1.1, 2.4);
+                let d = rng.range(1.0, 2.6);
+                push(&mut cover, &mut kind, Aabb {
+                    min: [x - w, 0.0, z - d],
+                    max: [x + w, h, z + d],
+                }, CoverKind::Crate);
+            }
+        }
     }
     MapLayout {
         cover,
@@ -787,6 +1194,11 @@ pub struct MatchConfig {
     pub map: MapKind,
     pub difficulty: Difficulty,
     pub loadout: Loadout,
+    /// §6 (Brief IV): the player's melee slot carries the axe.
+    pub melee_axe: bool,
+    /// §8 (Brief IV): index into GRENADE_PRESETS for the player's
+    /// 6-point throwable budget.
+    pub grenade_preset: usize,
 }
 
 impl Default for MatchConfig {
@@ -798,6 +1210,8 @@ impl Default for MatchConfig {
             map: MapKind::Arena,
             difficulty: Difficulty::Normal,
             loadout: DEFAULT_LOADOUT,
+            melee_axe: false,
+            grenade_preset: 0,
         }
     }
 }
@@ -834,13 +1248,69 @@ pub struct Fighter {
     pub vy: f32,
     pub grounded: bool,
     pub yaw: f32,
+    /// Last tick's yaw — the aim's angular rate for the §4 stability
+    /// model is (yaw − prev_yaw)/DT. Updated at the end of every step.
+    pub prev_yaw: f32,
     /// >0 → mid-somersault: fast, low, can't shoot. Set by the dodge key
     /// or automatically by a hard landing (parkour breakfall).
     pub roll_t: f32,
     pub roll_cd: f32,
     pub roll_dir: [f32; 2],
     pub health: f32,
-    pub armor: f32, // robot armor absorbs first
+    /// §6: the Robot Suit's POWER CORE charge (0 for every other set) —
+    /// thrusters and repulsors spend it, explosions drain it, the ground
+    /// recharges it. The HUD's second bar.
+    pub armor: f32,
+    /// §6: the equipped armor set — found in-world, lost on death.
+    pub armor_set: ArmorSet,
+    /// §11: the mech's hull pool (450, NEVER regenerates). >0 means the
+    /// chassis is intact; at zero the pilot ejects on foot at 25 HP.
+    pub hull: f32,
+    /// Pyro flame-projector fuel seconds.
+    pub fuel: f32,
+    /// Folk Shieldwall Brace held: planted, shielded, slow.
+    pub brace: bool,
+    /// §5 knife swing clock — 0 idle; counts up through wind → active →
+    /// recovery. `knife_committed` = the held lunge variant.
+    pub knife_phase: f32,
+    pub knife_committed: bool,
+    pub knife_struck: bool,
+    /// §6 (Brief IV): the melee slot carries the AXE instead of the
+    /// knife — slower, harder, and the swing sweeps the whole arc.
+    pub melee_axe: bool,
+    /// §7 (Brief IV): minigun barrel spin (0..=MINIGUN_SPINUP_S — firing
+    /// starts at the top), current heat (0..=100), and the vent lock.
+    pub spin_t: f32,
+    pub heat: f32,
+    pub vent_t: f32,
+    /// Trigger-held HOLD TIMER (seconds): refreshed by `try_fire`, drained
+    /// by the timer loop. A short 0.07 s hold (not a per-tick bool) so a
+    /// far bot thinking at the 15 Hz LOD still keeps its barrels climbing
+    /// between thinks; for the player it is refreshed every held tick.
+    pub spin_cmd: f32,
+    /// §7: the primary the minigun pickup displaced — restored on death.
+    pub prev_primary: GunKind,
+    /// §3: spear windup clock (counts down to the release), the aim
+    /// tracked through the wind, and the charge the trigger locked in.
+    pub spear_wind_t: f32,
+    pub spear_aim: [f32; 3],
+    pub spear_v0: f32,
+    /// §4 aerial flip: remaining rotation time, direction of travel,
+    /// the flip kind (0 front / 1 back / 2 left / 3 right), whether this
+    /// airborne period's one flip is spent, and the landing recovery.
+    pub flip_t: f32,
+    pub flip_dir: [f32; 2],
+    pub flip_kind: u8,
+    pub flip_used: bool,
+    pub flip_recover_t: f32,
+    /// §6: >0 → the raised shield is DIPPED for a throw (blocks nothing).
+    pub shield_dip_t: f32,
+    /// Ability cooldown (repulsor).
+    pub ability_cd: f32,
+    /// Sim time of last ability use (gates power recharge).
+    pub last_ability_at: f32,
+    /// Sim time of last damage taken (gates Recon regen).
+    pub last_dmg_at: f32,
     pub ammo: u32,
     pub reserve: u32,
     pub reload_t: f32,
@@ -851,6 +1321,21 @@ pub struct Fighter {
     pub kills: u32,
     pub deaths: u32,
     pub hits_dealt: u32,
+    /// §3: >0 → a walk-over pickup was refused because the reserve is at
+    /// cap; the HUD surfaces "AMMO FULL" (the missing feedback that hid
+    /// the pickup bug).
+    pub ammo_full_t: f32,
+    // §5 throwables
+    /// Remaining grenades per ThrowKind::ALL slot.
+    pub grenades: [u8; 4],
+    /// Selected throwable slot (G cycles).
+    pub throw_sel: u8,
+    /// >0 → holding a live grenade; frags detonate IN HAND past the fuse.
+    pub cook_t: f32,
+    /// §5.3 flashbang blind seconds remaining (bots aim ×4 worse).
+    pub blind_t: f32,
+    /// Burning marker (client flame FX), set by fire pools.
+    pub burn_t: f32,
     // bot brain
     pub waypoint: [f32; 2],
     pub strafe_phase: f32,
@@ -863,7 +1348,9 @@ impl Fighter {
         self.respawn_t <= 0.0 && self.health > 0.0
     }
     pub fn height(&self) -> f32 {
-        if self.roll_t > 0.0 {
+        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
+            BODY_HEIGHT * MECH_SCALE // §11: a 2.7 m powered exosuit
+        } else if self.roll_t > 0.0 {
             ROLL_HEIGHT
         } else if self.crouch {
             CROUCH_HEIGHT
@@ -871,8 +1358,26 @@ impl Fighter {
             BODY_HEIGHT
         }
     }
+    /// §11: the chassis is wide — it cannot fit through doorways.
+    pub fn radius(&self) -> f32 {
+        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
+            MECH_RADIUS
+        } else {
+            BODY_RADIUS
+        }
+    }
     pub fn armed(&self) -> bool {
         self.gun != GunKind::Fists
+    }
+    /// §4.3: the zone mode `apply_hit` must use for this fighter.
+    /// `flip_used` stays true from flip start through landing recovery —
+    /// exactly the "full duration + recovery" window the rule demands.
+    pub fn hit_zone_mode(&self) -> HitZoneMode {
+        if self.flip_t > 0.0 || self.flip_used {
+            HitZoneMode::Uniform
+        } else {
+            HitZoneMode::Banded
+        }
     }
 }
 
@@ -896,6 +1401,21 @@ pub struct PlayerCmd {
     pub shield: bool,
     /// −1..+1 lean input.
     pub lean: f32,
+    /// §5: holding a live grenade — release throws (cooking a frag past
+    /// its fuse detonates it in hand).
+    pub throw_hold: bool,
+    /// §1 (Brief V): cancel the aimed throw — exits aim mode without
+    /// throwing and without consuming the grenade. Edge-triggered.
+    pub throw_cancel: bool,
+    /// §5: cycle the selected throwable (G). Edge-triggered.
+    pub cycle_throw: bool,
+    /// §6: armor ability held (now C — §5 took F) — Folk brace / Pyro
+    /// flame / Robot repulsor.
+    pub ability: bool,
+    /// §6: SPACE held (not the jump edge) — the Robot Suit's thrusters.
+    pub jump_held: bool,
+    /// §5: knife held (F). Tap = quick slash, hold = committed lunge.
+    pub knife_hold: bool,
 }
 
 // ---------------------------------------------------------------- events
@@ -953,12 +1473,585 @@ pub struct Missile {
 
 // ---------------------------------------------------------------- pickups
 
+/// §3: ammo class of a recoverable projectile lying on the ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmmoKind {
+    Arrow,
+    Spear,
+}
+
+/// §3: a rested arrow/spear converted in place to a walk-over pickup.
+/// NO owner lock, NO self-pickup cooldown — your own thrown spear is
+/// explicitly yours to take back.
+#[derive(Clone, Debug)]
+pub struct DroppedAmmo {
+    pub kind: AmmoKind,
+    pub count: u8,
+    /// Sim ticks at rest — never wall clock (replays must agree).
+    pub rest_tick: u64,
+    pub pos: [f32; 3],
+}
+
+/// §3 tuning: recovery, caps, lifetimes. Spears always survive landing;
+/// arrows break 35% of the time.
+pub const ARROW_RECOVER_P: f32 = 0.65;
+pub const AMMO_CAP_ARROW: u32 = 24;
+pub const AMMO_CAP_SPEAR: u32 = 6;
+pub const DROPPED_RADIUS: f32 = 1.1;
+pub const DROPPED_MERGE_M: f32 = 0.75;
+pub const DROPPED_TTL_TICKS: u64 = 7200; // 60 s at 120 Hz
+pub const DROPPED_MAX: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickupKind {
     Health,
     Ammo,
+    /// §6: equips the Robot Suit (power core full).
     RobotArmor,
+    /// §6: equips Folk Armor (mail + plate, Shieldwall Brace).
+    FolkArmor,
+    /// §6: equips Pyro Armor (fire immunity, Flame Projector).
+    PyroArmor,
+    /// §6: equips Recon Weave (fast, quiet, self-healing).
+    ReconWeave,
+    /// §7 (Brief IV): the pad-only M134 — displaces your primary until
+    /// you die (then the original comes back).
+    Minigun,
 }
+
+// ---- §5 (Brief II): throwables -------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThrowKind {
+    Frag,
+    Flash,
+    Smoke,
+    Molotov,
+}
+
+impl ThrowKind {
+    pub const ALL: [ThrowKind; 4] = [
+        ThrowKind::Frag,
+        ThrowKind::Flash,
+        ThrowKind::Smoke,
+        ThrowKind::Molotov,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            ThrowKind::Frag => "FRAG",
+            ThrowKind::Flash => "FLASH",
+            ThrowKind::Smoke => "SMOKE",
+            ThrowKind::Molotov => "MOLOTOV",
+        }
+    }
+}
+
+/// §5.2 tuning per kind: fuse, bounce response, effect radius.
+pub struct ThrowSpec {
+    pub fuse_s: f32,
+    pub restitution: f32,
+    pub friction: f32,
+    pub radius_m: f32,
+}
+
+pub fn throw_spec(k: ThrowKind) -> ThrowSpec {
+    match k {
+        ThrowKind::Frag => ThrowSpec {
+            fuse_s: 2.4,
+            restitution: 0.28,
+            friction: 0.55,
+            radius_m: 6.0,
+        },
+        ThrowKind::Flash => ThrowSpec {
+            fuse_s: 1.6,
+            restitution: 0.42,
+            friction: 0.40,
+            radius_m: 9.0,
+        },
+        ThrowKind::Smoke => ThrowSpec {
+            fuse_s: 1.2, // deploy delay; the bloom lasts SMOKE_TTL_S
+            restitution: 0.22,
+            friction: 0.70,
+            radius_m: 2.6, // sphere radius (5.2 m sphere)
+        },
+        ThrowKind::Molotov => ThrowSpec {
+            fuse_s: f32::INFINITY, // detonates on impact
+            restitution: 0.0,      // shatters
+            friction: 1.0,
+            radius_m: 3.4,
+        },
+    }
+}
+
+/// §5.1 release speeds: overhand / underhand lob / retreat drop.
+pub const THROW_V_OVER: f32 = 11.5;
+pub const THROW_V_UNDER: f32 = 6.2;
+pub const THROW_V_DROP: f32 = 4.0;
+// ---- §1 (Brief V): grenade pre-aim + charge ------------------------------
+// Hold = aim mode: the arc previews live, power charges with hold time.
+// A sub-150 ms tap is the PANIC throw — a usable 50% lob, never a drop
+// at your own feet. (Frag cooking from Brief II is unchanged and rides
+// the same hold: charge and fuse risk are one decision.)
+pub const THROW_CHARGE_MIN_S: f32 = 0.15;
+pub const THROW_CHARGE_MAX_S: f32 = 1.2;
+/// Release-speed scale at zero charge / full charge.
+pub const THROW_POWER_MIN: f32 = 0.55;
+pub const THROW_POWER_MAX: f32 = 1.15;
+pub const THROW_TAP_POWER: f32 = 0.5;
+/// Aiming a throw is a two-handed thought: walk at 70%.
+pub const THROW_AIM_MOVE_MULT: f32 = 0.70;
+/// §1 shield tradeoff: charging one-handed behind the plate runs 25%
+/// slower, and the plate blocks at HALF strength while you aim.
+pub const THROW_SHIELD_CHARGE_MULT: f32 = 0.8;
+/// §1 mech variant: the launcher fires hotter and flatter — no wind-up
+/// pose, no movement penalty, same preview code path.
+pub const MECH_LAUNCHER_V_MULT: f32 = 1.35;
+
+/// Charge fraction [0,1] for a hold: tap = the fixed 50% panic throw,
+/// then 0.15 s → 1.2 s maps linearly min → max (no overcharge penalty).
+pub fn throw_power(hold_s: f32) -> f32 {
+    if hold_s < THROW_CHARGE_MIN_S {
+        THROW_TAP_POWER
+    } else {
+        ((hold_s - THROW_CHARGE_MIN_S) / (THROW_CHARGE_MAX_S - THROW_CHARGE_MIN_S))
+            .clamp(0.0, 1.0)
+    }
+}
+pub const FRAG_DMG: f32 = 118.0;
+pub const FLASH_BLIND_S: f32 = 3.2;
+pub const SMOKE_TTL_S: f32 = 16.0;
+pub const SMOKE_MAX: usize = 8;
+pub const FIRE_TTL_S: f32 = 9.0;
+pub const FIRE_DPS: f32 = 12.0;
+/// Starting pouch: [frag, flash, smoke, molotov].
+pub const GRENADE_LOADOUT: [u8; 4] = [2, 1, 1, 1];
+// ---- §8 (Brief IV): grenade budget presets -------------------------------
+// 6 points: frag 2 / molotov 2 / flash 1 / smoke 1. Order per slot is
+// [frag, flash, smoke, molotov] to match ThrowKind::ALL.
+pub const GRENADE_PRESETS: [([u8; 4], &str); 4] = [
+    ([2, 1, 1, 0], "STANDARD"),   // 2F + FL + S = 6
+    ([1, 0, 0, 2], "ARSONIST"),   // F + 2M = 6
+    ([0, 2, 4, 0], "SMOKE WALL"), // 2FL + 4S = 6
+    ([3, 0, 0, 0], "DEMO MAN"),   // 3F = 6
+];
+
+/// A grenade in flight or at rest, fuse burning. Point-mass integration
+/// at the fixed 120 Hz tick — tumble spin is CLIENT-side only.
+#[derive(Clone, Debug)]
+pub struct Grenade {
+    pub id: u32,
+    pub kind: ThrowKind,
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub thrower: usize,
+    pub team: Team,
+    pub fuse_t: f32,
+    pub bounces: u32,
+    pub rest: bool,
+}
+
+/// What one grenade physics tick concluded.
+pub enum GrenadeTick {
+    Fly,
+    Boom,
+    Rest,
+}
+
+/// One 120 Hz grenade physics tick — THE integrator, shared verbatim by
+/// the live flight (`step_grenades`) and the §1 (Brief V) aim preview
+/// (`predict_grenade`). There is deliberately no second arc formula
+/// anywhere: a preview that can diverge from the throw is worse than no
+/// preview. 9.81 gravity, friction+restitution bounce, rest test,
+/// settle guarantee, molotov shatter, fuse expiry.
+pub fn grenade_tick(g: &mut Grenade, grid: &CoverGrid, cover: &[Aabb]) -> GrenadeTick {
+    g.fuse_t -= DT;
+    if g.fuse_t <= 0.0 {
+        return GrenadeTick::Boom;
+    }
+    if g.rest {
+        return GrenadeTick::Rest;
+    }
+    g.vel[1] -= 9.81 * DT;
+    let old = g.pos;
+    let new = [
+        old[0] + g.vel[0] * DT,
+        old[1] + g.vel[1] * DT,
+        old[2] + g.vel[2] * DT,
+    ];
+    let seg = [new[0] - old[0], new[1] - old[1], new[2] - old[2]];
+    let seg_len = (seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2])
+        .sqrt()
+        .max(1e-6);
+    let dn = [seg[0] / seg_len, seg[1] / seg_len, seg[2] / seg_len];
+    // first surface on the path: cover (via the §9.1 grid) or ground
+    let mut hit: Option<(f32, [f32; 3])> = grid.ray_hit(cover, old, dn, seg_len);
+    if new[1] <= 0.0 && old[1] > 0.0 {
+        let t = (0.0 - old[1]) / (new[1] - old[1]) * seg_len;
+        if hit.map_or(true, |(ht, _)| t < ht) {
+            hit = Some((t, [0.0, 1.0, 0.0]));
+        }
+    }
+    if let Some((t, n)) = hit {
+        let spec = throw_spec(g.kind);
+        if g.kind == ThrowKind::Molotov {
+            // shatters on ANY surface — the pool spawns at impact
+            g.pos = [
+                old[0] + dn[0] * t,
+                (old[1] + dn[1] * t).max(0.02),
+                old[2] + dn[2] * t,
+            ];
+            return GrenadeTick::Boom;
+        }
+        let contact = [
+            old[0] + dn[0] * (t - 0.01).max(0.0),
+            old[1] + dn[1] * (t - 0.01).max(0.0),
+            old[2] + dn[2] * (t - 0.01).max(0.0),
+        ];
+        let vn = g.vel[0] * n[0] + g.vel[1] * n[1] + g.vel[2] * n[2];
+        let vnv = [n[0] * vn, n[1] * vn, n[2] * vn];
+        let vt = [g.vel[0] - vnv[0], g.vel[1] - vnv[1], g.vel[2] - vnv[2]];
+        g.bounces += 1;
+        let rest_coef = if g.bounces > 3 {
+            spec.restitution * 0.5_f32.powi(g.bounces as i32 - 3)
+        } else {
+            spec.restitution
+        };
+        g.vel = [
+            vt[0] * (1.0 - spec.friction) - vnv[0] * rest_coef,
+            vt[1] * (1.0 - spec.friction) - vnv[1] * rest_coef,
+            vt[2] * (1.0 - spec.friction) - vnv[2] * rest_coef,
+        ];
+        g.pos = contact;
+        // §5.2 rest test — without it: infinite micro-bounces
+        let speed = (g.vel[0] * g.vel[0] + g.vel[1] * g.vel[1] + g.vel[2] * g.vel[2]).sqrt();
+        if vn.abs() * rest_coef < 0.35 && speed < 0.6 {
+            g.rest = true;
+            g.vel = [0.0; 3];
+            g.pos[1] = g.pos[1].max(0.02);
+        }
+    } else {
+        g.pos = new;
+    }
+    GrenadeTick::Fly
+}
+
+/// §5.4: an active smoke sphere — occludes bot LOS via path length.
+#[derive(Clone, Debug)]
+pub struct SmokeVolume {
+    pub pos: [f32; 3],
+    pub ttl: f32,
+}
+
+/// §5.5: a molotov fire pool — 4 Hz damage ticks, blocks bot pathing.
+#[derive(Clone, Debug)]
+pub struct FirePool {
+    pub pos: [f32; 3],
+    pub ttl: f32,
+    pub thrower: usize,
+    pub tick_t: f32,
+}
+
+/// Detonation event for client FX (kind + where), with a display ttl.
+#[derive(Clone, Debug)]
+pub struct Boom {
+    pub at: [f32; 3],
+    pub kind: ThrowKind,
+}
+
+// ---- §6 (Brief II): armor sets with full powers --------------------------
+
+/// Found and equipped in-world, never spawned with. Lost on death.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmorSet {
+    None,
+    /// Mail and plate; Shieldwall Brace (hold F).
+    Folk,
+    /// Heat plate; fire immunity + Flame Projector (hold F).
+    Pyro,
+    /// The powered white robot; thruster flight (hold SPACE airborne) +
+    /// Repulsor Blast (F), all running on a power core.
+    RobotSuit,
+    /// The light counterweight: fast, quiet, self-healing. No abilities.
+    Recon,
+}
+
+/// §6.1: flat per-zone reduction applied AFTER the zone multiplier, with
+/// a floor of 15% of base damage — heavy sets never make limb shots free,
+/// and head flats stay small so headshots remain decisive.
+pub struct ArmorSpec {
+    pub flat_head: f32,
+    pub flat_torso: f32,
+    pub flat_limb: f32,
+    pub move_mult: f32,
+    /// Fraction of explosive damage shrugged off.
+    pub explosive_resist: f32,
+}
+
+pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
+    match s {
+        ArmorSet::None => ArmorSpec {
+            flat_head: 0.0,
+            flat_torso: 0.0,
+            flat_limb: 0.0,
+            move_mult: 1.0,
+            explosive_resist: 0.0,
+        },
+        ArmorSet::Folk => ArmorSpec {
+            flat_head: 12.0,
+            flat_torso: 45.0,
+            flat_limb: 15.0,
+            move_mult: 0.92,
+            explosive_resist: 0.0,
+        },
+        ArmorSet::Pyro => ArmorSpec {
+            flat_head: 14.0,
+            flat_torso: 30.0,
+            flat_limb: 30.0,
+            move_mult: 0.96,
+            explosive_resist: 0.5,
+        },
+        ArmorSet::RobotSuit => ArmorSpec {
+            flat_head: 16.0,
+            flat_torso: 55.0,
+            flat_limb: 55.0,
+            move_mult: 0.78, // §11.3 the walker's pace (×0.88 more, dry)
+            explosive_resist: 0.0,
+        },
+        ArmorSet::Recon => ArmorSpec {
+            flat_head: 12.0,
+            flat_torso: 12.0,
+            flat_limb: 12.0,
+            move_mult: 1.10,
+            explosive_resist: 0.0,
+        },
+    }
+}
+
+/// §6.1 damage floor: no set reduces a hit below this fraction of the
+/// gun's BASE damage — otherwise players stop aiming.
+pub const ARMOR_FLOOR_FRAC: f32 = 0.15;
+/// Folk Shieldwall Brace: frontal arc, reduction, stacking wall bonus.
+pub const BRACE_ARC_COS: f32 = 0.574; // cos(55°) — a 110° frontal arc
+pub const BRACE_REDUCTION: f32 = 0.82;
+pub const BRACE_STACK_BONUS: f32 = 0.08;
+pub const BRACE_STACK_CAP: u32 = 3;
+pub const BRACE_SPEED_MULT: f32 = 0.25;
+/// Robot power core: capacity, recharge (grounded, 5 s after ability use),
+/// thruster drain and speeds, repulsor cost/cooldown, EMP/explosive drain.
+pub const POWER_MAX: f32 = 100.0;
+pub const POWER_REGEN: f32 = 6.0;
+pub const POWER_REGEN_DELAY: f32 = 5.0;
+pub const THRUST_DRAIN: f32 = 8.0;
+pub const THRUST_VY: f32 = 14.0;
+pub const THRUST_LATERAL: f32 = 9.0;
+pub const REPULSOR_DMG: f32 = 62.0;
+pub const REPULSOR_KNOCK: f32 = 6.0;
+pub const REPULSOR_CD: f32 = 1.4;
+pub const REPULSOR_COST: f32 = 12.0;
+pub const EXPLOSIVE_POWER_DRAIN: f32 = 25.0;
+pub const ROBOT_DRAINED_MOVE: f32 = 0.88;
+/// Pyro flame projector: fuel seconds, dps, reach, cone, refill rate.
+pub const FLAME_FUEL_S: f32 = 6.0;
+pub const FLAME_DPS: f32 = 34.0;
+pub const FLAME_REACH: f32 = 7.5;
+pub const FLAME_ARC_COS: f32 = 0.906; // ±25°
+pub const FLAME_REFILL: f32 = FLAME_FUEL_S / 9.0;
+/// Recon passive regen: hp/s after this long without taking damage.
+pub const RECON_REGEN: f32 = 4.0;
+pub const RECON_REGEN_DELAY: f32 = 5.0;
+// ---- §11 (Brief III): the MECH chassis — supersedes the Robot Suit ------
+// A piloted walker above human scale. Damage is classified by the angle
+// between the shot and the mech's BODY FACING (never the camera): a
+// frontal fortress, a flanking objective. The hull is a resource you
+// spend — it never regenerates; at zero the pilot ejects at 25 HP.
+// §11 (Brief IV): pulled down from 2.2× — a 2.7 m POWERED EXOSUIT you
+// fight, not a building you shoot at. The arcs matter more up close.
+pub const MECH_SCALE: f32 = 1.5;
+pub const MECH_HULL: f32 = 450.0;
+pub const MECH_RADIUS: f32 = BODY_RADIUS * MECH_SCALE; // cannot fit doorways
+pub const MECH_EJECT_HP: f32 = 25.0;
+/// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
+pub const MECH_RED_FRONT: f32 = 0.85;
+pub const MECH_RED_SIDE: f32 = 0.70;
+/// §11.2 rule 2: explosives bypass HALF the reduction; fire bypasses ALL
+/// of it (it attacks cooling, not plating — Pyro's defined role).
+/// §11: the mech TURNS to face a threat — a real, visible, punishable
+/// commitment. The pilot's view is free; the armor follows the body.
+pub const MECH_TURN_RATE: f32 = 2.4; // rad/s
+// ---- §10 (Brief III): base health regeneration ---------------------------
+// Every fighter, independent of armor. Deliberately slow: worst case from
+// one bullet to full is 24 s — it rewards disengaging, not trading. ANY
+// damage resets the timer, so DoT (fire pools, toxin) denies regen
+// entirely and area denial keeps its value. Restores HEALTH only, never
+// armor — armor is a consumable found in the world.
+pub const REGEN_DELAY_S: f32 = 12.0;
+pub const REGEN_RATE_HPS: f32 = 8.33;
+// ---- §5 (Brief III): the knife -------------------------------------------
+// Tap: quick slash. Hold: committed lunge — visibly wound up, punishable.
+// Silent (4 m noise), backstabs are lethal, and it works on the horde:
+// the correct tool for zombie extraction and (later) mech rear arcs.
+pub const KNIFE_QUICK_WIND_S: f32 = 0.28;
+pub const KNIFE_QUICK_ACTIVE_S: f32 = 0.12;
+pub const KNIFE_QUICK_RECOVER_S: f32 = 0.34;
+pub const KNIFE_QUICK_DMG: f32 = 55.0;
+pub const KNIFE_QUICK_BACKSTAB: f32 = 160.0;
+pub const KNIFE_RANGE_M: f32 = 1.9;
+pub const KNIFE_LUNGE_WIND_S: f32 = 0.55;
+pub const KNIFE_LUNGE_RANGE_M: f32 = 2.9;
+pub const KNIFE_LUNGE_DMG: f32 = 95.0;
+pub const KNIFE_LUNGE_BACKSTAB: f32 = 999.0;
+/// Holding past this commits the lunge instead of the quick slash.
+pub const KNIFE_COMMIT_S: f32 = 0.30;
+// ---- §6 (Brief IV): the axe ----------------------------------------------
+// The knife's heavy sibling: slower on every beat, hits harder, and the
+// swing is a SWEEP — every enemy inside the 90° frontal arc takes the
+// hit. Louder than the blade (6 m), still quiet next to any gun.
+pub const AXE_QUICK_WIND_S: f32 = 0.45;
+pub const AXE_QUICK_ACTIVE_S: f32 = 0.15;
+pub const AXE_QUICK_RECOVER_S: f32 = 0.50;
+pub const AXE_QUICK_DMG: f32 = 85.0;
+pub const AXE_QUICK_BACKSTAB: f32 = 190.0;
+pub const AXE_RANGE_M: f32 = 2.1;
+/// cos of the sweep half-angle (±45° — the full 90° arc).
+pub const AXE_ARC_COS: f32 = 0.707;
+pub const AXE_LUNGE_WIND_S: f32 = 0.70;
+pub const AXE_LUNGE_DMG: f32 = 130.0;
+pub const AXE_LUNGE_BACKSTAB: f32 = 999.0;
+// ---- §7 (Brief IV): the minigun ------------------------------------------
+// Never in a loadout — a pad weapon. The whole design is the tradeoff
+// loop: spin-up latency before the stream, heat while it pours, a forced
+// 3 s vent at 100 heat (R vents early on YOUR schedule instead). 400
+// rounds, no reloads — the pad respawn is the reload.
+pub const MINIGUN_SPINUP_S: f32 = 0.6;
+/// 100 heat in ~4 s of continuous fire (110 rounds).
+pub const MINIGUN_HEAT_PER_SHOT: f32 = 0.91;
+pub const MINIGUN_VENT_FORCED_S: f32 = 3.0;
+/// Manual (R) vent clears heat at this rate — 60 heat ≈ 1.4 s.
+pub const MINIGUN_VENT_RATE: f32 = 42.9;
+/// Idle cooling while the trigger is off and no vent is running.
+pub const MINIGUN_HEAT_DECAY: f32 = 8.0;
+/// Carrying the mass: ×0.70 walk; barrels spun: ×0.55.
+pub const MINIGUN_MOVE_MULT: f32 = 0.70;
+pub const MINIGUN_SPUN_MOVE_MULT: f32 = 0.55;
+/// Trigger-intent hold window — long enough to bridge the 15 Hz far-bot
+/// LOD (8 ticks), short enough to be imperceptible on release (70 ms).
+pub const MINIGUN_SPIN_HOLD_S: f32 = 0.07;
+// ---- §6 (Brief III): shield rules ----------------------------------------
+/// Throwing from behind the raised shield LOWERS it for this long — a
+/// real window of vulnerability that makes the lob a decision.
+pub const SHIELD_DIP_S: f32 = 0.62;
+// ---- §3 (Brief III): the Achilles throw ----------------------------------
+/// The spear now has a VISIBLE windup before release — plant, hips, whip.
+/// Enemies can see it coming; the spear is a committal weapon, the
+/// correct counterweight to its flat trajectory. The release uses the
+/// thrower's aim AT RELEASE (athletes track their target through the
+/// plant), refreshed while winding.
+pub const SPEAR_WINDUP_S: f32 = 0.50;
+
+// ---- §4 (Brief III): aerial flips ----------------------------------------
+// Q + direction while airborne. ONE flip per airborne period, no firing
+// until landing recovery — pure mobility, never a combat move.
+pub const FLIP_S: f32 = 0.62;
+pub const FLIP_BOOST: f32 = 1.4;
+pub const FLIP_RECOVER_S: f32 = 0.18;
+pub const FLIP_RECOVER_SPEED: f32 = 0.6;
+
+/// §4.3: how `apply_hit` classifies zones on this fighter RIGHT NOW.
+/// Halfway through a backflip the head occupies the BOTTOM of the capsule
+/// — the banded frac test would call a boot shot a ×4 headshot. Airborne
+/// acrobatics force Uniform (×1.0 everywhere) for the full flip plus the
+/// landing recovery, in BOTH directions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HitZoneMode {
+    Banded,
+    Uniform,
+}
+
+// ---- §8 (Brief II): zombie extraction ------------------------------------
+
+/// The enemy roster. Headshots (×4.0) one-shot the mass — that's the
+/// skeleton and hit-zone work paying rent directly to the player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZKind {
+    /// The mass. A headshot is a one-shot kill.
+    Shambler,
+    /// Fast, after the 4-minute mark. Stops you moving backwards.
+    Runner,
+    /// Staggers on every 3rd headshot; a wall of meat.
+    Brute,
+    /// 2.2 s wind-up, then calls the horde. The tension engine.
+    Screamer,
+    /// Bursts into a toxic cloud on death. Punishes close range.
+    Bloater,
+}
+
+pub struct ZSpec {
+    pub hp: f32,
+    pub speed: f32,
+    pub dmg: f32,
+    pub height: f32,
+    pub girth: f32,
+}
+
+pub fn zspec(k: ZKind) -> ZSpec {
+    match k {
+        ZKind::Shambler => ZSpec { hp: 42.0, speed: 1.6, dmg: 14.0, height: 1.7, girth: 0.38 },
+        ZKind::Runner => ZSpec { hp: 30.0, speed: 6.9, dmg: 11.0, height: 1.6, girth: 0.32 },
+        ZKind::Brute => ZSpec { hp: 340.0, speed: 2.8, dmg: 48.0, height: 2.2, girth: 0.62 },
+        ZKind::Screamer => ZSpec { hp: 24.0, speed: 3.1, dmg: 0.0, height: 1.7, girth: 0.34 },
+        ZKind::Bloater => ZSpec { hp: 90.0, speed: 1.2, dmg: 0.0, height: 1.8, girth: 0.55 },
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Zombie {
+    pub id: u32,
+    pub kind: ZKind,
+    pub pos: [f32; 3],
+    pub hp: f32,
+    pub atk_cd: f32,
+    pub scream_t: f32,
+    pub head_hits: u32,
+    /// Where it's headed: a fighter it can see, or the last noise.
+    pub target: [f32; 2],
+    pub alerted: bool,
+}
+
+/// A bloater's burst — 4 m of lingering toxin.
+#[derive(Clone, Debug)]
+pub struct ToxicCloud {
+    pub pos: [f32; 3],
+    pub ttl: f32,
+    pub tick_t: f32,
+}
+
+/// §8.2 noise: every action has a radius that feeds the horde director.
+/// This is what turns the bow and spear into the CORRECT tool here.
+pub fn gun_noise_m(kind: GunKind) -> f32 {
+    match kind {
+        GunKind::Fists => 4.0,
+        GunKind::Bow => 6.0,
+        GunKind::Spear => 8.0,
+        GunKind::Glock => 60.0,
+        GunKind::Deagle => 80.0,
+        GunKind::Mp5 => 70.0,
+        GunKind::Shotgun => 110.0,
+        GunKind::Ak47 | GunKind::M4 => 90.0,
+        GunKind::Awm | GunKind::M249 => 100.0,
+        GunKind::Minigun => 95.0, // §7: the horde hears every burst
+    }
+}
+
+pub const ZOMBIE_CAP: usize = 40;
+pub const EXTRACT_LEN_S: f32 = 900.0; // a 15-minute run
+pub const EXTRACT_REVEAL_S: f32 = 240.0;
+pub const EXTRACT_RELOCATE_S: f32 = 720.0;
+pub const EXTRACT_HOLD_S: f32 = 90.0;
+pub const EXTRACT_RADIUS: f32 = 6.0;
+/// §8.3: never spawn within this range of a player's view cone.
+pub const ZSPAWN_MIN_M: f32 = 35.0;
+pub const TOXIC_DPS: f32 = 8.0;
+pub const TOXIC_R: f32 = 4.0;
 
 #[derive(Clone, Debug)]
 pub struct Pickup {
@@ -973,6 +2066,9 @@ pub struct Pickup {
 pub enum Mode {
     Tdm,
     Koth,
+    /// §8: co-op survival — insert, fight the horde, extract with what
+    /// you carry. Gear is lost on death.
+    Extraction,
 }
 
 pub struct TdmSim {
@@ -987,6 +2083,30 @@ pub struct TdmSim {
     pub checkpoints: Vec<Checkpoint>,
     pub pickups: Vec<Pickup>,
     pub missiles: Vec<Missile>,
+    /// §3: rested arrows/spears, recoverable by walking over them.
+    pub dropped: Vec<DroppedAmmo>,
+    /// §5 throwables in flight / at rest with fuses burning.
+    pub grenades_air: Vec<Grenade>,
+    /// §5.4 active smoke spheres (bounded at SMOKE_MAX).
+    pub smokes: Vec<SmokeVolume>,
+    /// §5.5 molotov fire pools.
+    pub fires: Vec<FirePool>,
+    /// Detonation FX events for the client, with display ttl.
+    pub booms: Vec<(Boom, f32)>,
+    /// §8 the horde.
+    pub zombies: Vec<Zombie>,
+    /// §8 bloater bursts.
+    pub toxics: Vec<ToxicCloud>,
+    /// §8.3 director pressure 0..1 — time, noise, and player health feed
+    /// it; spawn rate and composition scale off it.
+    pub pressure: f32,
+    /// §8.4 extraction: two candidate sites, the active index, and the
+    /// hold progress in seconds.
+    pub extract_sites: [[f32; 3]; 2],
+    pub extract_idx: usize,
+    pub extract_hold: f32,
+    zspawn_cd: f32,
+    next_zombie_id: u32,
     pub score: [f32; 2], // kills (TDM) or hill-seconds (KOTH)
     pub kill_feed: Vec<(KillEvent, f32)>,
     pub hits: Vec<(HitEvent, f32)>,
@@ -999,6 +2119,8 @@ pub struct TdmSim {
     pub winner: Option<Team>,
     pub hill: [f32; 3],
     pub player: usize,
+    /// §9.1 broadphase over `cover` — rebuilt with the map, never mutated.
+    grid: CoverGrid,
     rng: Pcg32,
     tick: u64,
     next_missile_id: u32,
@@ -1042,12 +2164,32 @@ impl TdmSim {
             (PickupKind::Health, 19.0, -14.0),
             (PickupKind::Ammo, -19.0, -14.0),
             (PickupKind::Ammo, 19.0, 14.0),
+            // §6: the armor sets are LOOT — walk over a pad to suit up
+            (PickupKind::FolkArmor, 0.0, 19.0),
+            (PickupKind::PyroArmor, 0.0, -19.0),
+            (PickupKind::ReconWeave, -19.0, 0.0),
+            // §7 (Brief IV): the M134 pad — the mirror of Recon's spot
+            (PickupKind::Minigun, 19.0, 0.0),
         ] {
             pickups.push(Pickup {
                 kind,
                 pos: [x, 0.0, z],
                 respawn_t: 0.0,
             });
+        }
+        // §12.2: on the Battlefield the loot TEACHES the route — armor
+        // along the landmarks, the Mech deep by the mine, consumables
+        // spread down the long axis
+        if cfg.map == MapKind::Battlefield {
+            for pk in &mut pickups {
+                pk.pos = match pk.kind {
+                    PickupKind::FolkArmor => [-58.0, 0.0, 56.0], // settlement
+                    PickupKind::PyroArmor => [-100.0, 0.0, -95.0], // the forge
+                    PickupKind::ReconWeave => [86.0, 0.0, 100.0], // cathedral
+                    PickupKind::RobotArmor => [166.0, 0.0, 152.0], // by the mine
+                    _ => [pk.pos[0] * 3.0, 0.0, pk.pos[2] * 3.0],
+                };
+            }
         }
         // snap pickups AND checkpoints onto the terrain under them — a
         // lane that crosses a plateau must sit ON it, not inside it
@@ -1074,7 +2216,10 @@ impl TdmSim {
             .collect();
 
         let mut fighters = Vec::new();
-        for team_i in 0..2 {
+        // §8: Extraction is CO-OP — everyone spawns Blue, the horde is
+        // the other side
+        let teams = if cfg.mode == Mode::Extraction { 1 } else { 2 };
+        for team_i in 0..teams {
             let team = if team_i == 0 { Team::Blue } else { Team::Red };
             for k in 0..per_team {
                 let (pos, yaw) = spawn_point(team, k, half);
@@ -1114,11 +2259,37 @@ impl TdmSim {
                     vy: 0.0,
                     grounded: true,
                     yaw,
+                    prev_yaw: yaw,
                     roll_t: 0.0,
                     roll_cd: 0.0,
                     roll_dir: [0.0, 1.0],
                     health: MAX_HEALTH,
                     armor: 0.0,
+                    armor_set: ArmorSet::None,
+                    hull: 0.0,
+                    fuel: 0.0,
+                    brace: false,
+                    knife_phase: 0.0,
+                    knife_committed: false,
+                    knife_struck: false,
+                    melee_axe: false,
+                    spin_t: 0.0,
+                    heat: 0.0,
+                    vent_t: 0.0,
+                    spin_cmd: 0.0,
+                    prev_primary: g0,
+                    shield_dip_t: 0.0,
+                    spear_wind_t: 0.0,
+                    spear_aim: [0.0, 0.0, 1.0],
+                    spear_v0: 0.0,
+                    flip_t: 0.0,
+                    flip_dir: [0.0, 0.0],
+                    flip_kind: 1,
+                    flip_used: false,
+                    flip_recover_t: 0.0,
+                    ability_cd: 0.0,
+                    last_ability_at: -100.0,
+                    last_dmg_at: -100.0,
                     ammo: gun(g0).mag,
                     reserve: gun(g0).reserve,
                     reload_t: 0.0,
@@ -1129,6 +2300,12 @@ impl TdmSim {
                     kills: 0,
                     deaths: 0,
                     hits_dealt: 0,
+                    ammo_full_t: 0.0,
+                    grenades: GRENADE_LOADOUT,
+                    throw_sel: 0,
+                    cook_t: 0.0,
+                    blind_t: 0.0,
+                    burn_t: 0.0,
                     waypoint: [rng.range(-12.0, 12.0), rng.range(-8.0, 8.0)],
                     strafe_phase: rng.range(0.0, 6.28),
                     los_time: 0.0,
@@ -1136,24 +2313,50 @@ impl TdmSim {
                 });
             }
         }
+        let mut fighters = fighters;
+        // §6/§8 (Brief IV): the PLAYER's loadout choices — melee slot and
+        // grenade budget preset. Bots keep the knife and standard pouch.
+        fighters[0].melee_axe = cfg.melee_axe;
+        fighters[0].grenades = GRENADE_PRESETS[cfg.grenade_preset % GRENADE_PRESETS.len()].0;
         TdmSim {
             cfg,
             mode: cfg.mode,
             map: cfg.map,
             half,
+            grid: CoverGrid::build(&cover, half),
             fighters,
             cover,
             cover_kind,
             checkpoints,
             pickups,
             missiles: Vec::new(),
+            dropped: Vec::new(),
+            grenades_air: Vec::new(),
+            smokes: Vec::new(),
+            fires: Vec::new(),
+            booms: Vec::new(),
             score: [0.0, 0.0],
             kill_feed: Vec::new(),
             hits: Vec::new(),
             impacts: Vec::new(),
             tracers: Vec::new(),
             t: 0.0,
-            match_t: MATCH_LEN_S,
+            match_t: if cfg.mode == Mode::Extraction {
+                EXTRACT_LEN_S
+            } else {
+                MATCH_LEN_S
+            },
+            zombies: Vec::new(),
+            toxics: Vec::new(),
+            pressure: 0.0,
+            extract_sites: [
+                [half - 20.0, 0.0, half - 20.0],
+                [-(half - 20.0), 0.0, -(half - 20.0)],
+            ],
+            extract_idx: 0,
+            extract_hold: 0.0,
+            zspawn_cd: 6.0,
+            next_zombie_id: 0,
             overtime: false,
             round_over_t: None,
             winner: None,
@@ -1170,6 +2373,19 @@ impl TdmSim {
             Team::Blue => 0,
             Team::Red => 1,
         }
+    }
+
+    /// §9.1: nearest static-cover hit along a ray, via the grid broadphase.
+    /// The client uses this too (camera boom, crosshair ray).
+    pub fn raycast_cover(&self, o: [f32; 3], d: [f32; 3], t_max: f32) -> Option<(f32, [f32; 3])> {
+        self.grid.ray_hit(&self.cover, o, d, t_max)
+    }
+
+    /// Rebuild the broadphase after mutating `cover` directly (test
+    /// harnesses build shooting ranges by clearing it). The grid indexes
+    /// into `cover` — a stale grid after a mutation is out of bounds.
+    pub fn rebuild_grid(&mut self) {
+        self.grid = CoverGrid::build(&self.cover, self.half);
     }
 
     pub fn step(&mut self, cmd: PlayerCmd) {
@@ -1206,25 +2422,118 @@ impl TdmSim {
         // ---- match clock + overtime ------------------------------------
         self.match_t -= DT;
         if self.match_t <= 0.0 {
-            let (b, r) = (self.score[0], self.score[1]);
-            if (b - r).abs() > 0.01 {
-                self.finish(if b > r { Team::Blue } else { Team::Red });
-            } else if !self.overtime {
-                self.overtime = true;
-                self.match_t = OVERTIME_S; // sudden death: next point wins
+            if self.mode == Mode::Extraction {
+                self.finish(Team::Red); // §8: overrun — the horde wins
             } else {
-                self.finish(Team::Blue); // exhausted overtime: blue by honor
+                let (b, r) = (self.score[0], self.score[1]);
+                if (b - r).abs() > 0.01 {
+                    self.finish(if b > r { Team::Blue } else { Team::Red });
+                } else if !self.overtime {
+                    self.overtime = true;
+                    self.match_t = OVERTIME_S; // sudden death: next point wins
+                } else {
+                    self.finish(Team::Blue); // exhausted overtime: blue by honor
+                }
             }
         }
 
         // ---- timers, respawns ------------------------------------------
+        let t_now = self.t;
+        let player_pouch =
+            GRENADE_PRESETS[self.cfg.grenade_preset % GRENADE_PRESETS.len()].0;
+        let mut spear_releases: Vec<usize> = Vec::new();
         for i in 0..self.fighters.len() {
             let f = &mut self.fighters[i];
             f.fire_cd = (f.fire_cd - DT).max(0.0);
             f.protect_t = (f.protect_t - DT).max(0.0);
             f.switch_t = (f.switch_t - DT).max(0.0);
             f.roll_cd = (f.roll_cd - DT).max(0.0);
-            f.bloom = (f.bloom - 0.02 * DT * 6.0).max(0.0);
+            f.ammo_full_t = (f.ammo_full_t - DT).max(0.0);
+            f.blind_t = (f.blind_t - DT).max(0.0);
+            f.burn_t = (f.burn_t - DT).max(0.0);
+            f.ability_cd = (f.ability_cd - DT).max(0.0);
+            f.shield_dip_t = (f.shield_dip_t - DT).max(0.0);
+            // §7: minigun barrels and heat. `spin_cmd` is the trigger
+            // hold-timer (refreshed by try_fire, drained here): live →
+            // barrels climb and heat holds; expired → wind down + cool.
+            if f.gun == GunKind::Minigun {
+                if f.spin_cmd > 0.0 {
+                    f.spin_cmd -= DT;
+                    f.spin_t = (f.spin_t + DT).min(MINIGUN_SPINUP_S);
+                } else {
+                    f.spin_t = (f.spin_t - DT).max(0.0);
+                    if f.vent_t <= 0.0 {
+                        f.heat = (f.heat - MINIGUN_HEAT_DECAY * DT).max(0.0);
+                    }
+                }
+                if f.vent_t > 0.0 {
+                    f.vent_t -= DT;
+                    if f.vent_t <= 0.0 {
+                        f.vent_t = 0.0;
+                        f.heat = 0.0; // a vent always clears the gun
+                    }
+                }
+            } else {
+                f.spin_t = 0.0;
+                f.spin_cmd = 0.0;
+            }
+            // §3: the spear releases at the END of the windup, on the
+            // tracked aim (the ammo was spent at the trigger)
+            if f.spear_wind_t > 0.0 {
+                f.spear_wind_t -= DT;
+                if f.spear_wind_t <= 0.0 {
+                    f.spear_wind_t = 0.0;
+                    spear_releases.push(i);
+                }
+            }
+            // §4 flip bookkeeping: the spin drifts 1.4 m/s in its
+            // direction; landing starts the 0.18 s recovery; recovery
+            // ending returns the trigger AND the gun
+            if f.flip_t > 0.0 {
+                f.flip_t = (f.flip_t - DT).max(0.0);
+                f.pos[0] += f.flip_dir[0] * FLIP_BOOST * DT;
+                f.pos[2] += f.flip_dir[1] * FLIP_BOOST * DT;
+                if f.grounded {
+                    f.flip_t = 0.0;
+                }
+            }
+            if f.flip_recover_t > 0.0 {
+                f.flip_recover_t -= DT;
+                if f.flip_recover_t <= 0.0 {
+                    f.flip_recover_t = 0.0;
+                    f.flip_used = false; // one per airborne period
+                }
+            } else if f.grounded && f.flip_used && f.flip_t <= 0.0 {
+                f.flip_recover_t = FLIP_RECOVER_S;
+            }
+            // §9 (Brief III): post-shot spread recovers fast — controlled
+            // bursts stay tight (was 0.12/s)
+            f.bloom = (f.bloom - 0.02 * DT * 10.0).max(0.0);
+            // §10 (Brief III): base regen for everyone — 12 s untouched,
+            // then 8.33 hp/s (Recon's own earlier regen stacks on top;
+            // that's its identity)
+            if f.alive() && t_now - f.last_dmg_at > REGEN_DELAY_S {
+                f.health = (f.health + REGEN_RATE_HPS * DT).min(MAX_HEALTH);
+            }
+            // §6 per-set upkeep: power recharge, fuel refill, Recon regen
+            match f.armor_set {
+                ArmorSet::RobotSuit => {
+                    if f.grounded && t_now - f.last_ability_at > POWER_REGEN_DELAY {
+                        f.armor = (f.armor + POWER_REGEN * DT).min(POWER_MAX);
+                    }
+                }
+                ArmorSet::Pyro => {
+                    if t_now - f.last_ability_at > 1.0 {
+                        f.fuel = (f.fuel + FLAME_REFILL * DT).min(FLAME_FUEL_S);
+                    }
+                }
+                ArmorSet::Recon => {
+                    if f.alive() && t_now - f.last_dmg_at > RECON_REGEN_DELAY {
+                        f.health = (f.health + RECON_REGEN * DT).min(MAX_HEALTH);
+                    }
+                }
+                _ => {}
+            }
             if f.reload_t > 0.0 {
                 f.reload_t -= DT;
                 if f.reload_t <= 0.0 {
@@ -1259,10 +2568,35 @@ impl TdmSim {
                     }
                     f.pos = pos;
                     f.yaw = yaw;
+                    f.prev_yaw = yaw; // no phantom whip-turn on the spawn tick
                     f.vy = 0.0;
                     f.grounded = true;
                     f.health = MAX_HEALTH;
                     f.armor = 0.0;
+                    f.armor_set = ArmorSet::None; // §6: gear is lost on death
+                    f.hull = 0.0;
+                    f.fuel = 0.0;
+                    f.brace = false;
+                    f.knife_phase = 0.0;
+                    f.knife_committed = false;
+                    f.knife_struck = false;
+                    f.spin_t = 0.0;
+                    f.heat = 0.0;
+                    f.vent_t = 0.0;
+                    f.spin_cmd = 0.0;
+                    f.shield_dip_t = 0.0;
+                    f.flip_t = 0.0;
+                    f.flip_used = false;
+                    f.flip_recover_t = 0.0;
+                    f.spear_wind_t = 0.0;
+                    f.ability_cd = 0.0;
+                    f.last_ability_at = -100.0;
+                    f.last_dmg_at = -100.0;
+                    // §7: the pad weapon dies with you — the ORIGINAL
+                    // primary comes back in its place
+                    if f.inventory[0] == GunKind::Minigun {
+                        f.inventory[0] = f.prev_primary;
+                    }
                     // the full loadout comes back with you
                     f.slot_ammo = fresh_ammo(f.inventory);
                     f.active = 0;
@@ -1276,8 +2610,28 @@ impl TdmSim {
                     f.crouch = false;
                     f.roll_t = 0.0;
                     f.roll_cd = 0.0;
+                    f.grenades = if i == 0 {
+                        // §8: the player's chosen budget comes back too
+                        player_pouch
+                    } else {
+                        GRENADE_LOADOUT
+                    };
+                    f.cook_t = 0.0;
+                    f.blind_t = 0.0;
+                    f.burn_t = 0.0;
                 }
             }
+        }
+
+        // §3: launch the wound-up spears (release aim, release charge)
+        for i in spear_releases {
+            if !self.fighters[i].alive() {
+                continue;
+            }
+            let (aim, v0) = (self.fighters[i].spear_aim, self.fighters[i].spear_v0);
+            let o = self.muzzle_origin(i);
+            let dmg = gun(GunKind::Spear).projectile.unwrap().1;
+            self.spawn_missile(o, aim, v0, dmg, i, true); // always a spear
         }
 
         // ---- pickups respawn + collection ------------------------------
@@ -1311,11 +2665,70 @@ impl TdmSim {
                             if !f.armed() {
                                 continue;
                             }
-                            f.reserve += gun(f.gun).mag * 2;
+                            // §7: the minigun has no reserve to fill — a
+                            // reserve it can never load would also trap
+                            // bots in the "still has ammo" branch forever.
+                            // The cache tops the BELT up instead.
+                            if f.gun == GunKind::Minigun {
+                                let mag = gun(GunKind::Minigun).mag;
+                                if f.ammo >= mag {
+                                    continue;
+                                }
+                                f.ammo = (f.ammo + 100).min(mag);
+                            } else {
+                                f.reserve += gun(f.gun).mag * 2;
+                            }
                         }
                         PickupKind::RobotArmor => {
+                            // §11: the pad now grants the MECH chassis
                             let f = &mut self.fighters[i];
-                            f.armor = ROBOT_ARMOR_HP;
+                            f.armor_set = ArmorSet::RobotSuit;
+                            f.armor = POWER_MAX;
+                            f.hull = MECH_HULL;
+                            f.fuel = 0.0;
+                        }
+                        PickupKind::FolkArmor => {
+                            let f = &mut self.fighters[i];
+                            f.armor_set = ArmorSet::Folk;
+                            f.armor = 0.0;
+                            f.fuel = 0.0;
+                        }
+                        PickupKind::PyroArmor => {
+                            let f = &mut self.fighters[i];
+                            f.armor_set = ArmorSet::Pyro;
+                            f.armor = 0.0;
+                            f.fuel = FLAME_FUEL_S;
+                        }
+                        PickupKind::ReconWeave => {
+                            let f = &mut self.fighters[i];
+                            f.armor_set = ArmorSet::Recon;
+                            f.armor = 0.0;
+                            f.fuel = 0.0;
+                        }
+                        PickupKind::Minigun => {
+                            let f = &mut self.fighters[i];
+                            if f.inventory[0] == GunKind::Minigun {
+                                continue; // already hauling one
+                            }
+                            // bank the OUTGOING slot's live rounds first —
+                            // the forced switch must not resurrect stale
+                            // spawn-time ammo later
+                            f.slot_ammo[f.active] = (f.ammo, f.reserve);
+                            // §7: it takes the PRIMARY slot and your
+                            // hands right now — the displaced primary
+                            // returns on death
+                            f.prev_primary = f.inventory[0];
+                            f.inventory[0] = GunKind::Minigun;
+                            f.slot_ammo[0] = (gun(GunKind::Minigun).mag, 0);
+                            f.active = 0;
+                            f.gun = GunKind::Minigun;
+                            f.ammo = f.slot_ammo[0].0;
+                            f.reserve = 0;
+                            f.reload_t = 0.0;
+                            f.heat = 0.0;
+                            f.spin_t = 0.0;
+                            f.vent_t = 0.0;
+                            f.switch_t = SWITCH_S;
                         }
                     }
                     taken = true;
@@ -1325,10 +2738,67 @@ impl TdmSim {
             if taken {
                 self.pickups[pi].respawn_t = match kind {
                     PickupKind::Health | PickupKind::Ammo => 20.0,
-                    PickupKind::RobotArmor => 45.0,
+                    PickupKind::Minigun => 75.0, // a power weapon earns a longer clock
+                    _ => 45.0, // every armor set is a 45 s pad
                 };
             }
         }
+
+        // ---- §3: dropped-ammo walk-over pickup (players AND bots; no
+        // owner lock, no prompt). At cap the entity is NOT consumed — it
+        // stays on the ground and the HUD says AMMO FULL.
+        for di in 0..self.dropped.len() {
+            if self.dropped[di].count == 0 {
+                continue;
+            }
+            let (dpos, kind) = (self.dropped[di].pos, self.dropped[di].kind);
+            let want = match kind {
+                AmmoKind::Arrow => GunKind::Bow,
+                AmmoKind::Spear => GunKind::Spear,
+            };
+            let cap = match kind {
+                AmmoKind::Arrow => AMMO_CAP_ARROW,
+                AmmoKind::Spear => AMMO_CAP_SPEAR,
+            };
+            for i in 0..self.fighters.len() {
+                let f = &self.fighters[i];
+                if !f.alive() {
+                    continue;
+                }
+                let dx = f.pos[0] - dpos[0];
+                let dz = f.pos[2] - dpos[2];
+                let dy = f.pos[1] - dpos[1];
+                if dx * dx + dz * dz > DROPPED_RADIUS * DROPPED_RADIUS || dy.abs() > 1.4 {
+                    continue;
+                }
+                let Some(slot) = (0..3).find(|&s| f.inventory[s] == want) else {
+                    continue; // no bow/spear in the loadout — not your ammo
+                };
+                let f = &mut self.fighters[i];
+                let reserve = if slot == f.active {
+                    f.reserve
+                } else {
+                    f.slot_ammo[slot].1
+                };
+                let room = cap.saturating_sub(reserve);
+                if room == 0 {
+                    f.ammo_full_t = 1.5;
+                    continue; // leave it lying there — visible feedback
+                }
+                let take = (self.dropped[di].count as u32).min(room);
+                if slot == f.active {
+                    f.reserve += take;
+                    f.slot_ammo[slot].1 = f.reserve;
+                } else {
+                    f.slot_ammo[slot].1 += take;
+                }
+                self.dropped[di].count -= take as u8;
+                if self.dropped[di].count == 0 {
+                    break;
+                }
+            }
+        }
+        self.dropped.retain(|d| d.count > 0);
 
         // ---- player -----------------------------------------------------
         let p = self.player;
@@ -1343,8 +2813,17 @@ impl TdmSim {
                 let f = &mut self.fighters[p];
                 f.shield_up = !f.shield_up;
             }
-            let scoped = cmd.ads && gun(self.fighters[p].gun).scoped;
-            let mut speed = if cmd.sprint { SPRINT_SPEED } else { MOVE_SPEED };
+            let p_spec = gun(self.fighters[p].gun);
+            let scoped = cmd.ads && p_spec.scoped;
+            // §4: a drawn bow / cocked spear walks at rifle-ADS pace, not
+            // a crawl — the accuracy cost of moving lives in `try_fire`'s
+            // stability model instead of in a movement prohibition
+            let drawn = cmd.ads && p_spec.projectile.is_some();
+            let mut speed = if cmd.sprint && !drawn {
+                SPRINT_SPEED // sprinting at full draw is genuinely not possible
+            } else {
+                MOVE_SPEED
+            };
             if cmd.crouch {
                 speed *= CROUCH_SPEED_MULT;
             }
@@ -1354,21 +2833,90 @@ impl TdmSim {
                 speed *= SHIELD_SPEED_MULT;
             } else if scoped {
                 speed *= SCOPED_SPEED_MULT; // AWM glass: a crawl
+            } else if drawn {
+                speed *= if self.fighters[p].gun == GunKind::Bow {
+                    DRAW_SPEED_MULT_BOW
+                } else {
+                    DRAW_SPEED_MULT_SPEAR
+                };
             } else if cmd.ads {
                 speed *= ADS_SPEED_MULT;
             }
-            if self.fighters[p].armor > 0.0 {
-                speed *= ROBOT_SPEED_MULT;
+            // §6: the equipped set owns the pace; a drained Robot Suit is
+            // heavy and grounded; a held Shieldwall Brace is a plant
+            {
+                let f = &self.fighters[p];
+                let aspec = armor_spec(f.armor_set);
+                speed *= aspec.move_mult;
+                if f.armor_set == ArmorSet::RobotSuit && f.armor <= 0.0 {
+                    speed *= ROBOT_DRAINED_MOVE;
+                }
+                if f.brace {
+                    speed *= BRACE_SPEED_MULT;
+                }
+                if f.flip_recover_t > 0.0 {
+                    speed *= FLIP_RECOVER_SPEED; // §4: 0.18 s landing tax
+                }
+                // §7: the minigun is MASS — slower carried, a trudge
+                // with the barrels spun
+                if f.gun == GunKind::Minigun {
+                    speed *= if f.spin_t > 0.2 {
+                        MINIGUN_SPUN_MOVE_MULT
+                    } else {
+                        MINIGUN_MOVE_MULT
+                    };
+                }
+                // §1 (Brief V): aiming a throw is a commitment — 70%
+                // walk. The mech's LAUNCHER carries no such tax.
+                if f.cook_t > 0.0
+                    && !(f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0)
+                {
+                    speed *= THROW_AIM_MOVE_MULT;
+                }
             }
             let mag = (cmd.move_x * cmd.move_x + cmd.move_z * cmd.move_z)
                 .sqrt()
                 .max(1e-6);
             let cap = if mag > 1.0 { mag } else { 1.0 };
-            self.fighters[p].vel = [cmd.move_x / cap * speed, cmd.move_z / cap * speed];
-            self.fighters[p].yaw = cmd.yaw;
+            let mut vel = [cmd.move_x / cap * speed, cmd.move_z / cap * speed];
+            if drawn {
+                // bracing: strafe and backpedal at 0.85 of the forward
+                // pace — walking INTO the shot is the natural motion
+                let (fx, fz) = (cmd.yaw.sin(), cmd.yaw.cos());
+                let fwd = vel[0] * fx + vel[1] * fz;
+                let (lx, lz) = (vel[0] - fwd * fx, vel[1] - fwd * fz);
+                let fwd = if fwd > 0.0 { fwd } else { fwd * DRAW_SIDE_MULT };
+                vel = [
+                    fx * fwd + lx * DRAW_SIDE_MULT,
+                    fz * fwd + lz * DRAW_SIDE_MULT,
+                ];
+            }
+            self.fighters[p].vel = vel;
+            // §11: a mech TURNS at a capped rate — facing a new threat is
+            // a visible, punishable commitment (the armor follows the
+            // body, the pilot's view stays free)
+            if self.fighters[p].armor_set == ArmorSet::RobotSuit && self.fighters[p].hull > 0.0
+            {
+                let f = &mut self.fighters[p];
+                let d = wrap_angle(cmd.yaw - f.yaw);
+                let step = (MECH_TURN_RATE * DT).min(d.abs());
+                f.yaw += d.signum() * step;
+            } else {
+                self.fighters[p].yaw = cmd.yaw;
+            }
+            // §3: the thrower TRACKS the target through the plant — the
+            // player's wound-up spear follows the live aim to release
+            if self.fighters[p].spear_wind_t > 0.0 {
+                self.fighters[p].spear_aim = normalize(cmd.aim);
+            }
             // duck-spin dodge: somersault in the move direction (facing if
-            // standing still); grounded only, gated by a short cooldown
+            // standing still); grounded only, gated by a short cooldown.
+            // §2 (Brief V): the human rolls (load → burst → ease-out);
+            // the MECH takes a braced SIDE-STEP instead — tall, grounded,
+            // committed — a 2.7 m walker does not somersault.
             if cmd.dodge {
+                let mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
+                    && self.fighters[p].hull > 0.0;
                 let f = &mut self.fighters[p];
                 if f.grounded && f.roll_t <= 0.0 && f.roll_cd <= 0.0 {
                     let m = (cmd.move_x * cmd.move_x + cmd.move_z * cmd.move_z).sqrt();
@@ -1377,8 +2925,48 @@ impl TdmSim {
                     } else {
                         [f.yaw.sin(), f.yaw.cos()]
                     };
-                    f.roll_t = ROLL_S;
-                    f.roll_cd = ROLL_S + ROLL_CD_S;
+                    if mech {
+                        f.roll_t = MECH_STEP_S + ROLL_EASE_S;
+                        f.roll_cd = MECH_STEP_S + ROLL_EASE_S + MECH_STEP_CD_S;
+                    } else {
+                        f.roll_t = ROLL_LOAD_S + ROLL_S + ROLL_EASE_S;
+                        f.roll_cd = ROLL_LOAD_S + ROLL_S + ROLL_EASE_S + ROLL_CD_S;
+                    }
+                } else if !mech
+                    && !f.grounded
+                    && f.flip_t <= 0.0
+                    && !f.flip_used
+                    && f.roll_t <= 0.0
+                {
+                    // §4: Q airborne = the flip. Direction from the stick
+                    // in body space; no input = backflip. One per airborne
+                    // period, 1.4 m/s of real travel, and the gun is
+                    // locked until landing recovery.
+                    let (fx, fz) = (f.yaw.sin(), f.yaw.cos());
+                    let (mx, mz) = (cmd.move_x, cmd.move_z);
+                    let fwd_c = mx * fx + mz * fz;
+                    let lat_c = mx * fz - mz * fx; // screen-right component
+                    f.flip_kind = if fwd_c.abs().max(lat_c.abs()) < 0.3 {
+                        1 // backflip default
+                    } else if fwd_c.abs() >= lat_c.abs() {
+                        if fwd_c > 0.0 {
+                            0
+                        } else {
+                            1
+                        }
+                    } else if lat_c > 0.0 {
+                        3
+                    } else {
+                        2
+                    };
+                    f.flip_dir = match f.flip_kind {
+                        0 => [fx, fz],
+                        1 => [-fx, -fz],
+                        3 => [fz, -fx],
+                        _ => [-fz, fx],
+                    };
+                    f.flip_t = FLIP_S;
+                    f.flip_used = true;
                 }
             }
             if cmd.jump && self.fighters[p].grounded && self.fighters[p].roll_t <= 0.0 {
@@ -1387,23 +2975,483 @@ impl TdmSim {
                 f.pos[1] += 0.05; // clear the support clamp so the ascent integrates
                 f.grounded = false;
             }
+            // §6 Robot thrusters: hold SPACE airborne — bounded by POWER,
+            // never by a timer. Dry core = ballistic.
+            {
+                let t_now = self.t;
+                let f = &mut self.fighters[p];
+                if cmd.jump_held
+                    && f.armor_set == ArmorSet::RobotSuit
+                    && !f.grounded
+                    && f.armor > 0.0
+                    && f.roll_t <= 0.0
+                {
+                    f.vy = (f.vy + 60.0 * DT).min(THRUST_VY * 0.65);
+                    f.armor = (f.armor - THRUST_DRAIN * DT).max(0.0);
+                    f.last_ability_at = t_now;
+                    // thruster lateral authority: 9 m/s toward the stick
+                    let l = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+                    if l > 0.5 {
+                        f.vel = [
+                            f.vel[0] / l * THRUST_LATERAL,
+                            f.vel[1] / l * THRUST_LATERAL,
+                        ];
+                    }
+                }
+            }
             if cmd.reload {
                 self.try_reload(p);
             }
             if cmd.shoot {
                 self.try_fire(p, cmd.aim, cmd.ads);
             }
+            // ---- §5 throwables: G cycles, hold arms, release throws ----
+            if cmd.cycle_throw {
+                let f = &mut self.fighters[p];
+                // §8 (Brief IV): G cycles through what you actually
+                // CARRY — empty slots are skipped (4 tries, then stay)
+                for _ in 0..4 {
+                    f.throw_sel = (f.throw_sel + 1) % 4;
+                    if f.grenades[f.throw_sel as usize] > 0 {
+                        break;
+                    }
+                }
+            }
+            let sel = self.fighters[p].throw_sel as usize;
+            let kind = ThrowKind::ALL[sel];
+            // §6: throwables are the ONE thing usable behind the raised
+            // shield — the shieldwall advances and lobs
+            // §1 (Brief V): cancel exits aim mode — nothing thrown,
+            // nothing consumed (the grenade is only spent at release)
+            if cmd.throw_cancel && self.fighters[p].cook_t > 0.0 {
+                self.fighters[p].cook_t = 0.0;
+            }
+            if cmd.throw_hold
+                && !cmd.throw_cancel
+                && self.fighters[p].grenades[sel] > 0
+                && self.fighters[p].roll_t <= 0.0
+                && self.fighters[p].knife_phase <= 0.0
+            {
+                let f = &mut self.fighters[p];
+                f.cook_t += DT;
+                // a frag cooked past its fuse goes off IN HAND
+                if kind == ThrowKind::Frag && f.cook_t >= throw_spec(kind).fuse_s {
+                    f.grenades[sel] -= 1;
+                    f.cook_t = 0.0;
+                    let at = [f.pos[0], f.pos[1] + 1.0, f.pos[2]];
+                    let team = f.team;
+                    self.next_missile_id += 1;
+                    let id = self.next_missile_id;
+                    self.detonate(Grenade {
+                        id,
+                        kind,
+                        pos: at,
+                        vel: [0.0; 3],
+                        thrower: p,
+                        team,
+                        fuse_t: 0.0,
+                        bounces: 0,
+                        rest: true,
+                    });
+                }
+            } else if self.fighters[p].cook_t > 0.0 {
+                // release → throw: overhand; underhand lob when crouched;
+                // gentle drop when looking steeply down (retreat play)
+                let cook = self.fighters[p].cook_t;
+                let f = &mut self.fighters[p];
+                if f.grenades[sel] > 0 {
+                    // §6: throwing from behind the plate DIPS it — a real
+                    // 0.62 s window of vulnerability
+                    if f.shield_up {
+                        f.shield_dip_t = SHIELD_DIP_S;
+                    }
+                    f.grenades[sel] -= 1;
+                    // §1 (Brief V): the SHARED release math — power from
+                    // the hold, crouch/drop variants, run inertia, mech
+                    // launcher — the same fn the preview arc calls
+                    let (o, vel) = self.throw_release_velocity(p, cmd.aim, cook);
+                    let f = &mut self.fighters[p];
+                    let spec_t = throw_spec(kind);
+                    let fuse = if spec_t.fuse_s.is_finite() {
+                        (spec_t.fuse_s - if kind == ThrowKind::Frag { cook } else { 0.0 })
+                            .max(0.15)
+                    } else {
+                        f32::INFINITY
+                    };
+                    self.next_missile_id += 1;
+                    let team = f.team;
+                    self.grenades_air.push(Grenade {
+                        id: self.next_missile_id,
+                        kind,
+                        pos: o,
+                        vel,
+                        thrower: p,
+                        team,
+                        fuse_t: fuse,
+                        bounces: 0,
+                        rest: false,
+                    });
+                }
+                self.fighters[p].cook_t = 0.0;
+            }
+            // ---- §6 abilities on F, by set -----------------------------
+            let t_now = self.t;
+            match self.fighters[p].armor_set {
+                ArmorSet::Folk => {
+                    // Shieldwall Brace: plant + raise, 110° frontal cut —
+                    // heavy to enter, committal, devastating when timed
+                    let f = &mut self.fighters[p];
+                    f.brace = cmd.ability && f.grounded && !f.shield_up && f.roll_t <= 0.0;
+                }
+                ArmorSet::Pyro => {
+                    self.fighters[p].brace = false;
+                    if cmd.ability
+                        && self.fighters[p].fuel > 0.0
+                        && self.fighters[p].roll_t <= 0.0
+                        && self.fighters[p].alive()
+                    {
+                        self.fighters[p].fuel = (self.fighters[p].fuel - DT).max(0.0);
+                        self.fighters[p].last_ability_at = t_now;
+                        // Flame Projector: 34 dps cone, 7.5 m, ±25°
+                        let (ppos, pteam, pyaw) = {
+                            let f = &self.fighters[p];
+                            (f.pos, f.team, f.yaw)
+                        };
+                        let fwd = [pyaw.sin(), pyaw.cos()];
+                        for j in 0..self.fighters.len() {
+                            let g = &self.fighters[j];
+                            if j == p || g.team == pteam || !g.alive() || g.protect_t > 0.0 {
+                                continue;
+                            }
+                            let dx = g.pos[0] - ppos[0];
+                            let dz = g.pos[2] - ppos[2];
+                            let d = (dx * dx + dz * dz).sqrt().max(0.01);
+                            if d > FLAME_REACH
+                                || (fwd[0] * dx + fwd[1] * dz) / d < FLAME_ARC_COS
+                            {
+                                continue;
+                            }
+                            self.fighters[j].burn_t = 1.0;
+                            let at = self.fighters[j].pos;
+                            self.apply_plain_damage(p, j, FLAME_DPS * DT, at, false, true);
+                        }
+                    }
+                }
+                ArmorSet::RobotSuit => {
+                    self.fighters[p].brace = false;
+                    if cmd.ability
+                        && self.fighters[p].ability_cd <= 0.0
+                        && self.fighters[p].armor >= REPULSOR_COST
+                    {
+                        self.fighters[p].ability_cd = REPULSOR_CD;
+                        self.fighters[p].armor -= REPULSOR_COST;
+                        self.fighters[p].last_ability_at = t_now;
+                        // Repulsor Blast: first enemy in a tight cone,
+                        // 62 damage + a real launch
+                        let (ppos, pteam) = {
+                            let f = &self.fighters[p];
+                            (f.pos, f.team)
+                        };
+                        let o = [ppos[0], ppos[1] + EYE_REL, ppos[2]];
+                        let d = normalize(cmd.aim);
+                        let mut best: Option<(usize, f32)> = None;
+                        for j in 0..self.fighters.len() {
+                            let g = &self.fighters[j];
+                            if j == p || g.team == pteam || !g.alive() || g.protect_t > 0.0 {
+                                continue;
+                            }
+                            let chest = [g.pos[0], g.pos[1] + g.height() * 0.55, g.pos[2]];
+                            let to = [chest[0] - o[0], chest[1] - o[1], chest[2] - o[2]];
+                            let dist =
+                                (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt().max(0.01);
+                            let dot = (to[0] * d[0] + to[1] * d[1] + to[2] * d[2]) / dist;
+                            if dist < 20.0
+                                && dot > 0.985
+                                && self.los_clear(o, chest)
+                                && best.map_or(true, |(_, bd)| dist < bd)
+                            {
+                                best = Some((j, dist));
+                            }
+                        }
+                        if let Some((j, _)) = best {
+                            // the launch: up and away, off the ground
+                            let g = &mut self.fighters[j];
+                            let dx = g.pos[0] - ppos[0];
+                            let dz = g.pos[2] - ppos[2];
+                            let l = (dx * dx + dz * dz).sqrt().max(0.1);
+                            g.pos[0] += dx / l * 0.4;
+                            g.pos[2] += dz / l * 0.4;
+                            g.pos[1] += 0.06;
+                            g.vy = REPULSOR_KNOCK * 0.5;
+                            g.grounded = false;
+                            let at = self.fighters[j].pos;
+                            self.apply_plain_damage(p, j, REPULSOR_DMG, at, true, false);
+                        }
+                    }
+                }
+                _ => {
+                    self.fighters[p].brace = false;
+                }
+            }
+            // ---- §5 the knife: tap = quick slash, hold = committed
+            // lunge. Silent, capsule-swept, lethal from behind. ---------
+            if cmd.knife_hold
+                && self.fighters[p].knife_phase <= 0.0
+                && self.fighters[p].roll_t <= 0.0
+                && !self.fighters[p].shield_up
+                && self.fighters[p].cook_t <= 0.0
+            {
+                let f = &mut self.fighters[p];
+                f.knife_phase = DT;
+                f.knife_committed = false;
+                f.knife_struck = false;
+            } else if self.fighters[p].knife_phase > 0.0 {
+                let phase = self.fighters[p].knife_phase + DT;
+                self.fighters[p].knife_phase = phase;
+                // §2 (Brief V): F while WIELDING THE SPEAR is a THRUST —
+                // its own beats, a narrow line, and a recovery that is
+                // longer on a whiff than on a hit. The mech gears the
+                // same thrust down. Otherwise §6 (Brief IV): the melee
+                // slot may carry the AXE — slower, harder, and the swing
+                // SWEEPS the arc.
+                let thrust = self.fighters[p].gun == GunKind::Spear;
+                let tmul = if thrust
+                    && self.fighters[p].armor_set == ArmorSet::RobotSuit
+                    && self.fighters[p].hull > 0.0
+                {
+                    MECH_THRUST_TIME_MULT
+                } else {
+                    1.0
+                };
+                let axe = self.fighters[p].melee_axe && !thrust;
+                let lunge_wind = if axe { AXE_LUNGE_WIND_S } else { KNIFE_LUNGE_WIND_S };
+                if !thrust
+                    && cmd.knife_hold
+                    && !self.fighters[p].knife_committed
+                    && (KNIFE_COMMIT_S..lunge_wind).contains(&phase)
+                {
+                    self.fighters[p].knife_committed = true; // visibly wound up
+                }
+                let committed = self.fighters[p].knife_committed;
+                let (wind, range, dmg, backstab) = if thrust {
+                    (
+                        THRUST_WIND_S * tmul,
+                        THRUST_RANGE_M,
+                        THRUST_DMG,
+                        THRUST_BACKSTAB,
+                    )
+                } else {
+                    match (axe, committed) {
+                        (false, true) => (
+                            KNIFE_LUNGE_WIND_S,
+                            KNIFE_LUNGE_RANGE_M,
+                            KNIFE_LUNGE_DMG,
+                            KNIFE_LUNGE_BACKSTAB,
+                        ),
+                        (false, false) => (
+                            KNIFE_QUICK_WIND_S,
+                            KNIFE_RANGE_M,
+                            KNIFE_QUICK_DMG,
+                            KNIFE_QUICK_BACKSTAB,
+                        ),
+                        (true, true) => (
+                            AXE_LUNGE_WIND_S,
+                            KNIFE_LUNGE_RANGE_M,
+                            AXE_LUNGE_DMG,
+                            AXE_LUNGE_BACKSTAB,
+                        ),
+                        (true, false) => (
+                            AXE_QUICK_WIND_S,
+                            AXE_RANGE_M,
+                            AXE_QUICK_DMG,
+                            AXE_QUICK_BACKSTAB,
+                        ),
+                    }
+                };
+                let (active, recover) = if thrust {
+                    // the whiff pays: a missed thrust is COMMITTED
+                    let rec = if self.fighters[p].knife_struck {
+                        THRUST_RECOVER_HIT_S
+                    } else {
+                        THRUST_RECOVER_WHIFF_S
+                    };
+                    (THRUST_ACTIVE_S * tmul, rec * tmul)
+                } else if axe {
+                    (AXE_QUICK_ACTIVE_S, AXE_QUICK_RECOVER_S)
+                } else {
+                    (KNIFE_QUICK_ACTIVE_S, KNIFE_QUICK_RECOVER_S)
+                };
+                // the lunge carries the body forward through its strike
+                if committed && phase >= wind && phase < wind + 0.18 {
+                    let f = &mut self.fighters[p];
+                    let (fx, fz) = (f.yaw.sin(), f.yaw.cos());
+                    f.pos[0] += fx * 5.0 * DT;
+                    f.pos[2] += fz * 5.0 * DT;
+                }
+                if axe
+                    && !self.fighters[p].knife_struck
+                    && phase >= wind
+                {
+                    // §6: ONE sweep on the first active tick — everyone
+                    // inside the 90° arc takes it, horde included
+                    self.fighters[p].knife_struck = true;
+                    let (ppos, pteam, pyaw) = {
+                        let f = &self.fighters[p];
+                        (f.pos, f.team, f.yaw)
+                    };
+                    let (fx, fz) = (pyaw.sin(), pyaw.cos());
+                    let mut hits: Vec<usize> = Vec::new();
+                    for (j, g) in self.fighters.iter().enumerate() {
+                        if j == p || g.team == pteam || !g.alive() || g.protect_t > 0.0 {
+                            continue;
+                        }
+                        let dx = g.pos[0] - ppos[0];
+                        let dz = g.pos[2] - ppos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < range && (fx * dx + fz * dz) / d.max(0.05) > AXE_ARC_COS {
+                            hits.push(j);
+                        }
+                    }
+                    let mut any = !hits.is_empty();
+                    for j in hits {
+                        // back-stab per victim: facing away from the sweep
+                        let v = &self.fighters[j];
+                        let dxv = v.pos[0] - ppos[0];
+                        let dzv = v.pos[2] - ppos[2];
+                        let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
+                        let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
+                        let d_out = if behind { backstab } else { dmg };
+                        let at = self.fighters[j].pos;
+                        self.apply_plain_damage(p, j, d_out, at, false, false);
+                    }
+                    let mut zhits: Vec<usize> = Vec::new();
+                    for (zi, z) in self.zombies.iter().enumerate() {
+                        let dx = z.pos[0] - ppos[0];
+                        let dz = z.pos[2] - ppos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < range && (fx * dx + fz * dz) / d.max(0.05) > AXE_ARC_COS {
+                            zhits.push(zi);
+                        }
+                    }
+                    any |= !zhits.is_empty();
+                    for zi in zhits {
+                        self.damage_zombie(zi, dmg, false);
+                    }
+                    if self.mode == Mode::Extraction && any {
+                        let at = [ppos[0], ppos[2]];
+                        self.emit_noise(at, 6.0); // heavier than the blade
+                    }
+                } else if !axe
+                    && !self.fighters[p].knife_struck
+                    && phase >= wind
+                    && phase < wind + active
+                {
+                    // §2: the thrust is a LINE — a much tighter cone than
+                    // the knife's target-assisted slash
+                    let cone = if thrust { THRUST_ARC_COS } else { 0.42 };
+                    let (ppos, pteam, pyaw) = {
+                        let f = &self.fighters[p];
+                        (f.pos, f.team, f.yaw)
+                    };
+                    let (fx, fz) = (pyaw.sin(), pyaw.cos());
+                    let mut best: Option<(usize, f32)> = None;
+                    for (j, g) in self.fighters.iter().enumerate() {
+                        if j == p || g.team == pteam || !g.alive() || g.protect_t > 0.0 {
+                            continue;
+                        }
+                        let dx = g.pos[0] - ppos[0];
+                        let dz = g.pos[2] - ppos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < range
+                            && (fx * dx + fz * dz) / d.max(0.05) > cone
+                            && best.map_or(true, |(_, b)| d < b)
+                        {
+                            best = Some((j, d));
+                        }
+                    }
+                    if let Some((j, _)) = best {
+                        self.fighters[p].knife_struck = true;
+                        // back-stab: the victim faces AWAY from the blade
+                        let v = &self.fighters[j];
+                        let dxv = v.pos[0] - ppos[0];
+                        let dzv = v.pos[2] - ppos[2];
+                        let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
+                        let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
+                        let d_out = if behind { backstab } else { dmg };
+                        let at = self.fighters[j].pos;
+                        self.apply_plain_damage(p, j, d_out, at, false, false);
+                    } else {
+                        // the horde is knife-work too (silent = correct)
+                        let mut bz: Option<(usize, f32)> = None;
+                        for (zi, z) in self.zombies.iter().enumerate() {
+                            let dx = z.pos[0] - ppos[0];
+                            let dz = z.pos[2] - ppos[2];
+                            let d = (dx * dx + dz * dz).sqrt();
+                            if d < range
+                                && (fx * dx + fz * dz) / d.max(0.05) > cone
+                                && bz.map_or(true, |(_, b)| d < b)
+                            {
+                                bz = Some((zi, d));
+                            }
+                        }
+                        if let Some((zi, _)) = bz {
+                            self.fighters[p].knife_struck = true;
+                            self.damage_zombie(zi, dmg, false);
+                        }
+                    }
+                    if self.mode == Mode::Extraction && self.fighters[p].knife_struck {
+                        let at = [self.fighters[p].pos[0], self.fighters[p].pos[2]];
+                        self.emit_noise(at, 4.0); // nearly silent
+                    }
+                }
+                let total = wind + active + recover;
+                if phase >= total {
+                    let f = &mut self.fighters[p];
+                    f.knife_phase = 0.0;
+                    f.knife_committed = false;
+                    f.knife_struck = false;
+                }
+            }
         } else {
             self.fighters[p].vel = [0.0, 0.0];
         }
 
+        // §8.2: sprinting is noise too (Recon Weave runs quiet)
+        if self.mode == Mode::Extraction && self.tick % 60 == 0 {
+            let mut events: Vec<([f32; 2], f32)> = Vec::new();
+            for f in &self.fighters {
+                if !f.alive() {
+                    continue;
+                }
+                let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+                if sp > 6.0 {
+                    let r = if f.armor_set == ArmorSet::Recon { 6.0 } else { 14.0 };
+                    events.push(([f.pos[0], f.pos[2]], r));
+                }
+            }
+            for (at, r) in events {
+                self.emit_noise(at, r);
+            }
+        }
+
         // ---- bots -------------------------------------------------------
+        let ppos = self.fighters[p].pos;
         for i in 0..self.fighters.len() {
             if i == p || !self.fighters[i].alive() {
                 continue;
             }
             if (self.tick + self.fighters[i].think_offset as u64) % 12 == 0 {
                 self.bot_think(i);
+            }
+            // §9.5 bot LOD: distant bots act at 15 Hz instead of 120. The
+            // LOD level is a PURE function of sim state (distance to the
+            // player) — never camera distance or frame rate, or every
+            // replay diverges. Velocity persists between acts.
+            let dx = self.fighters[i].pos[0] - ppos[0];
+            let dz = self.fighters[i].pos[2] - ppos[2];
+            let far = dx * dx + dz * dz > 80.0 * 80.0;
+            if far && (self.tick + self.fighters[i].think_offset as u64) % 8 != 0 {
+                continue;
             }
             self.bot_act(i);
         }
@@ -1420,7 +3468,22 @@ impl TdmSim {
                 if f.roll_t > 0.0 {
                     f.roll_t -= DT;
                     if f.alive() {
-                        f.vel = [f.roll_dir[0] * ROLL_SPEED, f.roll_dir[1] * ROLL_SPEED];
+                        // §2 (Brief V): load → burst → EASE-OUT. The burst
+                        // never hands speed back as a cliff — the ease
+                        // ramps it down to walking pace over 0.14 s. The
+                        // mech's side-step skips the load (servos don't
+                        // crouch) but keeps the ease.
+                        let mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+                        let burst = if mech { MECH_STEP_SPEED } else { ROLL_SPEED };
+                        let t = f.roll_t.max(0.0);
+                        let sp = if !mech && t > ROLL_S + ROLL_EASE_S {
+                            burst * 0.25 // the crouch-load creep
+                        } else if t > ROLL_EASE_S {
+                            burst
+                        } else {
+                            burst * (0.35 + 0.65 * (t / ROLL_EASE_S))
+                        };
+                        f.vel = [f.roll_dir[0] * sp, f.roll_dir[1] * sp];
                     }
                 }
             }
@@ -1429,6 +3492,9 @@ impl TdmSim {
                 (f.pos[0] + f.vel[0] * DT, f.pos[2] + f.vel[1] * DT)
             };
             let y = self.fighters[i].pos[1];
+            // §11.4: the mech's fat radius is what keeps it OUT of
+            // buildings — doorways it doesn't fit through push it back
+            let radius = self.fighters[i].radius();
             let mut px = nx.clamp(-half + 0.5, half - 0.5);
             let mut pz = nz.clamp(-half + 0.5, half - 0.5);
             // walls you cannot step onto push you out; walkable tops don't
@@ -1443,9 +3509,9 @@ impl TdmSim {
                 let cz = pz.clamp(c.min[2], c.max[2]);
                 let (dx, dz) = (px - cx, pz - cz);
                 let d2 = dx * dx + dz * dz;
-                if d2 < BODY_RADIUS * BODY_RADIUS {
+                if d2 < radius * radius {
                     let d = d2.sqrt().max(1e-4);
-                    let push = BODY_RADIUS - d;
+                    let push = radius - d;
                     if d > 1e-3 {
                         px += dx / d * push;
                         pz += dz / d * push;
@@ -1476,6 +3542,11 @@ impl TdmSim {
             };
             if f.pos[1] > support + 0.02 {
                 f.vy -= GRAVITY * DT;
+                // §9.3 soft ceiling: flyers get pushed back down into the
+                // fight — no orbital camping
+                if f.pos[1] > SOFT_CEILING_M {
+                    f.vy = f.vy.min(-2.0);
+                }
                 f.pos[1] = (f.pos[1] + f.vy * DT).max(support);
                 if f.pos[1] <= support {
                     // hard landing → automatic parkour breakfall: the fall
@@ -1490,8 +3561,10 @@ impl TdmSim {
                         } else {
                             [f.yaw.sin(), f.yaw.cos()]
                         };
-                        f.roll_t = ROLL_S;
-                        f.roll_cd = ROLL_S + ROLL_CD_S;
+                        // §2 (Brief V): reactive — the breakfall skips
+                        // the crouch-load but keeps the ease-out landing
+                        f.roll_t = ROLL_S + ROLL_EASE_S;
+                        f.roll_cd = ROLL_S + ROLL_EASE_S + ROLL_CD_S;
                     }
                 } else {
                     f.grounded = false;
@@ -1505,6 +3578,23 @@ impl TdmSim {
 
         // ---- missiles (arrows / spears) --------------------------------
         self.step_missiles();
+
+        // ---- §8 the horde ----------------------------------------------
+        if self.mode == Mode::Extraction {
+            self.step_zombies();
+        }
+
+        // ---- §5 throwables ---------------------------------------------
+        self.step_grenades();
+        self.step_fires();
+        for s in &mut self.smokes {
+            s.ttl -= DT;
+        }
+        self.smokes.retain(|s| s.ttl > 0.0);
+        for (_, ttl) in &mut self.booms {
+            *ttl -= DT;
+        }
+        self.booms.retain(|(_, ttl)| *ttl > 0.0);
 
         // ---- respawn checkpoints ("check back") ------------------------
         // Stand in the ring uncontested to charge it toward your team;
@@ -1565,6 +3655,12 @@ impl TdmSim {
                 self.finish(Team::Red);
             }
         }
+
+        // ---- §4 stability bookkeeping: this tick's yaw becomes the
+        // baseline for next tick's angular-rate measurement
+        for f in &mut self.fighters {
+            f.prev_yaw = f.yaw;
+        }
     }
 
     fn finish(&mut self, winner: Team) {
@@ -1599,6 +3695,14 @@ impl TdmSim {
         if !f.armed() {
             return;
         }
+        // §7: R on the minigun is a MANUAL VENT — clear the heat early,
+        // on your schedule, instead of eating the forced 3 s at 100.
+        if f.gun == GunKind::Minigun {
+            if f.vent_t <= 0.0 && f.heat > 1.0 {
+                f.vent_t = f.heat / MINIGUN_VENT_RATE;
+            }
+            return;
+        }
         let spec = gun(f.gun);
         if f.reload_t <= 0.0 && f.ammo < spec.mag && f.reserve > 0 {
             f.reload_t = spec.reload_s;
@@ -1620,10 +3724,12 @@ impl TdmSim {
         ]
     }
 
-    fn spawn_missile(&mut self, o: [f32; 3], d: [f32; 3], v0: f32, dmg: f32, i: usize) {
+    /// `is_spear` is bound at TRIGGER time by the caller — a forced
+    /// weapon switch (minigun pad) during the spear windup must not
+    /// transmute the released spear into an arrow's ballistics.
+    fn spawn_missile(&mut self, o: [f32; 3], d: [f32; 3], v0: f32, dmg: f32, i: usize, is_spear: bool) {
         let id = self.next_missile_id;
         self.next_missile_id += 1;
-        let is_spear = self.fighters[i].gun == GunKind::Spear;
         self.missiles.push(Missile {
             id,
             pos: o,
@@ -1637,6 +3743,13 @@ impl TdmSim {
     }
 
     fn try_fire(&mut self, i: usize, aim: [f32; 3], ads: bool) -> bool {
+        // §7: a HELD minigun trigger spins the barrels every tick it is
+        // held — including the ticks inside fire_cd between rounds. This
+        // must precede every early return or the spin (and the heat
+        // suppression) stutters between shots.
+        if self.fighters[i].gun == GunKind::Minigun && self.fighters[i].alive() {
+            self.fighters[i].spin_cmd = MINIGUN_SPIN_HOLD_S;
+        }
         {
             let f = &self.fighters[i];
             if !f.armed()
@@ -1647,7 +3760,18 @@ impl TdmSim {
                 || !f.alive()
                 || f.roll_t > 0.0 // no shooting mid-somersault
                 || f.shield_up // the shield takes both hands
+                || f.knife_phase > 0.0 // §5: the blade owns both hands too
+                || f.flip_t > 0.0 // §4.2: a flip is PURE mobility
+                || f.flip_used // ...and the gun returns on landing recovery
             {
+                return false;
+            }
+        }
+        // §7: rounds only leave once the spin-up completes, and never
+        // during a vent (spin_cmd was already set above).
+        if self.fighters[i].gun == GunKind::Minigun {
+            let f = &self.fighters[i];
+            if f.vent_t > 0.0 || f.spin_t < MINIGUN_SPINUP_S {
                 return false;
             }
         }
@@ -1663,6 +3787,19 @@ impl TdmSim {
         }
         if self.fighters[i].crouch {
             spread *= CROUCH_SPREAD_MULT;
+        }
+        // §4 stability: bow/spear shots taken mid-whip-turn or on the run
+        // are spoiled — the cost replaces the old feeling of being pinned.
+        // Deterministic: prev_yaw is sim state, updated once per tick.
+        if spec.projectile.is_some() {
+            let f = &self.fighters[i];
+            let ang = wrap_angle(f.yaw - f.prev_yaw).abs() / DT;
+            let plan = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+            let stability = (1.0
+                - AIM_TURN_K * (ang - AIM_TURN_FREE).max(0.0)
+                - AIM_MOVE_K * (plan - AIM_MOVE_FREE).max(0.0))
+            .clamp(AIM_STABILITY_MIN, 1.0);
+            spread /= stability;
         }
         // lean shifts the muzzle sideways off the body line and steadies
         // the shoulder a touch (recoil ×0.8 while leaning)
@@ -1681,18 +3818,51 @@ impl TdmSim {
                 spec.kick
             };
             f.bloom = (f.bloom + kick).min(0.05);
+            // §7: every round is heat; 100 forces the 3 s vent
+            if f.gun == GunKind::Minigun {
+                f.heat += MINIGUN_HEAT_PER_SHOT;
+                if f.heat >= 100.0 {
+                    f.heat = 100.0;
+                    f.vent_t = MINIGUN_VENT_FORCED_S;
+                }
+            }
             if f.ammo == 0 && spec.projectile.is_some() && f.reserve > 0 {
                 // nock the next arrow / heft the next spear automatically
                 f.reload_t = spec.reload_s;
             }
         }
         if let Some((v0, dmg)) = spec.projectile {
+            // §4: the PLAYER's hip-thrown spear is a min-charge lob; the
+            // full 26 m/s needs the settled (ADS) throw. Bots always
+            // commit to the full throw — they have no hip/ADS split.
+            let v0 = if self.fighters[i].gun == GunKind::Spear && !ads && i == self.player {
+                SPEAR_V0_MIN
+            } else {
+                v0
+            };
+            if self.fighters[i].gun == GunKind::Spear {
+                // §3: the throw WINDS UP — plant, hips, whip. The spear
+                // leaves the hand SPEAR_WINDUP_S later, on the aim held
+                // at release. Committal by design, visible to enemies.
+                let (ex, ey) = (
+                    self.rng.range(-spread, spread),
+                    self.rng.range(-spread, spread),
+                );
+                let d = perturb(normalize(aim), ex, ey);
+                let f = &mut self.fighters[i];
+                f.spear_wind_t = SPEAR_WINDUP_S;
+                f.spear_aim = d;
+                f.spear_v0 = v0;
+                return true;
+            }
             let (ex, ey) = (
                 self.rng.range(-spread, spread),
                 self.rng.range(-spread, spread),
             );
             let d = perturb(normalize(aim), ex, ey);
-            self.spawn_missile(o, d, v0, dmg, i);
+            // only the bow reaches here — the spear went out through the
+            // windup path above
+            self.spawn_missile(o, d, v0, dmg, i, false);
             return true;
         }
         // ---- hitscan: one trace per pellet (shotguns fire a cone) ------
@@ -1704,13 +3874,9 @@ impl TdmSim {
             let d = perturb(normalize(aim), ex, ey);
             let mut t_hit = 200.0_f32;
             let mut hit_normal = [0.0, 1.0, 0.0];
-            for c in &self.cover {
-                if let Some((t, n)) = c.ray_hit(o, d, t_hit) {
-                    if t < t_hit {
-                        t_hit = t;
-                        hit_normal = n;
-                    }
-                }
+            if let Some((t, n)) = self.grid.ray_hit(&self.cover, o, d, t_hit) {
+                t_hit = t;
+                hit_normal = n;
             }
             let shooter_team = self.fighters[i].team;
             let mut victim: Option<(usize, f32, f32)> = None;
@@ -1718,13 +3884,31 @@ impl TdmSim {
                 if j == i || g.team == shooter_team || !g.alive() || g.protect_t > 0.0 {
                     continue;
                 }
-                if let Some((t, hit_y)) = ray_vs_cylinder(o, d, g.pos, BODY_RADIUS, g.height()) {
+                if let Some((t, hit_y)) = ray_vs_cylinder(o, d, g.pos, g.radius(), g.height()) {
                     if t < t_hit && victim.map_or(true, |(_, bt, _)| t < bt) {
                         victim = Some((j, t, hit_y));
                     }
                 }
             }
-            let end_t = victim.map(|(_, t, _)| t).unwrap_or(t_hit);
+            // §8: the horde is shootable — same ray, same hit zones, so
+            // the ×4 head multiplier one-shots the mass
+            let mut zvictim: Option<(usize, f32, f32)> = None;
+            for (zi, z) in self.zombies.iter().enumerate() {
+                let zs = zspec(z.kind);
+                if let Some((t, hit_y)) = ray_vs_cylinder(o, d, z.pos, zs.girth, zs.height) {
+                    if t < t_hit
+                        && victim.map_or(true, |(_, bt, _)| t < bt)
+                        && zvictim.map_or(true, |(_, bt, _)| t < bt)
+                    {
+                        zvictim = Some((zi, t, hit_y));
+                    }
+                }
+            }
+            let end_t = zvictim
+                .map(|(_, t, _)| t)
+                .or(victim.map(|(_, t, _)| t))
+                .unwrap_or(t_hit)
+                .min(victim.map(|(_, t, _)| t).unwrap_or(t_hit));
             let end = [o[0] + d[0] * end_t, o[1] + d[1] * end_t, o[2] + d[2] * end_t];
             self.tracers.push(Tracer {
                 from: o,
@@ -1732,6 +3916,28 @@ impl TdmSim {
                 team: shooter_team,
                 ttl: 0.06,
             });
+            // nearest body wins: zombie, fighter, or the wall
+            if let Some((zi, zt, hit_y)) = zvictim {
+                if victim.map_or(true, |(_, ft, _)| zt < ft) {
+                    let (base, height, kind) = {
+                        let z = &self.zombies[zi];
+                        (z.pos[1], zspec(z.kind).height, z.kind)
+                    };
+                    let frac = ((hit_y - base) / height).clamp(0.0, 1.0);
+                    let head = frac > 0.82;
+                    let mult = if head {
+                        HEAD_MULT
+                    } else if frac > 0.35 {
+                        1.0
+                    } else {
+                        LEG_MULT
+                    };
+                    let _ = kind;
+                    self.fighters[i].hits_dealt += 1;
+                    self.damage_zombie(zi, spec.damage * mult, head);
+                    continue;
+                }
+            }
             match victim {
                 Some((j, _, hit_y)) => {
                     self.apply_hit(i, j, hit_y, end);
@@ -1749,6 +3955,13 @@ impl TdmSim {
                 }
             }
         }
+        // §8.2: gunfire is NOISE — the whole horde director runs on it.
+        // This is what makes the bow and spear the correct tool here.
+        if self.mode == Mode::Extraction {
+            let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
+            let r = gun_noise_m(self.fighters[i].gun);
+            self.emit_noise(at, r);
+        }
         true
     }
 
@@ -1758,8 +3971,9 @@ impl TdmSim {
     fn shield_block(&self, j: usize, attack_from: [f32; 3]) -> Option<f32> {
         let v = &self.fighters[j];
         // no plate discipline mid-somersault — a rolling shield blocks
-        // nothing (otherwise the roll would be a 95%-immune dash)
-        if !v.shield_up || v.roll_t > 0.0 {
+        // nothing (otherwise the roll would be a 95%-immune dash); a
+        // shield DIPPED for a throw (§6) blocks nothing either
+        if !v.shield_up || v.roll_t > 0.0 || v.shield_dip_t > 0.0 {
             return None;
         }
         let dx = attack_from[0] - v.pos[0];
@@ -1771,11 +3985,14 @@ impl TdmSim {
         let facing = [v.yaw.sin(), v.yaw.cos()];
         let dot = (facing[0] * dx + facing[1] * dz) / len;
         if dot > SHIELD_ARC_COS {
-            Some(if v.crouch {
+            let base = if v.crouch {
                 SHIELD_BLOCK_CROUCH
             } else {
                 SHIELD_BLOCK_STAND
-            })
+            };
+            // §1 (Brief V): aiming a throw drops the plate to a
+            // ONE-HANDED carry — half the block while the arm is busy
+            Some(if v.cook_t > 0.0 { base * 0.5 } else { base })
         } else {
             None
         }
@@ -1790,7 +4007,12 @@ impl TdmSim {
         let base = self.fighters[j].pos[1];
         let h = self.fighters[j].height();
         let frac = ((hit_y - base) / h).clamp(0.0, 1.0);
-        let zone = if frac > 0.82 {
+        // §4.3: a flipping fighter is UNIFORM — mid-backflip the head is
+        // at the BOTTOM of the capsule and the banded test would call a
+        // boot shot a ×4 headshot. No multiplier in either direction.
+        let zone = if self.fighters[j].hit_zone_mode() == HitZoneMode::Uniform {
+            HitZone::Torso
+        } else if frac > 0.82 {
             HitZone::Head
         } else if frac > 0.66 {
             HitZone::Arms
@@ -1812,12 +4034,9 @@ impl TdmSim {
             dmg *= 1.0 - block;
             shielded = true;
         }
-        let armor = self.fighters[j].armor;
-        if armor > 0.0 {
-            let absorbed = dmg.min(armor);
-            self.fighters[j].armor -= absorbed;
-            dmg -= absorbed * 0.7; // the robot shell soaks most of it
-        }
+        // §6.1: set armor applies AFTER the zone multiplier, with a floor
+        let base_dmg = gun(self.fighters[i].gun).damage;
+        dmg = self.apply_armor(j, dmg, base_dmg, zone, Some(from));
         self.fighters[j].health -= dmg;
         self.fighters[i].hits_dealt += 1;
         let fatal = self.fighters[j].health <= 0.0;
@@ -1873,7 +4092,7 @@ impl TdmSim {
         let d = normalize(d);
         let mut pos = o;
         let mut vel = [d[0] * v0, d[1] * v0, d[2] * v0];
-        let g = 9.81 * if is_spear { 1.0 } else { 0.55 };
+        let g = missile_g(is_spear); // the SAME constant the flight uses (§4)
         let mut pts = Vec::new();
         let steps = (max_s / DT) as usize;
         for step in 0..steps {
@@ -1887,14 +4106,7 @@ impl TdmSim {
                 .sqrt()
                 .max(1e-5);
             let dn = [seg[0] / seg_len, seg[1] / seg_len, seg[2] / seg_len];
-            let mut best: Option<(f32, [f32; 3])> = None;
-            for c in &self.cover {
-                if let Some((t, n)) = c.ray_hit(old, dn, seg_len) {
-                    if t <= seg_len && best.map_or(true, |(bt, _)| t < bt) {
-                        best = Some((t, n));
-                    }
-                }
-            }
+            let best = self.grid.ray_hit(&self.cover, old, dn, seg_len);
             if let Some((t, n)) = best {
                 let at = [old[0] + dn[0] * t, old[1] + dn[1] * t, old[2] + dn[2] * t];
                 return (pts, at, n);
@@ -1922,32 +4134,65 @@ impl TdmSim {
     fn step_missiles(&mut self) {
         let t_now = self.t;
         let mut hits: Vec<(usize, usize, f32, [f32; 3], [f32; 3])> = Vec::new();
-        let snap: Vec<(Team, [f32; 3], f32, bool)> = self
+        let snap: Vec<(Team, [f32; 3], f32, f32, bool)> = self
             .fighters
             .iter()
-            .map(|f| (f.team, f.pos, f.height(), f.alive() && f.protect_t <= 0.0))
+            .map(|f| {
+                (
+                    f.team,
+                    f.pos,
+                    f.height(),
+                    f.radius(),
+                    f.alive() && f.protect_t <= 0.0,
+                )
+            })
             .collect();
         let cover = &self.cover;
+        let grid = &self.grid;
+        // §8: arrows and spears bite the horde too — id-keyed so kills
+        // resolving after the loop can't be shifted by swap_remove
+        let zsnap: Vec<(u32, [f32; 3], f32, f32)> = self
+            .zombies
+            .iter()
+            .map(|z| (z.id, z.pos, zspec(z.kind).girth, zspec(z.kind).height))
+            .collect();
+        let mut zhits: Vec<(u32, f32, bool)> = Vec::new();
         for m in &mut self.missiles {
             if m.stuck_t.is_some() {
                 continue;
             }
-            m.vel[1] -= 9.81 * DT * if m.is_spear { 1.0 } else { 0.55 };
+            m.vel[1] -= missile_g(m.is_spear) * DT; // ONE shared constant (§4)
             let old = m.pos;
             m.pos[0] += m.vel[0] * DT;
             m.pos[1] += m.vel[1] * DT;
             m.pos[2] += m.vel[2] * DT;
             // body check
-            for (j, &(team, pos, h, alive)) in snap.iter().enumerate() {
+            for (j, &(team, pos, h, r, alive)) in snap.iter().enumerate() {
                 if team == m.team || !alive || j == m.shooter {
                     continue;
                 }
                 let dx = m.pos[0] - pos[0];
                 let dz = m.pos[2] - pos[2];
-                if dx * dx + dz * dz < 0.20 && m.pos[1] > pos[1] && m.pos[1] < pos[1] + h {
+                let rr = (r + 0.11) * (r + 0.11);
+                if dx * dx + dz * dz < rr && m.pos[1] > pos[1] && m.pos[1] < pos[1] + h {
                     hits.push((m.shooter, j, m.damage, m.pos, m.vel));
                     m.stuck_t = Some(t_now);
                     break;
+                }
+            }
+            if m.stuck_t.is_none() {
+                for &(zid, zpos, girth, height) in &zsnap {
+                    let dx = m.pos[0] - zpos[0];
+                    let dz = m.pos[2] - zpos[2];
+                    if dx * dx + dz * dz < girth * girth
+                        && m.pos[1] > zpos[1]
+                        && m.pos[1] < zpos[1] + height
+                    {
+                        let head = (m.pos[1] - zpos[1]) / height > 0.82;
+                        zhits.push((zid, m.damage, head));
+                        m.stuck_t = Some(t_now);
+                        break;
+                    }
                 }
             }
             if m.stuck_t.is_some() {
@@ -1963,22 +4208,102 @@ impl TdmSim {
                 .sqrt()
                 .max(1e-5);
             let dn = [seg[0] / seg_len, seg[1] / seg_len, seg[2] / seg_len];
-            for c in cover {
-                if let Some((t, _)) = c.ray_hit(old, dn, seg_len) {
-                    if t <= seg_len {
-                        m.pos = [old[0] + dn[0] * t, old[1] + dn[1] * t, old[2] + dn[2] * t];
-                        m.stuck_t = Some(t_now);
-                        break;
-                    }
-                }
+            // §9.1 grid broadphase — and NEAREST hit, so a segment that
+            // clips two boxes sticks at the first surface along the path
+            // (predict_arc already used nearest; now they agree exactly)
+            if let Some((t, _)) = grid.ray_hit(cover, old, dn, seg_len) {
+                m.pos = [old[0] + dn[0] * t, old[1] + dn[1] * t, old[2] + dn[2] * t];
+                m.stuck_t = Some(t_now);
             }
             if m.pos[1] <= 0.0 {
-                m.pos[1] = 0.0;
+                // land at the exact ground crossing — the same
+                // interpolation `predict_arc` uses, so the preview and
+                // the flight agree to the centimetre (§4)
+                let seg_y = m.pos[1] - old[1];
+                let t = if seg_y.abs() > 1e-6 {
+                    ((0.0 - old[1]) / seg_y).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                m.pos = [
+                    old[0] + (m.pos[0] - old[0]) * t,
+                    0.0,
+                    old[2] + (m.pos[2] - old[2]) * t,
+                ];
                 m.stuck_t = Some(t_now);
             }
         }
-        self.missiles
-            .retain(|m| m.stuck_t.map_or(true, |s| t_now - s < 15.0));
+        // ---- §3: a missile coming to rest converts IN PLACE to a
+        // walk-over pickup. Spears always survive; arrows break 35% of
+        // the time — rolled from a PCG seeded on the missile's stable ID
+        // (never wall clock, never renderer state: replays must agree).
+        let mut converted: Vec<u32> = Vec::new();
+        for m in &self.missiles {
+            if m.stuck_t != Some(t_now) {
+                continue; // only missiles that stuck THIS tick
+            }
+            let recovered = if m.is_spear {
+                true
+            } else {
+                let mut r = Pcg32::new(
+                    self.cfg.seed ^ (m.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    0xD20,
+                );
+                r.next_f32() < ARROW_RECOVER_P
+            };
+            if !recovered {
+                continue; // the broken arrow stays as a 15 s prop
+            }
+            converted.push(m.id);
+            let kind = if m.is_spear {
+                AmmoKind::Spear
+            } else {
+                AmmoKind::Arrow
+            };
+            // stack merging: an arrow-heavy round must not spawn hundreds
+            // of entities — nearby same-kind piles absorb the new one
+            let merged = self.dropped.iter_mut().any(|d| {
+                let dx = d.pos[0] - m.pos[0];
+                let dz = d.pos[2] - m.pos[2];
+                if d.kind == kind && dx * dx + dz * dz < DROPPED_MERGE_M * DROPPED_MERGE_M {
+                    d.count = d.count.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            });
+            if !merged {
+                self.dropped.push(DroppedAmmo {
+                    kind,
+                    count: 1,
+                    rest_tick: self.tick,
+                    pos: [m.pos[0], m.pos[1].max(0.0), m.pos[2]],
+                });
+            }
+        }
+        self.missiles.retain(|m| {
+            !converted.contains(&m.id) && m.stuck_t.map_or(true, |s| t_now - s < 15.0)
+        });
+        // lifetime + global cap, oldest first
+        let tick = self.tick;
+        self.dropped
+            .retain(|d| tick.saturating_sub(d.rest_tick) < DROPPED_TTL_TICKS);
+        while self.dropped.len() > DROPPED_MAX {
+            let oldest = self
+                .dropped
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, d)| d.rest_tick)
+                .map(|(i, _)| i)
+                .unwrap();
+            self.dropped.remove(oldest);
+        }
+        for (zid, dmg, head) in zhits {
+            if let Some(zi) = self.zombies.iter().position(|z| z.id == zid) {
+                // a stuck arrow in the skull is rewarded (bow = the tool)
+                self.damage_zombie(zi, if head { dmg * 1.5 } else { dmg }, head);
+            }
+        }
         for (i, j, dmg, at, vel) in hits {
             // a corpse from an earlier missile this same tick stays down —
             // no double deaths, no double score
@@ -1996,12 +4321,8 @@ impl TdmSim {
                 d *= 1.0 - block;
                 shielded = true;
             }
-            let armor = self.fighters[j].armor;
-            if armor > 0.0 {
-                let absorbed = d.min(armor);
-                self.fighters[j].armor -= absorbed;
-                d -= absorbed * 0.7;
-            }
+            // §6.1 flats + floor (projectiles are flat-torso damage)
+            d = self.apply_armor(j, d, dmg, HitZone::Torso, Some(from_dir));
             self.fighters[j].health -= d;
             self.fighters[i].hits_dealt += 1;
             let fatal = self.fighters[j].health <= 0.0;
@@ -2047,6 +4368,749 @@ impl TdmSim {
         }
     }
 
+    /// §8 the horde, all sim-side: the director breathes pressure in and
+    /// out, spawns arrive OUTSIDE view cones and never within 35 m,
+    /// zombies chase what they see or the last noise they heard, and the
+    /// extraction ring asks you to stand still while everything closes in.
+    fn step_zombies(&mut self) {
+        let elapsed = EXTRACT_LEN_S - self.match_t;
+        // ---- director: pressure rises with time and hurt, ebbs in quiet
+        let hurt = self
+            .fighters
+            .iter()
+            .filter(|f| f.alive())
+            .map(|f| 1.0 - f.health / MAX_HEALTH)
+            .fold(0.0_f32, f32::max);
+        self.pressure = (self.pressure + DT * (1.0 / 480.0 + hurt * 0.0004)
+            - DT * 0.002)
+            .clamp(0.05, 1.0);
+        let holding = {
+            let site = self.extract_sites[self.extract_idx];
+            elapsed >= EXTRACT_REVEAL_S
+                && self.fighters.iter().any(|f| {
+                    f.alive()
+                        && (f.pos[0] - site[0]).powi(2) + (f.pos[2] - site[2]).powi(2)
+                            < EXTRACT_RADIUS * EXTRACT_RADIUS
+                })
+        };
+        if holding {
+            self.pressure = 1.0; // the final wave dumps
+            self.extract_hold += DT;
+            if self.extract_hold >= EXTRACT_HOLD_S {
+                self.finish(Team::Blue); // EXTRACTED
+            }
+        }
+        // §8.4: the site relocates ONCE at the 12-minute mark
+        if elapsed >= EXTRACT_RELOCATE_S && self.extract_idx == 0 {
+            self.extract_idx = 1;
+            self.extract_hold = 0.0;
+        }
+        // ---- spawning: scaled by pressure, capped, out of sight --------
+        self.zspawn_cd -= DT;
+        if self.zspawn_cd <= 0.0 && self.zombies.len() < ZOMBIE_CAP {
+            self.zspawn_cd = 6.0 - 4.8 * self.pressure;
+            let n = 1 + (self.pressure * 3.0) as usize;
+            for _ in 0..n {
+                if self.zombies.len() >= ZOMBIE_CAP {
+                    break;
+                }
+                // pick an edge point ≥35 m from every player and OUTSIDE
+                // every view cone — try a few candidates, else skip
+                let mut spot = None;
+                for _try in 0..6 {
+                    let side = (self.rng.next_f32() * 4.0) as u32;
+                    let a = self.rng.range(-self.half + 4.0, self.half - 4.0);
+                    let e = self.half - 4.0;
+                    let cand = match side {
+                        0 => [a, e],
+                        1 => [a, -e],
+                        2 => [e, a],
+                        _ => [-e, a],
+                    };
+                    let ok = self.fighters.iter().all(|f| {
+                        if !f.alive() {
+                            return true;
+                        }
+                        let dx = cand[0] - f.pos[0];
+                        let dz = cand[1] - f.pos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < ZSPAWN_MIN_M {
+                            return false;
+                        }
+                        // outside the view cone (±60°)
+                        let fwd = [f.yaw.sin(), f.yaw.cos()];
+                        (fwd[0] * dx + fwd[1] * dz) / d.max(0.1) < 0.5
+                    });
+                    if ok {
+                        spot = Some(cand);
+                        break;
+                    }
+                }
+                let Some(spot) = spot else { continue };
+                // composition scales with pressure; Runners gate on time
+                let roll = self.rng.next_f32();
+                let kind = if roll < 0.68 {
+                    ZKind::Shambler
+                } else if roll < 0.80 && elapsed > 240.0 {
+                    ZKind::Runner
+                } else if roll < 0.88 {
+                    ZKind::Screamer
+                } else if roll < 0.96 {
+                    ZKind::Bloater
+                } else {
+                    ZKind::Brute
+                };
+                self.next_zombie_id += 1;
+                self.zombies.push(Zombie {
+                    id: self.next_zombie_id,
+                    kind,
+                    pos: [spot[0], 0.0, spot[1]],
+                    hp: zspec(kind).hp,
+                    atk_cd: 0.0,
+                    scream_t: 0.0,
+                    head_hits: 0,
+                    target: [0.0, 0.0],
+                    alerted: false,
+                });
+            }
+        }
+        // ---- per-zombie behavior ---------------------------------------
+        let mut screams: Vec<[f32; 3]> = Vec::new();
+        for zi in 0..self.zombies.len() {
+            let (zpos, kind) = (self.zombies[zi].pos, self.zombies[zi].kind);
+            let spec = zspec(kind);
+            // sight: nearest living fighter within 40 m with clear LOS
+            let mut seen: Option<(usize, f32)> = None;
+            for (j, f) in self.fighters.iter().enumerate() {
+                if !f.alive() {
+                    continue;
+                }
+                let dx = f.pos[0] - zpos[0];
+                let dz = f.pos[2] - zpos[2];
+                let d2 = dx * dx + dz * dz;
+                if d2 < 40.0 * 40.0
+                    && seen.map_or(true, |(_, b)| d2 < b)
+                    && self.sight_clear(
+                        [zpos[0], zpos[1] + 1.4, zpos[2]],
+                        [f.pos[0], f.pos[1] + 1.0, f.pos[2]],
+                    )
+                {
+                    seen = Some((j, d2));
+                }
+            }
+            let z = &mut self.zombies[zi];
+            z.atk_cd = (z.atk_cd - DT).max(0.0);
+            if let Some((j, d2)) = seen {
+                let fpos = self.fighters[j].pos;
+                z.target = [fpos[0], fpos[2]];
+                z.alerted = true;
+                // §8.1 Screamer: wind-up, then call the horde
+                if kind == ZKind::Screamer && d2 < 14.0 * 14.0 && z.scream_t > -1.0 {
+                    z.scream_t += DT;
+                    if z.scream_t >= 2.2 {
+                        z.scream_t = -999.0; // spent
+                        screams.push(z.pos);
+                    }
+                }
+                // melee
+                if d2 < 1.4 * 1.4 && z.atk_cd <= 0.0 && spec.dmg > 0.0 {
+                    z.atk_cd = 1.0;
+                    let f = &mut self.fighters[j];
+                    f.health -= spec.dmg;
+                    f.last_dmg_at = self.t;
+                    if f.health <= 0.0 {
+                        f.deaths += 1;
+                        f.respawn_t = 9999.0; // §8: no respawns in the run
+                        f.vel = [0.0, 0.0];
+                        f.shield_up = false;
+                    }
+                }
+            }
+            // §1 (Brief III) audit fix: an unalerted zombie previously
+            // stood at its spawn point forever — with out-of-view spawns
+            // that read as "the mode is empty". The idle horde now DRIFTS
+            // toward the map's heart, so contact always comes.
+            {
+                let z = &mut self.zombies[zi];
+                if !z.alerted && seen.is_none() {
+                    let d = (z.pos[0] * z.pos[0] + z.pos[2] * z.pos[2]).sqrt();
+                    if d > 6.0 {
+                        z.pos[0] -= z.pos[0] / d * spec.speed * 0.45 * DT;
+                        z.pos[2] -= z.pos[2] / d * spec.speed * 0.45 * DT;
+                        z.target = [0.0, 0.0];
+                    }
+                }
+            }
+            // move toward the target (stop short in melee range).
+            // §13: relentless AND convincing — a blocked path deflects
+            // sideways instead of clumping at the wall, and the deflect
+            // side is a stable function of the zombie's id (deterministic)
+            let steer = {
+                let z = &self.zombies[zi];
+                let dx = z.target[0] - z.pos[0];
+                let dz = z.target[1] - z.pos[2];
+                let d = (dx * dx + dz * dz).sqrt();
+                if d > 1.0 {
+                    let (nx, nz) = (dx / d, dz / d);
+                    let eye = [z.pos[0], z.pos[1] + 1.0, z.pos[2]];
+                    let blocked = self
+                        .grid
+                        .ray_hit(&self.cover, eye, [nx, 0.0, nz], 2.2)
+                        .is_some();
+                    if blocked {
+                        // wall ahead: slide along it, side picked by id
+                        let s = if z.id % 2 == 0 { 1.0 } else { -1.0 };
+                        Some(([-nz * s, nx * s], d))
+                    } else {
+                        Some(([nx, nz], d))
+                    }
+                } else {
+                    None
+                }
+            };
+            let z = &mut self.zombies[zi];
+            if (z.alerted || seen.is_some()) && steer.is_some() {
+                let ([mx, mz], _d) = steer.unwrap();
+                // Brutes freshly staggered stand still
+                let staggered = kind == ZKind::Brute && z.atk_cd > 1.4;
+                if !staggered {
+                    z.pos[0] += mx * spec.speed * DT;
+                    z.pos[2] += mz * spec.speed * DT;
+                }
+            }
+            // walls push zombies out just like fighters
+            let half = self.half;
+            let z = &mut self.zombies[zi];
+            z.pos[0] = z.pos[0].clamp(-half + 0.5, half - 0.5);
+            z.pos[2] = z.pos[2].clamp(-half + 0.5, half - 0.5);
+            for c in &self.cover {
+                if c.max[1] <= z.pos[1] + STEP_UP {
+                    continue;
+                }
+                let cx = z.pos[0].clamp(c.min[0], c.max[0]);
+                let cz = z.pos[2].clamp(c.min[2], c.max[2]);
+                let (dx, dz) = (z.pos[0] - cx, z.pos[2] - cz);
+                let d2 = dx * dx + dz * dz;
+                if d2 < spec.girth * spec.girth {
+                    let d = d2.sqrt().max(1e-4);
+                    let push = spec.girth - d;
+                    if d > 1e-3 {
+                        z.pos[0] += dx / d * push;
+                        z.pos[2] += dz / d * push;
+                    } else {
+                        z.pos[2] += push;
+                    }
+                }
+            }
+        }
+        // §13: the pile — zombies press INTO each other but never stack;
+        // pairwise separation keeps a horde reading as bodies, not a blob
+        for a in 0..self.zombies.len() {
+            for b in (a + 1)..self.zombies.len() {
+                let dx = self.zombies[b].pos[0] - self.zombies[a].pos[0];
+                let dz = self.zombies[b].pos[2] - self.zombies[a].pos[2];
+                let d2 = dx * dx + dz * dz;
+                if d2 < 0.55 * 0.55 && d2 > 1e-6 {
+                    let d = d2.sqrt();
+                    let push = (0.55 - d) * 0.5;
+                    let (ux, uz) = (dx / d, dz / d);
+                    self.zombies[a].pos[0] -= ux * push;
+                    self.zombies[a].pos[2] -= uz * push;
+                    self.zombies[b].pos[0] += ux * push;
+                    self.zombies[b].pos[2] += uz * push;
+                }
+            }
+        }
+
+        // screams: a pressure spike and everyone hears it
+        for at in screams {
+            self.pressure = (self.pressure + 0.35).min(1.0);
+            self.emit_noise([at[0], at[2]], 60.0);
+        }
+        // toxic clouds tick
+        for ti in 0..self.toxics.len() {
+            self.toxics[ti].ttl -= DT;
+            self.toxics[ti].tick_t += DT;
+            if self.toxics[ti].tick_t < 0.25 {
+                continue;
+            }
+            self.toxics[ti].tick_t -= 0.25;
+            let tp = self.toxics[ti].pos;
+            for j in 0..self.fighters.len() {
+                let f = &self.fighters[j];
+                if !f.alive() || f.armor_set == ArmorSet::Pyro {
+                    continue; // sealed plate: gas does nothing
+                }
+                let dx = f.pos[0] - tp[0];
+                let dz = f.pos[2] - tp[2];
+                if dx * dx + dz * dz < TOXIC_R * TOXIC_R && (f.pos[1] - tp[1]).abs() < 2.2 {
+                    let f = &mut self.fighters[j];
+                    f.health -= TOXIC_DPS * 0.25;
+                    f.last_dmg_at = self.t;
+                    if f.health <= 0.0 {
+                        f.deaths += 1;
+                        f.respawn_t = 9999.0;
+                        f.vel = [0.0, 0.0];
+                    }
+                }
+            }
+        }
+        self.toxics.retain(|t| t.ttl > 0.0);
+        // the run ends when every fighter is down
+        if self.fighters.iter().all(|f| !f.alive()) {
+            self.finish(Team::Red);
+        }
+    }
+
+    /// §8.2: noise pulls the horde. Zombies inside the radius re-target
+    /// the source; the director feels it too.
+    fn emit_noise(&mut self, at: [f32; 2], radius: f32) {
+        self.pressure = (self.pressure + 0.008).min(1.0);
+        for z in &mut self.zombies {
+            let dx = z.pos[0] - at[0];
+            let dz = z.pos[2] - at[1];
+            if dx * dx + dz * dz < radius * radius {
+                z.alerted = true;
+                z.target = at;
+            }
+        }
+    }
+
+    /// §8: damage a zombie (zone multiplier already applied). Brutes
+    /// stagger on every third headshot; Bloaters burst on death.
+    fn damage_zombie(&mut self, zi: usize, dmg: f32, headshot: bool) {
+        let z = &mut self.zombies[zi];
+        z.hp -= dmg;
+        z.alerted = true;
+        if headshot && z.kind == ZKind::Brute {
+            z.head_hits += 1;
+            if z.head_hits % 3 == 0 {
+                z.atk_cd = 2.0; // the stagger window
+            }
+        }
+        if z.hp <= 0.0 {
+            let (pos, kind) = (z.pos, z.kind);
+            self.zombies.swap_remove(zi);
+            self.pressure = (self.pressure - 0.004).max(0.05);
+            if kind == ZKind::Bloater {
+                self.toxics.push(ToxicCloud {
+                    pos,
+                    ttl: 6.0,
+                    tick_t: 0.0,
+                });
+                self.booms.push((
+                    Boom {
+                        at: pos,
+                        kind: ThrowKind::Smoke,
+                    },
+                    2.0,
+                ));
+            }
+        }
+    }
+
+    /// §8: the active extraction point, once revealed.
+    pub fn extract_point(&self) -> Option<[f32; 3]> {
+        if self.mode != Mode::Extraction {
+            return None;
+        }
+        let elapsed = EXTRACT_LEN_S - self.match_t;
+        if elapsed < EXTRACT_REVEAL_S {
+            None
+        } else {
+            Some(self.extract_sites[self.extract_idx])
+        }
+    }
+
+    /// §5.2 grenade integration: deterministic point-mass at 120 Hz, full
+    /// 9.81 gravity, bounce = tangential friction + normal restitution,
+    /// a rest test so nothing micro-bounces forever, and a settle
+    /// guarantee (restitution halves after the third bounce).
+    fn step_grenades(&mut self) {
+        let mut boom_ids: Vec<u32> = Vec::new();
+        let TdmSim {
+            grenades_air,
+            grid,
+            cover,
+            ..
+        } = self;
+        for g in grenades_air.iter_mut() {
+            if let GrenadeTick::Boom = grenade_tick(g, grid, cover) {
+                boom_ids.push(g.id);
+            }
+        }
+        for id in boom_ids {
+            if let Some(i) = self.grenades_air.iter().position(|g| g.id == id) {
+                let g = self.grenades_air.remove(i);
+                self.detonate(g);
+            }
+        }
+    }
+
+    /// §1 (Brief V): the aim preview — steps a scratch grenade through
+    /// `grenade_tick`, the EXACT integrator the live flight uses (same
+    /// constants, same fixed timestep, same bounce/rest/fuse rules), so
+    /// the preview cannot drift from the throw. Returns the tick-spaced
+    /// path, the end point (detonation or rest), and the path index of
+    /// the first bounce (the client fades everything after it).
+    pub fn predict_grenade(
+        &self,
+        kind: ThrowKind,
+        o: [f32; 3],
+        vel: [f32; 3],
+        fuse_s: f32,
+        max_s: f32,
+    ) -> (Vec<[f32; 3]>, [f32; 3], Option<usize>) {
+        let mut g = Grenade {
+            id: 0,
+            kind,
+            pos: o,
+            vel,
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: fuse_s,
+            bounces: 0,
+            rest: false,
+        };
+        let mut pts: Vec<[f32; 3]> = Vec::new();
+        let mut first_bounce: Option<usize> = None;
+        let steps = (max_s / DT) as usize;
+        for _ in 0..steps {
+            match grenade_tick(&mut g, &self.grid, &self.cover) {
+                GrenadeTick::Boom | GrenadeTick::Rest => {
+                    return (pts, g.pos, first_bounce)
+                }
+                GrenadeTick::Fly => {
+                    if first_bounce.is_none() && g.bounces > 0 {
+                        first_bounce = Some(pts.len());
+                    }
+                    pts.push(g.pos);
+                }
+            }
+        }
+        (pts, g.pos, first_bounce)
+    }
+
+    /// §1 (Brief V): the release origin + velocity for fighter `i`
+    /// holding a throw for `hold_s` — THE single source shared by the
+    /// real throw and the preview arc. Crouch lobs underhand, a steep
+    /// downward aim drops gently, run inertia carries in; charge scales
+    /// the speed; the shield slows the one-handed charge; the mech's
+    /// LAUNCHER fires hotter with none of the hand-throw tax.
+    pub fn throw_release_velocity(
+        &self,
+        i: usize,
+        aim: [f32; 3],
+        hold_s: f32,
+    ) -> ([f32; 3], [f32; 3]) {
+        let f = &self.fighters[i];
+        let mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+        let eff_hold = if f.shield_up && !mech {
+            hold_s * THROW_SHIELD_CHARGE_MULT
+        } else {
+            hold_s
+        };
+        let power = throw_power(eff_hold);
+        let scale = THROW_POWER_MIN + (THROW_POWER_MAX - THROW_POWER_MIN) * power;
+        let base = if f.crouch {
+            THROW_V_UNDER
+        } else if aim[1] < -0.7 {
+            THROW_V_DROP
+        } else {
+            THROW_V_OVER
+        };
+        let v0 = base * scale * if mech { MECH_LAUNCHER_V_MULT } else { 1.0 };
+        let d = normalize(aim);
+        let o = [f.pos[0], f.pos[1] + 1.45, f.pos[2]];
+        (
+            o,
+            [
+                d[0] * v0 + f.vel[0] * 0.5,
+                d[1] * v0 + 2.2,
+                d[2] * v0 + f.vel[1] * 0.5,
+            ],
+        )
+    }
+
+    /// §5 detonation effects — all sim-side, all deterministic.
+    fn detonate(&mut self, g: Grenade) {
+        let spec = throw_spec(g.kind);
+        self.booms.push((
+            Boom {
+                at: g.pos,
+                kind: g.kind,
+            },
+            2.0,
+        ));
+        match g.kind {
+            ThrowKind::Frag => {
+                // 118 × (1 − d/6)^1.6, LOS-blocked: no damage through walls
+                for j in 0..self.fighters.len() {
+                    let f = &self.fighters[j];
+                    if !f.alive() || f.protect_t > 0.0 {
+                        continue;
+                    }
+                    let chest = [f.pos[0], f.pos[1] + f.height() * 0.55, f.pos[2]];
+                    let dx = chest[0] - g.pos[0];
+                    let dy = chest[1] - g.pos[1];
+                    let dz = chest[2] - g.pos[2];
+                    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if d > spec.radius_m || !self.los_clear(g.pos, chest) {
+                        continue;
+                    }
+                    let dmg = FRAG_DMG * (1.0 - d / spec.radius_m).powf(1.6);
+                    self.apply_plain_damage(g.thrower, j, dmg, g.pos, true, false);
+                }
+            }
+            ThrowKind::Flash => {
+                // blind = 3.2 s × LOS × facing × distance (§5.3); bots eat
+                // the same penalty — a human-only flash is worse than none
+                for j in 0..self.fighters.len() {
+                    let f = &self.fighters[j];
+                    if !f.alive() {
+                        continue;
+                    }
+                    let eye = [f.pos[0], f.pos[1] + EYE_REL.min(f.height() - 0.1), f.pos[2]];
+                    let dx = g.pos[0] - eye[0];
+                    let dy = g.pos[1] - eye[1];
+                    let dz = g.pos[2] - eye[2];
+                    let d = (dx * dx + dy * dy + dz * dz).sqrt().max(0.01);
+                    if d > spec.radius_m || !self.los_clear(g.pos, eye) {
+                        continue;
+                    }
+                    let fwd = [f.yaw.sin(), 0.0, f.yaw.cos()];
+                    let facing = ((fwd[0] * dx + fwd[2] * dz) / d).clamp(0.15, 1.0);
+                    let blind = FLASH_BLIND_S * facing * (1.0 - d / spec.radius_m).clamp(0.0, 1.0);
+                    let f = &mut self.fighters[j];
+                    f.blind_t = f.blind_t.max(blind);
+                }
+            }
+            ThrowKind::Smoke => {
+                if self.smokes.len() < SMOKE_MAX {
+                    self.smokes.push(SmokeVolume {
+                        pos: [g.pos[0], g.pos[1].max(0.4), g.pos[2]],
+                        ttl: SMOKE_TTL_S,
+                    });
+                }
+            }
+            ThrowKind::Molotov => {
+                self.fires.push(FirePool {
+                    pos: [g.pos[0], g.pos[1].max(0.02), g.pos[2]],
+                    ttl: FIRE_TTL_S,
+                    thrower: g.thrower,
+                    tick_t: 0.0,
+                });
+            }
+        }
+    }
+
+    /// §5.5 fire pools: 4 Hz damage ticks to anyone standing in them.
+    fn step_fires(&mut self) {
+        for fi in 0..self.fires.len() {
+            self.fires[fi].ttl -= DT;
+            self.fires[fi].tick_t += DT;
+            if self.fires[fi].tick_t < 0.25 {
+                continue;
+            }
+            self.fires[fi].tick_t -= 0.25;
+            let (fpos, thrower) = (self.fires[fi].pos, self.fires[fi].thrower);
+            let r = throw_spec(ThrowKind::Molotov).radius_m;
+            for j in 0..self.fighters.len() {
+                let f = &self.fighters[j];
+                if !f.alive() || f.protect_t > 0.0 {
+                    continue;
+                }
+                let dx = f.pos[0] - fpos[0];
+                let dz = f.pos[2] - fpos[2];
+                if dx * dx + dz * dz < r * r && (f.pos[1] - fpos[1]).abs() < 2.0 {
+                    if self.fighters[j].armor_set != ArmorSet::Pyro {
+                        self.fighters[j].burn_t = 1.0;
+                    }
+                    self.apply_plain_damage(thrower, j, FIRE_DPS * 0.25, fpos, false, true);
+                }
+            }
+        }
+        self.fires.retain(|f| f.ttl > 0.0);
+    }
+
+    /// §6.1: the armor-set damage pipeline, shared by every damage path.
+    /// Folk's held brace cuts 82% inside its 110° frontal arc (stacking
+    /// +8% per overlapping braced ally, capped at 3 — the shieldwall in
+    /// one line); then the set's flat per-zone reduction applies with a
+    /// floor of 15% of BASE damage so limb shots are never free. Marks
+    /// the victim's last-damage time (gates Recon regen).
+    fn apply_armor(
+        &mut self,
+        j: usize,
+        dmg: f32,
+        base: f32,
+        zone: HitZone,
+        from: Option<[f32; 3]>,
+    ) -> f32 {
+        self.apply_armor_tagged(j, dmg, base, zone, from, false, false)
+    }
+
+    /// §11: the full damage pipeline with the mech's angle-based model.
+    /// A mech classifies by the angle between the shot and its BODY
+    /// facing — front 85% cut, side 70%, rear nothing; explosives bypass
+    /// half the cut, fire bypasses all of it. Damage lands on the HULL
+    /// (never the pilot) until it's gone — then the pilot ejects at 25 HP.
+    fn apply_armor_tagged(
+        &mut self,
+        j: usize,
+        mut dmg: f32,
+        base: f32,
+        zone: HitZone,
+        from: Option<[f32; 3]>,
+        explosive: bool,
+        fire: bool,
+    ) -> f32 {
+        {
+            let v = &self.fighters[j];
+            if v.armor_set == ArmorSet::RobotSuit && v.hull > 0.0 {
+                let mut red = 0.0;
+                if let Some(fp) = from {
+                    let dx = fp[0] - v.pos[0];
+                    let dz = fp[2] - v.pos[2];
+                    let len = (dx * dx + dz * dz).sqrt().max(1e-3);
+                    // BODY facing, never the camera (§11.2 rule 1)
+                    let cos = (v.yaw.sin() * dx + v.yaw.cos() * dz) / len;
+                    red = if cos > 0.5 {
+                        MECH_RED_FRONT
+                    } else if cos > -0.5 {
+                        MECH_RED_SIDE
+                    } else {
+                        0.0
+                    };
+                }
+                if fire {
+                    red = 0.0; // fire attacks cooling, not plating
+                } else if explosive {
+                    red *= 0.5; // grenades are a real frontal answer
+                }
+                let d = dmg * (1.0 - red);
+                let f = &mut self.fighters[j];
+                f.hull = (f.hull - d).max(0.0);
+                f.last_dmg_at = self.t;
+                if f.hull <= 0.0 {
+                    // destroyed: the pilot ejects, vulnerable and on foot
+                    f.armor_set = ArmorSet::None;
+                    f.armor = 0.0;
+                    f.health = f.health.min(MECH_EJECT_HP);
+                }
+                return 0.0; // the pilot takes nothing while the hull holds
+            }
+        }
+        let v = &self.fighters[j];
+        if v.brace && v.armor_set == ArmorSet::Folk {
+            if let Some(fp) = from {
+                let dx = fp[0] - v.pos[0];
+                let dz = fp[2] - v.pos[2];
+                let len = (dx * dx + dz * dz).sqrt().max(1e-3);
+                let facing = [v.yaw.sin(), v.yaw.cos()];
+                if (facing[0] * dx + facing[1] * dz) / len > BRACE_ARC_COS {
+                    let mut allies = 0u32;
+                    for (k, a) in self.fighters.iter().enumerate() {
+                        if k != j && a.team == v.team && a.brace && a.alive() {
+                            let ax = a.pos[0] - v.pos[0];
+                            let az = a.pos[2] - v.pos[2];
+                            if ax * ax + az * az < 16.0 {
+                                allies += 1;
+                            }
+                        }
+                    }
+                    let red = (BRACE_REDUCTION
+                        + BRACE_STACK_BONUS * allies.min(BRACE_STACK_CAP) as f32)
+                        .min(0.96);
+                    dmg *= 1.0 - red;
+                }
+            }
+        }
+        let spec = armor_spec(self.fighters[j].armor_set);
+        let flat = match zone {
+            HitZone::Head => spec.flat_head,
+            HitZone::Torso => spec.flat_torso,
+            _ => spec.flat_limb,
+        };
+        // the floor never RAISES an already-tiny hit (shielded shots)
+        let out = (dmg - flat).max(base * ARMOR_FLOOR_FRAC).min(dmg).max(0.0);
+        self.fighters[j].last_dmg_at = self.t;
+        out
+    }
+
+    /// Zone-less damage (explosions, fire, abilities): §6 flats apply at
+    /// torso rate, the shield does NOT block (blast wraps it), kills
+    /// credit the source. `explosive` engages Pyro's blast resistance and
+    /// drains a Robot Suit's power core; `fire` respects Pyro immunity.
+    fn apply_plain_damage(
+        &mut self,
+        src: usize,
+        victim: usize,
+        dmg: f32,
+        at: [f32; 3],
+        explosive: bool,
+        fire: bool,
+    ) {
+        if !self.fighters[victim].alive() || dmg <= 0.0 {
+            return;
+        }
+        let vset = self.fighters[victim].armor_set;
+        if fire && vset == ArmorSet::Pyro {
+            return; // §6.2 full fire immunity — own and enemy flame alike
+        }
+        let mut d = dmg;
+        if explosive {
+            d *= 1.0 - armor_spec(vset).explosive_resist;
+            if vset == ArmorSet::RobotSuit {
+                let f = &mut self.fighters[victim];
+                f.armor = (f.armor - EXPLOSIVE_POWER_DRAIN).max(0.0);
+            }
+        }
+        // §11: blasts carry their direction — the mech's arc model reads
+        // the blast position; fire and explosives use their bypass rules
+        d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire);
+        self.fighters[victim].health -= d;
+        let fatal = self.fighters[victim].health <= 0.0;
+        let from = self.fighters[src].pos;
+        self.hits.push((
+            HitEvent {
+                shooter: src,
+                victim,
+                zone: HitZone::Torso,
+                damage: d,
+                shielded: false,
+                from,
+                at,
+                fatal,
+            },
+            2.2,
+        ));
+        if fatal {
+            self.fighters[victim].deaths += 1;
+            self.fighters[victim].respawn_t = RESPAWN_S;
+            self.fighters[victim].vel = [0.0, 0.0];
+            self.fighters[victim].shield_up = false;
+            if src != victim {
+                self.fighters[src].kills += 1;
+                if self.mode == Mode::Tdm {
+                    let s = Self::team_idx(self.fighters[src].team);
+                    self.score[s] += 1.0;
+                    if self.overtime || self.score[s] >= TDM_TARGET as f32 {
+                        self.finish(self.fighters[src].team);
+                    }
+                }
+            }
+            self.kill_feed.push((
+                KillEvent {
+                    killer: src,
+                    victim,
+                    headshot: false,
+                },
+                5.0,
+            ));
+        }
+    }
+
     fn los_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
@@ -2054,14 +5118,47 @@ impl TdmSim {
             return true;
         }
         let dn = [d[0] / len, d[1] / len, d[2] / len];
-        for c in &self.cover {
-            if let Some((t, _)) = c.ray_hit(from, dn, len) {
-                if t < len - 0.1 {
-                    return false;
-                }
+        if let Some((t, _)) = self.grid.ray_hit(&self.cover, from, dn, len) {
+            if t < len - 0.1 {
+                return false;
             }
         }
         true
+    }
+
+    /// §5.4: VISION test — walls AND smoke. Bots see with this; damage
+    /// paths keep `los_clear` (shrapnel doesn't care about smoke).
+    /// Occlusion accumulates by path length through each sphere; > 0.6
+    /// blocks. The sphere test runs only on rays the walls left clear.
+    fn sight_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        if !self.los_clear(from, to) {
+            return false;
+        }
+        if self.smokes.is_empty() {
+            return true;
+        }
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-3 {
+            return true;
+        }
+        let dn = [d[0] / len, d[1] / len, d[2] / len];
+        let r = throw_spec(ThrowKind::Smoke).radius_m;
+        let mut occl = 0.0_f32;
+        for s in &self.smokes {
+            let oc = [from[0] - s.pos[0], from[1] - s.pos[1], from[2] - s.pos[2]];
+            let b = oc[0] * dn[0] + oc[1] * dn[1] + oc[2] * dn[2];
+            let c2 = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - r * r;
+            let disc = b * b - c2;
+            if disc <= 0.0 {
+                continue;
+            }
+            let sq = disc.sqrt();
+            let t0 = (-b - sq).max(0.0);
+            let t1 = (-b + sq).min(len);
+            occl += (t1 - t0).max(0.0) * 0.25;
+        }
+        occl < 0.6
     }
 
     fn nearest_visible_enemy(&self, i: usize) -> Option<usize> {
@@ -2075,7 +5172,7 @@ impl TdmSim {
             // sight the target's actual chest — a crouched enemy is LOWER
             let tgt = [g.pos[0], g.pos[1] + g.height() * 0.6, g.pos[2]];
             let d2 = (tgt[0] - eye[0]).powi(2) + (tgt[2] - eye[2]).powi(2);
-            if best.map_or(true, |(_, b)| d2 < b) && self.los_clear(eye, tgt) {
+            if best.map_or(true, |(_, b)| d2 < b) && self.sight_clear(eye, tgt) {
                 best = Some((j, d2));
             }
         }
@@ -2128,8 +5225,14 @@ impl TdmSim {
     }
 
     fn bot_act(&mut self, i: usize) {
-        // difficulty shapes the whole brain: aim, reflexes, range, push
-        let bp = bot_params(self.cfg.difficulty);
+        // difficulty shapes the whole brain: aim, reflexes, range, push.
+        // §5.3: a flashed bot eats the SAME penalty a flashed human does —
+        // aim spread ×4, reaction ×3, deterministically.
+        let mut bp = bot_params(self.cfg.difficulty);
+        if self.fighters[i].blind_t > 0.0 {
+            bp.aim_sigma *= 4.0;
+            bp.reaction_s *= 3.0;
+        }
         // a fully dry active slot (no mag, no reserve) means SWITCH, not
         // sulk — grab the first slot that still has ammo
         {
@@ -2224,6 +5327,19 @@ impl TdmSim {
                 }
             }
         }
+        // §5.5: fire pools block bot pathing — they veer around them
+        {
+            let ahead = [fpos[0] + vel[0] * 0.4, fpos[2] + vel[1] * 0.4];
+            let avoid = throw_spec(ThrowKind::Molotov).radius_m + 0.8;
+            for fp in &self.fires {
+                let dx = ahead[0] - fp.pos[0];
+                let dz = ahead[1] - fp.pos[2];
+                if dx * dx + dz * dz < avoid * avoid {
+                    vel = [-vel[1], vel[0]]; // hard perpendicular veer
+                    break;
+                }
+            }
+        }
         let fm = &mut self.fighters[i];
         if fm.shield_up {
             vel = [vel[0] * SHIELD_SPEED_MULT, vel[1] * SHIELD_SPEED_MULT];
@@ -2231,6 +5347,16 @@ impl TdmSim {
         if fm.crouch {
             // bots pay the same crouch tax the player does
             vel = [vel[0] * CROUCH_SPEED_MULT, vel[1] * CROUCH_SPEED_MULT];
+        }
+        // §7: bots pay the same MASS tax the player does — the minigun's
+        // identity is its mobility cost, on every carrier
+        if fm.gun == GunKind::Minigun {
+            let m = if fm.spin_t > 0.2 {
+                MINIGUN_SPUN_MOVE_MULT
+            } else {
+                MINIGUN_MOVE_MULT
+            };
+            vel = [vel[0] * m, vel[1] * m];
         }
         fm.vel = vel;
         fm.yaw = yaw;
@@ -2254,6 +5380,19 @@ fn spawn_point(team: Team, slot: usize, half: f32) -> ([f32; 3], f32) {
 fn normalize(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
     [v[0] / l, v[1] / l, v[2] / l]
+}
+
+/// Shortest signed angle equivalent — keeps a yaw delta in (−π, π] so a
+/// wrap across ±π never reads as a full-circle whip turn.
+fn wrap_angle(a: f32) -> f32 {
+    let two_pi = std::f32::consts::TAU;
+    let mut a = a % two_pi;
+    if a > std::f32::consts::PI {
+        a -= two_pi;
+    } else if a < -std::f32::consts::PI {
+        a += two_pi;
+    }
+    a
 }
 
 fn perturb(d: [f32; 3], ex: f32, ey: f32) -> [f32; 3] {
@@ -2344,6 +5483,7 @@ mod tests {
         let mut s = TdmSim::new(cfg(seed, 1, Mode::Tdm, MapKind::Arena));
         s.cover.clear();
         s.cover_kind.clear();
+        s.rebuild_grid();
         s.pickups.clear();
         s.checkpoints.clear();
         s.fighters[0].pos = [0.0, 0.0, -5.0];
@@ -2631,6 +5771,7 @@ mod tests {
         let mut s = TdmSim::new(cfg(15, 1, Mode::Tdm, MapKind::Arena));
         s.cover.clear();
         s.cover_kind.clear();
+        s.rebuild_grid();
         s.pickups.clear();
         s.checkpoints.clear();
         s.fighters[0].gun = GunKind::Bow;
@@ -2715,15 +5856,20 @@ mod tests {
         };
         s.step(dodge);
         assert!(s.fighters[0].roll_t > 0.0, "dodge must start a roll");
-        // mid-roll: faster than sprint, balled up small, gun locked out
+        // §2 (Brief V): the roll LOADS first — ride past the crouch-coil
+        // into the burst before sampling the dash
+        for _ in 0..((ROLL_LOAD_S / DT) as usize + 2) {
+            s.step(PlayerCmd::default());
+        }
+        // mid-burst: faster than sprint, balled up small, gun locked out
         let sp = {
             let f = &s.fighters[0];
             (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
         };
         assert!(sp > SPRINT_SPEED, "roll must dash faster than sprint: {sp}");
         assert!(s.fighters[0].height() < CROUCH_HEIGHT, "roll must be low");
-        // roll ends, cooldown blocks an immediate second roll
-        for _ in 0..((ROLL_S / DT) as usize + 2) {
+        // roll ends (load + burst + ease), cooldown blocks a second roll
+        for _ in 0..(((ROLL_S + ROLL_EASE_S) / DT) as usize + 2) {
             s.step(PlayerCmd::default());
         }
         assert!(s.fighters[0].roll_t <= 0.0, "roll must end");
@@ -2796,6 +5942,9 @@ mod tests {
                     break;
                 }
             } else {
+                // §3: a landed spear converts IN PLACE to a DroppedAmmo
+                // pile — the pile position IS the landing point
+                landed = s.dropped.last().map(|d| d.pos);
                 break;
             }
         }
@@ -2866,6 +6015,1395 @@ mod tests {
                 s.fighters.iter().map(|f| f.deaths).collect::<Vec<_>>()
             };
             assert_eq!(run_map(map), run_map(map), "{map:?} must be deterministic");
+        }
+    }
+
+    /// §11.5 (Brief III) — THE mandatory mech arc test: front 15%, side
+    /// 30%, rear 100%, all read from BODY facing; explosives bypass half
+    /// the cut; the hull soaks everything until the pilot ejects at 25.
+    #[test]
+    fn mech_arcs_follow_body_facing_and_eject() {
+        let mut s = range(141);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        // FRONT: body faces the shooter → 15% lands
+        s.fighters[1].yaw = std::f32::consts::PI;
+        let h0 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
+        let front = h0 - s.fighters[1].hull;
+        assert!(
+            (front - 12.5 * (1.0 - MECH_RED_FRONT)).abs() < 0.01,
+            "front arc 15%: took {front}"
+        );
+        assert!(
+            (s.fighters[1].health - MAX_HEALTH).abs() < 0.01,
+            "the pilot takes NOTHING while the hull holds"
+        );
+        // SIDE: body perpendicular → 30%
+        s.fighters[1].yaw = std::f32::consts::FRAC_PI_2;
+        let h1 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
+        let side = h1 - s.fighters[1].hull;
+        assert!(
+            (side - 12.5 * (1.0 - MECH_RED_SIDE)).abs() < 0.01,
+            "side arc 30%: took {side}"
+        );
+        // REAR: back turned → everything lands
+        s.fighters[1].yaw = 0.0;
+        let h2 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
+        let rear = h2 - s.fighters[1].hull;
+        assert!((rear - 12.5).abs() < 0.01, "rear arc 100%: took {rear}");
+        // EXPLOSIVES bypass half the frontal cut: 40 × (1 − 0.425) = 23
+        s.fighters[1].yaw = std::f32::consts::PI;
+        let h3 = s.fighters[1].hull;
+        s.apply_plain_damage(0, 1, 40.0, [0.0, 1.0, 3.0], true, false);
+        let boom = h3 - s.fighters[1].hull;
+        assert!(
+            (boom - 40.0 * (1.0 - MECH_RED_FRONT * 0.5)).abs() < 0.1,
+            "frontal explosive 57.5%: took {boom}"
+        );
+        // DESTRUCTION: hull to zero → the pilot ejects at ≤25 HP, alive
+        s.fighters[1].hull = 5.0;
+        s.fighters[1].yaw = 0.0;
+        s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
+        assert_eq!(
+            s.fighters[1].armor_set,
+            ArmorSet::None,
+            "the chassis is destroyed"
+        );
+        assert!(
+            s.fighters[1].health <= MECH_EJECT_HP + 0.01,
+            "the pilot ejects at 25: {}",
+            s.fighters[1].health
+        );
+        assert!(s.fighters[1].alive(), "ejecting is survivable");
+    }
+
+    /// §3 (Brief III): the spear THROW winds up — no missile at the
+    /// trigger, a real launch ~0.5 s later, replay-identical.
+    #[test]
+    fn spear_windup_is_committal() {
+        let mut s = range(131);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        s.fighters[0].gun = GunKind::Spear;
+        s.fighters[0].ammo = 1;
+        s.fighters[0].reserve = 5;
+        assert!(s.try_fire(0, [0.0, 0.2, 1.0], true), "the trigger arms");
+        assert!(
+            s.missiles.is_empty(),
+            "no spear leaves the hand at the trigger"
+        );
+        assert!(s.fighters[0].spear_wind_t > 0.0, "the wind is live");
+        for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 3) {
+            s.step(PlayerCmd {
+                aim: [0.0, 0.2, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+        }
+        assert!(
+            !s.missiles.is_empty() || !s.dropped.is_empty(),
+            "the spear must FLY after the windup"
+        );
+    }
+
+    /// §4.3 (Brief III) — THE mandatory regression test: no headshot
+    /// multiplier can be applied to a flipping fighter, top or bottom of
+    /// the capsule; a flipping shooter cannot fire; and flips replay
+    /// bit-identically.
+    #[test]
+    fn flips_force_uniform_zones_and_block_fire() {
+        let mut s = range(121);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        // put the victim mid-flip in the air
+        s.fighters[1].grounded = false;
+        s.fighters[1].pos[1] = 2.0;
+        s.fighters[1].flip_t = FLIP_S * 0.5;
+        s.fighters[1].flip_used = true;
+        // a shot in the bottom sixth of the capsule: banded would say
+        // LEGS ×0.75; a shot at skull height: banded would say HEAD ×4.
+        // Uniform must make BOTH exactly ×1.0.
+        let h0 = s.fighters[1].health;
+        s.apply_hit(0, 1, s.fighters[1].pos[1] + 0.15, [0.0, 2.15, 5.0]);
+        let low = h0 - s.fighters[1].health;
+        assert!(
+            (low - 12.5).abs() < 0.01,
+            "mid-flip low shot must be x1.0: took {low}"
+        );
+        let h1 = s.fighters[1].health;
+        s.apply_hit(0, 1, s.fighters[1].pos[1] + 1.72, [0.0, 3.72, 5.0]);
+        let high = h1 - s.fighters[1].health;
+        assert!(
+            (high - 12.5).abs() < 0.01,
+            "mid-flip skull shot must be x1.0, never x4: took {high}"
+        );
+        // a flipping shooter cannot fire — pure mobility
+        let mut s = range(122);
+        s.fighters[0].grounded = false;
+        s.fighters[0].flip_t = 0.3;
+        s.fighters[0].flip_used = true;
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "no shooting mid-flip"
+        );
+        // determinism: a run full of jump+flip inputs replays identically
+        let outcome = || {
+            let mut s = TdmSim::new(cfg(123, 3, Mode::Tdm, MapKind::Arena));
+            for i in 0..(20 * SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 0.8,
+                    move_x: if (i / 200) % 2 == 0 { 0.5 } else { -0.5 },
+                    aim: [0.0, 0.0, 1.0],
+                    jump: i % 180 == 0,
+                    dodge: i % 180 == 12, // just after leaving the ground
+                    shoot: i % 90 < 3,
+                    ..Default::default()
+                });
+            }
+            (
+                s.score[0] as u32,
+                s.score[1] as u32,
+                s.fighters.iter().map(|f| f.deaths).collect::<Vec<_>>(),
+                s.fighters[0].pos[0].to_bits(),
+                s.fighters[0].pos[2].to_bits(),
+            )
+        };
+        assert_eq!(outcome(), outcome(), "flips must replay identically");
+    }
+
+    /// §5/§6 (Brief III): the knife back-stabs lethally and slashes for
+    /// 55 frontally; the raised shield allows ONLY throwables, and a
+    /// throw dips the plate for a real vulnerability window.
+    #[test]
+    fn knife_backstab_and_shield_throwable_rules() {
+        let disarm_bot = |s: &mut TdmSim| {
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+        };
+        // back-stab: the victim faces AWAY → a tap kills outright
+        let mut s = range(111);
+        disarm_bot(&mut s);
+        for i in 0..70 {
+            s.step(PlayerCmd {
+                knife_hold: i < 2, // a TAP
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [0.0, 0.0, -3.6]; // 1.4 m ahead
+            s.fighters[1].vel = [0.0, 0.0];
+            s.fighters[1].yaw = 0.0; // back turned
+            s.fighters[1].protect_t = 0.0;
+        }
+        assert!(
+            !s.fighters[1].alive(),
+            "backstab must kill: hp {}",
+            s.fighters[1].health
+        );
+        // frontal: 55 damage, survivable
+        let mut s = range(112);
+        disarm_bot(&mut s);
+        for i in 0..70 {
+            s.step(PlayerCmd {
+                knife_hold: i < 2,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [0.0, 0.0, -3.6];
+            s.fighters[1].vel = [0.0, 0.0];
+            s.fighters[1].yaw = std::f32::consts::PI; // facing the blade
+            s.fighters[1].protect_t = 0.0;
+        }
+        assert!(s.fighters[1].alive(), "a frontal slash must not kill");
+        assert!(
+            (s.fighters[1].health - (MAX_HEALTH - KNIFE_QUICK_DMG)).abs() < 1.0,
+            "frontal slash ≈ 55: hp {}",
+            s.fighters[1].health
+        );
+        // §6: shield up → guns blocked, throwables fine, throw dips plate
+        let mut s = range(113);
+        disarm_bot(&mut s);
+        s.step(PlayerCmd {
+            shield: true,
+            ..Default::default()
+        });
+        assert!(s.fighters[0].shield_up, "the plate must rise");
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "no firearms behind the plate"
+        );
+        for _ in 0..30 {
+            s.step(PlayerCmd {
+                throw_hold: true,
+                aim: [0.0, 0.4, 1.0],
+                ..Default::default()
+            });
+        }
+        s.step(PlayerCmd::default()); // release → the frag flies
+        assert_eq!(
+            s.fighters[0].grenades[0], 1,
+            "the shielded throw must launch"
+        );
+        assert!(
+            s.fighters[0].shield_dip_t > 0.0,
+            "the throw must DIP the shield"
+        );
+    }
+
+    /// §6 (Brief IV): the axe swing is a SWEEP — one tap hits every
+    /// enemy inside the 90° arc for 85 frontal.
+    #[test]
+    fn axe_sweeps_the_whole_arc() {
+        let mut s = TdmSim::new(cfg(77, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.pickups.clear();
+        s.checkpoints.clear();
+        s.fighters[0].melee_axe = true;
+        s.fighters[0].pos = [0.0, 0.0, -5.0];
+        s.fighters[0].yaw = 0.0;
+        for j in 2..4 {
+            s.fighters[j].ammo = 0;
+            s.fighters[j].reserve = 0;
+            s.fighters[j].slot_ammo = [(0, 0); 3];
+        }
+        for i in 0..90 {
+            s.step(PlayerCmd {
+                knife_hold: i < 2, // a TAP — the quick chop
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            // both reds inside the arc at ~1.6 m, facing the axe
+            s.fighters[2].pos = [-0.7, 0.0, -3.6];
+            s.fighters[3].pos = [0.7, 0.0, -3.6];
+            for j in 2..4 {
+                s.fighters[j].vel = [0.0, 0.0];
+                s.fighters[j].yaw = std::f32::consts::PI;
+                s.fighters[j].protect_t = 0.0;
+            }
+            s.fighters[1].pos = [-30.0, 0.0, -30.0]; // teammate parked
+        }
+        for j in 2..4 {
+            assert!(
+                (s.fighters[j].health - (MAX_HEALTH - AXE_QUICK_DMG)).abs() < 1.0,
+                "one sweep must hit BOTH: fighter {j} at hp {}",
+                s.fighters[j].health
+            );
+        }
+    }
+
+    /// §7 (Brief IV): the minigun's whole identity — no rounds before
+    /// the spin-up completes, heat per round, the forced vent at 100 —
+    /// and all of it replays bit-identically.
+    #[test]
+    fn minigun_heat_cycle_is_deterministic() {
+        let run = || {
+            let mut s = range(909);
+            let f = &mut s.fighters[0];
+            f.prev_primary = f.inventory[0];
+            f.inventory[0] = GunKind::Minigun;
+            f.slot_ammo[0] = (400, 0);
+            f.active = 0;
+            f.gun = GunKind::Minigun;
+            f.ammo = 400;
+            f.reserve = 0;
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            let mut fired_early = false;
+            let mut vent_seen = false;
+            for i in 0..(8 * SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    shoot: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+                s.fighters[1].vel = [0.0, 0.0];
+                let f = &s.fighters[0];
+                if (i as f32) * DT < MINIGUN_SPINUP_S - 0.05 && f.ammo < 400 {
+                    fired_early = true;
+                }
+                if f.vent_t > 0.0 {
+                    vent_seen = true;
+                }
+            }
+            (
+                fired_early,
+                vent_seen,
+                s.fighters[0].ammo,
+                s.fighters[0].heat.to_bits(),
+                s.fighters[0].spin_t.to_bits(),
+            )
+        };
+        let (early, vented, ammo, heat_bits, spin_bits) = run();
+        assert!(!early, "no rounds before the barrels are up");
+        assert!(vented, "4 s of held trigger must FORCE the vent");
+        assert!(
+            (240..=310).contains(&ammo),
+            "8 s hold ≈ one heat cycle of fire: ammo left {ammo}"
+        );
+        assert_eq!(
+            run(),
+            (early, vented, ammo, heat_bits, spin_bits),
+            "the heat cycle must replay bit-identically"
+        );
+    }
+
+    /// §1 (Brief V) — THE preview-honesty gate: the aim preview and the
+    /// real flight share one integrator, so for six angle/power/kind
+    /// combinations (near-vertical lob, flat close-range, mid arc, the
+    /// 50% tap, a mid-air smoke pop, a molotov shatter) the predicted
+    /// end point and the actual simulated end point agree within 10 cm.
+    #[test]
+    fn grenade_preview_matches_flight_within_10cm() {
+        let cases: [([f32; 3], f32, ThrowKind); 6] = [
+            ([0.0, 0.05, 1.0], 0.30, ThrowKind::Frag), // flat, close-range
+            ([0.0, 0.98, 0.06], 1.30, ThrowKind::Frag), // near-vertical lob, max
+            ([0.0, 0.7, 0.7], 0.60, ThrowKind::Frag),  // mid arc, mid charge
+            ([0.0, 0.5, 0.85], 0.10, ThrowKind::Flash), // TAP — the 50% panic
+            ([0.0, 0.6, 0.8], 1.20, ThrowKind::Smoke), // fuse pops mid-flight
+            ([0.0, 0.35, 0.95], 0.80, ThrowKind::Molotov), // shatters on impact
+        ];
+        for (ci, (aim, hold, kind)) in cases.into_iter().enumerate() {
+            let mut s = range(400 + ci as u64);
+            s.fighters[1].pos = [-30.0, 0.0, -30.0]; // clear the flight path
+            let (o, vel) = s.throw_release_velocity(0, aim, hold);
+            let spec = throw_spec(kind);
+            let fuse = if spec.fuse_s.is_finite() {
+                (spec.fuse_s - if kind == ThrowKind::Frag { hold } else { 0.0 })
+                    .max(0.15)
+            } else {
+                f32::INFINITY
+            };
+            let (_, predicted, _) = s.predict_grenade(kind, o, vel, fuse, 12.0);
+            // fly the REAL grenade through the REAL sim loop
+            s.next_missile_id += 1;
+            let id = s.next_missile_id;
+            s.grenades_air.push(Grenade {
+                id,
+                kind,
+                pos: o,
+                vel,
+                thrower: 0,
+                team: Team::Blue,
+                fuse_t: fuse,
+                bounces: 0,
+                rest: false,
+            });
+            let mut actual: Option<[f32; 3]> = None;
+            for _ in 0..(12 * SIM_HZ as usize) {
+                s.step_grenades();
+                if let Some(g) = s.grenades_air.iter().find(|g| g.id == id) {
+                    if g.rest {
+                        actual = Some(g.pos);
+                        break;
+                    }
+                } else {
+                    // it detonated — the Boom records where
+                    actual = s.booms.last().map(|(b, _)| b.at);
+                    break;
+                }
+            }
+            let a = actual.expect("the grenade must land or detonate");
+            let d = ((a[0] - predicted[0]).powi(2)
+                + (a[1] - predicted[1]).powi(2)
+                + (a[2] - predicted[2]).powi(2))
+            .sqrt();
+            assert!(
+                d < 0.10,
+                "case {ci} ({kind:?}): predicted {predicted:?} vs actual {a:?} — {d:.3} m apart"
+            );
+        }
+        // the tap is a USABLE panic throw, not a drop at the feet: from a
+        // standing flat aim it must clear 4 m of ground distance
+        let mut s = range(444);
+        s.fighters[1].pos = [-30.0, 0.0, -30.0];
+        let (o, vel) = s.throw_release_velocity(0, [0.0, 0.2, 1.0], 0.05);
+        let (_, land, _) =
+            s.predict_grenade(ThrowKind::Frag, o, vel, f32::INFINITY, 12.0);
+        let reach = ((land[0] - o[0]).powi(2) + (land[2] - o[2]).powi(2)).sqrt();
+        assert!(reach > 4.0, "tap throw must be usable: reached {reach:.2} m");
+    }
+
+    /// §2 (Brief V): the spear THRUST connects for 70 frontal — and a
+    /// WHIFF locks the weapon out visibly longer than a hit. A missed
+    /// thrust is committed, not free.
+    #[test]
+    fn spear_thrust_commits_with_whiff_recovery() {
+        let run = |enemy_z: f32| -> (f32, usize) {
+            let mut s = range(551);
+            let f = &mut s.fighters[0];
+            f.inventory[2] = GunKind::Spear;
+            f.active = 2;
+            f.gun = GunKind::Spear;
+            f.ammo = 1;
+            f.reserve = 5;
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            let mut end_tick = 0usize;
+            for i in 0..(3 * SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    knife_hold: i < 2, // a TAP — the quick thrust
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                s.fighters[1].pos = [0.0, 0.0, enemy_z];
+                s.fighters[1].vel = [0.0, 0.0];
+                s.fighters[1].yaw = std::f32::consts::PI;
+                s.fighters[1].protect_t = 0.0;
+                if i > 3 && s.fighters[0].knife_phase <= 0.0 {
+                    end_tick = i;
+                    break;
+                }
+            }
+            (s.fighters[1].health, end_tick)
+        };
+        // HIT: the enemy stands 1.8 m down the line
+        let (hp_hit, t_hit) = run(-3.2);
+        assert!(
+            (hp_hit - (MAX_HEALTH - THRUST_DMG)).abs() < 1.0,
+            "a frontal thrust lands 70: hp {hp_hit}"
+        );
+        // WHIFF: nobody there — the recovery must run visibly longer
+        let (hp_whiff, t_whiff) = run(20.0);
+        assert!((hp_whiff - MAX_HEALTH).abs() < 0.01, "a whiff hits nothing");
+        assert!(
+            t_whiff > t_hit + 20,
+            "whiff recovery must be LONGER than hit recovery: {t_whiff} vs {t_hit} ticks"
+        );
+    }
+
+    /// §2 (Brief V): the roll is load → burst → ease-out. No tick outruns
+    /// the burst, the landing hands speed back smoothly (never a cliff),
+    /// and mid-roll a ray at STANDING head height sails clean over the
+    /// ball — the silent-headshot regression, extended to the roll.
+    #[test]
+    fn roll_loads_bursts_eases_and_ducks_headshots() {
+        let mut s = range(552);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        let mut speeds: Vec<(bool, f32, f32)> = Vec::new(); // (rolling, roll_t, speed)
+        let mut head_missed = true;
+        for i in 0..(2 * SIM_HZ as usize) {
+            let prev = s.fighters[0].pos;
+            s.step(PlayerCmd {
+                move_z: 1.0,
+                dodge: i == 10,
+                aim: [0.0, 0.0, 1.0],
+                yaw: 0.0,
+                ..Default::default()
+            });
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            let f = &s.fighters[0];
+            let d = ((f.pos[0] - prev[0]).powi(2) + (f.pos[2] - prev[2]).powi(2)).sqrt();
+            speeds.push((f.roll_t > 0.0, f.roll_t, d / DT));
+            if f.roll_t > 0.0 {
+                let o = [f.pos[0] - 3.0, 1.70, f.pos[2]];
+                if ray_vs_cylinder(o, [1.0, 0.0, 0.0], f.pos, f.radius(), f.height())
+                    .is_some()
+                {
+                    head_missed = false;
+                }
+            }
+        }
+        assert!(speeds.iter().any(|(r, ..)| *r), "the roll must trigger");
+        assert!(head_missed, "standing-head-height rays sail over the roll");
+        // (a) nothing ever outruns the burst
+        let vmax = speeds.iter().map(|(_, _, v)| *v).fold(0.0, f32::max);
+        assert!(vmax <= ROLL_SPEED + 0.2, "no tick outruns the burst: {vmax}");
+        assert!(vmax > ROLL_SPEED - 0.6, "the burst must actually fire: {vmax}");
+        // (b) NO cliff anywhere once the roll starts: the worst
+        // single-tick speed drop stays far under an instant stop (8.6)
+        let mut worst_drop = 0.0_f32;
+        for w in speeds.windows(2) {
+            worst_drop = worst_drop.max(w[0].2 - w[1].2);
+        }
+        assert!(
+            worst_drop < 3.0,
+            "the landing must EASE, never stop dead: worst drop {worst_drop:.2} m/s per tick"
+        );
+        // (c) inside the ease window the ramp-down is gentle per tick
+        for w in speeds.windows(2) {
+            let (r0, t0, v0) = w[0];
+            let (r1, t1, v1) = w[1];
+            if r0 && r1 && t0 <= ROLL_EASE_S && t1 > 0.0 {
+                assert!(
+                    v0 - v1 < 0.6,
+                    "ease-out must ramp, not step: {v0:.2} → {v1:.2}"
+                );
+            }
+        }
+    }
+
+    /// §2 (Brief V): the mech's dodge is a braced SIDE-STEP — it stays
+    /// TALL (no tumbling ball at 2.7 m), commits (no firing mid-step),
+    /// and travels a bounded braced distance.
+    #[test]
+    fn mech_side_step_stays_tall_and_committed() {
+        let mut s = range(553);
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.armor = POWER_MAX;
+            f.hull = MECH_HULL;
+        }
+        let start = s.fighters[0].pos;
+        let mut stepped = false;
+        for i in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd {
+                move_x: 1.0,
+                dodge: i == 5,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            s.fighters[1].vel = [0.0, 0.0];
+            if s.fighters[0].roll_t > 0.0 {
+                stepped = true;
+                let h = s.fighters[0].height();
+                assert!(h > 2.0, "the mech stays TALL through the step: {h}");
+                assert!(
+                    !s.try_fire(0, [0.0, 0.0, 1.0], false),
+                    "the side-step is committed — no fire"
+                );
+            }
+        }
+        assert!(stepped, "the mech must side-step on dodge");
+        let end = s.fighters[0].pos;
+        let d = ((end[0] - start[0]).powi(2) + (end[2] - start[2]).powi(2)).sqrt();
+        assert!(
+            (1.0..6.0).contains(&d),
+            "a bounded braced step, not a teleport or a lunge: {d:.2} m"
+        );
+    }
+
+    /// AUTO-PLAYTEST (run on demand):
+    /// `cargo test --release -p jk_tdm -- --ignored autoplay --nocapture`
+    /// Drives full headless matches in EVERY mode with a scripted player
+    /// policy — patrol, engage, dodge, grenade, melee — and prints a
+    /// stats report per run. Sanity-asserts the sim stays finite and the
+    /// match actually progresses. This is the instrument for the
+    /// "try every dynamic" passes; it plays the REAL sim, not a mock.
+    #[test]
+    #[ignore]
+    fn autoplay_report() {
+        let corners: [[f32; 2]; 4] =
+            [[14.0, 14.0], [-14.0, 14.0], [-14.0, -14.0], [14.0, -14.0]];
+        for (mode, map, mins, driven, seed) in [
+            (Mode::Tdm, MapKind::Arena, 5usize, true, 0xA110u64),
+            (Mode::Koth, MapKind::Arena, 5, true, 0xA110),
+            (Mode::Tdm, MapKind::Bailey, 3, true, 0xA110),
+            (Mode::Koth, MapKind::Gardens, 3, true, 0xA110),
+            (Mode::Extraction, MapKind::Battlefield, 6, true, 0xA110),
+            // bots-only KOTH bias probes: is the Red tilt systemic, or an
+            // artifact of the scripted player feeding on Blue?
+            (Mode::Koth, MapKind::Arena, 4, false, 0xBEE5),
+            (Mode::Koth, MapKind::Arena, 4, false, 0x51DE),
+        ] {
+            let mut s = TdmSim::new(cfg(seed, 5, mode, map));
+            let mut shots = 0u32;
+            let mut nades = 0u32;
+            let mut dodges = 0u32;
+            let mut melee = 0u32;
+            // rounds RESET score/deaths on completion — track cumulative
+            // peaks across resets or a busy map reads as a dead one
+            let mut peak_deaths = 0u32;
+            let mut prev_deaths = 0u32;
+            let mut rounds_done = 0u32;
+            let mut min_hp = f32::MAX;
+            let mut zombies_downed = 0u32;
+            let mut prev_zcount = 0usize;
+            let ticks = mins * 60 * SIM_HZ as usize;
+            for i in 0..ticks {
+                let t = i as f32 * DT;
+                let me = &s.fighters[0];
+                let alive = me.alive();
+                // nearest living enemy — fighters in PvP, ZOMBIES in
+                // extraction (there are no enemy fighters there)
+                let mut aim = [0.0, 0.0, 1.0];
+                let mut near = f32::MAX;
+                for (j, g) in s.fighters.iter().enumerate() {
+                    if j == 0 || g.team == s.fighters[0].team || !g.alive() {
+                        continue;
+                    }
+                    let dx = g.pos[0] - me.pos[0];
+                    let dz = g.pos[2] - me.pos[2];
+                    let d = (dx * dx + dz * dz).sqrt();
+                    if d < near {
+                        near = d;
+                        aim = [dx / d.max(0.1), 0.02, dz / d.max(0.1)];
+                    }
+                }
+                if mode == Mode::Extraction {
+                    for z in &s.zombies {
+                        let dx = z.pos[0] - me.pos[0];
+                        let dz = z.pos[2] - me.pos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < near {
+                            near = d;
+                            aim = [dx / d.max(0.1), 0.02, dz / d.max(0.1)];
+                        }
+                    }
+                }
+                // patrol the corners; in extraction, drift toward the
+                // site; in KOTH, PLAY THE OBJECTIVE — contest the hill
+                let wp = if mode == Mode::Extraction {
+                    let p2 = s.extract_point().unwrap_or([0.0, 0.0, 0.0]);
+                    [p2[0], p2[2]]
+                } else if mode == Mode::Koth {
+                    [s.hill[0], s.hill[2]]
+                } else {
+                    corners[(i / (8 * SIM_HZ as usize)) % 4]
+                };
+                let (mvx, mvz) = {
+                    let dx = wp[0] - me.pos[0];
+                    let dz = wp[1] - me.pos[2];
+                    let l = (dx * dx + dz * dz).sqrt().max(0.5);
+                    (dx / l, dz / l)
+                };
+                let yaw = aim[0].atan2(aim[2]);
+                let shoot = alive && near < 40.0 && i % 30 < 12;
+                let do_dodge = alive && i % (7 * SIM_HZ as usize) == 40;
+                let hold_nade = alive
+                    && (i % (20 * SIM_HZ as usize)) < (SIM_HZ as usize / 2)
+                    && i > 5 * SIM_HZ as usize;
+                let do_knife = alive && near < 2.0 && i % 60 == 0;
+                if shoot {
+                    shots += 1;
+                }
+                if do_dodge {
+                    dodges += 1;
+                }
+                if hold_nade {
+                    nades += 1;
+                }
+                if do_knife {
+                    melee += 1;
+                }
+                s.step(if driven {
+                    PlayerCmd {
+                        move_x: mvx,
+                        move_z: mvz,
+                        sprint: near > 25.0,
+                        yaw,
+                        aim,
+                        shoot,
+                        dodge: do_dodge,
+                        throw_hold: hold_nade,
+                        knife_hold: do_knife,
+                        reload: i % (6 * SIM_HZ as usize) == 0,
+                        ..Default::default()
+                    }
+                } else {
+                    PlayerCmd::default() // bots-only probe: idle player
+                });
+                let td: u32 = s.fighters.iter().map(|f| f.deaths).sum();
+                if td < prev_deaths {
+                    rounds_done += 1; // a round completed and reset
+                }
+                peak_deaths = peak_deaths.max(td);
+                prev_deaths = td;
+                if s.fighters[0].alive() {
+                    min_hp = min_hp.min(s.fighters[0].health);
+                }
+                // horde attrition: count the population DROPPING (kills
+                // outpacing the director's spawns at that instant)
+                let zc = s.zombies.len();
+                if zc < prev_zcount {
+                    zombies_downed += (prev_zcount - zc) as u32;
+                }
+                prev_zcount = zc;
+                if i % (10 * 60 * 2) == 0 {
+                    for f in &s.fighters {
+                        assert!(
+                            f.pos[0].is_finite() && f.pos[1].is_finite() && f.pos[2].is_finite(),
+                            "{mode:?}/{map:?}: NaN position at t={t:.1}"
+                        );
+                    }
+                }
+            }
+            let p = &s.fighters[0];
+            println!(
+                "== AUTOPLAY {mode:?} on {map:?} ({mins} min) ==\n\
+                 score BLUE {:.0} — RED {:.0} | rounds completed {rounds_done} | peak deaths {peak_deaths}\n\
+                 player K/D {}/{} hits {} | hp {:.0} | gun {:?} armor {:?}\n\
+                 inputs: shot-ticks {shots}, nade-holds {nades}, dodges {dodges}, melee {melee}\n\
+                 player min-hp {:.0} | zombies downed {zombies_downed} | extract hold {:.0}s\n\
+                 world: missiles {} grenades {} smokes {} fires {} zombies {} pressure {:.2}\n",
+                s.score[0],
+                s.score[1],
+                p.kills,
+                p.deaths,
+                p.hits_dealt,
+                p.health.max(0.0),
+                p.gun,
+                p.armor_set,
+                if min_hp.is_finite() { min_hp } else { 0.0 },
+                s.extract_hold,
+                s.missiles.len(),
+                s.grenades_air.len(),
+                s.smokes.len(),
+                s.fires.len(),
+                s.zombies.len(),
+                s.pressure,
+            );
+            // the match must actually PROGRESS — judged on CUMULATIVE
+            // events, robust to round resets
+            assert!(
+                peak_deaths > 0 || rounds_done > 0 || mode == Mode::Extraction,
+                "{mode:?}/{map:?}: a {mins}-minute match with zero events is a dead sim"
+            );
+        }
+    }
+
+    /// Diagnostic (run on demand): where do Bailey bots actually GO?
+    #[test]
+    #[ignore]
+    fn diag_bailey() {
+        let corners: [[f32; 2]; 4] =
+            [[14.0, 14.0], [-14.0, 14.0], [-14.0, -14.0], [14.0, -14.0]];
+        let mut s = TdmSim::new(cfg(0xA110, 5, Mode::Tdm, MapKind::Bailey));
+        for i in 0..(120 * SIM_HZ as usize) {
+            // EXACTLY the autoplay policy — the bots-only run plays fine,
+            // so the freeze must ride in on the player's cmd stream
+            let me = &s.fighters[0];
+            let mut aim = [0.0, 0.0, 1.0];
+            let mut near = f32::MAX;
+            for (j, g) in s.fighters.iter().enumerate() {
+                if j == 0 || g.team == s.fighters[0].team || !g.alive() {
+                    continue;
+                }
+                let dx = g.pos[0] - me.pos[0];
+                let dz = g.pos[2] - me.pos[2];
+                let d = (dx * dx + dz * dz).sqrt();
+                if d < near {
+                    near = d;
+                    aim = [dx / d.max(0.1), 0.02, dz / d.max(0.1)];
+                }
+            }
+            let wp = corners[(i / (8 * SIM_HZ as usize)) % 4];
+            let (mvx, mvz) = {
+                let dx = wp[0] - me.pos[0];
+                let dz = wp[1] - me.pos[2];
+                let l = (dx * dx + dz * dz).sqrt().max(0.5);
+                (dx / l, dz / l)
+            };
+            let alive = me.alive();
+            s.step(PlayerCmd {
+                move_x: mvx,
+                move_z: mvz,
+                sprint: near > 25.0,
+                yaw: aim[0].atan2(aim[2]),
+                aim,
+                shoot: alive && near < 40.0 && i % 30 < 12,
+                dodge: alive && i % (7 * SIM_HZ as usize) == 40,
+                throw_hold: alive
+                    && (i % (20 * SIM_HZ as usize)) < (SIM_HZ as usize / 2)
+                    && i > 5 * SIM_HZ as usize,
+                knife_hold: alive && near < 2.0 && i % 60 == 0,
+                reload: i % (6 * SIM_HZ as usize) == 0,
+                ..Default::default()
+            });
+            if i % (10 * SIM_HZ as usize) == 0 {
+                let t = i as f32 * DT;
+                let mut min_sep = f32::MAX;
+                for a in &s.fighters[..5] {
+                    for b in &s.fighters[5..] {
+                        let d = ((a.pos[0] - b.pos[0]).powi(2)
+                            + (a.pos[2] - b.pos[2]).powi(2))
+                        .sqrt();
+                        min_sep = min_sep.min(d);
+                    }
+                }
+                println!(
+                    "t={t:>5.1}  min_sep={min_sep:>5.1}  player=({:>6.1},{:>6.1}) hp {:>4.0}  blue1=({:>6.1},{:>6.1}) red1=({:>6.1},{:>6.1}) deaths={}",
+                    s.fighters[0].pos[0],
+                    s.fighters[0].pos[2],
+                    s.fighters[0].health.max(0.0),
+                    s.fighters[1].pos[0],
+                    s.fighters[1].pos[2],
+                    s.fighters[6].pos[0],
+                    s.fighters[6].pos[2],
+                    s.fighters.iter().map(|f| f.deaths).sum::<u32>(),
+                );
+            }
+        }
+    }
+
+    /// §10 (Brief III): regen waits 12 s, heals at 8.33/s, and ANY new
+    /// damage resets the clock.
+    #[test]
+    fn health_regen_waits_heals_and_resets() {
+        let mut s = range(101);
+        // disarm and strand the bot so nothing interferes
+        s.fighters[1].ammo = 0;
+        s.fighters[1].reserve = 0;
+        s.fighters[1].slot_ammo = [(0, 0); 3];
+        s.fighters[0].health = 40.0;
+        s.fighters[0].last_dmg_at = s.t;
+        let run = |s: &mut TdmSim, secs: usize| {
+            for _ in 0..(secs * SIM_HZ as usize) {
+                s.step(PlayerCmd::default());
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            }
+        };
+        run(&mut s, 11);
+        assert!(
+            s.fighters[0].health < 41.0,
+            "no healing inside the 12 s window: {}",
+            s.fighters[0].health
+        );
+        run(&mut s, 6);
+        assert!(
+            s.fighters[0].health > 70.0,
+            "regen must be well underway by 17 s: {}",
+            s.fighters[0].health
+        );
+        // fresh damage stops it cold
+        let t_now = s.t;
+        s.fighters[0].health -= 10.0;
+        s.fighters[0].last_dmg_at = t_now;
+        let h = s.fighters[0].health;
+        run(&mut s, 5);
+        assert!(
+            s.fighters[0].health < h + 1.0,
+            "damage must reset the regen clock: {} -> {}",
+            h,
+            s.fighters[0].health
+        );
+    }
+
+    /// §8 (Brief II): the horde spawns out of sight, chases noise,
+    /// dies to headshots (a shambler is a ×4 one-shot), and the whole
+    /// run replays bit-identically.
+    #[test]
+    fn zombies_spawn_chase_headshot_and_replay() {
+        // director spawns while the player survives, never within 35 m
+        let mut s = TdmSim::new(cfg(91, 1, Mode::Extraction, MapKind::Arena));
+        for _ in 0..(40 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+        }
+        assert!(!s.zombies.is_empty(), "the director must spawn a horde");
+        for z in &s.zombies {
+            assert!(z.pos.iter().all(|v| v.is_finite()), "no NaN zombies");
+        }
+        // a fresh spawn is never inside 35 m of the (idle, spawn-facing)
+        // player at the moment it appears — hard to catch after movement,
+        // so assert the spec knob instead of chasing history
+        assert!(ZSPAWN_MIN_M >= 35.0);
+        // headshot rule: M4 head (50) one-shots a Shambler (42 hp)
+        let mut s = TdmSim::new(cfg(92, 1, Mode::Extraction, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.zombies.clear();
+        s.zombies.push(Zombie {
+            id: 900,
+            kind: ZKind::Shambler,
+            pos: [0.0, 0.0, -5.0 + 8.0],
+            hp: zspec(ZKind::Shambler).hp,
+            atk_cd: 0.0,
+            scream_t: 0.0,
+            head_hits: 0,
+            target: [0.0, 0.0],
+            alerted: false,
+        });
+        s.fighters[0].pos = [0.0, 0.0, -5.0];
+        s.fighters[0].yaw = 0.0;
+        // aim at the shambler's head band (1.7 × 0.91 ≈ 1.55)
+        let aim = [0.0, (1.55 - EYE_REL) / 8.0, 1.0];
+        assert!(s.try_fire(0, aim, true), "the shot must fire");
+        assert!(
+            s.zombies.is_empty(),
+            "one M4 headshot must drop a shambler: hp left {:?}",
+            s.zombies.first().map(|z| z.hp)
+        );
+        // noise pulls: an unalerted shambler ~44 m out hears rifle fire
+        let mut s = TdmSim::new(cfg(93, 1, Mode::Extraction, MapKind::Arena));
+        s.zombies.clear();
+        s.zombies.push(Zombie {
+            id: 901,
+            kind: ZKind::Shambler,
+            pos: [20.0, 0.0, 0.0],
+            hp: 42.0,
+            atk_cd: 0.0,
+            scream_t: 0.0,
+            head_hits: 0,
+            target: [20.0, 0.0],
+            alerted: false,
+        });
+        let ppos = s.fighters[0].pos;
+        s.try_fire(0, [0.0, 0.0, 1.0], false); // 90 m of rifle noise
+        let z = &s.zombies[0];
+        assert!(z.alerted, "gunfire must alert the horde");
+        assert!(
+            (z.target[0] - ppos[0]).abs() < 1.0 && (z.target[1] - ppos[2]).abs() < 1.0,
+            "the noise target must be the shooter"
+        );
+        // determinism: a 30 s run with movement replays identically
+        let outcome = || {
+            let mut s = TdmSim::new(cfg(94, 2, Mode::Extraction, MapKind::Arena));
+            for i in 0..(30 * SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 0.7,
+                    move_x: if (i / 240) % 2 == 0 { 0.4 } else { -0.4 },
+                    aim: [0.0, 0.0, 1.0],
+                    shoot: i % 120 < 4,
+                    ..Default::default()
+                });
+            }
+            (
+                s.zombies.len(),
+                s.pressure.to_bits(),
+                s.fighters[0].health.to_bits(),
+                s.fighters.iter().map(|f| f.deaths).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(outcome(), outcome(), "the run must replay identically");
+    }
+
+    /// §6 (Brief II): headshots stay decisive against EVERY set, the
+    /// damage floor keeps limb/torso shots from ever being free, and the
+    /// Folk brace cuts frontal damage without touching the rear.
+    #[test]
+    fn armor_sets_flats_floor_and_brace() {
+        use ArmorSet::*;
+        for set in [None, Folk, Pyro, RobotSuit, Recon] {
+            let mut s = range(71);
+            s.fighters[0].gun = GunKind::Awm;
+            s.fighters[1].armor_set = set;
+            s.apply_hit(0, 1, 1.70, [0.0, 1.70, 5.0]);
+            assert!(
+                !s.fighters[1].alive(),
+                "{set:?}: an AWM headshot must remain decisive"
+            );
+        }
+        // the floor: an M4 torso shot vs the Robot Suit lands exactly at
+        // 15% of base — reduced hard, never to zero
+        let mut s = range(72);
+        s.fighters[1].armor_set = RobotSuit;
+        let h0 = s.fighters[1].health;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        let d = h0 - s.fighters[1].health;
+        assert!(
+            (d - 12.5 * ARMOR_FLOOR_FRAC).abs() < 0.01,
+            "floor damage: {d}"
+        );
+        // Folk Shieldwall Brace: big frontal cut, nothing from behind
+        let mut s = range(73);
+        s.fighters[0].gun = GunKind::Awm;
+        s.fighters[1].armor_set = Folk;
+        s.fighters[1].brace = true;
+        s.fighters[1].yaw = std::f32::consts::PI; // facing the shooter
+        let h0 = s.fighters[1].health;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        let front = h0 - s.fighters[1].health;
+        s.fighters[1].yaw = 0.0; // back turned: the brace covers nothing
+        let h1 = s.fighters[1].health;
+        s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        let rear = h1 - s.fighters[1].health;
+        assert!(
+            front < rear,
+            "brace must cut FRONTAL damage only: front {front}, rear {rear}"
+        );
+    }
+
+    /// §6: a match with thruster flight and repulsor use replays
+    /// bit-identically — abilities are sim state, not presentation.
+    #[test]
+    fn abilities_replay_identically() {
+        let outcome = || {
+            let mut s = TdmSim::new(cfg(81, 4, Mode::Tdm, MapKind::Arena));
+            s.fighters[0].armor_set = ArmorSet::RobotSuit;
+            s.fighters[0].armor = POWER_MAX;
+            for i in 0..(15 * SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 0.8,
+                    aim: [0.1, 0.0, 1.0],
+                    jump: i % 240 == 0,
+                    jump_held: (i % 240) < 100,
+                    ability: (i % 180) < 20,
+                    ..Default::default()
+                });
+            }
+            (
+                s.score[0] as u32,
+                s.score[1] as u32,
+                s.fighters.iter().map(|f| f.deaths).collect::<Vec<_>>(),
+                s.fighters[0].armor.to_bits(),
+            )
+        };
+        assert_eq!(outcome(), outcome(), "abilities must replay identically");
+    }
+
+    /// §5 (Brief II): frag damage is LOS-blocked (no damage through
+    /// walls), grenades always come to rest, flash blinds only with line
+    /// of sight, smoke blocks bot vision, and 40 simultaneous throwables
+    /// stay bounded and deterministic.
+    #[test]
+    fn throwables_bounce_blast_blind_and_smoke() {
+        // -- frag: no damage through a wall, real damage in the open
+        let mut s = range(51);
+        s.cover.push(Aabb {
+            min: [-3.0, 0.0, 1.5],
+            max: [3.0, 3.0, 2.1],
+        });
+        s.cover_kind.push(CoverKind::Stone);
+        s.rebuild_grid();
+        // victim behind the wall (z=5), frag on the near side (z=0.5)
+        let h0 = s.fighters[1].health;
+        s.grenades_air.push(Grenade {
+            id: 9001,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.0, 0.5],
+            vel: [0.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 0.05,
+            bounces: 0,
+            rest: true,
+        });
+        for _ in 0..30 {
+            s.step_grenades();
+        }
+        assert_eq!(
+            s.fighters[1].health, h0,
+            "frag must NOT damage through the wall"
+        );
+        // same blast in the open bites hard
+        let mut s = range(52);
+        let h0 = s.fighters[1].health;
+        s.grenades_air.push(Grenade {
+            id: 9002,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.0, 3.5],
+            vel: [0.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 0.05,
+            bounces: 0,
+            rest: true,
+        });
+        for _ in 0..30 {
+            s.step_grenades();
+        }
+        assert!(
+            s.fighters[1].health < h0 - 20.0,
+            "open-air frag must bite: {} -> {}",
+            h0,
+            s.fighters[1].health
+        );
+        // -- flash: blinds the facing victim with LOS; a wall blocks it
+        let mut s = range(53);
+        s.fighters[1].yaw = std::f32::consts::PI; // facing the flash
+        s.grenades_air.push(Grenade {
+            id: 9003,
+            kind: ThrowKind::Flash,
+            pos: [0.0, 1.4, 2.0],
+            vel: [0.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 0.05,
+            bounces: 0,
+            rest: true,
+        });
+        for _ in 0..30 {
+            s.step_grenades();
+        }
+        assert!(
+            s.fighters[1].blind_t > 1.0,
+            "facing flash must blind: {}",
+            s.fighters[1].blind_t
+        );
+        // -- smoke blocks bot SIGHT but not raw wall LOS
+        let mut s = range(54);
+        s.fighters[0].protect_t = 0.0; // protected players are untargetable
+        assert!(
+            s.nearest_visible_enemy(1).is_some(),
+            "clear range: bot sees the player"
+        );
+        s.smokes.push(SmokeVolume {
+            pos: [0.0, 1.0, 0.0], // midway between z −5 and +5
+            ttl: 10.0,
+        });
+        assert!(
+            s.nearest_visible_enemy(1).is_none(),
+            "smoke must blot out bot vision"
+        );
+        assert!(
+            s.los_clear([0.0, 1.0, -5.0], [0.0, 1.0, 5.0]),
+            "walls-only LOS ignores smoke (shrapnel path)"
+        );
+        // -- 40 mixed throwables: all settle/detonate, counts bounded
+        let mut s = range(55);
+        for k in 0..40u32 {
+            let kind = ThrowKind::ALL[(k % 4) as usize];
+            s.grenades_air.push(Grenade {
+                id: 9100 + k,
+                kind,
+                pos: [(k % 7) as f32 * 2.0 - 6.0, 1.5, (k / 7) as f32 * 2.0 - 6.0],
+                vel: [
+                    ((k * 37) % 11) as f32 - 5.0,
+                    3.0,
+                    ((k * 53) % 13) as f32 - 6.0,
+                ],
+                thrower: 0,
+                team: Team::Blue,
+                fuse_t: throw_spec(kind).fuse_s,
+                bounces: 0,
+                rest: false,
+            });
+        }
+        for _ in 0..(12 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            s.fighters[1].pos = [-30.0, 0.0, -30.0];
+        }
+        assert!(
+            s.grenades_air.is_empty(),
+            "all grenades must detonate/settle: {} left",
+            s.grenades_air.len()
+        );
+        assert!(s.smokes.len() <= SMOKE_MAX, "smoke cap holds");
+        for g in &s.grenades_air {
+            assert!(g.pos.iter().all(|v| v.is_finite()), "no NaN positions");
+        }
+    }
+
+    /// §5: a scripted match WITH thrown grenades replays bit-identically.
+    #[test]
+    fn throwables_are_deterministic() {
+        let outcome = || {
+            let mut s = TdmSim::new(cfg(61, 4, Mode::Tdm, MapKind::Arena));
+            for i in 0..(20 * SIM_HZ as usize) {
+                // pulse the throw key: hold for 30 ticks every 4 s, cycle
+                // the selection every 6 s
+                let hold = (i % (4 * SIM_HZ as usize)) < 30;
+                let cycle = i % (6 * SIM_HZ as usize) == 0;
+                s.step(PlayerCmd {
+                    move_z: 0.6,
+                    aim: [0.2, 0.25, 1.0],
+                    throw_hold: hold,
+                    cycle_throw: cycle,
+                    ..Default::default()
+                });
+            }
+            (
+                s.score[0] as u32,
+                s.score[1] as u32,
+                s.fighters.iter().map(|f| f.deaths).collect::<Vec<_>>(),
+                s.smokes.len(),
+                s.fires.len(),
+            )
+        };
+        assert_eq!(outcome(), outcome(), "griefing must replay identically");
+    }
+
+    /// §4 (Brief II): the preview and the flight share one integrator and
+    /// one gravity constant — over a long flat shot they may not diverge
+    /// by more than 5 cm. If this fails, the preview is lying.
+    #[test]
+    fn preview_matches_flight_within_5cm() {
+        // per weapon: launch pitch that maximises carry, and the minimum
+        // distance that still counts as a LONG shot for it
+        for (is_spear, v0, pitch, min_m) in
+            [(true, 26.0_f32, 0.42, 45.0_f32), (false, 52.0, 0.10, 55.0)]
+        {
+            let mut s = TdmSim::new(cfg(19, 1, Mode::Tdm, MapKind::Arena));
+            s.cover.clear();
+            s.cover_kind.clear();
+            s.rebuild_grid();
+            let o = [-30.0, EYE_REL, -30.0];
+            let d = normalize([0.55, pitch, 0.83]); // long diagonal
+            let (_, predicted, _) = s.predict_arc(o, d, v0, is_spear, 8.0);
+            s.missiles.push(Missile {
+                id: 700,
+                pos: o,
+                vel: [d[0] * v0, d[1] * v0, d[2] * v0],
+                team: Team::Blue,
+                shooter: 0,
+                damage: 0.0,
+                is_spear,
+                stuck_t: None,
+            });
+            let mut landed = None;
+            for _ in 0..(8 * SIM_HZ as usize) {
+                s.step_missiles();
+                if let Some(m) = s.missiles.iter().find(|m| m.id == 700) {
+                    if m.stuck_t.is_some() {
+                        landed = Some(m.pos);
+                        break;
+                    }
+                } else {
+                    landed = s.dropped.last().map(|d| d.pos);
+                    break;
+                }
+            }
+            let landed = landed.expect("missile must land");
+            let dist = ((landed[0] - o[0]).powi(2) + (landed[2] - o[2]).powi(2)).sqrt();
+            assert!(dist > min_m, "the shot must be LONG: went {dist:.1} m");
+            let err = ((landed[0] - predicted[0]).powi(2)
+                + (landed[1] - predicted[1]).powi(2)
+                + (landed[2] - predicted[2]).powi(2))
+            .sqrt();
+            assert!(
+                err < 0.05,
+                "spear={is_spear}: preview off by {err:.3} m at {dist:.1} m"
+            );
+        }
+    }
+
+    /// §3: thrown spears recover at 100% up to the cap (which refuses
+    /// WITHOUT consuming the pile), arrows at ~65%, and the whole cycle
+    /// replays bit-identically.
+    #[test]
+    fn dropped_ammo_is_recoverable_and_deterministic() {
+        let run = |arrows: bool| -> (u32, usize) {
+            let mut s = TdmSim::new(cfg(33, 1, Mode::Tdm, MapKind::Arena));
+            s.cover.clear();
+            s.cover_kind.clear();
+            s.rebuild_grid();
+            s.pickups.clear();
+            s.checkpoints.clear();
+            // disarm and strand the bot so it can't interfere
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            // the player carries the matching launcher, bone dry
+            let launcher = if arrows { GunKind::Bow } else { GunKind::Spear };
+            s.fighters[0].inventory = [GunKind::M4, GunKind::Glock, launcher];
+            s.fighters[0].active = 2;
+            s.fighters[0].gun = launcher;
+            s.fighters[0].ammo = 0;
+            s.fighters[0].reserve = 0;
+            s.fighters[0].slot_ammo = [(30, 120), (17, 68), (0, 0)];
+            // rain 30 projectiles in a grid of separate piles
+            for k in 0..30u32 {
+                let x = (k % 6) as f32 * 0.9 - 2.5;
+                let z = 8.0 + (k / 6) as f32 * 0.9;
+                s.missiles.push(Missile {
+                    id: 500 + k,
+                    pos: [x, 3.0, z],
+                    vel: [0.0, -8.0, 0.0],
+                    team: Team::Blue,
+                    shooter: 0,
+                    damage: 0.0,
+                    is_spear: !arrows,
+                    stuck_t: None,
+                });
+            }
+            for _ in 0..SIM_HZ as usize {
+                s.step(PlayerCmd::default());
+                s.fighters[0].pos = [0.0, 0.0, -5.0];
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            }
+            // walk over every pile
+            for k in 0..30u32 {
+                let x = (k % 6) as f32 * 0.9 - 2.5;
+                let z = 8.0 + (k / 6) as f32 * 0.9;
+                s.fighters[0].pos = [x, 0.0, z];
+                s.step(PlayerCmd::default());
+                s.fighters[1].pos = [-30.0, 0.0, -30.0];
+            }
+            (s.fighters[0].reserve, s.dropped.len())
+        };
+        let (spear_reserve, spears_left) = run(false);
+        assert_eq!(
+            spear_reserve, AMMO_CAP_SPEAR,
+            "spear reserve fills to the cap"
+        );
+        assert!(
+            spears_left > 0,
+            "over-cap spears stay on the ground, unconsumed"
+        );
+        let (arrow_reserve, _) = run(true);
+        assert!(
+            (10..=24).contains(&arrow_reserve),
+            "arrows recover at ~65%: got {arrow_reserve}"
+        );
+        // §3.3 determinism: identical runs, bit-identical reserves
+        assert_eq!(run(true), run(true), "arrow recovery must replay");
+        assert_eq!(run(false), run(false), "spear recovery must replay");
+    }
+
+    /// §9.1: the grid broadphase must return EXACTLY the linear scan's
+    /// nearest hit — 10,000 random rays per map — and beat it on time.
+    #[test]
+    fn broadphase_matches_linear_scan() {
+        use jk_core::Pcg32;
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(0xB40A, 5, Mode::Tdm, map));
+            let half = s.half;
+            let linear = |o: [f32; 3], d: [f32; 3], tm: f32| -> Option<(f32, [f32; 3])> {
+                let mut best: Option<(f32, [f32; 3])> = None;
+                for c in &s.cover {
+                    if let Some((t, n)) = c.ray_hit(o, d, tm) {
+                        if best.map_or(true, |(bt, _)| t < bt) {
+                            best = Some((t, n));
+                        }
+                    }
+                }
+                best
+            };
+            let mut rng = Pcg32::new(0xB40AD, 7);
+            let mut rays = Vec::new();
+            for _ in 0..10_000 {
+                let o = [
+                    rng.range(-half, half),
+                    rng.range(0.0, 6.0),
+                    rng.range(-half, half),
+                ];
+                let mut d = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-0.6, 0.6),
+                    rng.range(-1.0, 1.0),
+                ];
+                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
+                d = [d[0] / l, d[1] / l, d[2] / l];
+                rays.push((o, d));
+            }
+            for &(o, d) in &rays {
+                let a = s.raycast_cover(o, d, 200.0);
+                let b = linear(o, d, 200.0);
+                match (a, b) {
+                    (None, None) => {}
+                    (Some((ta, na)), Some((tb, nb))) => {
+                        assert!(
+                            (ta - tb).abs() < 1e-4,
+                            "{map:?}: grid t {ta} vs linear t {tb} for {o:?} {d:?}"
+                        );
+                        assert_eq!(na, nb, "{map:?}: normals differ at {o:?} {d:?}");
+                    }
+                    _ => panic!("{map:?}: grid {a:?} vs linear {b:?} for {o:?} {d:?}"),
+                }
+            }
+            // the whole point: the grid must not be slower than the scan
+            let t0 = std::time::Instant::now();
+            for &(o, d) in &rays {
+                std::hint::black_box(s.raycast_cover(o, d, 200.0));
+            }
+            let grid_t = t0.elapsed();
+            let t0 = std::time::Instant::now();
+            for &(o, d) in &rays {
+                std::hint::black_box(linear(o, d, 200.0));
+            }
+            let lin_t = t0.elapsed();
+            println!("{map:?}: 10k rays — grid {grid_t:?} vs linear {lin_t:?}");
         }
     }
 

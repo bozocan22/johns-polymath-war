@@ -30,6 +30,9 @@ use bevy::audio::Volume;
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
+use bevy::math::Isometry3d;
+use bevy::render::camera::ClearColorConfig;
+use bevy::render::view::RenderLayers;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use jk_core::timestep::DT;
 use sim::*;
@@ -49,6 +52,8 @@ struct Game {
     pending_dodge: bool,
     pending_shield: bool,
     pending_slot: Option<u8>,
+    /// §5: G pressed — cycle the selected throwable (edge, latched).
+    pending_cycle_throw: bool,
 }
 
 #[derive(Resource)]
@@ -60,6 +65,125 @@ struct CamCtl {
     recoil: f32,
     /// V toggles: first-person (hands + viewmodel) vs third-person.
     first_person: bool,
+    /// §3.4 ADS progress 0..1, advanced framerate-independently. Drives
+    /// the FOV blend, the sim's ADS gate (spread/speed at > 0.9), and the
+    /// zoom-consistent sensitivity.
+    ads_t: f32,
+    /// The LIVE world FOV in radians (mid-transition included) — §3.2
+    /// feeds this into the tangent sensitivity match.
+    fov_now: f32,
+    /// §5 person blend: 0 = first person, 1 = third person. `first_person`
+    /// is the target; this eases toward it over PERSON_BLEND_S.
+    person_t: f32,
+    /// Smoothed third-person boom length after collision (§5.2):
+    /// pulled in instantly on contact, pushed back out slowly.
+    boom: f32,
+    /// §5.3: the muzzle→aim-point segment is obstructed close-by — the
+    /// crosshair shows a blocked state so near-cover hits aren't a mystery.
+    blocked: bool,
+    /// §10 (Brief II): smoothed shoulder side, +1 right / −1 left — the
+    /// boom auto-mirrors when a wall sits within 1.2 m on the camera side.
+    shoulder: f32,
+    /// Landing camera dip (weight-absorb), decaying — set on the
+    /// grounded edge proportional to impact speed.
+    land_dip: f32,
+    prev_vy: f32,
+    prev_grounded: bool,
+}
+
+impl Default for CamCtl {
+    fn default() -> Self {
+        CamCtl {
+            yaw: 0.0,
+            pitch: 0.08,
+            grabbed: false,
+            ads: false,
+            recoil: 0.0,
+            first_person: false,
+            ads_t: 0.0,
+            fov_now: FOV_HIP_DEG.to_radians(),
+            person_t: 1.0,
+            boom: TP_BOOM,
+            blocked: false,
+            shoulder: 1.0,
+            land_dip: 0.0,
+            prev_vy: 0.0,
+            prev_grounded: true,
+        }
+    }
+}
+
+// ---- §3/§5 camera + aim tuning -------------------------------------------
+/// Hip-fire world FOV (vertical, degrees). Gun `zoom_deg` values lerp
+/// against this on ADS.
+const FOV_HIP_DEG: f32 = 62.0;
+/// One mouse sensitivity for both axes — raw, no dt, no smoothing (§3.1).
+const MOUSE_SENS: f32 = 0.0026;
+/// Zoom sensitivity ratio: 1.0 = full monitor-distance match (§3.2).
+const ADS_SENS_RATIO: f32 = 1.0;
+/// ADS transition time, ease-out (§3.4).
+const ADS_TIME_S: f32 = 0.12;
+/// First↔third person blend time, ease-out (§5.1).
+const PERSON_BLEND_S: f32 = 0.18;
+/// Third-person boom: back / up / screen-right of the head pivot (§5.1).
+const TP_BOOM: f32 = 2.6;
+const TP_UP: f32 = 0.55;
+const TP_RIGHT: f32 = 0.45;
+/// Camera collision pad (§5.2) and its slow push-back-out time.
+const CAM_PAD: f32 = 0.2;
+const CAM_RECOVER_S: f32 = 0.25;
+
+/// §3.2 monitor-distance sensitivity match: how much to scale raw mouse
+/// input at the current (live, mid-transition) FOV so tracking feels
+/// identical hip-fired and zoomed. `ratio` 1.0 = full match, 0.0 = off.
+fn ads_sens_mult(fov_hip: f32, fov_now: f32, ratio: f32) -> f32 {
+    let raw = (fov_now * 0.5).tan() / (fov_hip * 0.5).tan();
+    1.0 + (raw - 1.0) * ratio
+}
+
+/// §3.3/§5.3 two-stage aim, shared by the shot command and the arc
+/// preview so they always agree: the CROSSHAIR ray (camera eye, camera
+/// forward) finds the first cover/ground hit (or the 200 m far point);
+/// the SHOT direction runs from the muzzle toward that point. Returns
+/// the muzzle-space aim direction plus whether the muzzle→point segment
+/// is obstructed within ~1.5 m (the "you're hugging your own cover"
+/// crosshair state).
+fn crosshair_aim_dir(sim: &TdmSim, cam_tf: &Transform) -> (Vec3, bool) {
+    let fwd = cam_tf.forward().as_vec3();
+    let o = cam_tf.translation;
+    let mut t_hit = 200.0_f32;
+    for c in &sim.cover {
+        if let Some((t, _)) = c.ray_hit(o.to_array(), fwd.to_array(), t_hit) {
+            // ignore sub-0.6 m hits: in third person the ray can start
+            // shy of geometry the CAMERA is already tucked against
+            if t > 0.6 && t < t_hit {
+                t_hit = t;
+            }
+        }
+    }
+    if fwd.y < -1e-4 {
+        let t = -o.y / fwd.y; // the ground plane is a real aim target
+        if t > 0.6 && t < t_hit {
+            t_hit = t;
+        }
+    }
+    let aim_point = o + fwd * t_hit;
+    let eye = Vec3::from_array(sim.muzzle_origin(sim.player));
+    let to = aim_point - eye;
+    let dist = to.length().max(1e-4);
+    let dir = to / dist;
+    let probe = (dist - 0.1).min(1.5);
+    let blocked = probe > 0.05
+        && sim
+            .cover
+            .iter()
+            .any(|c| c.ray_hit(eye.to_array(), dir.to_array(), probe).is_some());
+    (dir, blocked)
+}
+
+/// Ease-out cubic — snappy start, gentle landing (§3.4/§5.1).
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// Everything the intro/loadout screen configures for the next match.
@@ -72,6 +196,9 @@ struct Selected {
     /// cosmetic only: hat + tunic colors picked before the match
     hat: usize,
     tunic: usize,
+    /// §6/§8 (Brief IV): melee slot choice + grenade budget preset
+    melee_axe: bool,
+    grenade_preset: usize,
 }
 
 impl Default for Selected {
@@ -83,6 +210,8 @@ impl Default for Selected {
             loadout: DEFAULT_LOADOUT,
             hat: 0,
             tunic: 0,
+            melee_axe: false,
+            grenade_preset: 0,
         }
     }
 }
@@ -126,20 +255,158 @@ struct FighterVis {
 
 #[derive(Component)]
 struct FighterRig {
+    /// §1.4 gait phase in radians — driven by DISTANCE, never by time.
     phase: f32,
+    /// last frame's planar speed, for the accel lean
+    prev_speed: f32,
+    /// smoothed accel lean (root pitch), ±0.07 rad
+    accel_lean: f32,
+    /// smoothed sprint low-ready blend 0..1 (in 220 ms, out 140 ms)
+    sprint_t: f32,
+    /// §2.2 carry→aim blend 0..1 (aim in 220 ms / out 140 ms)
+    carry_t: f32,
+    /// §2.3 weapon-mass settle: the gun lags the spine on turns
+    prev_yaw_vis: f32,
+    wr_lag_yaw: f32,
+    wr_lag_v: f32,
     /// per side: [thigh (hip pivot), shin (knee pivot), foot (ankle pivot)]
     leg_l: [Entity; 3],
     leg_r: [Entity; 3],
     torso: Entity,
+    /// the neck pivot — sits EXACTLY on the 0.82 band line (§1.1), so
+    /// head rotation stays inside the head hit band
+    neck: Entity,
     /// per arm: [upper (shoulder pivot), forearm (elbow pivot), hand (wrist)]
     arm_l: [Entity; 3],
     arm_r: [Entity; 3],
+    /// §1.3: the gun is parented HERE on the spine — the gun leads, the
+    /// hands follow via two-bone IK. Never parented to a hand.
+    weapon_root: Entity,
     /// held weapon models, indexed by `weapon_slot`
     weapons: [Entity; N_WEAPONS],
     /// the always-carried shield, shown raised on the left arm
     shield: Entity,
     bow_arrow: Entity,
     armor_rig: Entity,
+}
+
+/// §1.4: metres per full step. Phase advances by planar distance / stride
+/// — zero foot sliding at every speed falls out for free.
+const STRIDE_M: f32 = 1.45;
+
+// ---- §1 (Brief IV): rig connectivity ------------------------------------
+// THE RULE: every parent–child pair overlaps or is bridged by joint
+// geometry — zero daylight in any pose. Rotations preserve bone lengths,
+// so overlaps asserted here hold across EVERY animation phase; these
+// constants are shared by the spawn code and the gap unit test so they
+// cannot drift apart.
+/// Neck: a dark cylinder bridging yoke → head, in torso-local Y.
+const NECK_R: f32 = 0.055;
+const NECK_BOT: f32 = 0.64; // sunk ≥2 cm into the yoke (top 0.695)
+const NECK_TOP: f32 = 0.89; // ≥1.5 cm past the head pivot (0.846)
+/// Yoke half-width must reach past the shoulder pivots (±0.26).
+const YOKE_HALF_W: f32 = 0.27;
+const SHOULDER_X: f32 = 0.26;
+/// Arm chain (all local Y, downward negative): shell spans must reach
+/// their joint balls.
+const UPPER_CENTER: f32 = -0.115;
+const UPPER_HALF: f32 = 0.14 / 2.0 + 0.055; // capsule half-len + radius
+const ELBOW_Y: f32 = -0.21;
+const ELBOW_R: f32 = 0.05;
+const FORE_CENTER: f32 = -0.09;
+const FORE_HALF: f32 = 0.12 / 2.0 + 0.048;
+const WRIST_Y: f32 = -0.19;
+const WRIST_R: f32 = 0.04;
+
+// ---- §5 (Brief IV): weapon–body clipping ---------------------------------
+// The stock was piercing the chest: weapon_root sat too close to the
+// torso centerline. These offsets hold the weapon's rear point OUTSIDE
+// the chest ellipse (half-extents 0.20 × 0.15 at chest height) for the
+// longest stock in the arsenal — asserted by the sweep test.
+const WR_X: f32 = 0.14;
+const WR_Z_HIP: f32 = 0.23;
+const WR_Z_ADS: f32 = 0.19;
+
+/// Rear extent (stock length behind the grip) per weapon, metres.
+fn weapon_rear_extent(kind: GunKind) -> f32 {
+    match kind {
+        GunKind::Fists => 0.0,
+        GunKind::Glock | GunKind::Deagle => 0.10,
+        GunKind::Mp5 => 0.15, // folded stock — rear cap only
+        GunKind::Shotgun => 0.34,
+        GunKind::Ak47 | GunKind::M4 | GunKind::M249 => 0.36,
+        GunKind::Awm => 0.39,
+        GunKind::Bow => 0.12,
+        GunKind::Spear => 0.63, // carried overhead — cleared vertically
+        // §7: no stock at all — the rear grip and motor housing brace
+        // AGAINST the torso; that contact is the carry, not a clip
+        GunKind::Minigun => 0.15,
+    }
+}
+
+/// §1.4 pose core: (hip_y, torso_pitch) for a grounded gait at phase θ.
+/// PURE — shared by `sync_fighters` and the §0.2 band test, so the test
+/// can never drift from the render. Pelvis bob is 2× frequency with its
+/// MINIMUM at double support, and only ever ADDS height; total torso
+/// pitch is capped so the head can never dip below the 0.82 line.
+fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32) -> (f32, f32) {
+    if crouch {
+        (
+            0.54 + 0.018 * (1.0 - (2.0 * theta).cos()) * amp,
+            0.90, // ~52°: projects the 0.324 m head into the crouch band
+        )
+    } else {
+        (
+            0.63 + 0.0175 * (1.0 - (2.0 * theta).cos()) * amp,
+            // stronger run lean — the band cap still rules (§0.2 test)
+            (0.05 + amp * 0.09 + accel_lean).min(0.185),
+        )
+    }
+}
+
+/// §0.2: world-Y of the head's LOWEST geometry for a grounded pose (the
+/// head pivot — geometry sits entirely above it).
+fn head_base_y(crouch: bool, theta: f32, amp: f32, accel_lean: f32) -> f32 {
+    let (hip, pitch) = gait_pose(crouch, theta, amp, accel_lean);
+    let drop = if crouch { 0.12 } else { 0.0 };
+    hip - drop + 0.846 * pitch.cos()
+}
+
+/// §2.3 (Brief III): weapon-mass settle — (lag seconds, damping). Heavy
+/// weapons lag the spine and OVERSHOOT on direction changes; SMGs and
+/// pistols snap. One constant per weapon differentiates the whole arsenal.
+fn weapon_lag(kind: GunKind) -> (f32, f32) {
+    match kind {
+        GunKind::M249 | GunKind::Awm => (0.055, 0.60), // underdamped: 1.4° overshoot
+        GunKind::Ak47 | GunKind::M4 | GunKind::Shotgun => (0.035, 0.85),
+        GunKind::Spear | GunKind::Bow => (0.030, 0.85),
+        _ => (0.020, 1.0), // MP5, pistols, fists: critically damped, no lag
+    }
+}
+
+/// §1.3 analytic two-bone IK, solved in torso space: shoulder at `s`,
+/// wrist target `t`, elbow steered toward `pole` (down-and-out ~35° —
+/// what stops arms looking broken). Returns the shoulder rotation and
+/// the elbow hinge flex; with the rig's −X elbow hinge the chain lands
+/// EXACTLY on the target (within reach).
+fn solve_arm_ik(s: Vec3, t: Vec3, pole: Vec3) -> (Quat, f32) {
+    const L1: f32 = 0.21; // shoulder → elbow
+    const L2: f32 = 0.21; // elbow → wrist (incl. mitten reach)
+    let to = t - s;
+    let d = to.length().clamp(0.08, L1 + L2 - 0.005);
+    let dir = to.normalize_or(Vec3::NEG_Y);
+    let cos_e = ((L1 * L1 + L2 * L2 - d * d) / (2.0 * L1 * L2)).clamp(-1.0, 1.0);
+    let flex = PI - cos_e.acos();
+    let a1 = ((L1 * L1 - L2 * L2 + d * d) / (2.0 * d)).clamp(-L1, L1);
+    let r = (L1 * L1 - a1 * a1).max(0.0).sqrt();
+    let side = (pole - dir * pole.dot(dir)).normalize_or(Vec3::NEG_Z);
+    let elbow = s + dir * a1 + side * r;
+    let up = (elbow - s).normalize_or(Vec3::NEG_Y);
+    let fore = (t - elbow).normalize_or(up);
+    let z = (fore - up * fore.dot(up)).normalize_or(Vec3::Z);
+    let y = -up;
+    let x = y.cross(z).normalize_or(Vec3::X);
+    (Quat::from_mat3(&Mat3::from_cols(x, y, z)), flex)
 }
 
 /// First-person viewmodel: hands + weapon parented to the camera.
@@ -154,15 +421,44 @@ struct VmRig {
 #[derive(Component)]
 struct AdsDetail;
 
-/// The red predicted-arc laser for bow/spear aiming.
+/// The predicted-arc preview for bow/spear aiming (§4.2 Brief II):
+/// arc-length-spaced dots, a landing ring + drop-line, and a ±spread
+/// cone of two fainter arcs that widens as stability degrades.
 #[derive(Resource)]
 struct ArcVis {
     dots: Vec<Entity>,
+    /// two fainter arcs at ±current spread — 8 dots each
+    cone: Vec<Entity>,
+    ring: Entity,
+    drop_line: Entity,
+}
+
+/// §1 (Brief V): the grenade pre-aim preview — amber dots along the
+/// predicted flight, a fainter run after the first bounce (less certain),
+/// and a landing ring at the predicted end point.
+#[derive(Resource)]
+struct GrenadeArcVis {
+    /// bright dots: launch → first bounce
+    pre: Vec<Entity>,
+    /// faint dots: after the first bounce
+    post: Vec<Entity>,
     ring: Entity,
 }
 
+/// What the preview computed this frame — the HUD prints the range.
+#[derive(Resource, Default)]
+struct ArcState {
+    range: Option<f32>,
+}
+
 /// Model-index for every carriable weapon (v6 roster).
-const N_WEAPONS: usize = 10;
+const N_WEAPONS: usize = 11;
+
+/// §2.3: render layer for the first-person viewmodel — seen only by the
+/// dedicated fixed-FOV viewmodel camera, never by the world camera.
+const VIEWMODEL_LAYER: usize = 1;
+/// Viewmodel camera FOV (fixed regardless of world/ADS FOV).
+const VM_FOV_DEG: f32 = 55.0;
 
 fn weapon_slot(kind: GunKind) -> Option<usize> {
     match kind {
@@ -177,6 +473,7 @@ fn weapon_slot(kind: GunKind) -> Option<usize> {
         GunKind::M249 => Some(7),
         GunKind::Bow => Some(8),
         GunKind::Spear => Some(9),
+        GunKind::Minigun => Some(10),
     }
 }
 
@@ -191,8 +488,10 @@ const ALL_WEAPONS: [GunKind; N_WEAPONS] = [
     GunKind::M249,
     GunKind::Bow,
     GunKind::Spear,
+    GunKind::Minigun,
 ];
 
+#[allow(dead_code)] // §7 dropped the caliber flavor line; kept for tooling
 fn ammo_kind(kind: GunKind) -> &'static str {
     match kind {
         GunKind::Fists => "",
@@ -206,6 +505,7 @@ fn ammo_kind(kind: GunKind) -> &'static str {
         GunKind::M249 => "5.56 BELT",
         GunKind::Bow => "ARROWS",
         GunKind::Spear => "WAR SPEARS",
+        GunKind::Minigun => "7.62 BELT",
     }
 }
 
@@ -239,6 +539,64 @@ struct BarFill;
 
 #[derive(Component)]
 struct TracerMarker;
+
+/// §3: a recoverable arrow/spear pile lying on the ground.
+#[derive(Component)]
+struct DroppedMarker;
+
+#[derive(Resource, Default)]
+struct DroppedPool(Vec<Entity>);
+
+/// §5 throwable visuals: grenades in flight, smoke spheres, fire pools,
+/// detonation flashes — one pooled entity set each.
+#[derive(Component)]
+struct GrenadeMarker;
+#[derive(Component)]
+struct SmokeMarker;
+#[derive(Component)]
+struct FireMarker;
+#[derive(Component)]
+struct BoomMarker;
+/// Full-screen §5.3 flash whiteout (quantised steps, not an alpha fade).
+#[derive(Component)]
+struct FlashOverlay;
+
+/// §8: pooled horde visuals — one body + one head per zombie, plus the
+/// extraction beacon pillar.
+#[derive(Component)]
+struct ZombieMarker;
+
+#[derive(Resource, Default)]
+struct ZombiePool {
+    bodies: Vec<Entity>,
+    heads: Vec<Entity>,
+    beacon: Option<Entity>,
+}
+
+#[derive(Resource)]
+struct ZombieAssets {
+    moss: Handle<StandardMaterial>,
+    pale: Handle<StandardMaterial>,
+    beacon: Handle<StandardMaterial>,
+}
+
+#[derive(Resource, Default)]
+struct ThrowPools {
+    grenades: Vec<Entity>,
+    smokes: Vec<Entity>,
+    fires: Vec<Entity>,
+    booms: Vec<Entity>,
+}
+
+#[derive(Resource)]
+struct ThrowAssets {
+    ball: Handle<Mesh>,
+    body: Handle<StandardMaterial>,
+    smoke: Handle<StandardMaterial>,
+    fire_mesh: Handle<Mesh>,
+    fire: Handle<StandardMaterial>,
+    flashband: Handle<StandardMaterial>,
+}
 
 #[derive(Component)]
 struct MissileMarker;
@@ -282,6 +640,7 @@ struct BarAssets {
 struct ModelKit {
     cube: Handle<Mesh>,
     cyl: Handle<Mesh>, // unit cylinder: radius 0.5, height 1, axis Y
+    ball: Handle<Mesh>, // unit sphere: radius 0.5
     gunmetal: Handle<StandardMaterial>,
     steel: Handle<StandardMaterial>,
     wood: Handle<StandardMaterial>,
@@ -293,8 +652,160 @@ struct ModelKit {
     med_glow: Handle<StandardMaterial>,
     armor_dark: Handle<StandardMaterial>,
     core_glow: Handle<StandardMaterial>,
-    /// leather glove — every finger of every hand wears it
+    /// the gripping mitt — §1 restyles this to the robot's shell
     hand: Handle<StandardMaterial>,
+    // §2.1 weapon palette: four flat greys, tone changes — not geometry —
+    // suggest complexity (the reference's rail notches are tone stripes)
+    grey_light: Handle<StandardMaterial>,
+    grey_mid: Handle<StandardMaterial>,
+    grey_dark: Handle<StandardMaterial>,
+    grey_black: Handle<StandardMaterial>,
+    // §11 (Brief IV): the Mech Armada palette — khaki faceted plates
+    // over shadowed joints, one red sensor slit
+    mech_khaki: Handle<StandardMaterial>,
+    mech_khaki_dk: Handle<StandardMaterial>,
+    mech_khaki_lt: Handle<StandardMaterial>,
+    mech_shadow: Handle<StandardMaterial>,
+    mech_metal: Handle<StandardMaterial>,
+    mech_red: Handle<StandardMaterial>,
+}
+
+/// §2.1 tone slots of the weapon palette.
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Light,
+    Mid,
+    Dark,
+    Black,
+}
+
+impl ModelKit {
+    fn tone(&self, t: Tone) -> Handle<StandardMaterial> {
+        match t {
+            Tone::Light => self.grey_light.clone(),
+            Tone::Mid => self.grey_mid.clone(),
+            Tone::Dark => self.grey_dark.clone(),
+            Tone::Black => self.grey_black.clone(),
+        }
+    }
+}
+
+/// §2.1 shared part vocabulary: every gun is blocks + cylinders in the
+/// four-grey palette. Local frame: root at the grip, muzzle-forward = +Z
+/// (the bow stands along +Y with its string toward −Z).
+struct WPart {
+    cyl: bool,
+    tone: Tone,
+    pos: Vec3,
+    /// radians about X — magazines and stocks are raked, never square
+    tilt: f32,
+    size: Vec3,
+    /// true → ADS-only greeble (rides the existing detail-LOD path)
+    detail: bool,
+}
+
+fn wp(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
+    WPart {
+        cyl,
+        tone,
+        pos: Vec3::new(pos.0, pos.1, pos.2),
+        tilt,
+        size: Vec3::new(size.0, size.1, size.2),
+        detail: false,
+    }
+}
+
+fn wd(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
+    WPart {
+        detail: true,
+        ..wp(cyl, tone, pos, tilt, size)
+    }
+}
+
+/// The reference's signature top rail: a repeated notch pattern —
+/// alternating light/mid blocks over a dark base bar.
+fn push_rail(parts: &mut Vec<WPart>, y: f32, z0: f32, z1: f32, n: usize) {
+    parts.push(wp(false, Tone::Dark, (0.0, y, (z0 + z1) * 0.5), 0.0, (0.030, 0.018, z1 - z0)));
+    let step = (z1 - z0) / n as f32;
+    for i in 0..n {
+        let tone = if i % 2 == 0 { Tone::Light } else { Tone::Mid };
+        parts.push(wp(
+            false,
+            tone,
+            (0.0, y + 0.014, z0 + step * (i as f32 + 0.5)),
+            0.0,
+            (0.034, 0.012, step * 0.55),
+        ));
+    }
+}
+
+/// Skeletal stock: an OUTLINE of thin bars with a hole through it, never
+/// a solid block — top bar, bottom bar, rear vertical, shoulder pad.
+fn push_stock(parts: &mut Vec<WPart>, z_rear: f32, drop: f32) {
+    let len = -z_rear - 0.04; // grip → rear
+    let zc = z_rear * 0.5 - 0.02;
+    parts.push(wp(false, Tone::Dark, (0.0, 0.035, zc), 0.06, (0.024, 0.024, len)));
+    parts.push(wp(false, Tone::Dark, (0.0, -drop, zc), -0.10, (0.024, 0.024, len)));
+    parts.push(wp(false, Tone::Dark, (0.0, (0.035 - drop) * 0.5, z_rear), 0.0, (0.026, drop + 0.10, 0.028)));
+    parts.push(wp(false, Tone::Mid, (0.0, (0.035 - drop) * 0.5, z_rear - 0.018), 0.0, (0.030, drop + 0.13, 0.014)));
+}
+
+/// Muzzle device: a slightly wider dark block with a visible black bore
+/// recess poking out of it.
+fn push_muzzle(parts: &mut Vec<WPart>, y: f32, z: f32, w: f32) {
+    parts.push(wp(false, Tone::Dark, (0.0, y, z), 0.0, (w, w, 0.07)));
+    parts.push(wp(true, Tone::Black, (0.0, y, z + 0.028), FRAC_PI_2, (w * 0.45, 0.03, w * 0.45)));
+}
+
+/// §1.3: hand placements per weapon — (position, yaw, curl, mirrored) in
+/// weapon-local space. Entry 0 is the GRIP socket, entry 1 (if any) the
+/// FOREGRIP socket. One table serves both the viewmodel's posed hands and
+/// the third-person two-bone IK, so they can never disagree.
+fn weapon_hand_specs(kind: GunKind) -> Vec<(Vec3, f32, f32, bool)> {
+    match kind {
+        GunKind::Fists => vec![],
+        // §2.2 (image 2): pistols get the two-handed CUP grip — support
+        // hand wraps the firing hand from the left
+        GunKind::Glock => vec![
+            (Vec3::new(0.0, -0.05, -0.015), 0.0, 0.9, false),
+            (Vec3::new(-0.028, -0.065, 0.005), 0.35, 0.8, true),
+        ],
+        GunKind::Deagle => vec![
+            (Vec3::new(0.0, -0.055, -0.015), 0.0, 0.9, false),
+            (Vec3::new(-0.030, -0.070, 0.005), 0.35, 0.8, true),
+        ],
+        GunKind::Mp5 => vec![
+            (Vec3::new(0.0, -0.07, -0.055), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.045, 0.16), 0.15, 0.55, true),
+        ],
+        GunKind::Shotgun => vec![
+            (Vec3::new(0.0, -0.045, -0.06), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.05, 0.30), 0.0, 0.55, true),
+        ],
+        GunKind::Ak47 => vec![
+            (Vec3::new(0.0, -0.08, -0.06), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.035, 0.32), 0.1, 0.55, true),
+        ],
+        GunKind::M4 => vec![
+            (Vec3::new(0.0, -0.08, -0.06), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.045, 0.24), 0.1, 0.55, true),
+        ],
+        GunKind::Awm => vec![
+            (Vec3::new(0.0, -0.075, -0.10), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.05, 0.26), 0.1, 0.55, true),
+        ],
+        GunKind::M249 => vec![
+            (Vec3::new(0.0, -0.07, -0.08), 0.0, 1.0, false),
+            (Vec3::new(0.0, -0.10, 0.22), 0.1, 0.55, true),
+        ],
+        GunKind::Bow => vec![(Vec3::new(0.0, 0.0, 0.03), 0.0, 0.8, true)],
+        GunKind::Spear => vec![(Vec3::new(0.0, -0.02, 0.0), 0.0, 1.0, false)],
+        // §7: rear spade grip + the side support handle — the hip carry
+        GunKind::Minigun => vec![
+            (Vec3::new(0.0, -0.06, -0.09), 0.0, 1.0, false),
+            (Vec3::new(-0.02, -0.11, 0.18), 0.1, 0.6, true),
+        ],
+    }
 }
 
 // ---- audio ---------------------------------------------------------------
@@ -336,6 +847,7 @@ fn shot_sound<'a>(sfx: &'a Sfx, kind: GunKind) -> &'a Handle<AudioSource> {
         GunKind::M249 => &sfx.shot_mg,
         GunKind::Bow => &sfx.bow,
         GunKind::Spear => &sfx.spear,
+        GunKind::Minigun => &sfx.shot_mg,
         GunKind::Fists => &sfx.hit,
     }
 }
@@ -423,6 +935,55 @@ struct BannerText;
 #[derive(Component)]
 struct CrosshairText;
 
+/// §4.2: numeric range beside the trajectory impact marker.
+#[derive(Component)]
+struct RangeText;
+
+/// §7: compass strip at the top — cardinal window over the view yaw.
+#[derive(Component)]
+struct CompassText;
+
+/// §9.1 (Brief IV): one cell of the vertical weapon strip on the right
+/// screen edge — active slot at full opacity with an accent, inactive 40%.
+#[derive(Component)]
+struct WeaponStripCell(usize);
+
+/// §9.1: the strip — updates names/opacity, fades after 4 s idle.
+fn weapon_strip(
+    time: Res<Time>,
+    game: Res<Game>,
+    mut last_active: Local<usize>,
+    mut idle_t: Local<f32>,
+    mut q: Query<(&WeaponStripCell, &mut Text, &mut TextColor)>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    if p.active != *last_active {
+        *last_active = p.active;
+        *idle_t = 0.0;
+    } else {
+        *idle_t += time.delta_secs();
+    }
+    let strip_fade = if *idle_t > 4.0 { 0.45 } else { 1.0 };
+    for (cell, mut t, mut tc) in &mut q {
+        let g = p.inventory[cell.0];
+        let name = if g == GunKind::Fists { "—" } else { gun(g).name };
+        let active = cell.0 == p.active;
+        **t = if active {
+            format!("▸ {}  [{}]", name, cell.0 + 1)
+        } else {
+            format!("  {}  [{}]", name, cell.0 + 1)
+        };
+        let a = if active { 1.0 } else { 0.40 } * strip_fade;
+        *tc = TextColor(Color::srgba(0.92, 0.93, 0.95, a));
+    }
+}
+
+/// §7: the stance/stability bracket around the crosshair — widens with
+/// the CURRENT spread (bloom + movement + stance), so the player watches
+/// their own accuracy in real time. 0 = left, 1 = right.
+#[derive(Component)]
+struct StabilityBracket(u8);
+
 #[derive(Component)]
 struct PanelInfoText;
 
@@ -439,11 +1000,7 @@ struct ScoreboardText;
 #[derive(Component)]
 struct DmgEdge(u8);
 
-#[derive(Component)]
-struct OwnHpFill;
-
-#[derive(Component)]
-struct OwnArmorFill;
+// (§7 Brief III: the old OwnHpFill/OwnArmorFill bars are gone — numerals only.)
 
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
 enum GameState {
@@ -453,6 +1010,147 @@ enum GameState {
     Paused,
     Settings,
     Manual,
+    /// §1.2 (Brief III): the controls screen, generated from the registry.
+    Controls,
+}
+
+// ---- §1.2 (Brief III): the keybind registry ------------------------------
+// ONE table owns every action's bind, display name, and grouping. The
+// controls screen and the first-run card are GENERATED from it, so they
+// can never drift from reality. Every new action registers here.
+
+struct Bind {
+    key: &'static str,
+    action: &'static str,
+    /// Shown on the one-time first-run card (the non-obvious binds).
+    essential: bool,
+}
+
+const BIND_REGISTRY: &[Bind] = &[
+    Bind { key: "W A S D", action: "Move", essential: false },
+    Bind { key: "MOUSE", action: "Look", essential: false },
+    Bind { key: "LMB", action: "Aim down sights (zoom)", essential: false },
+    Bind { key: "RMB", action: "Fire", essential: false },
+    Bind { key: "T", action: "Inspect weapon", essential: false },
+    Bind { key: "SHIFT", action: "Sprint", essential: false },
+    Bind { key: "SPACE", action: "Jump  (HOLD mid-air: Mech thrusters)", essential: true },
+    Bind { key: "CTRL", action: "Crouch", essential: false },
+    Bind { key: "Q", action: "Ground: dodge roll · Air + direction: FLIP (no firing)", essential: true },
+    Bind { key: "V or O", action: "Camera: first <-> third person", essential: true },
+    Bind { key: "E", action: "Shield stance (throwables only while up)", essential: true },
+    Bind { key: "F", action: "Knife — tap: slash, hold: lunge (backstab kills)", essential: true },
+    Bind { key: "C (hold)", action: "Armor ability (brace / flame / repulsor)", essential: true },
+    Bind { key: "G", action: "Cycle throwable (frag/flash/smoke/molotov)", essential: true },
+    Bind { key: "H / Mouse4", action: "HOLD: aim throw (arc previews, power charges) — release: throw", essential: true },
+    Bind { key: "B", action: "Cancel aimed throw (keeps the grenade)", essential: false },
+    Bind { key: "1 2 3", action: "Weapon slots", essential: false },
+    Bind { key: "R", action: "Reload", essential: false },
+    Bind { key: "Z / X", action: "Lean left / right", essential: false },
+    Bind { key: "TAB", action: "Scoreboard", essential: false },
+    Bind { key: "M", action: "Minimap on/off", essential: false },
+    Bind { key: "F3", action: "Hit-zone debug rings", essential: false },
+    Bind { key: "F4", action: "Rig joint markers (gap view)", essential: false },
+    Bind { key: "ESC", action: "Menu", essential: false },
+];
+
+/// §1.2: armor pads must announce themselves — the sets were shipped and
+/// nobody could find them.
+fn pickup_prompt(kind: PickupKind) -> &'static str {
+    match kind {
+        PickupKind::Health => "HEALTH PACK",
+        PickupKind::Ammo => "AMMO CACHE",
+        PickupKind::RobotArmor => "MECH CHASSIS — walk over to board  (SPACE mid-air: fly, C: repulsor · armored front, soft rear)",
+        PickupKind::FolkArmor => "FOLK ARMOR — walk over to equip  (hold C: shieldwall brace)",
+        PickupKind::PyroArmor => "PYRO ARMOR — walk over to equip  (hold C: flame projector)",
+        PickupKind::ReconWeave => "RECON WEAVE — walk over to equip  (fast, quiet, self-healing)",
+        PickupKind::Minigun => "M134 MINIGUN — walk over to heft it  (hold fire: spin-up · R: vent heat · lost on death)",
+    }
+}
+
+/// The 4-second ability hint shown the moment a set is equipped.
+fn equip_hint(set: ArmorSet) -> &'static str {
+    match set {
+        ArmorSet::None => "",
+        ArmorSet::Folk => "FOLK ARMOR EQUIPPED — hold C to BRACE the shieldwall",
+        ArmorSet::Pyro => "PYRO ARMOR EQUIPPED — hold C: FLAME PROJECTOR · fireproof",
+        ArmorSet::RobotSuit => "MECH BOARDED — SPACE mid-air: FLY · C: REPULSOR · protect your REAR",
+        ArmorSet::Recon => "RECON WEAVE EQUIPPED — faster, silent, regenerates",
+    }
+}
+
+/// §1.2 first-run card: shown once on the first spawn, dismissed by any
+/// key — the build finally teaches its own controls.
+#[derive(Resource)]
+struct FirstRunCard {
+    shown: bool,
+    dismissed: bool,
+}
+
+impl Default for FirstRunCard {
+    fn default() -> Self {
+        FirstRunCard {
+            shown: false,
+            dismissed: false,
+        }
+    }
+}
+
+#[derive(Component)]
+struct FirstRunRoot;
+
+#[derive(Component)]
+struct ControlsRoot;
+
+/// Bottom-center contextual prompt ("[pad] — walk over to equip").
+#[derive(Component)]
+struct PromptText;
+
+/// A short on-screen confirmation ("FIRST PERSON") — actions the player
+/// can't otherwise verify announce themselves here.
+#[derive(Resource, Default)]
+struct Toast {
+    text: String,
+    t: f32,
+}
+
+/// §10: low-health screen tint that pulses gently while regenerating —
+/// the regen timer is readable without a HUD element.
+#[derive(Component)]
+struct HealthVignette;
+
+/// §14: the loadout tech readout — real numbers from the live weapon
+/// table. "spear — 26 m/s, 4.70 m drop at 30 m" tells the player the
+/// game's premise before they press Play.
+#[derive(Component)]
+struct TechReadout;
+
+fn tech_readout(sel: Res<Selected>, mut q: Query<&mut Text, With<TechReadout>>) {
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    let mut s = String::from("— LOADOUT SPEC —\n");
+    for g in sel.loadout.iter() {
+        let spec = gun(*g);
+        s += &match spec.projectile {
+            Some((v0, _)) => {
+                let g_eff = missile_g(*g == GunKind::Spear);
+                let t30 = 30.0 / v0;
+                let drop = 0.5 * g_eff * t30 * t30;
+                format!(
+                    "{:<14} {:>3.0} m/s   drop {:.2} m @30 m   dmg {:.0}\n",
+                    spec.name, v0, drop, spec.damage
+                )
+            }
+            None => format!(
+                "{:<14} hitscan   {:>4.0} rpm   dmg {:.1}   mag {}\n",
+                spec.name,
+                60.0 / spec.fire_period,
+                spec.damage,
+                spec.mag
+            ),
+        };
+    }
+    **t = s;
 }
 
 #[derive(Component)]
@@ -471,6 +1169,8 @@ struct ManualRoot;
 enum ModeButton {
     Tdm,
     Koth,
+    /// §8: co-op zombie extraction.
+    Extraction,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -490,12 +1190,22 @@ struct LoadoutButton(usize, GunKind);
 #[derive(Component, Clone, Copy)]
 struct CosmeticButton(usize, usize);
 
+/// §6 (Brief IV): melee slot pick — false = knife, true = axe.
+#[derive(Component, Clone, Copy)]
+struct MeleeButton(bool);
+
+/// §8 (Brief IV): grenade budget preset pick (GRENADE_PRESETS index).
+#[derive(Component, Clone, Copy)]
+struct NadeButton(usize);
+
 #[derive(Component, Clone, Copy)]
 enum MenuButton {
     Resume,
     Restart,
     Settings,
     Manual,
+    /// §1.2: the registry-generated controls screen.
+    Controls,
     BackToLoadout,
     Quit,
 }
@@ -537,6 +1247,7 @@ fn main() {
                 }),
         )
         .insert_resource(ClearColor(Color::srgb(0.58, 0.63, 0.72)))
+        .init_resource::<CamCtl>()
         .init_state::<GameState>()
         .add_systems(Startup, setup)
         .add_systems(Update, input_and_step.run_if(in_state(GameState::Playing)))
@@ -547,6 +1258,9 @@ fn main() {
                 sync_fighters,
                 sync_tracers,
                 sync_missiles,
+                sync_dropped,
+                sync_throwables,
+                sync_zombies,
                 sync_decals,
                 sync_pickups,
                 camera_system,
@@ -560,16 +1274,26 @@ fn main() {
             Update,
             (
                 hud_system,
-                own_bars,
+                hud_fade,
                 scoreboard_system,
                 damage_indicator,
                 sfx_system,
+                distant_gunfire,
                 scope_overlay,
                 ads_detail,
                 checkpoint_rings,
                 minimap_system,
+                zone_overlay,
+                tag_viewmodel_layer,
+                compass_system,
+                stability_bracket,
+                health_vignette,
+                weapon_strip,
             ),
         )
+        .init_resource::<DebugZones>()
+        .init_resource::<DistantShots>()
+        .init_resource::<Toast>()
         .add_systems(Update, esc_toggle)
         .add_systems(OnEnter(GameState::Playing), grab_cursor)
         .add_systems(OnEnter(GameState::Intro), open_intro)
@@ -581,8 +1305,11 @@ fn main() {
                 intro_map_buttons,
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
+                intro_melee_buttons,
+                intro_nade_buttons,
                 intro_diff_buttons,
                 intro_size_buttons,
+                tech_readout, // §14: live weapon numbers on the loadout
             )
                 .run_if(in_state(GameState::Intro)),
         )
@@ -594,40 +1321,208 @@ fn main() {
         .add_systems(Update, settings_buttons.run_if(in_state(GameState::Settings)))
         .add_systems(OnEnter(GameState::Manual), open_manual)
         .add_systems(OnExit(GameState::Manual), close_manual)
+        // §1.2 (Brief III): discoverability — the controls screen, the
+        // first-run card, and contextual pickup/equip prompts
+        .init_resource::<FirstRunCard>()
+        .add_systems(OnEnter(GameState::Controls), open_controls)
+        .add_systems(OnExit(GameState::Controls), close_controls)
+        .add_systems(
+            Update,
+            (first_run_card, contextual_prompts).run_if(in_state(GameState::Playing)),
+        )
+        // §12 (Brief IV): ejected shell casings — pooled, physical, brief
+        .add_systems(
+            Update,
+            (spawn_casings, update_casings, spin_minigun_barrels, grenade_arc)
+                .run_if(in_state(GameState::Playing)),
+        )
         .run();
+}
+
+/// §1 (Brief V): the grenade pre-aim arc. While the throw is held this
+/// calls the sim's OWN `throw_release_velocity` + `predict_grenade` —
+/// never a reimplementation — so the dots trace exactly the flight the
+/// grenade will take, live, as the camera moves and the power charges.
+/// Dots after the first bounce render faint: less certain, by design.
+fn grenade_arc(
+    game: Res<Game>,
+    arc: Res<GrenadeArcVis>,
+    cam_q: Query<&Transform, With<MainCam>>,
+    mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let show = p.alive() && p.cook_t > 0.0;
+    if !show {
+        for e in arc.pre.iter().chain(arc.post.iter()).chain([&arc.ring]) {
+            if let Ok((_, mut v)) = q.get_mut(*e) {
+                *v = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+    let Ok(cam_tf) = cam_q.get_single() else {
+        return;
+    };
+    let (d, _) = crosshair_aim_dir(&game.sim, cam_tf);
+    let kind = ThrowKind::ALL[p.throw_sel as usize];
+    let (o, vel) = game.sim.throw_release_velocity(
+        game.sim.player,
+        [d.x, d.y, d.z],
+        p.cook_t,
+    );
+    let spec = throw_spec(kind);
+    let fuse = if spec.fuse_s.is_finite() {
+        (spec.fuse_s - if kind == ThrowKind::Frag { p.cook_t } else { 0.0 }).max(0.15)
+    } else {
+        f32::INFINITY
+    };
+    let (pts, end, first_bounce) = game.sim.predict_grenade(kind, o, vel, fuse, 8.0);
+    let fb = first_bounce.unwrap_or(pts.len()).min(pts.len());
+    let mut place = |ents: &[Entity], seg: &[[f32; 3]]| {
+        for (i, e) in ents.iter().enumerate() {
+            let Ok((mut t, mut v)) = q.get_mut(*e) else {
+                continue;
+            };
+            if seg.len() < 2 {
+                *v = Visibility::Hidden;
+                continue;
+            }
+            let idx = (i * (seg.len() - 1)) / (ents.len() - 1).max(1);
+            t.translation = Vec3::from_array(seg[idx]);
+            *v = Visibility::Visible;
+        }
+    };
+    place(&arc.pre, &pts[..fb]);
+    place(&arc.post, &pts[fb..]);
+    if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
+        t.translation = Vec3::from_array(end) + Vec3::Y * 0.04;
+        t.rotation = Quat::IDENTITY;
+        *v = Visibility::Visible;
+    }
+}
+
+/// §7: the viewmodel barrels turn with the sim's spin state — idle
+/// crawl at rest, a blur at full spin, frozen mid-vent.
+fn spin_minigun_barrels(
+    game: Res<Game>,
+    time: Res<Time>,
+    mut q: Query<&mut Transform, With<MinigunSpinner>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let rate = if p.vent_t > 0.0 {
+        0.0 // vent locks the cluster while it dumps heat
+    } else {
+        (p.spin_t / MINIGUN_SPINUP_S) * 46.0
+    };
+    if rate <= 0.0 {
+        return;
+    }
+    let dt = time.delta_secs().min(0.05);
+    for mut tf in &mut q {
+        tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+    }
+}
+
+// ------------------------------------------------------------- casings ---
+
+/// §12: one ejected casing per shot — a tiny brass slug that arcs right,
+/// bounces once, and fades from the world after 8 s. Render-side only.
+#[derive(Component)]
+struct Casing {
+    vel: Vec3,
+    spin: Vec3,
+    ttl: f32,
+    bounced: bool,
+    /// world-Y the casing lands on — the SHOOTER's floor, so brass on a
+    /// plateau doesn't sink to the arena floor below it
+    floor_y: f32,
+}
+
+const CASING_CAP: usize = 96;
+const CASING_TTL_S: f32 = 8.0;
+
+/// Detect fresh shots by each fighter's fire_cd jumping UP, and eject a
+/// casing from beside the action. Bows, spears, and fists leave none.
+fn spawn_casings(
+    mut commands: Commands,
+    game: Res<Game>,
+    kit: Res<ModelKit>,
+    live: Query<(), With<Casing>>,
+    mut prev_cd: Local<Vec<f32>>,
+) {
+    let simr = &game.sim;
+    prev_cd.resize(simr.fighters.len(), 0.0);
+    let mut budget = CASING_CAP.saturating_sub(live.iter().count());
+    for (i, f) in simr.fighters.iter().enumerate() {
+        let fresh = f.fire_cd > prev_cd[i] + 1e-6;
+        prev_cd[i] = f.fire_cd;
+        if !fresh || budget == 0 {
+            continue;
+        }
+        if matches!(f.gun, GunKind::Bow | GunKind::Spear | GunKind::Fists) {
+            continue;
+        }
+        budget -= 1;
+        // eject to screen-right of the muzzle line
+        let right = Vec3::new(-f.yaw.cos(), 0.0, f.yaw.sin());
+        let fwd = Vec3::new(f.yaw.sin(), 0.0, f.yaw.cos());
+        let at = Vec3::new(f.pos[0], f.pos[1] + 1.32, f.pos[2]) + right * 0.22 + fwd * 0.30;
+        // small per-shot variety from a render-side hash (never sim RNG)
+        let h = ((i as f32 * 12.9898 + simr.t * 78.233).sin() * 43758.55).fract();
+        commands.spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.gold.clone()),
+            Transform::from_translation(at)
+                .with_scale(Vec3::new(0.014, 0.014, 0.034)),
+            Casing {
+                vel: right * (1.3 + h * 0.8) + Vec3::Y * (1.6 + h * 0.5) - fwd * 0.2,
+                spin: Vec3::new(7.0 + h * 6.0, 5.0, 3.0 + h * 4.0),
+                ttl: CASING_TTL_S,
+                bounced: false,
+                floor_y: f.pos[1] + 0.02,
+            },
+        ));
+    }
+}
+
+fn update_casings(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut Casing, &mut Transform)>,
+) {
+    let dt = time.delta_secs().min(0.05);
+    for (e, mut c, mut tf) in &mut q {
+        c.ttl -= dt;
+        if c.ttl <= 0.0 {
+            commands.entity(e).despawn_recursive();
+            continue;
+        }
+        if c.vel.length_squared() > 1e-4 {
+            c.vel.y -= 9.8 * dt;
+            let step = c.vel * dt;
+            tf.translation += step;
+            tf.rotation = Quat::from_scaled_axis(c.spin * dt) * tf.rotation;
+            if tf.translation.y < c.floor_y {
+                tf.translation.y = c.floor_y;
+                if c.bounced {
+                    // at rest: lie flat where it landed
+                    c.vel = Vec3::ZERO;
+                    c.spin = Vec3::ZERO;
+                } else {
+                    c.bounced = true;
+                    c.vel.y = -c.vel.y * 0.35;
+                    c.vel.x *= 0.55;
+                    c.vel.z *= 0.55;
+                    c.spin *= 0.5;
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ colors
 
-fn fighter_color(team: Team, slot: usize, is_player: bool) -> Color {
-    if is_player {
-        return Color::srgb(0.95, 0.78, 0.25);
-    }
-    // per-man shade: same team, different personality
-    let k = 0.80 + 0.10 * (slot % 3) as f32;
-    match team {
-        Team::Blue => Color::srgb(0.25 * k, 0.46 * k, 0.92 * k),
-        Team::Red => Color::srgb(0.90 * k, 0.30 * k, 0.24 * k),
-    }
-}
-
-/// Per-man visor / accent color — the "personality" light on the face.
-fn accent_color(slot: usize, is_player: bool) -> Color {
-    if is_player {
-        return Color::srgb(0.98, 0.85, 0.30);
-    }
-    const P: [(f32, f32, f32); 5] = [
-        (0.95, 0.30, 0.20),
-        (0.95, 0.85, 0.20),
-        (0.30, 0.90, 0.50),
-        (0.90, 0.40, 0.90),
-        (0.20, 0.85, 0.95),
-    ];
-    let (r, g, b) = P[slot % 5];
-    Color::srgb(r, g, b)
-}
-
-/// Per-man hat color — no two cowboys dress alike; the player rides in white.
+/// Per-man hat color — no two robots dress alike; the player rides in white.
 fn hat_color(slot: usize, is_player: bool) -> Color {
     if is_player {
         return Color::srgb(0.92, 0.90, 0.85);
@@ -645,40 +1540,72 @@ fn hat_color(slot: usize, is_player: bool) -> Color {
 
 // --------------------------------------------------------------- models ---
 
-/// A HAND with real fingers: palm + four two-jointed fingers + a
-/// two-jointed thumb, curled around whatever it grips. `curl` is the
-/// grip strength: 1.0 = fist around a rifle grip, 0.55 = the open cradle
-/// of a forend, 0.9 = a pistol squeeze. `mirror` flips the chirality so
-/// left hands are true left hands (thumb on the correct side).
-fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) -> Entity {
+/// §2.1: the index-finger pivot on a first-person hand — the trigger
+/// finger. `rest` is its rest curl; `fp_viewmodel` drives it to full
+/// flex over 40 ms on fire, returning over 90 ms, LEADING the shot.
+#[derive(Component)]
+struct TriggerFinger {
+    rest: f32,
+}
+
+/// §7: the viewmodel minigun's barrel-cluster pivot — spun by the sim's
+/// spin_t (the player's own barrels; world models stay still).
+#[derive(Component)]
+struct MinigunSpinner;
+
+/// §2.1 (Brief II): a fully articulated fingered hand — palm, four
+/// two-jointed fingers, two-jointed thumb. VIEWMODEL ONLY: it lives on
+/// the viewmodel render layer, is never instanced per-bot, and therefore
+/// has no bearing on the per-fighter cost §0.3 protects.
+fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) -> Entity {
     let m = if mirror { -1.0_f32 } else { 1.0 };
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
+    // §2.2 (Brief IV, image 4): white shell segments, DARK ball joints,
+    // individually segmented fingers with dark knuckle lines — sized to
+    // READ in frame, not to hide behind the receiver.
+    // wrist ball
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.grey_black.clone()),
+            Transform::from_xyz(0.0, 0.0, -0.045).with_scale(Vec3::splat(0.052)),
+        ))
+        .set_parent(root);
     // palm
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_scale(Vec3::new(0.075, 0.028, 0.085)),
+            Transform::from_scale(Vec3::new(0.105, 0.040, 0.115)),
         ))
         .set_parent(root);
-    // four fingers across the palm's front edge, two joints each
-    for (fi, fx) in [-0.027_f32, -0.009, 0.009, 0.027].into_iter().enumerate() {
-        let len = if fi == 0 || fi == 3 { 0.030 } else { 0.036 };
-        let base = commands
+    // four fingers, two segments each, dark knuckle balls at both joints
+    for (fi, fx) in [-0.038_f32, -0.013, 0.013, 0.038].into_iter().enumerate() {
+        let len = if fi == 0 || fi == 3 { 0.044 } else { 0.052 };
+        let rest = -1.15 * curl;
+        let mut base_cmd = commands.spawn((
+            Transform::from_xyz(fx * m, 0.0, 0.058).with_rotation(Quat::from_rotation_x(rest)),
+            Visibility::default(),
+        ));
+        if fi == 0 && !mirror {
+            base_cmd.insert(TriggerFinger { rest });
+        }
+        let base = base_cmd.set_parent(root).id();
+        // knuckle line at the palm edge
+        commands
             .spawn((
-                Transform::from_xyz(fx * m, 0.0, 0.042)
-                    .with_rotation(Quat::from_rotation_x(-1.15 * curl)),
-                Visibility::default(),
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.grey_black.clone()),
+                Transform::from_scale(Vec3::splat(0.024)),
             ))
-            .set_parent(root)
-            .id();
+            .set_parent(base);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.hand.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.5).with_scale(Vec3::new(0.015, 0.016, len)),
+                Transform::from_xyz(0.0, 0.0, len * 0.5).with_scale(Vec3::new(0.022, 0.023, len)),
             ))
             .set_parent(base);
         let tip = commands
@@ -689,19 +1616,27 @@ fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) 
             ))
             .set_parent(base)
             .id();
+        // mid-knuckle
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.grey_black.clone()),
+                Transform::from_scale(Vec3::splat(0.021)),
+            ))
+            .set_parent(tip);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.hand.clone()),
                 Transform::from_xyz(0.0, 0.0, len * 0.4)
-                    .with_scale(Vec3::new(0.014, 0.015, len * 0.8)),
+                    .with_scale(Vec3::new(0.020, 0.021, len * 0.8)),
             ))
             .set_parent(tip);
     }
     // thumb: two joints, wrapping from the side (flipped when mirrored)
     let tbase = commands
         .spawn((
-            Transform::from_xyz(-0.040 * m, 0.0, 0.012).with_rotation(
+            Transform::from_xyz(-0.056 * m, 0.0, 0.018).with_rotation(
                 Quat::from_rotation_y(0.9 * curl * m) * Quat::from_rotation_x(-0.5 * curl),
             ),
             Visibility::default(),
@@ -710,14 +1645,21 @@ fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) 
         .id();
     commands
         .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.grey_black.clone()),
+            Transform::from_scale(Vec3::splat(0.024)),
+        ))
+        .set_parent(tbase);
+    commands
+        .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.016).with_scale(Vec3::new(0.017, 0.018, 0.032)),
+            Transform::from_xyz(0.0, 0.0, 0.023).with_scale(Vec3::new(0.024, 0.025, 0.046)),
         ))
         .set_parent(tbase);
     let ttip = commands
         .spawn((
-            Transform::from_xyz(0.0, 0.0, 0.032)
+            Transform::from_xyz(0.0, 0.0, 0.046)
                 .with_rotation(Quat::from_rotation_y(0.9 * curl * m)),
             Visibility::default(),
         ))
@@ -727,193 +1669,269 @@ fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) 
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.013).with_scale(Vec3::new(0.015, 0.016, 0.026)),
+            Transform::from_xyz(0.0, 0.0, 0.019).with_scale(Vec3::new(0.021, 0.022, 0.038)),
         ))
         .set_parent(ttip);
     root
 }
 
-/// Spawn a detailed weapon model. Root sits at the grip; +Z is the muzzle.
-/// (The bow stands along +Y with its string toward -Z.) Every gun comes
-/// with fingered HANDS posed to its grip. `with_detail` adds the extra
-/// `AdsDetail` greebles that only show while aiming — the §5 detail LOD
-/// belongs to YOUR weapons (world + viewmodel); bots skip the parts
-/// entirely, which is the LOD working as intended.
+/// §1.1: hands are MITTENS — a rounded mitt curled to the grip plus a
+/// separate thumb. `curl` is the grip strength (1.0 = fist around a rifle
+/// grip, 0.55 = the open cradle of a forend); `mirror` flips chirality so
+/// the thumb sits on the correct side. Three entities where the fingered
+/// hand spent nineteen — a straight perf win on top of the art change.
+fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) -> Entity {
+    let m = if mirror { -1.0_f32 } else { 1.0 };
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    // the mitt: a rounded shell wrapped over the grip
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(0.0, -0.005, 0.020)
+                .with_rotation(Quat::from_rotation_x(-0.55 * curl))
+                .with_scale(Vec3::new(0.085, 0.062, 0.115)),
+        ))
+        .set_parent(root);
+    // the thumb: one rounded capsule-ish lobe hooking from the side
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(-0.042 * m, 0.004, 0.028)
+                .with_rotation(
+                    Quat::from_rotation_y(0.8 * curl * m) * Quat::from_rotation_x(-0.4 * curl),
+                )
+                .with_scale(Vec3::new(0.034, 0.034, 0.062)),
+        ))
+        .set_parent(root);
+    root
+}
+
+/// Spawn a weapon model from the §2.1 shared part vocabulary. Root sits
+/// at the grip; +Z is the muzzle. (The bow stands along +Y with its
+/// string toward -Z.) Per-gun differentiation is PROPORTION, not new part
+/// types; tone changes — not geometry — suggest complexity. Every gun
+/// `with_detail` adds the ADS-only greebles (sights, scope rings) — the
+/// detail LOD belongs to YOUR weapons; bots skip the parts entirely.
+/// `with_hands` bakes posed mitten hands onto the model (viewmodel only —
+/// §1.3 third-person hands are the BODY's, IK'd onto the sockets).
 fn spawn_weapon_model(
     commands: &mut Commands,
     kit: &ModelKit,
     kind: GunKind,
     with_detail: bool,
+    with_hands: bool,
 ) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    // (is_cylinder, material, translation, rot_x, scale)
-    let mut parts: Vec<(bool, Handle<StandardMaterial>, Vec3, f32, Vec3)> = Vec::new();
-    let mut detail: Vec<(bool, Handle<StandardMaterial>, Vec3, f32, Vec3)> = Vec::new();
-    // (position, yaw, curl, mirrored-left?) for each gripping hand
-    let mut hands: Vec<(Vec3, f32, f32, bool)> = Vec::new();
+    let mut parts: Vec<WPart> = Vec::new();
     match kind {
         GunKind::Fists => {}
         GunKind::Glock => {
-            // compact polymer pistol: squared slide, short barrel
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.05, 0.07), 0.0, Vec3::new(0.045, 0.06, 0.22)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.05, 0.19), FRAC_PI_2, Vec3::new(0.026, 0.06, 0.026)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.05, -0.01), 0.18, Vec3::new(0.042, 0.13, 0.06)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.085, 0.15), 0.0, Vec3::new(0.008, 0.012, 0.01)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.085, -0.03), 0.0, Vec3::new(0.014, 0.012, 0.01)));
-            hands.push((Vec3::new(0.0, -0.05, -0.015), 0.0, 0.9, false));
+            // compact service pistol: squared mid slide over a dark frame
+            parts.push(wp(false, Tone::Mid, (0.0, 0.05, 0.07), 0.0, (0.046, 0.058, 0.22)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.05, -0.025), 0.0, (0.048, 0.044, 0.045)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.052, 0.185), FRAC_PI_2, (0.026, 0.05, 0.026)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.05), 0.0, (0.042, 0.045, 0.20)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.05, -0.01), 0.18, (0.042, 0.13, 0.06)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.018, 0.048), 0.0, (0.012, 0.012, 0.05)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
         }
         GunKind::Deagle => {
-            // the hand cannon: long heavy slide, gold accents
-            parts.push((false, kit.steel.clone(), Vec3::new(0.0, 0.055, 0.10), 0.0, Vec3::new(0.052, 0.075, 0.30)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.055, 0.26), FRAC_PI_2, Vec3::new(0.034, 0.07, 0.034)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.055, -0.01), 0.20, Vec3::new(0.046, 0.14, 0.065)));
-            parts.push((false, kit.gold.clone(), Vec3::new(0.0, 0.02, 0.06), 0.0, Vec3::new(0.054, 0.012, 0.16)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.10, 0.22), 0.0, Vec3::new(0.008, 0.014, 0.01)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.0, 0.10, -0.04), 0.0, Vec3::new(0.016, 0.012, 0.01)));
-            hands.push((Vec3::new(0.0, -0.055, -0.015), 0.0, 0.9, false));
+            // the hand cannon: long light slide, heavy dark frame
+            parts.push(wp(false, Tone::Light, (0.0, 0.055, 0.10), 0.0, (0.052, 0.075, 0.30)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.096, 0.10), 0.0, (0.030, 0.012, 0.28)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.07), 0.0, (0.048, 0.05, 0.24)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
+            push_muzzle(&mut parts, 0.055, 0.27, 0.055);
+            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
         }
         GunKind::Mp5 => {
-            // compact SMG: stubby, slab receiver, angled magazine
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.02, 0.04), 0.0, Vec3::new(0.05, 0.09, 0.34)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.03, 0.28), FRAC_PI_2, Vec3::new(0.024, 0.18, 0.024)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.10, 0.10), 0.45, Vec3::new(0.032, 0.17, 0.06)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.07, -0.05), 0.2, Vec3::new(0.04, 0.11, 0.05)));
-            parts.push((false, kit.steel.clone(), Vec3::new(0.0, 0.0, -0.18), 0.0, Vec3::new(0.03, 0.07, 0.12)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.085, 0.16), 0.0, Vec3::new(0.01, 0.02, 0.012)));
-            detail.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.03, 0.37), FRAC_PI_2, Vec3::new(0.03, 0.03, 0.03)));
-            hands.push((Vec3::new(0.0, -0.07, -0.055), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.045, 0.16), 0.15, 0.55, true));
+            // compact SMG: short everything — slab receiver, raked mag
+            parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.04), 0.0, (0.05, 0.09, 0.34)));
+            push_rail(&mut parts, 0.075, -0.10, 0.18, 6);
+            parts.push(wp(true, Tone::Dark, (0.0, 0.03, 0.28), FRAC_PI_2, (0.024, 0.18, 0.024)));
+            push_muzzle(&mut parts, 0.03, 0.385, 0.036);
+            parts.push(wp(false, Tone::Light, (0.0, -0.012, 0.16), 0.0, (0.052, 0.058, 0.14)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.10, 0.10), 0.35, (0.032, 0.17, 0.06)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.07, -0.05), 0.2, (0.04, 0.11, 0.05)));
+            // folded stock: flat end cap + side-folded strut hugging the
+            // receiver — nothing protrudes past the grip line
+            parts.push(wp(false, Tone::Mid, (0.0, 0.02, -0.135), 0.0, (0.046, 0.075, 0.018)));
+            parts.push(wp(false, Tone::Dark, (0.055, 0.025, 0.02), 0.0, (0.016, 0.02, 0.26)));
         }
         GunKind::Shotgun => {
-            // pump gun: long tube pair, wood pump + stock
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.02, 0.02), 0.0, Vec3::new(0.05, 0.085, 0.30)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.045, 0.38), FRAC_PI_2, Vec3::new(0.028, 0.48, 0.028)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, -0.005, 0.36), FRAC_PI_2, Vec3::new(0.024, 0.42, 0.024)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.015, 0.30), 0.0, Vec3::new(0.052, 0.05, 0.16)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.035, -0.20), 0.12, Vec3::new(0.045, 0.10, 0.26)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.09, 0.55), 0.0, Vec3::new(0.008, 0.016, 0.01)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.045, -0.01, 0.05), 0.0, Vec3::new(0.012, 0.03, 0.05)));
-            hands.push((Vec3::new(0.0, -0.045, -0.06), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.05, 0.30), 0.0, 0.55, true));
+            // pump gun: barrel + tube pair over a light pump
+            parts.push(wp(false, Tone::Dark, (0.0, 0.02, 0.02), 0.0, (0.05, 0.085, 0.30)));
+            parts.push(wp(true, Tone::Mid, (0.0, 0.045, 0.38), FRAC_PI_2, (0.028, 0.48, 0.028)));
+            parts.push(wp(true, Tone::Dark, (0.0, -0.005, 0.36), FRAC_PI_2, (0.024, 0.42, 0.024)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.015, 0.30), 0.0, (0.054, 0.05, 0.16)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
+            parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
         }
         GunKind::Ak47 => {
-            // the classic: wood furniture, curved magazine, long gas tube
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.02, 0.06), 0.0, Vec3::new(0.05, 0.085, 0.38)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.045, 0.44), FRAC_PI_2, Vec3::new(0.026, 0.36, 0.026)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, 0.01, 0.32), 0.0, Vec3::new(0.05, 0.055, 0.18)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.015, -0.22), 0.10, Vec3::new(0.045, 0.10, 0.26)));
-            // the curved mag: two angled segments
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.10, 0.09), 0.35, Vec3::new(0.036, 0.14, 0.075)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.185, 0.14), 0.75, Vec3::new(0.034, 0.11, 0.07)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.08, -0.05), 0.30, Vec3::new(0.04, 0.10, 0.05)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.085, 0.10), 0.0, Vec3::new(0.014, 0.02, 0.012)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.09, 0.58), 0.0, Vec3::new(0.008, 0.018, 0.01)));
-            hands.push((Vec3::new(0.0, -0.08, -0.06), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.035, 0.32), 0.1, 0.55, true));
+            // the classic: long gas tube, big two-segment raked magazine
+            parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.06), 0.0, (0.05, 0.085, 0.38)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.068, 0.0), 0.0, (0.048, 0.02, 0.22)));
+            parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.44), FRAC_PI_2, (0.026, 0.36, 0.026)));
+            parts.push(wp(true, Tone::Light, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.10, 0.09), 0.35, (0.036, 0.14, 0.075)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.185, 0.14), 0.75, (0.034, 0.11, 0.07)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
+            push_stock(&mut parts, -0.30, 0.045);
+            push_muzzle(&mut parts, 0.045, 0.635, 0.038);
+            parts.push(wd(false, Tone::Light, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
         }
         GunKind::M4 => {
-            // modern carbine: rails, carry sights, straight mag
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.02, 0.08), 0.0, Vec3::new(0.05, 0.09, 0.42)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.03, 0.45), FRAC_PI_2, Vec3::new(0.028, 0.34, 0.028)));
-            parts.push((false, kit.olive.clone(), Vec3::new(0.0, -0.01, -0.20), 0.0, Vec3::new(0.045, 0.10, 0.26)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, -0.09, 0.06), 0.25, Vec3::new(0.038, 0.16, 0.08)));
-            parts.push((false, kit.steel.clone(), Vec3::new(0.0, 0.09, 0.10), 0.0, Vec3::new(0.018, 0.05, 0.10)));
-            parts.push((false, kit.olive.clone(), Vec3::new(0.0, -0.08, -0.06), 0.35, Vec3::new(0.04, 0.10, 0.05)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.10, 0.24), 0.0, Vec3::new(0.008, 0.018, 0.01)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.10, -0.02), 0.0, Vec3::new(0.014, 0.016, 0.01)));
-            detail.push((false, kit.gunmetal.clone(), Vec3::new(0.045, 0.02, 0.22), 0.0, Vec3::new(0.012, 0.02, 0.14)));
-            hands.push((Vec3::new(0.0, -0.08, -0.06), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.045, 0.24), 0.1, 0.55, true));
+            // modern carbine: notched top rail, straight raked mag
+            parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.08), 0.0, (0.05, 0.09, 0.42)));
+            push_rail(&mut parts, 0.078, -0.08, 0.30, 10);
+            parts.push(wp(true, Tone::Dark, (0.0, 0.03, 0.45), FRAC_PI_2, (0.028, 0.34, 0.028)));
+            push_muzzle(&mut parts, 0.03, 0.635, 0.04);
+            parts.push(wp(false, Tone::Dark, (0.0, -0.005, 0.30), 0.0, (0.055, 0.055, 0.20)));
+            parts.push(wp(false, Tone::Light, (0.032, -0.005, 0.30), 0.0, (0.008, 0.02, 0.16)));
+            parts.push(wp(false, Tone::Light, (-0.032, -0.005, 0.30), 0.0, (0.008, 0.02, 0.16)));
+            parts.push(wp(false, Tone::Mid, (0.0, -0.09, 0.06), 0.15, (0.038, 0.16, 0.08)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
+            push_stock(&mut parts, -0.30, 0.05);
+            parts.push(wd(false, Tone::Light, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
         }
         GunKind::Awm => {
-            // the AWM: long fluted barrel, big scope, olive stock, bipod
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.01, 0.05), 0.0, Vec3::new(0.045, 0.08, 0.46)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.03, 0.55), FRAC_PI_2, Vec3::new(0.024, 0.55, 0.024)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.10, 0.08), FRAC_PI_2, Vec3::new(0.055, 0.20, 0.055)));
-            parts.push((true, kit.lens.clone(), Vec3::new(0.0, 0.10, 0.185), FRAC_PI_2, Vec3::new(0.045, 0.012, 0.045)));
-            parts.push((false, kit.olive.clone(), Vec3::new(0.0, -0.02, -0.22), 0.0, Vec3::new(0.045, 0.11, 0.30)));
-            parts.push((false, kit.steel.clone(), Vec3::new(0.045, -0.08, 0.42), 0.0, Vec3::new(0.012, 0.14, 0.012)));
-            parts.push((false, kit.steel.clone(), Vec3::new(-0.045, -0.08, 0.42), 0.0, Vec3::new(0.012, 0.14, 0.012)));
-            detail.push((true, kit.steel.clone(), Vec3::new(0.0, 0.03, 0.70), FRAC_PI_2, Vec3::new(0.030, 0.05, 0.030)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.05, 0.02, -0.04), -0.5, Vec3::new(0.014, 0.06, 0.014)));
-            detail.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.10, -0.02), FRAC_PI_2, Vec3::new(0.058, 0.02, 0.058)));
-            hands.push((Vec3::new(0.0, -0.075, -0.10), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.05, 0.26), 0.1, 0.55, true));
+            // the AWM: long barrel, big scope block, solid cheek stock
+            parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.05), 0.0, (0.045, 0.08, 0.46)));
+            parts.push(wp(true, Tone::Mid, (0.0, 0.03, 0.55), FRAC_PI_2, (0.024, 0.55, 0.024)));
+            push_muzzle(&mut parts, 0.03, 0.85, 0.036);
+            parts.push(wp(true, Tone::Dark, (0.0, 0.10, 0.08), FRAC_PI_2, (0.055, 0.20, 0.055)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.10, 0.185), FRAC_PI_2, (0.045, 0.012, 0.045)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.02, -0.22), 0.0, (0.045, 0.11, 0.30)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.02, -0.375), 0.0, (0.048, 0.12, 0.02)));
+            parts.push(wp(false, Tone::Dark, (0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
+            parts.push(wp(false, Tone::Dark, (-0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
+            parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.02), FRAC_PI_2, (0.060, 0.02, 0.060)));
+            parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.14), FRAC_PI_2, (0.060, 0.02, 0.060)));
         }
         GunKind::M249 => {
-            // belt-fed support gun: box mag, top feed tray, thick barrel
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.02, 0.05), 0.0, Vec3::new(0.075, 0.12, 0.50)));
-            parts.push((true, kit.steel.clone(), Vec3::new(0.0, 0.04, 0.50), FRAC_PI_2, Vec3::new(0.045, 0.40, 0.045)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.04, 0.72), FRAC_PI_2, Vec3::new(0.065, 0.09, 0.065)));
-            parts.push((false, kit.olive.clone(), Vec3::new(0.0, -0.13, 0.02), 0.0, Vec3::new(0.09, 0.16, 0.13)));
-            parts.push((false, kit.steel.clone(), Vec3::new(0.0, 0.12, 0.08), 0.0, Vec3::new(0.02, 0.06, 0.16)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.0, -0.22), 0.0, Vec3::new(0.05, 0.09, 0.18)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.05, -0.02, 0.10), 0.0, Vec3::new(0.014, 0.05, 0.10)));
-            detail.push((false, kit.steel.clone(), Vec3::new(0.0, 0.10, 0.30), 0.0, Vec3::new(0.01, 0.02, 0.012)));
-            hands.push((Vec3::new(0.0, -0.07, -0.08), 0.0, 1.0, false));
-            hands.push((Vec3::new(0.0, -0.10, 0.22), 0.1, 0.55, true));
+            // belt-fed support gun: deep receiver, box mag, thick barrel
+            parts.push(wp(false, Tone::Dark, (0.0, 0.02, 0.05), 0.0, (0.075, 0.12, 0.50)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.088, 0.05), 0.0, (0.07, 0.02, 0.30)));
+            parts.push(wp(true, Tone::Dark, (0.0, 0.04, 0.50), FRAC_PI_2, (0.045, 0.40, 0.045)));
+            push_muzzle(&mut parts, 0.04, 0.73, 0.06);
+            parts.push(wp(false, Tone::Mid, (0.0, -0.13, 0.02), 0.0, (0.09, 0.16, 0.13)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.12, 0.08), 0.0, (0.02, 0.06, 0.16)));
+            push_stock(&mut parts, -0.30, 0.05);
+            parts.push(wp(false, Tone::Dark, (0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
+            parts.push(wp(false, Tone::Dark, (-0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
         }
         GunKind::Bow => {
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, 0.24, 0.03), -0.30, Vec3::new(0.028, 0.46, 0.045)));
-            parts.push((false, kit.wood.clone(), Vec3::new(0.0, -0.24, 0.03), 0.30, Vec3::new(0.028, 0.46, 0.045)));
-            parts.push((false, kit.gunmetal.clone(), Vec3::new(0.0, 0.0, 0.01), 0.0, Vec3::new(0.035, 0.15, 0.055)));
-            parts.push((false, kit.string.clone(), Vec3::new(0.0, 0.0, -0.09), 0.0, Vec3::new(0.008, 0.82, 0.008)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.0, 0.10, 0.02), 0.0, Vec3::new(0.038, 0.02, 0.058)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.0, -0.10, 0.02), 0.0, Vec3::new(0.038, 0.02, 0.058)));
-            hands.push((Vec3::new(0.0, 0.0, 0.03), 0.0, 0.8, true));
+            // hard-surface war bow: dark blocky limbs, mid riser, light tips
+            parts.push(wp(false, Tone::Dark, (0.0, 0.24, 0.03), -0.30, (0.028, 0.46, 0.045)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.24, 0.03), 0.30, (0.028, 0.46, 0.045)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.01), 0.0, (0.035, 0.15, 0.055)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.455, -0.04), -0.30, (0.032, 0.05, 0.05)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.455, -0.04), 0.30, (0.032, 0.05, 0.05)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, -0.09), 0.0, (0.008, 0.82, 0.008)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.02), 0.0, (0.038, 0.02, 0.058)));
+            parts.push(wd(false, Tone::Light, (0.0, -0.10, 0.02), 0.0, (0.038, 0.02, 0.058)));
         }
         GunKind::Spear => {
-            parts.push((true, kit.wood.clone(), Vec3::new(0.0, 0.0, 0.35), FRAC_PI_2, Vec3::new(0.032, 1.85, 0.032)));
-            parts.push((false, kit.steel.clone(), Vec3::new(0.0, 0.0, 1.32), 0.0, Vec3::new(0.055, 0.018, 0.22)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.0, 1.18), FRAC_PI_2, Vec3::new(0.042, 0.09, 0.042)));
-            parts.push((true, kit.gunmetal.clone(), Vec3::new(0.0, 0.0, -0.56), FRAC_PI_2, Vec3::new(0.038, 0.07, 0.038)));
-            detail.push((false, kit.gold.clone(), Vec3::new(0.0, 0.0, 1.10), 0.0, Vec3::new(0.045, 0.045, 0.02)));
-            hands.push((Vec3::new(0.0, -0.02, 0.0), 0.0, 1.0, false));
+            // war spear: dark shaft, light flat blade, black collar + butt
+            parts.push(wp(true, Tone::Dark, (0.0, 0.0, 0.35), FRAC_PI_2, (0.032, 1.85, 0.032)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.32), 0.0, (0.055, 0.018, 0.22)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.0, 1.18), FRAC_PI_2, (0.042, 0.09, 0.042)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.0, -0.56), FRAC_PI_2, (0.038, 0.07, 0.038)));
+            parts.push(wd(false, Tone::Light, (0.0, 0.0, 1.10), 0.0, (0.045, 0.045, 0.02)));
+        }
+        GunKind::Minigun => {
+            // §7: six-barrel cluster round a spine, deep motor housing at
+            // the rear, spade grip below — no stock, the housing IS the
+            // brace. Reads as MASS from every angle. The whole barrel
+            // cluster lives on its own SPINNER child so the viewmodel can
+            // rotate it with the sim's spin_t.
+            let spinner = commands
+                .spawn((Transform::IDENTITY, Visibility::default()))
+                .id();
+            if with_hands {
+                commands.entity(spinner).insert(MinigunSpinner);
+            }
+            commands.entity(spinner).set_parent(root);
+            let mut cluster: Vec<(Tone, Vec3, Vec3)> = vec![
+                (Tone::Mid, Vec3::new(0.0, 0.0, 0.24), Vec3::new(0.024, 0.52, 0.024)),
+                (Tone::Black, Vec3::new(0.0, 0.0, 0.50), Vec3::new(0.082, 0.05, 0.082)),
+                (Tone::Black, Vec3::new(0.0, 0.0, 0.16), Vec3::new(0.086, 0.05, 0.086)),
+            ];
+            for i in 0..6 {
+                let a = i as f32 * std::f32::consts::TAU / 6.0;
+                let (bx, by) = (a.cos() * 0.052, a.sin() * 0.052);
+                cluster.push((
+                    Tone::Dark,
+                    Vec3::new(bx, by, 0.26),
+                    Vec3::new(0.017, 0.56, 0.017),
+                ));
+            }
+            for (tone, pos, size) in cluster {
+                commands
+                    .spawn((
+                        Mesh3d(kit.cyl.clone()),
+                        MeshMaterial3d(kit.tone(tone)),
+                        Transform {
+                            translation: pos,
+                            rotation: Quat::from_rotation_x(FRAC_PI_2),
+                            scale: size,
+                        },
+                    ))
+                    .set_parent(spinner);
+            }
+            // motor housing + rear cap (the torso-brace face)
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0, -0.05), 0.0, (0.13, 0.15, 0.18)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.0, -0.135), 0.0, (0.11, 0.13, 0.02)));
+            // spade grip under the rear + side support handle
+            parts.push(wp(false, Tone::Black, (0.0, -0.115, -0.07), 0.15, (0.03, 0.09, 0.04)));
+            parts.push(wp(false, Tone::Black, (-0.02, -0.10, 0.18), 0.0, (0.026, 0.10, 0.035)));
+            // feed chute hint on the right flank
+            parts.push(wd(false, Tone::Light, (0.075, -0.02, -0.02), 0.0, (0.02, 0.06, 0.10)));
         }
     }
-    for (is_cyl, mat, tr, rx, sc) in parts {
-        let mesh = if is_cyl { kit.cyl.clone() } else { kit.cube.clone() };
-        commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-                Transform {
-                    translation: tr,
-                    rotation: Quat::from_rotation_x(rx),
-                    scale: sc,
-                },
-            ))
-            .set_parent(root);
+    for p in parts {
+        if p.detail && !with_detail {
+            continue; // bots carry the plain silhouette — the LOD working
+        }
+        let mesh = if p.cyl { kit.cyl.clone() } else { kit.cube.clone() };
+        let mut e = commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(kit.tone(p.tone)),
+            Transform {
+                translation: p.pos,
+                rotation: Quat::from_rotation_x(p.tilt),
+                scale: p.size,
+            },
+        ));
+        if p.detail {
+            // aiming-only greebles (§5: weapon detail steps up on ADS)
+            e.insert((Visibility::Hidden, AdsDetail));
+        }
+        e.set_parent(root);
     }
-    // aiming-only greebles (§5: weapon detail steps up on ADS)
-    if !with_detail {
-        detail.clear();
-    }
-    for (is_cyl, mat, tr, rx, sc) in detail {
-        let mesh = if is_cyl { kit.cyl.clone() } else { kit.cube.clone() };
-        commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-                Transform {
-                    translation: tr,
-                    rotation: Quat::from_rotation_x(rx),
-                    scale: sc,
-                },
-                Visibility::Hidden,
-                AdsDetail,
-            ))
-            .set_parent(root);
-    }
-    // the gripping hands, fingers curled to this weapon
-    for (pos, ry, curl, mirror) in hands {
-        let hand = spawn_hand(commands, kit, curl, mirror);
-        commands
-            .entity(hand)
-            .insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(ry)))
-            .set_parent(root);
+    // §2.1: the viewmodel's hands are FULLY FINGERED — trigger finger,
+    // grip wrap, thumb-over — where the world model wears mittens
+    if with_hands {
+        for (pos, ry, curl, mirror) in weapon_hand_specs(kind) {
+            let hand = spawn_hand_fingered(commands, kit, curl, mirror);
+            commands
+                .entity(hand)
+                .insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(ry)))
+                .set_parent(root);
+        }
     }
     root
 }
@@ -984,20 +2002,55 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
 
 /// Spawn the wearable robot-armor rig (chest plate, power pack, pauldrons).
 fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    // §11 (Brief IV): the Mech Armada read — khaki FACETED plates (each
+    // face slightly canted so light breaks across them), a single red
+    // sensor slit instead of eyes, boxy shoulder pods, exhaust stubs.
+    // Worn over the fighter rig; the sim's arcs/hull/eject are untouched.
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    for (mat, tr, sc) in [
-        (kit.armor_dark.clone(), Vec3::new(0.0, 0.32, 0.07), Vec3::new(0.50, 0.44, 0.28)),
-        (kit.armor_dark.clone(), Vec3::new(0.0, 0.35, -0.20), Vec3::new(0.30, 0.36, 0.14)),
-        (kit.core_glow.clone(), Vec3::new(0.0, 0.35, -0.28), Vec3::new(0.14, 0.14, 0.05)),
-        (kit.armor_dark.clone(), Vec3::new(0.33, 0.58, 0.0), Vec3::new(0.17, 0.14, 0.20)),
-        (kit.armor_dark.clone(), Vec3::new(-0.33, 0.58, 0.0), Vec3::new(0.17, 0.14, 0.20)),
-    ] {
+    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 14] = [
+        // chest: two canted khaki facets meeting on the centerline
+        (kit.mech_khaki.clone(), Vec3::new(0.13, 0.34, 0.10),
+         Quat::from_rotation_y(-0.22), Vec3::new(0.30, 0.46, 0.16)),
+        (kit.mech_khaki.clone(), Vec3::new(-0.13, 0.34, 0.10),
+         Quat::from_rotation_y(0.22), Vec3::new(0.30, 0.46, 0.16)),
+        // collar wedge above the chest facets
+        (kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.56, 0.06),
+         Quat::from_rotation_x(0.30), Vec3::new(0.34, 0.10, 0.16)),
+        // abdomen band — darker, recessed
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.10, 0.05),
+         Quat::IDENTITY, Vec3::new(0.40, 0.14, 0.22)),
+        // back: power pack + twin exhaust stubs
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.36, -0.20),
+         Quat::IDENTITY, Vec3::new(0.34, 0.40, 0.16)),
+        (kit.mech_metal.clone(), Vec3::new(0.10, 0.52, -0.26),
+         Quat::from_rotation_x(-0.20), Vec3::new(0.07, 0.16, 0.07)),
+        (kit.mech_metal.clone(), Vec3::new(-0.10, 0.52, -0.26),
+         Quat::from_rotation_x(-0.20), Vec3::new(0.07, 0.16, 0.07)),
+        // shoulder pods: boxy, khaki top over shadow underside
+        (kit.mech_khaki.clone(), Vec3::new(0.36, 0.60, 0.0),
+         Quat::from_rotation_z(-0.12), Vec3::new(0.22, 0.16, 0.24)),
+        (kit.mech_khaki.clone(), Vec3::new(-0.36, 0.60, 0.0),
+         Quat::from_rotation_z(0.12), Vec3::new(0.22, 0.16, 0.24)),
+        (kit.mech_shadow.clone(), Vec3::new(0.36, 0.50, 0.0),
+         Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
+        (kit.mech_shadow.clone(), Vec3::new(-0.36, 0.50, 0.0),
+         Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
+        // helm cowl over the head + the RED SENSOR SLIT
+        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.90, -0.01),
+         Quat::from_rotation_x(0.08), Vec3::new(0.26, 0.16, 0.24)),
+        (kit.mech_red.clone(), Vec3::new(0.0, 0.885, 0.115),
+         Quat::IDENTITY, Vec3::new(0.16, 0.028, 0.03)),
+        // pelvis skirt plate
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.02, 0.10),
+         Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
+    ];
+    for (mat, tr, rot, sc) in plates {
         commands
             .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
                 translation: tr,
-                rotation: Quat::IDENTITY,
+                rotation: rot,
                 scale: sc,
             }))
             .set_parent(root);
@@ -1057,15 +2110,101 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
             );
             e
         }
+        // §6: the three new set pads — a readable silhouette each
+        PickupKind::FolkArmor => {
+            let root = commands
+                .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
+                .id();
+            for (mat, tr, sc) in [
+                (kit.steel.clone(), Vec3::ZERO, Vec3::new(0.42, 0.40, 0.24)),
+                (kit.wood.clone(), Vec3::new(0.0, -0.06, 0.13), Vec3::new(0.44, 0.08, 0.02)),
+                (kit.steel.clone(), Vec3::new(0.0, 0.26, 0.0), Vec3::new(0.30, 0.12, 0.22)),
+            ] {
+                commands
+                    .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
+                        translation: tr,
+                        rotation: Quat::IDENTITY,
+                        scale: sc,
+                    }))
+                    .set_parent(root);
+            }
+            root
+        }
+        PickupKind::PyroArmor => {
+            let root = commands
+                .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
+                .id();
+            for (mat, tr, sc) in [
+                (kit.grey_black.clone(), Vec3::ZERO, Vec3::new(0.42, 0.40, 0.24)),
+                (kit.core_glow.clone(), Vec3::new(0.0, 0.0, 0.13), Vec3::new(0.30, 0.04, 0.02)),
+                (kit.core_glow.clone(), Vec3::new(0.0, 0.14, 0.13), Vec3::new(0.20, 0.04, 0.02)),
+            ] {
+                commands
+                    .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
+                        translation: tr,
+                        rotation: Quat::IDENTITY,
+                        scale: sc,
+                    }))
+                    .set_parent(root);
+            }
+            root
+        }
+        PickupKind::ReconWeave => {
+            let root = commands
+                .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
+                .id();
+            for (mat, tr, sc) in [
+                (kit.grey_mid.clone(), Vec3::ZERO, Vec3::new(0.36, 0.42, 0.18)),
+                (kit.lens.clone(), Vec3::new(0.0, 0.20, 0.10), Vec3::new(0.16, 0.03, 0.02)),
+            ] {
+                commands
+                    .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
+                        translation: tr,
+                        rotation: Quat::IDENTITY,
+                        scale: sc,
+                    }))
+                    .set_parent(root);
+            }
+            root
+        }
+        // §7: the pad shows the gun itself, laid across the plinth
+        PickupKind::Minigun => {
+            let root = commands
+                .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
+                .id();
+            for (mat, tr, sc) in [
+                // barrel cluster hint: a fat cylinder-read from cubes
+                (kit.grey_dark.clone(), Vec3::new(0.0, 0.0, 0.22), Vec3::new(0.11, 0.11, 0.44)),
+                (kit.grey_black.clone(), Vec3::new(0.0, 0.0, -0.10), Vec3::new(0.16, 0.18, 0.24)),
+                (kit.grey_mid.clone(), Vec3::new(0.0, -0.12, 0.10), Vec3::new(0.05, 0.10, 0.06)),
+                (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.45), Vec3::new(0.13, 0.13, 0.04)),
+            ] {
+                commands
+                    .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
+                        translation: tr,
+                        rotation: Quat::IDENTITY,
+                        scale: sc,
+                    }))
+                    .set_parent(root);
+            }
+            root
+        }
     }
 }
 
 // ------------------------------------------- match-scoped world builders --
 
-/// Build every fighter's rig. v6 art direction: ROUNDED and cute — big
-/// head, short limbs, inflated capsule body (Baymax construction, Smurf
-/// proportions) — over a REAL skeleton: hips/knees/ankles in the legs,
-/// shoulder/elbow/wrist in the arms, fingered hands on every weapon.
+/// Build every fighter's rig. §1 art direction: the WHITE SERVICE ROBOT —
+/// matte white shell panels over exposed dark gloss joints, an oversized
+/// rounded head with two big black oval eyes (no mouth, no visor), glossy
+/// knee domes, mitten hands. Same skeleton as ever: hips/knees/ankles,
+/// shoulder/elbow/wrist — the animation code is untouched.
+///
+/// ⚠ §1.2: the sim classifies hits by HEIGHT FRACTION (head > 0.82,
+/// arms > 0.66, torso > 0.35 — `apply_hit`). The model FITS those bands:
+/// standing hip 0.63 (legs fill 0.00–0.35), chest tops out at 1.19,
+/// shoulder yoke rides 1.19–1.476, and the head base sits exactly on the
+/// 0.82 line (1.476) with its crown at 1.80. Check any change with F3.
 fn spawn_fighter_rigs(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1081,28 +2220,60 @@ fn spawn_fighter_rigs(
         ..default()
     };
     // rounded primitives only — no hard edges on a body
-    let mesh_head = meshes.add(Sphere::new(0.27));
-    let mesh_torso = meshes.add(Capsule3d::new(0.30, 0.22));
-    let mesh_thigh = meshes.add(Capsule3d::new(0.080, 0.16));
-    let mesh_shin = meshes.add(Capsule3d::new(0.068, 0.14));
-    let mesh_upper = meshes.add(Capsule3d::new(0.065, 0.12));
-    let mesh_fore = meshes.add(Capsule3d::new(0.055, 0.11));
-    let mesh_glove = meshes.add(Sphere::new(0.06));
-    let mesh_boot = meshes.add(Capsule3d::new(0.075, 0.10));
-    let robot_head = materials.add(metal(Color::srgb(0.72, 0.73, 0.76), 0.9, 0.35));
-    let legs_mat = materials.add(metal(Color::srgb(0.28, 0.24, 0.20), 0.1, 0.9));
-    let boot_mat = materials.add(metal(Color::srgb(0.20, 0.13, 0.08), 0.0, 0.9));
-    let belt_mat = materials.add(metal(Color::srgb(0.25, 0.16, 0.09), 0.0, 0.85));
+    let mesh_thigh = meshes.add(Capsule3d::new(0.072, 0.15));
+    let mesh_shin = meshes.add(Capsule3d::new(0.060, 0.15));
+    // §1 (Brief IV): shells LONG enough to reach their joint balls —
+    // zero daylight, in every pose, by construction
+    let mesh_upper = meshes.add(Capsule3d::new(0.055, 0.14));
+    let mesh_fore = meshes.add(Capsule3d::new(0.048, 0.12));
+    // §1.4 shared shell/joint materials — created ONCE per rebuild, cloned
+    // per fighter only for the accent slot
+    let shell = materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42));
+    let shell2 = materials.add(metal(Color::srgb_u8(0xDC, 0xDE, 0xE1), 0.0, 0.45));
+    let joint = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
+    let knee = materials.add(metal(Color::srgb_u8(0x0E, 0x10, 0x13), 0.20, 0.08));
+    let eye_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(0x0A, 0x0B, 0x0D),
+        perceptual_roughness: 0.15,
+        // a faint cool glow so the eyes still read at range
+        emissive: LinearRgba::new(0.016, 0.021, 0.028, 1.0),
+        ..default()
+    });
+    let accent_of = |team: Team| {
+        let (r, g, b) = match team {
+            Team::Blue => (0x3F as f32, 0x7B as f32, 0xD6 as f32),
+            Team::Red => (0xD6 as f32, 0x50 as f32, 0x3F as f32),
+        };
+        let (r, g, b) = (r / 255.0, g / 255.0, b / 255.0);
+        StandardMaterial {
+            base_color: Color::srgb(r, g, b),
+            perceptual_roughness: 0.35,
+            emissive: LinearRgba::new(r * 0.4, g * 0.4, b * 0.4, 1.0),
+            ..default()
+        }
+    };
+    let accent_blue = materials.add(accent_of(Team::Blue));
+    let accent_red = materials.add(accent_of(Team::Red));
 
     for (i, f) in sim.fighters.iter().enumerate() {
         let is_player = i == sim.player;
         let slot = i % 5;
-        // cosmetics: the player wears what the loadout screen picked
-        let tunic_color = if is_player {
+        let accent = match f.team {
+            Team::Blue => accent_blue.clone(),
+            Team::Red => accent_red.clone(),
+        };
+        // cosmetics: the player's tunic pick tints THEIR waist stripe;
+        // team identity stays on the emblem ring + shoulder band
+        let stripe = if is_player {
             let (_, (r, g, b)) = TUNIC_CHOICES[sel.tunic % TUNIC_CHOICES.len()];
-            Color::srgb(r, g, b)
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(r, g, b),
+                perceptual_roughness: 0.35,
+                emissive: LinearRgba::new(r * 0.4, g * 0.4, b * 0.4, 1.0),
+                ..default()
+            })
         } else {
-            fighter_color(f.team, slot, false)
+            accent.clone()
         };
         let hat_c = if is_player {
             let (_, (r, g, b)) = HAT_CHOICES[sel.hat % HAT_CHOICES.len()];
@@ -1110,28 +2281,7 @@ fn spawn_fighter_rigs(
         } else {
             hat_color(slot, false)
         };
-        let tunic = materials.add(StandardMaterial {
-            base_color: tunic_color,
-            perceptual_roughness: 0.9,
-            ..default()
-        });
-        let bandana = materials.add(StandardMaterial {
-            base_color: match f.team {
-                Team::Blue => Color::srgb(0.20, 0.40, 0.95),
-                Team::Red => Color::srgb(0.95, 0.22, 0.18),
-            },
-            ..default()
-        });
         let hat = materials.add(metal(hat_c, 0.05, 0.85));
-        let visor = materials.add(StandardMaterial {
-            base_color: accent_color(slot, is_player),
-            emissive: {
-                let c = accent_color(slot, is_player).to_srgba();
-                LinearRgba::new(c.red * 2.2, c.green * 2.2, c.blue * 2.2, 1.0)
-            },
-            unlit: true,
-            ..default()
-        });
         let root = commands
             .spawn((
                 Transform::from_xyz(f.pos[0], f.pos[1], f.pos[2]),
@@ -1139,98 +2289,194 @@ fn spawn_fighter_rigs(
                 FighterVis { index: i },
             ))
             .id();
-        // STUBBY legs: thigh → knee → shin → ankle → boot
+        // LEGS fill the 0.00–0.63 budget: thigh 0.29, shin 0.28, foot 0.06.
+        // Every joint is a visible dark gap; the KNEE is the signature — a
+        // glossy dark dome sitting proud of the shin.
         let mut legs = [[Entity::PLACEHOLDER; 3]; 2];
-        for (li, lx) in [(-0.13_f32), 0.13].into_iter().enumerate() {
+        for (li, lx) in [(-0.11_f32), 0.11].into_iter().enumerate() {
             let thigh = commands
-                .spawn((Transform::from_xyz(lx, 0.62, 0.0), Visibility::default()))
+                .spawn((Transform::from_xyz(lx, 0.63, 0.0), Visibility::default()))
                 .set_parent(root)
                 .id();
             commands
                 .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(joint.clone()),
+                    Transform::from_scale(Vec3::new(0.13, 0.11, 0.13)),
+                ))
+                .set_parent(thigh);
+            commands
+                .spawn((
                     Mesh3d(mesh_thigh.clone()),
-                    MeshMaterial3d(legs_mat.clone()),
-                    Transform::from_xyz(0.0, -0.15, 0.0),
+                    MeshMaterial3d(shell.clone()),
+                    Transform::from_xyz(0.0, -0.145, 0.0),
                 ))
                 .set_parent(thigh);
             let shin = commands
-                .spawn((Transform::from_xyz(0.0, -0.30, 0.0), Visibility::default()))
+                .spawn((Transform::from_xyz(0.0, -0.29, 0.0), Visibility::default()))
                 .set_parent(thigh)
                 .id();
+            // the glossy knee dome, clearly larger than the other joints
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(knee.clone()),
+                    Transform::from_xyz(0.0, -0.005, 0.045)
+                        .with_scale(Vec3::new(0.13, 0.13, 0.13)),
+                ))
+                .set_parent(shin);
             commands
                 .spawn((
                     Mesh3d(mesh_shin.clone()),
-                    MeshMaterial3d(legs_mat.clone()),
-                    Transform::from_xyz(0.0, -0.13, 0.0),
+                    MeshMaterial3d(shell2.clone()),
+                    Transform::from_xyz(0.0, -0.14, 0.0),
                 ))
                 .set_parent(shin);
             let foot = commands
-                .spawn((Transform::from_xyz(0.0, -0.27, 0.0), Visibility::default()))
+                .spawn((Transform::from_xyz(0.0, -0.28, 0.0), Visibility::default()))
                 .set_parent(shin)
                 .id();
             commands
                 .spawn((
-                    Mesh3d(mesh_boot.clone()),
-                    MeshMaterial3d(boot_mat.clone()),
-                    Transform::from_xyz(0.0, -0.02, 0.05)
-                        .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(joint.clone()),
+                    Transform::from_scale(Vec3::new(0.09, 0.07, 0.09)),
+                ))
+                .set_parent(foot);
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(shell.clone()),
+                    Transform::from_xyz(0.0, -0.025, 0.05)
+                        .with_scale(Vec3::new(0.14, 0.09, 0.22)),
                 ))
                 .set_parent(foot);
             legs[li] = [thigh, shin, foot];
         }
         let [leg_l, leg_r] = legs;
-        // round torso + cowboy dressing
+        // TORSO: pelvis → abdomen → chest shells (0.63 → 1.19 world),
+        // shoulder yoke 1.19 → 1.476, all under one animated pivot
         let torso = commands
-            .spawn((Transform::from_xyz(0.0, 0.62, 0.0), Visibility::default()))
+            .spawn((Transform::from_xyz(0.0, 0.63, 0.0), Visibility::default()))
             .set_parent(root)
             .id();
         commands
             .spawn((
-                Mesh3d(mesh_torso.clone()),
-                MeshMaterial3d(tunic),
-                Transform::from_xyz(0.0, 0.38, 0.0),
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(shell.clone()),
+                Transform::from_xyz(0.0, 0.09, 0.0).with_scale(Vec3::new(0.34, 0.16, 0.26)),
             ))
             .set_parent(torso);
-        // belt + buckle
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(shell2.clone()),
+                Transform::from_xyz(0.0, 0.235, 0.0).with_scale(Vec3::new(0.30, 0.24, 0.24)),
+            ))
+            .set_parent(torso);
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(shell.clone()),
+                Transform::from_xyz(0.0, 0.455, 0.0).with_scale(Vec3::new(0.40, 0.30, 0.30)),
+            ))
+            .set_parent(torso);
+        // §1.4 accent 1/3: the thin waist stripe (player: tunic pick)
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(belt_mat.clone()),
-                Transform::from_xyz(0.0, 0.12, 0.0).with_scale(Vec3::new(0.52, 0.07, 0.44)),
+                MeshMaterial3d(stripe),
+                Transform::from_xyz(0.0, 0.155, 0.0).with_scale(Vec3::new(0.345, 0.03, 0.27)),
+            ))
+            .set_parent(torso);
+        // §1.4 accent 2/3: the chest emblem — a small ring inset on the
+        // upper-left chest, dark center (the player's is gold)
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(accent.clone()),
+                Transform::from_xyz(-0.09, 0.52, 0.145)
+                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                    .with_scale(Vec3::new(0.075, 0.012, 0.075)),
+            ))
+            .set_parent(torso);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(if is_player {
+                    kit.gold.clone()
+                } else {
+                    joint.clone()
+                }),
+                Transform::from_xyz(-0.09, 0.52, 0.152)
+                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                    .with_scale(Vec3::new(0.04, 0.012, 0.04)),
+            ))
+            .set_parent(torso);
+        // shoulder yoke + §1.4 accent 3/3: the band across it — visible
+        // from front, back, and both sides. §1 (Brief IV): wide enough
+        // to reach past the shoulder pivots — no daylight at the arms.
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(shell.clone()),
+                Transform::from_xyz(0.0, 0.625, 0.0)
+                    .with_scale(Vec3::new(YOKE_HALF_W * 2.0, 0.14, 0.24)),
             ))
             .set_parent(torso);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.gold.clone()),
-                Transform::from_xyz(0.0, 0.12, 0.225).with_scale(Vec3::new(0.10, 0.06, 0.02)),
+                MeshMaterial3d(accent.clone()),
+                Transform::from_xyz(0.0, 0.625, 0.0)
+                    .with_scale(Vec3::new(YOKE_HALF_W * 2.0 + 0.01, 0.032, 0.245)),
             ))
             .set_parent(torso);
-        // bandana at the neck
+        // §1.2 (Brief IV) THE NECK: a dark cylinder BRIDGING yoke → head —
+        // sunk into the shoulders below, piercing past the head pivot
+        // above, so the head-to-body connection survives the full look
+        // range. A joint fills its gap; background never shows through.
         commands
             .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(bandana),
-                Transform::from_xyz(0.0, 0.60, 0.06)
-                    .with_rotation(Quat::from_rotation_x(0.15))
-                    .with_scale(Vec3::new(0.32, 0.12, 0.28)),
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(joint.clone()),
+                Transform::from_xyz(0.0, (NECK_BOT + NECK_TOP) * 0.5, 0.0)
+                    .with_scale(Vec3::new(NECK_R * 2.0, NECK_TOP - NECK_BOT, NECK_R * 2.0)),
             ))
             .set_parent(torso);
-        // the BIG round head + glowing visor
+        // HEAD: the focal mass — a rounded ellipsoid, wider than tall,
+        // matte white, two big black oval eyes set wide and low. Its BASE
+        // sits exactly on the 0.82 hit-band line (world 1.476): every
+        // pixel of face you can see is a real ×4 headshot.
+        let head = commands
+            .spawn((Transform::from_xyz(0.0, 0.846, 0.0), Visibility::default()))
+            .set_parent(torso)
+            .id();
         commands
             .spawn((
-                Mesh3d(mesh_head.clone()),
-                MeshMaterial3d(robot_head.clone()),
-                Transform::from_xyz(0.0, 0.82, 0.02),
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(shell.clone()),
+                Transform::from_xyz(0.0, 0.162, 0.01).with_scale(Vec3::new(0.38, 0.324, 0.35)),
             ))
-            .set_parent(torso);
-        commands
-            .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(visor),
-                Transform::from_xyz(0.0, 0.85, 0.30).with_scale(Vec3::new(0.28, 0.06, 0.05)),
-            ))
-            .set_parent(torso);
+            .set_parent(head);
+        for ex in [-0.075_f32, 0.075] {
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(eye_mat.clone()),
+                    Transform::from_xyz(ex, 0.135, 0.155)
+                        .with_scale(Vec3::new(0.065, 0.092, 0.024)),
+                ))
+                .set_parent(head);
+        }
+        // §1.3 HatSocket: the hat is FROZEN — same meshes, same materials,
+        // same local values. The socket sits where the old torso pivot was
+        // (world 0.62 standing: 0.63 hip + 0.846 head − 0.856), so every
+        // hat piece lands at its exact pre-rebuild world transform.
+        let hat_socket = commands
+            .spawn((Transform::from_xyz(0.0, -0.856, 0.0), Visibility::default()))
+            .set_parent(head)
+            .id();
         // hat: brim, crown, band — plus the little antenna
         commands
             .spawn((
@@ -1238,89 +2484,114 @@ fn spawn_fighter_rigs(
                 MeshMaterial3d(hat.clone()),
                 Transform::from_xyz(0.0, 1.02, 0.0).with_scale(Vec3::new(0.72, 0.028, 0.72)),
             ))
-            .set_parent(torso);
+            .set_parent(hat_socket);
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(hat.clone()),
                 Transform::from_xyz(0.0, 1.11, 0.0).with_scale(Vec3::new(0.36, 0.18, 0.36)),
             ))
-            .set_parent(torso);
+            .set_parent(hat_socket);
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.gunmetal.clone()),
                 Transform::from_xyz(0.0, 1.045, 0.0).with_scale(Vec3::new(0.365, 0.04, 0.365)),
             ))
-            .set_parent(torso);
+            .set_parent(hat_socket);
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.steel.clone()),
                 Transform::from_xyz(0.13, 1.22, 0.0).with_scale(Vec3::new(0.015, 0.13, 0.015)),
             ))
-            .set_parent(torso);
+            .set_parent(hat_socket);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.core_glow.clone()),
                 Transform::from_xyz(0.13, 1.30, 0.0).with_scale(Vec3::splat(0.035)),
             ))
-            .set_parent(torso);
-        // JOINTED arms: shoulder → elbow → wrist, short and round
+            .set_parent(hat_socket);
+        // ARMS: shoulder → elbow → wrist off the yoke, every joint a dark
+        // ball in a visible gap, white shell segments, mitten hands
         let mut arms = [[Entity::PLACEHOLDER; 3]; 2];
-        for (ai, ax) in [(-0.36_f32), 0.36].into_iter().enumerate() {
+        for (ai, ax) in [(-SHOULDER_X), SHOULDER_X].into_iter().enumerate() {
             let upper = commands
                 .spawn((Transform::from_xyz(ax, 0.62, 0.02), Visibility::default()))
                 .set_parent(torso)
                 .id();
             commands
                 .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(joint.clone()),
+                    Transform::from_scale(Vec3::new(0.11, 0.10, 0.11)),
+                ))
+                .set_parent(upper);
+            commands
+                .spawn((
                     Mesh3d(mesh_upper.clone()),
-                    MeshMaterial3d(legs_mat.clone()),
-                    Transform::from_xyz(0.0, -0.10, 0.0),
+                    MeshMaterial3d(shell.clone()),
+                    Transform::from_xyz(0.0, UPPER_CENTER, 0.0),
                 ))
                 .set_parent(upper);
             let fore = commands
-                .spawn((Transform::from_xyz(0.0, -0.21, 0.0), Visibility::default()))
+                .spawn((Transform::from_xyz(0.0, ELBOW_Y, 0.0), Visibility::default()))
                 .set_parent(upper)
                 .id();
+            // §1: the elbow ball is BIG enough to be the bridge
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(joint.clone()),
+                    Transform::from_scale(Vec3::splat(ELBOW_R * 2.0)),
+                ))
+                .set_parent(fore);
             commands
                 .spawn((
                     Mesh3d(mesh_fore.clone()),
-                    MeshMaterial3d(legs_mat.clone()),
-                    Transform::from_xyz(0.0, -0.09, 0.0),
+                    MeshMaterial3d(shell2.clone()),
+                    Transform::from_xyz(0.0, FORE_CENTER, 0.0),
                 ))
                 .set_parent(fore);
             let hand = commands
-                .spawn((Transform::from_xyz(0.0, -0.19, 0.0), Visibility::default()))
+                .spawn((Transform::from_xyz(0.0, WRIST_Y, 0.0), Visibility::default()))
                 .set_parent(fore)
                 .id();
+            // §1: a dark wrist ball closes the forearm → mitten seam
             commands
                 .spawn((
-                    Mesh3d(mesh_glove.clone()),
-                    MeshMaterial3d(kit.hand.clone()),
-                    Transform::from_xyz(0.0, -0.02, 0.0),
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(joint.clone()),
+                    Transform::from_scale(Vec3::splat(WRIST_R * 2.0)),
+                ))
+                .set_parent(hand);
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(shell.clone()),
+                    Transform::from_xyz(0.0, -0.02, 0.0)
+                        .with_scale(Vec3::new(0.13, 0.10, 0.15)),
                 ))
                 .set_parent(hand);
             arms[ai] = [upper, fore, hand];
         }
         let [arm_l, arm_r] = arms;
-        // held weapons hang off the WRIST: one model per roster kind.
-        // (local: the arm chain runs −Y, so ×90° X maps the muzzle out
-        // along the arm — when the shoulder aims, the gun aims)
+        // §1.3: the WEAPON ROOT on the spine — the gun is parented here
+        // (muzzle already +Z = body forward) and BOTH hands IK onto its
+        // grip sockets. Parenting the gun to a hand is what produces the
+        // floating-weapon look; this is the correct dependency direction.
+        let weapon_root = commands
+            .spawn((Transform::from_xyz(0.10, 0.50, 0.14), Visibility::default()))
+            .set_parent(torso)
+            .id();
         let mut weapons = [Entity::PLACEHOLDER; N_WEAPONS];
         for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
-            let model = spawn_weapon_model(commands, kit, wk, is_player);
-            let parent = if wk == GunKind::Bow { arm_l[2] } else { arm_r[2] };
+            let model = spawn_weapon_model(commands, kit, wk, is_player, false);
             commands
                 .entity(model)
-                .insert((
-                    Transform::from_xyz(0.0, -0.05, 0.02)
-                        .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
-                    Visibility::Hidden,
-                ))
-                .set_parent(parent);
+                .insert((Transform::IDENTITY, Visibility::Hidden))
+                .set_parent(weapon_root);
             weapons[wi] = model;
         }
         // the always-carried shield, on the left forearm
@@ -1353,11 +2624,20 @@ fn spawn_fighter_rigs(
             .set_parent(torso);
         commands.entity(root).insert(FighterRig {
             phase: 0.0,
+            prev_speed: 0.0,
+            accel_lean: 0.0,
+            sprint_t: 0.0,
+            carry_t: 0.0,
+            prev_yaw_vis: f.yaw,
+            wr_lag_yaw: 0.0,
+            wr_lag_v: 0.0,
             leg_l,
             leg_r,
             torso,
+            neck: head,
             arm_l,
             arm_r,
+            weapon_root,
             weapons,
             shield,
             bow_arrow,
@@ -1486,6 +2766,7 @@ fn setup(
         pending_dodge: false,
         pending_shield: false,
         pending_slot: None,
+        pending_cycle_throw: false,
     };
     commands.insert_resource(Selected::default());
     commands.insert_resource(GameSettings::default());
@@ -1537,9 +2818,26 @@ fn setup(
         perceptual_roughness: r,
         ..default()
     };
+    // §2.1 four-grey weapon palette: flat-shaded panels — low roughness
+    // VARIANCE so the blocks read as hard surfaces, not plastic
+    let flat = |hex: u32| StandardMaterial {
+        base_color: Color::srgb_u8(
+            ((hex >> 16) & 0xFF) as u8,
+            ((hex >> 8) & 0xFF) as u8,
+            (hex & 0xFF) as u8,
+        ),
+        metallic: 0.05,
+        perceptual_roughness: 0.60,
+        ..default()
+    };
     let kit = ModelKit {
         cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         cyl: meshes.add(Cylinder::new(0.5, 1.0)),
+        ball: meshes.add(Sphere::new(0.5)),
+        grey_light: materials.add(flat(0xC8C9CB)),
+        grey_mid: materials.add(flat(0x8A8C8F)),
+        grey_dark: materials.add(flat(0x3A3C40)),
+        grey_black: materials.add(flat(0x1E2024)),
         gunmetal: materials.add(metal(Color::srgb(0.16, 0.17, 0.19), 0.8, 0.45)),
         steel: materials.add(metal(Color::srgb(0.62, 0.64, 0.68), 0.95, 0.30)),
         wood: materials.add(metal(Color::srgb(0.42, 0.28, 0.15), 0.0, 0.85)),
@@ -1572,7 +2870,20 @@ fn setup(
             unlit: true,
             ..default()
         }),
-        hand: materials.add(metal(Color::srgb(0.48, 0.36, 0.24), 0.05, 0.9)),
+        // the robot's mitten: matte white shell, same as the body (§1.4)
+        hand: materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42)),
+        // §11: khaki military plates — matte, board-game-mini flat
+        mech_khaki: materials.add(flat(0x8C7F5E)),
+        mech_khaki_dk: materials.add(flat(0x5E563F)),
+        mech_khaki_lt: materials.add(flat(0xB7AB86)),
+        mech_shadow: materials.add(flat(0x2B2A26)),
+        mech_metal: materials.add(metal(Color::srgb_u8(0x4A, 0x4A, 0x48), 0.7, 0.45)),
+        mech_red: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0xC2, 0x3B, 0x2E),
+            emissive: LinearRgba::new(1.6, 0.25, 0.12, 1.0),
+            unlit: true,
+            ..default()
+        }),
     };
 
     // Fighter rigs, health bars, and pickup pads are match-scoped now
@@ -1623,13 +2934,89 @@ fn setup(
     commands.insert_resource(TracerPool::default());
     commands.insert_resource(MissilePool::default());
     commands.insert_resource(DecalPool::default());
+    commands.insert_resource(DroppedPool::default());
+    // ---- §5 throwable FX assets ----------------------------------------
+    commands.insert_resource(ThrowPools::default());
+    commands.insert_resource(ThrowAssets {
+        ball: meshes.add(Sphere::new(0.5)),
+        body: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x1E, 0x20, 0x24),
+            metallic: 0.4,
+            perceptual_roughness: 0.5,
+            ..default()
+        }),
+        smoke: materials.add(StandardMaterial {
+            base_color: Color::srgba_u8(0xB8, 0xBC, 0xC0, 235),
+            perceptual_roughness: 1.0,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        fire_mesh: meshes.add(Cylinder::new(1.0, 0.06)),
+        fire: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0xE8, 0x87, 0x3F),
+            emissive: LinearRgba::new(2.4, 0.9, 0.25, 1.0),
+            unlit: true,
+            ..default()
+        }),
+        flashband: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::new(6.0, 6.0, 6.0, 1.0),
+            unlit: true,
+            ..default()
+        }),
+    });
+    // §8 horde visuals
+    commands.insert_resource(ZombiePool::default());
+    commands.insert_resource(ZombieAssets {
+        moss: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.34, 0.42, 0.28),
+            perceptual_roughness: 0.9,
+            ..default()
+        }),
+        pale: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.66, 0.68, 0.58),
+            perceptual_roughness: 0.8,
+            ..default()
+        }),
+        beacon: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.3, 0.95, 0.85, 0.55),
+            emissive: LinearRgba::new(0.5, 2.4, 2.0, 1.0),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        }),
+    });
+    // §10 low-health vignette (under the flash overlay)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.5, 0.02, 0.02, 0.0)),
+        GlobalZIndex(20),
+        HealthVignette,
+    ));
+    // §5.3 flash whiteout overlay (UI, quantised alpha steps)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
+        GlobalZIndex(40),
+        FlashOverlay,
+    ));
 
     // ---- camera ---------------------------------------------------------
     let cam = commands
         .spawn((
             Camera3d::default(),
             Projection::Perspective(PerspectiveProjection {
-                fov: 62_f32.to_radians(),
+                fov: FOV_HIP_DEG.to_radians(),
                 ..default()
             }),
             DistanceFog {
@@ -1642,31 +3029,59 @@ fn setup(
             },
             Transform::from_xyz(0.0, 3.0, -28.0).looking_at(Vec3::ZERO, Vec3::Y),
             MainCam,
+            // two cameras now exist — the HUD belongs to this one
+            IsDefaultUiCamera,
         ))
+        .id();
+
+    // ---- §2.3 viewmodel camera: the gun renders on its OWN camera with a
+    // FIXED ~55° FOV, so the world FOV zooming on ADS never stretches the
+    // viewmodel. It draws over the world (order 1, no clear) and sees only
+    // the VIEWMODEL render layer; the world camera never sees that layer.
+    let vm_cam = commands
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                order: 1,
+                clear_color: ClearColorConfig::None,
+                ..default()
+            },
+            Projection::Perspective(PerspectiveProjection {
+                fov: VM_FOV_DEG.to_radians(),
+                ..default()
+            }),
+            RenderLayers::layer(VIEWMODEL_LAYER),
+            Transform::IDENTITY,
+        ))
+        .set_parent(cam)
         .id();
 
     // ---- first-person viewmodel: hands + weapon on the camera ----------
     // (the camera looks down its -Z, so the models yaw 180°: muzzle out)
     let vm_root = commands
         .spawn((Transform::IDENTITY, Visibility::Hidden))
-        .set_parent(cam)
+        .set_parent(vm_cam)
         .id();
     let vm_arm_mat = materials.add(metal(Color::srgb(0.28, 0.24, 0.20), 0.1, 0.9));
     let mut vm_weapons = [Entity::PLACEHOLDER; N_WEAPONS];
     for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
-        let model = spawn_weapon_model(&mut commands, &kit, wk, true);
+        let model = spawn_weapon_model(&mut commands, &kit, wk, true, true);
+        // §2.1 (Brief IV) CS:GO placement: right +0.11, down −0.13,
+        // forward 0.32, yawed ~1.5° so the muzzle converges on screen
+        // center; long guns exit the frame bottom-right through the stock
         let (tr, extra_rx) = match wk {
-            GunKind::Bow => (Vec3::new(-0.16, -0.20, -0.42), 0.0),
-            GunKind::Spear => (Vec3::new(0.24, -0.14, -0.30), -0.12),
-            GunKind::Glock | GunKind::Deagle => (Vec3::new(0.16, -0.20, -0.40), 0.0),
-            _ => (Vec3::new(0.20, -0.22, -0.42), 0.0),
+            GunKind::Bow => (Vec3::new(-0.10, -0.16, -0.36), 0.0),
+            GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
+            GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
+            _ => (Vec3::new(0.11, -0.13, -0.32), 0.0),
         };
         commands
             .entity(model)
             .insert((
                 Transform {
                     translation: tr,
-                    rotation: Quat::from_rotation_y(PI) * Quat::from_rotation_x(extra_rx),
+                    rotation: Quat::from_rotation_y(PI + 0.026)
+                        * Quat::from_rotation_x(extra_rx),
                     scale: Vec3::splat(0.9),
                 },
                 Visibility::Hidden,
@@ -1708,21 +3123,42 @@ fn setup(
         shield: vm_shield,
     });
 
-    // ---- projectile arc preview: red laser dots + landing ring ---------
-    let dot_mesh = meshes.add(Sphere::new(0.05));
+    // ---- §4.2 projectile arc preview: pixel squares spaced by ARC
+    // LENGTH, a landing ring + drop-line, and a ±spread cone -------------
+    let dot_mesh = meshes.add(Cuboid::new(0.09, 0.09, 0.09)); // pixel square
     let laser_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.2, 0.15),
         emissive: LinearRgba::new(3.0, 0.4, 0.3, 1.0),
         unlit: true,
         ..default()
     });
+    let faint_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.25, 0.18, 0.35),
+        emissive: LinearRgba::new(1.1, 0.15, 0.10, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
     let mut dots = Vec::new();
-    for _ in 0..28 {
+    for _ in 0..24 {
         dots.push(
             commands
                 .spawn((
                     Mesh3d(dot_mesh.clone()),
                     MeshMaterial3d(laser_mat.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id(),
+        );
+    }
+    let mut cone = Vec::new();
+    for _ in 0..16 {
+        cone.push(
+            commands
+                .spawn((
+                    Mesh3d(dot_mesh.clone()),
+                    MeshMaterial3d(faint_mat.clone()),
                     Transform::IDENTITY,
                     Visibility::Hidden,
                 ))
@@ -1743,7 +3179,83 @@ fn setup(
             Visibility::Hidden,
         ))
         .id();
-    commands.insert_resource(ArcVis { dots, ring });
+    // the vertical drop-line under the marker: reads the distance
+    let drop_line = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.03, 1.0, 0.03))),
+            MeshMaterial3d(faint_mat.clone()),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+        ))
+        .id();
+    commands.insert_resource(ArcVis {
+        dots,
+        cone,
+        ring,
+        drop_line,
+    });
+    commands.insert_resource(ArcState::default());
+
+    // ---- §1 (Brief V): grenade pre-aim arc — amber, with a fainter
+    // post-bounce run and a landing ring --------------------------------
+    let amber_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.75, 0.2),
+        emissive: LinearRgba::new(2.6, 1.6, 0.3, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let amber_faint = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.75, 0.25, 0.30),
+        emissive: LinearRgba::new(0.9, 0.55, 0.12, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    let mut gpre = Vec::new();
+    for _ in 0..16 {
+        gpre.push(
+            commands
+                .spawn((
+                    Mesh3d(dot_mesh.clone()),
+                    MeshMaterial3d(amber_mat.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id(),
+        );
+    }
+    let mut gpost = Vec::new();
+    for _ in 0..8 {
+        gpost.push(
+            commands
+                .spawn((
+                    Mesh3d(dot_mesh.clone()),
+                    MeshMaterial3d(amber_faint.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id(),
+        );
+    }
+    let gring = commands
+        .spawn((
+            Mesh3d(meshes.add(Cylinder::new(0.55, 0.03))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.75, 0.2, 0.55),
+                emissive: LinearRgba::new(2.0, 1.2, 0.25, 1.0),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            })),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+        ))
+        .id();
+    commands.insert_resource(GrenadeArcVis {
+        pre: gpre,
+        post: gpost,
+        ring: gring,
+    });
 
     // ---- HUD ------------------------------------------------------------
     commands.spawn((
@@ -1761,6 +3273,89 @@ fn setup(
         },
         CrosshairText,
     ));
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 15.0,
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 0.45, 0.35, 0.9)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(51.6),
+            top: Val::Percent(52.2),
+            ..default()
+        },
+        RangeText,
+    ));
+    // §1.2 (Brief III) contextual prompt line, bottom-center
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 19.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.88, 0.55)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(30.0),
+            bottom: Val::Percent(20.0),
+            ..default()
+        },
+        PromptText,
+    ));
+    // §9.1 (Brief IV): vertical weapon strip, right screen edge
+    for slot in 0..3usize {
+        commands.spawn((
+            Text::new(""),
+            TextFont {
+                font_size: 16.0,
+                ..default()
+            },
+            TextColor(Color::srgba(0.92, 0.93, 0.95, 0.4)),
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(14.0),
+                top: Val::Percent(40.0 + slot as f32 * 4.6),
+                ..default()
+            },
+            WeaponStripCell(slot),
+        ));
+    }
+    // §7 compass strip
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgba(0.95, 0.95, 0.98, 0.85)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(44.0),
+            top: Val::Px(34.0),
+            ..default()
+        },
+        CompassText,
+    ));
+    // §7 stability bracket: two glyphs that ride the live spread
+    for (i, ch) in ["[", "]"].into_iter().enumerate() {
+        commands.spawn((
+            Text::new(ch),
+            TextFont {
+                font_size: 22.0,
+                ..default()
+            },
+            TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(48.9),
+                ..default()
+            },
+            StabilityBracket(i as u8),
+        ));
+    }
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -1923,44 +3518,9 @@ fn setup(
                 TextColor(Color::WHITE),
                 PanelAmmoText,
             ));
-            p.spawn((
-                Node {
-                    width: Val::Px(240.0),
-                    height: Val::Px(14.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.85)),
-            ))
-            .with_children(|b| {
-                b.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.25, 0.9, 0.35)),
-                    OwnHpFill,
-                ));
-            });
-            p.spawn((
-                Node {
-                    width: Val::Px(240.0),
-                    height: Val::Px(7.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.6)),
-            ))
-            .with_children(|b| {
-                b.spawn((
-                    Node {
-                        width: Val::Percent(0.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.35, 0.8, 0.95)),
-                    OwnArmorFill,
-                ));
-            });
+            // §7 (Brief III): CS:GO-minimal — numerals only, NO bars.
+            // (The old fill bars are gone; health/armor read as numbers
+            // in the panel text above.)
         });
     // scoreboard (TAB)
     commands
@@ -2159,14 +3719,7 @@ fn setup(
         });
 
     commands.insert_resource(game);
-    commands.insert_resource(CamCtl {
-        yaw: 0.0,
-        pitch: 0.08,
-        grabbed: false,
-        ads: false,
-        recoil: 0.0,
-        first_person: false,
-    });
+    commands.insert_resource(CamCtl::default());
 }
 
 /// The whole battlefield look is map-owned: ground, border walls, cover
@@ -2236,6 +3789,11 @@ fn rebuild_world(
             Color::srgb(0.55, 0.71, 0.55),
             Color::srgb(0.27, 0.48, 0.24),
             Color::srgb(0.58, 0.56, 0.50),
+        ),
+        MapKind::Battlefield => (
+            Color::srgb(0.60, 0.62, 0.68),
+            Color::srgb(0.36, 0.40, 0.28),
+            Color::srgb(0.50, 0.50, 0.48),
         ),
     };
     clear.0 = sky;
@@ -2402,6 +3960,7 @@ fn rebuild_world(
 
 // ------------------------------------------------------------------- input
 
+#[allow(clippy::too_many_arguments)]
 fn input_and_step(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -2410,12 +3969,20 @@ fn input_and_step(
     mut motion: EventReader<MouseMotion>,
     mut cam: ResMut<CamCtl>,
     mut game: ResMut<Game>,
+    mut toast: ResMut<Toast>,
     cam_q: Query<&Transform, With<MainCam>>,
 ) {
+    // §3.1: raw input. Every motion event is consumed, the delta is a
+    // displacement (never scaled by dt), and there is NO smoothing or
+    // acceleration on the angles — any lerp here would be input lag.
+    // §3.2: the one multiplier allowed is the zoom sensitivity match,
+    // fed the LIVE mid-transition FOV so tracking stays continuous.
     if cam.grabbed {
+        let zoom_mult = ads_sens_mult(FOV_HIP_DEG.to_radians(), cam.fov_now, ADS_SENS_RATIO);
         for ev in motion.read() {
-            cam.yaw -= ev.delta.x * 0.0026;
-            cam.pitch = (cam.pitch + ev.delta.y * 0.0022).clamp(-0.7, 0.8);
+            cam.yaw -= ev.delta.x * MOUSE_SENS * zoom_mult;
+            cam.pitch = (cam.pitch + ev.delta.y * MOUSE_SENS * zoom_mult)
+                .clamp(-1.53, 1.53);
         }
     } else {
         motion.clear();
@@ -2439,14 +4006,13 @@ fn input_and_step(
     // note the strafe sign: per playtest, A = screen-left, D = screen-right
     let world = Vec2::new(-mv.x * c + mv.y * s, mv.x * s + mv.y * c);
 
-    // Aim: from the MUZZLE (crouch-lowered, lean-shifted — the same
-    // origin the sim fires from) toward what the crosshair sees. Using a
-    // standing eye here made crouched/leaned shots land off-crosshair.
+    // §3.3/§5.3 two-stage aim: in first person eye ≈ muzzle and this
+    // collapses to the camera ray; in third person it kills the parallax
+    // that made shots sail over near cover.
     let aim = if let Ok(cam_tf) = cam_q.get_single() {
-        let fwd = cam_tf.forward().as_vec3();
-        let far = cam_tf.translation + fwd * 90.0;
-        let eye = Vec3::from_array(game.sim.muzzle_origin(game.sim.player));
-        (far - eye).normalize_or_zero()
+        let (dir, blocked) = crosshair_aim_dir(&game.sim, cam_tf);
+        cam.blocked = blocked;
+        dir
     } else {
         Vec3::Z
     };
@@ -2462,8 +4028,30 @@ fn input_and_step(
     };
     let ads = buttons.pressed(aim_btn);
     cam.ads = ads;
+    // §3.4: ADS progress advances framerate-independently; the sim's ADS
+    // benefits (spread ×0.32, ADS walk speed) key off ads_t > 0.9 so
+    // frame 1 of the zoom doesn't get full accuracy.
+    {
+        let dir = if ads { 1.0 } else { -1.0 };
+        // §6: Recon Weave aims in 40% faster
+        let ads_time = if game.sim.fighters[game.sim.player].armor_set == ArmorSet::Recon {
+            ADS_TIME_S / 1.4
+        } else {
+            ADS_TIME_S
+        };
+        cam.ads_t = (cam.ads_t + dir * time.delta_secs() / ads_time).clamp(0.0, 1.0);
+    }
+    let ads_settled = ads && cam.ads_t > 0.9;
     if keys.just_pressed(KeyCode::KeyV) || keys.just_pressed(KeyCode::KeyO) {
         cam.first_person = !cam.first_person;
+        // the toggle CONFIRMS itself — an unseen mode switch reads as
+        // a dead key
+        toast.text = if cam.first_person {
+            "FIRST PERSON  (V: back to third)".to_string()
+        } else {
+            "THIRD PERSON  (V: first person)".to_string()
+        };
+        toast.t = 1.8;
     }
     if keys.just_pressed(KeyCode::Space) {
         game.pending_jump = true;
@@ -2473,6 +4061,9 @@ fn input_and_step(
     }
     if keys.just_pressed(KeyCode::KeyE) {
         game.pending_shield = true;
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        game.pending_cycle_throw = true; // §5: cycle the throwable
     }
     for (key, s) in [
         (KeyCode::Digit1, 0u8),
@@ -2487,8 +4078,7 @@ fn input_and_step(
     let lean = (keys.pressed(KeyCode::KeyX) as i32 - keys.pressed(KeyCode::KeyZ) as i32) as f32;
     let sprinting = keys.pressed(KeyCode::ShiftLeft) && !ads;
     if keys.just_pressed(KeyCode::KeyQ)
-        || (sprinting
-            && (keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC)))
+        || (sprinting && keys.just_pressed(KeyCode::ControlLeft))
     {
         game.pending_dodge = true;
     }
@@ -2498,15 +4088,27 @@ fn input_and_step(
         sprint: sprinting,
         yaw: cam.yaw,
         aim: [aim.x, aim.y, aim.z],
-        shoot: buttons.pressed(fire_btn) || keys.pressed(KeyCode::KeyT),
+        // §2.4 (Brief IV): T is INSPECT now — fire is the mouse alone
+        shoot: buttons.pressed(fire_btn),
         reload: game.pending_reload,
-        ads,
-        crouch: keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC),
+        ads: ads_settled,
+        // §6: crouch is CTRL only — C now holds the armor ability
+        crouch: keys.pressed(KeyCode::ControlLeft),
         jump: game.pending_jump,
         dodge: game.pending_dodge,
         slot: game.pending_slot,
         shield: game.pending_shield,
         lean,
+        // §5: hold H (or Mouse4) to cook, release to throw
+        throw_hold: keys.pressed(KeyCode::KeyH) || buttons.pressed(MouseButton::Back),
+        // §1 (Brief V): B cancels the aimed throw, grenade kept
+        throw_cancel: keys.just_pressed(KeyCode::KeyB),
+        cycle_throw: game.pending_cycle_throw,
+        // §5/§6 (Brief III): F is the KNIFE now; the armor ability
+        // (brace / flame / repulsor) moved to held C
+        ability: keys.pressed(KeyCode::KeyC),
+        jump_held: keys.pressed(KeyCode::Space),
+        knife_hold: keys.pressed(KeyCode::KeyF),
     };
 
     let prev_fire_cd = game.sim.fighters[game.sim.player].fire_cd;
@@ -2527,6 +4129,7 @@ fn input_and_step(
         game.pending_dodge = false;
         game.pending_shield = false;
         game.pending_slot = None;
+        game.pending_cycle_throw = false;
     }
 
     // recoil: the camera kicks up when your gun goes off — sustained fire
@@ -2575,7 +4178,9 @@ fn sync_fighters(
         // first person — or looking through the AWM's glass, which parks
         // the camera at the eye in EITHER mode: your own body leaves the
         // frame (hands take over)
-        let self_view = cam_ctl.first_person
+        // §5: the model swap rides the blend MIDPOINT, not the toggle —
+        // no frame of the inside of your own head
+        let self_view = cam_ctl.person_t < 0.5
             || (cam_ctl.ads && gun(f.gun).scoped && !f.shield_up);
         *root_vis = if is_player && self_view && f.alive() {
             Visibility::Hidden
@@ -2591,16 +4196,49 @@ fn sync_fighters(
             continue;
         }
         let rolling = f.roll_t > 0.0;
-        if rolling {
+        let in_mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+        if rolling && in_mech {
+            // §2 (Brief V): the mech does NOT tumble — the side-step is a
+            // braced lean into the travel direction, tall the whole way
+            let total = MECH_STEP_S + ROLL_EASE_S;
+            let e = ((total - f.roll_t) / 0.08).clamp(0.0, 1.0)
+                * (f.roll_t / 0.10).clamp(0.0, 1.0); // in fast, out easing
+            let step_yaw = f.roll_dir[0].atan2(f.roll_dir[1]);
+            tf.translation = Vec3::new(f.pos[0], f.pos[1], f.pos[2]);
+            tf.rotation = Quat::from_rotation_y(f.yaw)
+                * Quat::from_axis_angle(
+                    // lean about the axis PERPENDICULAR to travel
+                    Vec3::new((step_yaw - f.yaw).cos(), 0.0, -(step_yaw - f.yaw).sin()),
+                    0.16 * e,
+                );
+        } else if rolling {
             // the somersault: a full forward tumble about the ball's center,
-            // facing the roll direction
-            let prog = (1.0 - f.roll_t / ROLL_S).clamp(0.0, 1.0);
+            // facing the roll direction. §2 (Brief V): progress runs over
+            // the WHOLE load → burst → ease timeline, so the coil begins
+            // slow, the tumble carries, and the uncurl lands with the ease.
+            let total = ROLL_LOAD_S + ROLL_S + ROLL_EASE_S;
+            let prog = (1.0 - f.roll_t / total).clamp(0.0, 1.0);
             let roll_yaw = f.roll_dir[0].atan2(f.roll_dir[1]);
             // pivot at the BALL's center (0.6 up) with the body curled
             // tight around it — the head must orbit, not plow the floor
             tf.translation = Vec3::new(f.pos[0], f.pos[1] + 0.6, f.pos[2]);
             tf.rotation = Quat::from_rotation_y(roll_yaw)
-                * Quat::from_rotation_x(prog * std::f32::consts::TAU);
+                * Quat::from_rotation_x(ease_out(prog) * std::f32::consts::TAU);
+        } else if f.flip_t > 0.0 {
+            // §4: the aerial flip — a full rotation about the body's
+            // CENTER (the head must orbit, not sweep the floor)
+            let prog = (1.0 - f.flip_t / FLIP_S).clamp(0.0, 1.0);
+            let spin = prog * std::f32::consts::TAU;
+            let rot = match f.flip_kind {
+                0 => Quat::from_rotation_x(spin),
+                1 => Quat::from_rotation_x(-spin),
+                2 => Quat::from_rotation_z(spin),
+                _ => Quat::from_rotation_z(-spin),
+            };
+            let full = Quat::from_rotation_y(f.yaw) * rot;
+            let center = Vec3::new(f.pos[0], f.pos[1] + 0.9, f.pos[2]);
+            tf.translation = center - full * (Vec3::Y * 0.9);
+            tf.rotation = full;
         } else {
             tf.translation = Vec3::new(f.pos[0], f.pos[1], f.pos[2]);
             // lean tilts the whole body sideways off the hips (positive
@@ -2610,15 +4248,46 @@ fn sync_fighters(
                 .rotation
                 .slerp(Quat::from_rotation_y(f.yaw) * lean_roll, 0.35);
         }
+        // §11: the MECH is the same rig at walker scale — unmistakable
+        tf.scale = Vec3::splat(
+            if f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0 {
+                MECH_SCALE
+            } else {
+                1.0
+            },
+        );
         // spawn-protection shimmer: bob slightly
         if f.protect_t > 0.0 {
             tf.translation.y += (game.sim.t * 14.0).sin() * 0.02;
         }
         let speed = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
-        if speed > 0.1 && !rolling {
-            rig.phase += speed * 2.4 * dt * 4.0;
+        // §1.4: phase is driven by DISTANCE, never by time — feet cannot
+        // slide at any speed because stride length is the integral
+        if speed > 0.1 && !rolling && f.grounded {
+            rig.phase += speed * dt * PI / STRIDE_M;
         }
-        let amp = (speed / SPRINT_SPEED).clamp(0.0, 1.0) * 0.6;
+        // §1.4 accel lean: sells starts and stops (smoothed, capped so
+        // the head stays in band — the cap lives in gait_pose)
+        let accel = (speed - rig.prev_speed) / dt.max(1e-4);
+        rig.prev_speed = speed;
+        let lean_target = (accel * 0.012).clamp(-0.07, 0.07);
+        rig.accel_lean += (lean_target - rig.accel_lean) * (8.0 * dt).min(1.0);
+        // move direction in body space: forward + lateral fractions drive
+        // the swing AXIS, so strafing reads as a crossover step instead of
+        // the forward cycle rotated sideways
+        let (fx, fz) = (f.yaw.sin(), f.yaw.cos());
+        let (fwd_c, lat_c) = if speed > 0.3 {
+            (
+                (f.vel[0] * fx + f.vel[1] * fz) / speed,
+                (f.vel[0] * fz - f.vel[1] * fx) / speed,
+            )
+        } else {
+            (1.0, 0.0)
+        };
+        let swing_axis = Vec3::new(fwd_c, 0.0, -lat_c).normalize_or(Vec3::X);
+        let amp = (speed / SPRINT_SPEED).clamp(0.0, 1.0)
+            * 0.6
+            * if f.crouch { 0.6 } else { 1.0 };
         let swing = rig.phase.sin() * amp;
         let airborne = !f.grounded;
         // just-fired jerk, driven by the sim's own cooldown
@@ -2628,24 +4297,25 @@ fn sync_fighters(
         } else {
             0.0
         };
-        // hips + torso by state (chibi frame): ball, FULL squat, tuck,
-        // stand. Standing hip 0.68 puts the boot soles ON the ground
-        // (thigh 0.30 + shin 0.27 + ankle/boot ≈ 0.10).
+        // §1.4 pose core — the SAME pure function the §0.2 band test
+        // samples, so the render cannot drift out of the hit bands
         let (hip_y, torso_pitch_base) = if rolling {
             (0.25, 1.0) // curled tight around the tumble pivot
-        } else if f.crouch {
-            // deep pitch keeps the VISIBLE head inside the crouch hitbox
-            (0.34, 0.55)
+        } else if airborne {
+            (0.63, 0.10)
         } else {
-            (
-                0.68 + if speed > 0.5 {
-                    (rig.phase * 2.0).sin().abs() * 0.02 * amp
-                } else {
-                    0.0
-                },
-                if airborne { 0.10 } else { 0.06 },
-            )
+            gait_pose(f.crouch, rig.phase, amp, rig.accel_lean)
         };
+        // §2 (Brief V): the landing SETTLES — a weight-absorb dip in the
+        // first 0.20 s after a roll/side-step ends, easing back up. The
+        // window is read straight off the cooldown clock: no new state.
+        let settle = if !rolling && f.roll_t <= 0.0 {
+            let cd_base = if in_mech { MECH_STEP_CD_S } else { ROLL_CD_S };
+            ((f.roll_cd - (cd_base - ROLL_SETTLE_S)) / ROLL_SETTLE_S).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let hip_y = hip_y - 0.055 * settle;
         // legs: thigh (hip), shin (knee), foot (ankle) per side.
         // Sign convention: +X rotation swings the limb BACKWARD, so knees
         // fold positive and a raised thigh is negative.
@@ -2657,28 +4327,35 @@ fn sync_fighters(
                 shin = 2.30;
                 foot = -0.55;
             } else if f.crouch && !airborne {
-                // FULL crouch: a real deep squat
-                thigh = -1.15;
-                shin = 2.05;
-                foot = -(2.05 - 1.15) * 0.6;
+                // half-squat under the §0.2-tuned crouch lean
+                thigh = -0.85;
+                shin = 1.55;
+                foot = -0.42;
             } else if airborne {
                 // jump tuck
                 thigh = -0.85;
                 shin = 1.50;
                 foot = -0.40;
             } else {
-                // the gait: hips swing, the knee bends hardest as the leg
-                // recovers forward, the ankle keeps the sole near-level
-                // with a little toe-off flick
+                // the gait: elliptical foot path (60% stance / 40% swing
+                // read), knee bends hardest on recovery, and the ankle
+                // rolls heel-strike → toe-off — the *human* read
                 let sw = (rig.phase + off).sin() * amp;
                 let lift = (rig.phase + off + 0.9).sin().max(0.0) * amp;
                 thigh = sw * 0.9;
                 shin = 0.10 + lift * 1.25;
-                foot = -(thigh + shin) * 0.55 + (rig.phase + off - 1.2).sin() * 0.20 * amp;
+                foot = -(thigh + shin) * 0.55
+                    + (rig.phase + off - 1.2).sin() * 0.20 * amp
+                    + (rig.phase + off + 0.6).sin() * 0.22 * amp; // ankle roll
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[0]) {
                 t.translation.y = hip_y;
-                t.rotation = Quat::from_rotation_x(thigh);
+                t.rotation = if rolling || f.crouch || airborne {
+                    Quat::from_rotation_x(thigh)
+                } else {
+                    // swing in the plane of MOVEMENT (crossover strafe)
+                    Quat::from_axis_angle(swing_axis, thigh)
+                };
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[1]) {
                 t.rotation = Quat::from_rotation_x(shin);
@@ -2687,11 +4364,109 @@ fn sync_fighters(
                 t.rotation = Quat::from_rotation_x(foot);
             }
         }
+        // §3.4: recoil is a BODY event with staggered peaks — the wrist
+        // (weapon root, jerk³) spikes first, the torso rocks back ~1.2°
+        // on a slower curve and settles last
+        let torso_pitch = torso_pitch_base - jerk.powf(0.4) * 0.021;
+        // §3.2 the Achilles throw: windup rotates the torso 42° AWAY,
+        // the plant blocks, the hips fire open through release, and the
+        // follow-through carries past — sequencing, not detail
+        let spear_yaw = if f.gun == GunKind::Spear {
+            if f.spear_wind_t > 0.0 {
+                let wp = 1.0 - f.spear_wind_t / SPEAR_WINDUP_S;
+                if wp < 0.68 {
+                    -0.73 * (wp / 0.68) // windup: torso coils away
+                } else {
+                    // plant → whip: hips fire open, fast
+                    -0.73 + 1.08 * ((wp - 0.68) / 0.32)
+                }
+            } else if f.knife_phase > 0.0 {
+                // §2 (Brief V): the THRUST sequences hips BEFORE hands —
+                // coil away through the load, fire open through the
+                // drive on a faster clock than the arm (order: legs,
+                // hips, shoulders, hands)
+                let tw = THRUST_WIND_S
+                    * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
+                let ph = f.knife_phase;
+                if ph < tw {
+                    -0.45 * ease_out((ph / tw).clamp(0.0, 1.0))
+                } else {
+                    -0.45 + 0.80 * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
+                }
+            } else {
+                0.35 * jerk // follow-through, decaying with the cooldown
+            }
+        } else {
+            0.0
+        };
+        // §4 (Brief IV): the idle life layer — breathing, weight shift,
+        // micro-sway, damage flinch. Phase offsets come from a RENDER-
+        // side hash of the fighter index (twenty soldiers desync for
+        // free) — NEVER the sim RNG, or replays break. Breathing is
+        // additive-only and the flinch is clamped, so the head band
+        // stays law by construction.
+        let ph = vis.index as f32 * 2.399;
+        let tnow = game.sim.t;
+        let breathe_hz = if speed > 4.0 { 0.35 } else { 0.27 };
+        let breath =
+            0.003 * (1.0 + (tnow * std::f32::consts::TAU * breathe_hz + ph).sin());
+        let wshift = 0.03 * (tnow * 0.85 + ph * 1.3).sin() * (1.0 - amp.min(1.0));
+        let sway_r = 0.007 * (tnow * 0.94 + ph).sin();
+        let flinch = {
+            let age = tnow - f.last_dmg_at;
+            if (0.0..0.3).contains(&age) {
+                0.06 * (1.0 - age / 0.3)
+            } else {
+                0.0
+            }
+        };
         if let Ok((mut t, _)) = parts.get_mut(rig.torso) {
-            // crouching also drops the torso a notch below the hips so
-            // the big head ducks under the (shootable) crouch height
-            t.translation.y = hip_y - if f.crouch && !rolling { 0.12 } else { 0.0 };
-            t.rotation = Quat::from_rotation_x(torso_pitch_base + amp * 0.12 - jerk * 0.06);
+            // §1.4 pelvis layers: lateral sway toward the stance foot,
+            // pelvis yaw with the spine counter-rotating most of it back
+            // (net ±1.5° — which is also all the arm swing an armed
+            // carry gets: the upper body moves through the spine, not
+            // the shoulders)
+            t.translation.y =
+                hip_y - if f.crouch && !rolling { 0.12 } else { 0.0 } + breath;
+            // amplitudes tuned UP so the gait reads from the 2.6 m boom
+            t.translation.x = 0.048 * rig.phase.sin() * amp + wshift;
+            t.rotation = Quat::from_rotation_y(0.045 * rig.phase.sin() * amp + spear_yaw)
+                * Quat::from_rotation_x((torso_pitch + flinch + 0.07 * settle).min(0.185))
+                * Quat::from_rotation_z(sway_r);
+        }
+        // §1.1 the neck aims: head pitch follows the view (×0.75, capped
+        // so head geometry stays inside its band), minus part of the
+        // torso pitch so the head reads as LOOKING, not nodding along
+        let aim_pitch_view = if is_player { cam_ctl.pitch } else { 0.05 };
+        if let Ok((mut t, _)) = parts.get_mut(rig.neck) {
+            let head_rx =
+                (aim_pitch_view * 0.75).clamp(-0.55, 0.55) - torso_pitch.min(0.30);
+            // §2.2 cheek weld: on ADS the HEAD comes to the stock — ~6°
+            // tilt and 3 cm toward the shoulder. The weapon does not
+            // float up to a stationary head. (Previous-frame blend.)
+            let weld = ease_out(rig.carry_t)
+                * if f.armed() && !f.shield_up && f.gun != GunKind::Bow {
+                    1.0
+                } else {
+                    0.0
+                };
+            // §3.4: eyes and head FOLLOW the magazine through a reload
+            let reload_look = if f.reload_t > 0.0 { 0.22 } else { 0.0 };
+            // §4.1: idle head scan — a soldier at rest LOOKS around
+            // (suppressed the moment anything is happening)
+            let scan = if speed < 0.5
+                && f.fire_cd <= 0.0
+                && f.reload_t <= 0.0
+                && tnow - f.last_dmg_at > 4.0
+            {
+                0.38 * (tnow * 0.55 + ph).sin()
+            } else {
+                0.0
+            };
+            t.translation = Vec3::new(0.03 * weld, 0.846, 0.0);
+            t.rotation = Quat::from_rotation_y(scan)
+                * Quat::from_rotation_z(-0.105 * weld)
+                * Quat::from_rotation_x(head_rx + reload_look);
         }
         // ---- arms + the held weapon --------------------------------------
         // Jointed chains now: shoulder (free) → elbow (hinge, no
@@ -2714,24 +4489,123 @@ fn sync_fighters(
                 };
             }
         }
-        // shoulder aim base: arm forward = −π/2 in this rig's local frame.
-        // The arms live UNDER the torso, so whatever the torso pitches
-        // (crouch lean, run lean, fire jerk) must be compensated here or
-        // the weapon drifts off the crosshair by exactly that much.
-        let torso_pitch = torso_pitch_base + amp * 0.12 - jerk * 0.06;
-        let fwd = -FRAC_PI_2 + aim_pitch - torso_pitch;
+        // ---- §1.3/§2.3: the weapon root leads; the hands follow ---------
+        // Weapon-root pitch tracks the aim line (compensating the torso),
+        // the sprint low-ready drops it, and the spine counter-rotation
+        // above feeds through it — that's the whole "tactical carry".
+        let sprinting =
+            speed > SPRINT_SPEED * 0.85 && f.armed() && !(is_player && cam_ctl.ads);
+        {
+            let dir = if sprinting { 1.0 } else { -1.0 };
+            let rate = if sprinting { 0.22 } else { 0.14 }; // fast OUT
+            rig.sprint_t = (rig.sprint_t + dir * dt / rate).clamp(0.0, 1.0);
+        }
+        let wr_pitch = aim_pitch - torso_pitch;
+        let spear_cocked =
+            f.gun == GunKind::Spear && if is_player { cam_ctl.ads } else { true };
+        let bow_draw = if f.gun == GunKind::Bow {
+            if is_player {
+                if cam_ctl.ads {
+                    1.0
+                } else {
+                    0.25
+                }
+            } else {
+                0.6
+            }
+        } else {
+            0.0
+        };
+        // §2.2 carry states: a soldier is recognisable by how the weapon
+        // is held when NOT shooting. Aimed blends in over 220 ms and out
+        // over 140 ms; un-aimed carry is low-ready when contact is live
+        // (recent fire or recent damage), patrol otherwise.
+        let aiming = if is_player {
+            cam_ctl.ads
+        } else {
+            f.los_time > 0.0
+        };
+        {
+            let dir = if aiming { 1.0 } else { -1.0 };
+            let rate = if aiming { 0.22 } else { 0.14 };
+            rig.carry_t = (rig.carry_t + dir * dt / rate).clamp(0.0, 1.0);
+        }
+        let aim_e = ease_out(rig.carry_t);
+        let contact = f.fire_cd > 0.0 || game.sim.t - f.last_dmg_at < 6.0;
+        let carry_pitch = if contact { 0.56 } else { 0.31 }; // low ready / patrol
+        // §2.3 weapon-mass settle: the gun trails the spine on turns —
+        // heavy weapons lag and overshoot, light ones snap
+        let yaw_delta = wrap_angle(f.yaw - rig.prev_yaw_vis);
+        rig.prev_yaw_vis = f.yaw;
+        let (lag_s, zeta) = weapon_lag(f.gun);
+        rig.wr_lag_yaw = (rig.wr_lag_yaw - yaw_delta * lag_s * 6.0).clamp(-0.22, 0.22);
+        let w_spring = 1.0 / lag_s.max(0.01);
+        rig.wr_lag_v +=
+            (-2.0 * zeta * w_spring * rig.wr_lag_v - w_spring * w_spring * rig.wr_lag_yaw) * dt;
+        rig.wr_lag_yaw += rig.wr_lag_v * dt;
+        // §2.2 muzzle avoidance: probe 0.9 m ahead of the muzzle; raise
+        // the barrel proportionally to the intrusion (to ~55°) — solves
+        // wall clipping AND reads as trained CQB handling
+        let muzzle_up = {
+            let (fx, fz) = (f.yaw.sin(), f.yaw.cos());
+            let o = [f.pos[0] + fx * 0.25, f.pos[1] + 1.28, f.pos[2] + fz * 0.25];
+            match game.sim.raycast_cover(o, [fx, 0.0, fz], 0.9) {
+                Some((t, _)) => -(1.0 - t / 0.9) * 0.96,
+                None => 0.0,
+            }
+        };
+        let reload_cant = if f.reload_t > 0.0 { 0.44 } else { 0.0 };
+        let (wr_pos, wr_rot) = if spear_cocked || f.spear_wind_t > 0.0 {
+            // §3.2: drawn back level with the shoulder through the wind,
+            // whipping forward at release
+            let wind_back = if f.spear_wind_t > 0.0 {
+                (1.0 - f.spear_wind_t / SPEAR_WINDUP_S).min(0.68) * 0.8
+            } else {
+                0.0
+            };
+            (
+                Vec3::new(0.16, 0.72, 0.02 - 0.12 * wind_back),
+                Quat::from_rotation_x(wr_pitch - 1.35 - 0.5 * wind_back + jerk * 1.5),
+            )
+        } else if f.gun == GunKind::Bow {
+            // the bow stands in front of the LEFT side
+            (
+                Vec3::new(-0.04, 0.48, 0.16),
+                Quat::from_rotation_x(wr_pitch * 0.9),
+            )
+        } else {
+            let s = ease_out(rig.sprint_t);
+            // aim ↔ carry blend, then sprint, muzzle-avoidance, and the
+            // §3.4 reload cant (25° toward the body) on top.
+            // §5 (Brief IV): the root rides far enough out that the
+            // longest stock clears the chest ellipse in every stance —
+            // ADS pulls it in and UP to the shoulder pocket instead of
+            // back through the torso.
+            let pitch = (aim_pitch * aim_e + carry_pitch * (1.0 - aim_e)) - torso_pitch;
+            let z = WR_Z_HIP + (WR_Z_ADS - WR_Z_HIP) * aim_e;
+            (
+                Vec3::new(WR_X, 0.50 + 0.06 * aim_e - 0.06 * s, z),
+                Quat::from_rotation_y(0.35 * s + rig.wr_lag_yaw)
+                    * Quat::from_rotation_x(pitch + jerk * 0.18 + 0.61 * s + muzzle_up)
+                    * Quat::from_rotation_z(reload_cant),
+            )
+        };
+        if let Ok((mut t, _)) = parts.get_mut(rig.weapon_root) {
+            t.translation = wr_pos;
+            t.rotation = wr_rot;
+        }
         let mut arrow_vis = Visibility::Hidden;
-        // (shoulder quat, elbow flex ≥ 0 shown as −flex, hand pitch)
-        let mut left = (
-            Quat::from_rotation_x(swing * 0.5),
-            0.15,
-            0.0_f32,
-        );
-        let mut right = (
-            Quat::from_rotation_x(-swing * 0.5),
-            0.15,
-            0.0_f32,
-        );
+        // hand IK targets in torso space: the weapon's OWN sockets
+        let sockets = weapon_hand_specs(f.gun);
+        let grip_t = sockets.first().map(|(p, ..)| wr_pos + wr_rot * *p);
+        let fore_t = sockets.get(1).map(|(p, ..)| wr_pos + wr_rot * *p);
+        let sh_l = Vec3::new(-0.26, 0.62, 0.02);
+        let sh_r = Vec3::new(0.26, 0.62, 0.02);
+        let pole_l = Vec3::new(-0.574, -0.80, 0.15); // down-and-out 35°
+        let pole_r = Vec3::new(0.574, -0.80, 0.15);
+        // (shoulder quat, elbow flex, wrist pitch) per arm
+        let mut left = (Quat::from_rotation_x(swing * 0.5), 0.15, 0.0_f32);
+        let mut right = (Quat::from_rotation_x(-swing * 0.5), 0.15, 0.0_f32);
         if rolling {
             // arms wrap the ball
             left = (Quat::from_rotation_x(-0.9), 1.2, 0.0);
@@ -2744,61 +4618,125 @@ fn sync_fighters(
             match f.gun {
                 GunKind::Fists => {}
                 GunKind::Bow => {
-                    // left arm punches the bow out; right arm draws, the
-                    // elbow folding as the string comes back
-                    let draw = if is_player {
-                        if cam_ctl.ads {
-                            1.0
-                        } else {
-                            0.25
-                        }
-                    } else {
-                        0.6
-                    };
-                    left = (Quat::from_rotation_x(fwd + 0.18), 0.18, 0.0);
-                    right = (
-                        Quat::from_rotation_y(-0.35) * Quat::from_rotation_x(fwd + 0.45),
-                        0.45 + draw * 0.75,
-                        0.0,
-                    );
+                    // left hand IK to the bow grip; right hand IK to the
+                    // STRING, pulled back with the draw
+                    if let Some(t) = grip_t {
+                        let (q, e) = solve_arm_ik(sh_l, t, pole_l);
+                        left = (q, e, 0.0);
+                    }
+                    // §3.3: a REAL anchor — the string hand draws to the
+                    // corner of the mouth at full draw, and flies back
+                    // past the ear on release (the follow-through sells it)
+                    let release_fly = if jerk > 0.55 { (jerk - 0.55) * 0.5 } else { 0.0 };
+                    let nock = wr_pos
+                        + wr_rot
+                            * Vec3::new(
+                                0.03,
+                                0.14 * bow_draw,
+                                -0.09 - 0.18 * bow_draw - release_fly,
+                            );
+                    let (q, e) = solve_arm_ik(sh_r, nock, pole_r);
+                    right = (q, e, 0.0);
                     if f.ammo > 0 && f.reload_t <= 0.0 {
                         arrow_vis = Visibility::Inherited;
                     }
                 }
-                GunKind::Spear => {
-                    // cocked overhead javelin-style while aiming; whips
-                    // forward on release; carry blend when lowered
-                    let cocked = if is_player { cam_ctl.ads } else { true };
-                    let a = if cocked {
-                        -2.0 + jerk * 1.7 + aim_pitch * 0.4
-                    } else {
-                        0.35 + jerk * (-1.0)
-                    };
-                    let elbow = 0.3;
-                    // wrist counter-rotates so the spear rides ~level on
-                    // the aim line whatever the arm is doing. The muzzle
-                    // points ALONG the arm, i.e. chain + 90° — that 90°
-                    // must come out of the wrist too.
-                    let hand = aim_pitch - (fwd + a - elbow) - FRAC_PI_2;
-                    right = (Quat::from_rotation_x(fwd + a), elbow, hand);
-                    left = (Quat::from_rotation_x(0.1 + swing * 0.3), 0.2, 0.0);
-                }
                 _ => {
-                    // two-handed gun: right hand at the trigger with a
-                    // solid elbow bend, left crossed to the foregrip;
-                    // both kick with the shot
-                    right = (
-                        Quat::from_rotation_x(fwd + 0.45 + jerk * 0.30),
-                        0.45 + jerk * 0.2,
-                        0.0,
-                    );
-                    left = (
-                        Quat::from_rotation_y(0.5) * Quat::from_rotation_x(fwd + 0.6 + jerk * 0.12),
-                        0.6,
-                        0.0,
-                    );
+                    // gun/spear: right hand IK to the grip socket; left
+                    // hand IK to the foregrip, or a chest-guard idle when
+                    // the weapon has none (pistols)
+                    if let Some(t) = grip_t {
+                        let (q, e) = solve_arm_ik(sh_r, t, pole_r);
+                        right = (q, e, 0.0);
+                    }
+                    // §3.2: through the windup the OFF ARM points at the
+                    // target — the classic javelin sight line, and the
+                    // single most readable tell of the committed throw
+                    let lt = if f.gun == GunKind::Spear && f.spear_wind_t > 0.0 {
+                        Vec3::new(-0.06, 0.58, 0.55)
+                    } else {
+                        fore_t.unwrap_or(Vec3::new(-0.12, 0.38, 0.16))
+                    };
+                    let (q, e) = solve_arm_ik(sh_l, lt, pole_l);
+                    left = (q, e, 0.0);
                 }
             }
+        }
+        // §6 (Brief IV): a live melee swing owns the RIGHT arm — the hand
+        // rises beside the ear through the wind, then sweeps across to
+        // the opposite hip. Readable at range; enemies see it coming.
+        // §2 (Brief V): with the SPEAR in hand this is the THRUST — the
+        // hand draws back along the flank, DRIVES past full reach (the
+        // follow-through overshoot), and settles back — arms finishing
+        // after the hips above.
+        if f.knife_phase > 0.0 && !rolling && !f.shield_up {
+            let thrust_v = f.gun == GunKind::Spear;
+            let tmul_v = if thrust_v && in_mech {
+                MECH_THRUST_TIME_MULT
+            } else {
+                1.0
+            };
+            let w = if thrust_v {
+                THRUST_WIND_S * tmul_v
+            } else {
+                match (f.melee_axe, f.knife_committed) {
+                    (false, false) => KNIFE_QUICK_WIND_S,
+                    (false, true) => KNIFE_LUNGE_WIND_S,
+                    (true, false) => AXE_QUICK_WIND_S,
+                    (true, true) => AXE_LUNGE_WIND_S,
+                }
+            };
+            let ph = f.knife_phase;
+            let target = if thrust_v {
+                if ph < w {
+                    // load: draw back along the flank as the hips coil
+                    let e = ease_out((ph / w).clamp(0.0, 1.0));
+                    Vec3::new(0.20, 0.46, 0.24).lerp(Vec3::new(0.30, 0.42, -0.12), e)
+                } else {
+                    let span =
+                        (THRUST_ACTIVE_S + THRUST_RECOVER_HIT_S) * tmul_v;
+                    let r = ((ph - w) / span).clamp(0.0, 1.0);
+                    if r < 0.25 {
+                        // the drive: past full reach — the overshoot
+                        Vec3::new(0.30, 0.42, -0.12)
+                            .lerp(Vec3::new(0.10, 0.50, 0.98), ease_out(r / 0.25))
+                    } else {
+                        // the tip settles back from the overshoot
+                        Vec3::new(0.10, 0.50, 0.98).lerp(
+                            Vec3::new(0.16, 0.47, 0.72),
+                            ease_out((r - 0.25) / 0.75),
+                        )
+                    }
+                }
+            } else if ph < w {
+                // wind: from a mid guard up beside the ear
+                let e = ease_out((ph / w).clamp(0.0, 1.0));
+                Vec3::new(0.16, 0.44, 0.28).lerp(Vec3::new(0.36, 0.80, -0.06), e)
+            } else {
+                // strike snaps across, then eases back to the guard
+                let active = if f.melee_axe {
+                    AXE_QUICK_ACTIVE_S + AXE_QUICK_RECOVER_S
+                } else {
+                    KNIFE_QUICK_ACTIVE_S + KNIFE_QUICK_RECOVER_S
+                };
+                let r = ((ph - w) / active).clamp(0.0, 1.0);
+                let hit = Vec3::new(-0.26, 0.26, 0.44);
+                hit.lerp(Vec3::new(0.16, 0.44, 0.28), ease_out(r))
+            };
+            let (q, e) = solve_arm_ik(sh_r, target, pole_r);
+            right = (q, e, 0.0);
+        }
+        // §1 (Brief V): an aimed throw coils the OFF hand up beside the
+        // head — visible at range, like the spear's javelin sight line
+        if f.cook_t > 0.0
+            && !rolling
+            && !(f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0)
+        {
+            let wind_e = (f.cook_t / THROW_CHARGE_MAX_S).clamp(0.0, 1.0);
+            let t = Vec3::new(-0.12, 0.52, 0.20)
+                .lerp(Vec3::new(-0.20, 0.86, -0.10), wind_e);
+            let (q, e) = solve_arm_ik(sh_l, t, pole_l);
+            left = (q, e, 0.0);
         }
         for (arm, (sh, elbow, hand)) in [(rig.arm_l, left), (rig.arm_r, right)] {
             if let Ok((mut t, _)) = parts.get_mut(arm[0]) {
@@ -2823,9 +4761,9 @@ fn sync_fighters(
         if let Ok((_, mut v)) = parts.get_mut(rig.bow_arrow) {
             *v = arrow_vis;
         }
-        // robot armor shell
+        // §6: the powered shell shows while the Robot Suit is worn
         if let Ok((_, mut v)) = parts.get_mut(rig.armor_rig) {
-            *v = if f.armor > 0.0 {
+            *v = if f.armor_set == ArmorSet::RobotSuit {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -2859,8 +4797,14 @@ fn sync_tracers(
         };
         match game.sim.tracers.get(idx) {
             Some(tr) => {
-                let a = Vec3::from_array(tr.from);
+                // §3.3: the HIT ray runs eye→aim-point; the VISIBLE streak
+                // starts a touch forward and below — where the muzzle sits.
+                // Purely cosmetic, fully decoupled from the hit test.
+                let a0 = Vec3::from_array(tr.from);
                 let b = Vec3::from_array(tr.to);
+                let seg = b - a0;
+                let sl = seg.length().max(0.05);
+                let a = a0 + (seg / sl) * (0.45_f32).min(sl * 0.4) - Vec3::Y * 0.12;
                 let mid = (a + b) * 0.5;
                 let len = (b - a).length().max(0.05);
                 let dir = (b - a) / len;
@@ -2921,6 +4865,293 @@ fn sync_missiles(
             }
             None => {
                 *vis = Visibility::Hidden;
+            }
+        }
+    }
+}
+
+/// §3: render recoverable ammo piles — a lying shaft per pile, slightly
+/// scaled up as arrows merge into it. (The through-wall pixel outline
+/// belongs to the §7 HUD pass.)
+fn sync_dropped(
+    mut commands: Commands,
+    game: Res<Game>,
+    assets: Res<FxAssets>,
+    mut pool: ResMut<DroppedPool>,
+    mut q: Query<
+        (&mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
+        With<DroppedMarker>,
+    >,
+) {
+    while pool.0.len() < game.sim.dropped.len() {
+        let e = commands
+            .spawn((
+                Mesh3d(assets.missile_mesh.clone()),
+                MeshMaterial3d(assets.arrow_mat.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                DroppedMarker,
+            ))
+            .id();
+        pool.0.push(e);
+    }
+    for (idx, e) in pool.0.iter().enumerate() {
+        let Ok((mut tf, mut vis, mut mat)) = q.get_mut(*e) else {
+            continue;
+        };
+        match game.sim.dropped.get(idx) {
+            Some(d) => {
+                let yaw = d.rest_tick as f32 * 0.61;
+                let bulk = 1.0 + 0.18 * ((d.count as f32) - 1.0).min(4.0);
+                *tf = Transform::from_xyz(d.pos[0], d.pos[1] + 0.06, d.pos[2])
+                    .with_rotation(Quat::from_rotation_y(yaw))
+                    .with_scale(Vec3::new(bulk, 1.0, if d.kind == AmmoKind::Spear { 1.8 } else { 0.8 }));
+                *mat = MeshMaterial3d(match d.kind {
+                    AmmoKind::Arrow => assets.arrow_mat.clone(),
+                    AmmoKind::Spear => assets.spear_mat.clone(),
+                });
+                *vis = Visibility::Visible;
+            }
+            None => *vis = Visibility::Hidden,
+        }
+    }
+}
+
+/// §5: render throwables — tumbling grenades (spin is VISUAL only), smoke
+/// spheres blooming in, flickering fire pools, and detonation flashes.
+/// The §5.3 whiteout uses QUANTISED alpha steps (pixel-dither read), and
+/// only ever reads sim state — nothing here feeds back.
+#[allow(clippy::too_many_arguments)]
+fn sync_throwables(
+    mut commands: Commands,
+    game: Res<Game>,
+    assets: Res<ThrowAssets>,
+    mut pools: ResMut<ThrowPools>,
+    mut q: Query<
+        (&mut Transform, &mut Visibility),
+        Or<(
+            With<GrenadeMarker>,
+            With<SmokeMarker>,
+            With<FireMarker>,
+            With<BoomMarker>,
+        )>,
+    >,
+    mut flash: Query<&mut BackgroundColor, With<FlashOverlay>>,
+) {
+    let simr = &game.sim;
+    // grow pools to demand
+    while pools.grenades.len() < simr.grenades_air.len() {
+        let e = commands
+            .spawn((
+                Mesh3d(assets.ball.clone()),
+                MeshMaterial3d(assets.body.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                GrenadeMarker,
+            ))
+            .id();
+        pools.grenades.push(e);
+    }
+    while pools.smokes.len() < simr.smokes.len() {
+        let e = commands
+            .spawn((
+                Mesh3d(assets.ball.clone()),
+                MeshMaterial3d(assets.smoke.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                SmokeMarker,
+            ))
+            .id();
+        pools.smokes.push(e);
+    }
+    while pools.fires.len() < simr.fires.len() {
+        let e = commands
+            .spawn((
+                Mesh3d(assets.fire_mesh.clone()),
+                MeshMaterial3d(assets.fire.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                FireMarker,
+            ))
+            .id();
+        pools.fires.push(e);
+    }
+    while pools.booms.len() < simr.booms.len() {
+        let e = commands
+            .spawn((
+                Mesh3d(assets.ball.clone()),
+                MeshMaterial3d(assets.flashband.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                BoomMarker,
+            ))
+            .id();
+        pools.booms.push(e);
+    }
+    for (idx, e) in pools.grenades.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            match simr.grenades_air.get(idx) {
+                Some(g) => {
+                    // 9 rad/s tumble — cosmetic, never fed back to the sim
+                    let spin = simr.t * 9.0 + g.id as f32;
+                    *t = Transform::from_xyz(g.pos[0], g.pos[1].max(0.08), g.pos[2])
+                        .with_rotation(Quat::from_rotation_x(spin) * Quat::from_rotation_z(spin * 0.7))
+                        .with_scale(Vec3::splat(0.16));
+                    *v = Visibility::Visible;
+                }
+                None => *v = Visibility::Hidden,
+            }
+        }
+    }
+    for (idx, e) in pools.smokes.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            match simr.smokes.get(idx) {
+                Some(s) => {
+                    let age = SMOKE_TTL_S - s.ttl;
+                    let bloom = (age * 1.6).clamp(0.1, 1.0);
+                    let fade = (s.ttl / 2.5).clamp(0.0, 1.0);
+                    let r = throw_spec(ThrowKind::Smoke).radius_m * 2.0 * bloom * fade.max(0.25);
+                    *t = Transform::from_translation(Vec3::from_array(s.pos))
+                        .with_scale(Vec3::splat(r));
+                    *v = Visibility::Visible;
+                }
+                None => *v = Visibility::Hidden,
+            }
+        }
+    }
+    for (idx, e) in pools.fires.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            match simr.fires.get(idx) {
+                Some(fp) => {
+                    let flick = 1.0 + (simr.t * 17.0 + idx as f32).sin() * 0.08;
+                    let r = throw_spec(ThrowKind::Molotov).radius_m * flick;
+                    *t = Transform::from_xyz(fp.pos[0], fp.pos[1] + 0.04, fp.pos[2])
+                        .with_scale(Vec3::new(r, 1.0, r));
+                    *v = Visibility::Visible;
+                }
+                None => *v = Visibility::Hidden,
+            }
+        }
+    }
+    for (idx, e) in pools.booms.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            match simr.booms.get(idx) {
+                Some((b, ttl)) => {
+                    let age = (2.0 - ttl).max(0.0);
+                    if age > 0.35 || b.kind == ThrowKind::Smoke {
+                        *v = Visibility::Hidden;
+                        continue;
+                    }
+                    *t = Transform::from_translation(Vec3::from_array(b.at))
+                        .with_scale(Vec3::splat(0.4 + age * 9.0));
+                    *v = Visibility::Visible;
+                }
+                None => *v = Visibility::Hidden,
+            }
+        }
+    }
+    // §5.3 whiteout: quantised to 8 steps — dither, never a smooth fade
+    if let Ok(mut bg) = flash.get_single_mut() {
+        let p = &simr.fighters[simr.player];
+        let a = (p.blind_t / FLASH_BLIND_S).clamp(0.0, 1.0);
+        let stepped = (a * 8.0).round() / 8.0;
+        *bg = BackgroundColor(Color::srgba(1.0, 1.0, 1.0, stepped * 0.96));
+    }
+}
+
+/// §8: render the horde — a moss body + pale head per zombie, scaled by
+/// kind (the Brute reads at a glance), plus the extraction beacon.
+fn sync_zombies(
+    mut commands: Commands,
+    game: Res<Game>,
+    kit: Res<ModelKit>,
+    assets: Res<ZombieAssets>,
+    mut pool: ResMut<ZombiePool>,
+    mut q: Query<(&mut Transform, &mut Visibility), With<ZombieMarker>>,
+) {
+    let simr = &game.sim;
+    while pool.bodies.len() < simr.zombies.len() {
+        let b = commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(assets.moss.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                ZombieMarker,
+            ))
+            .id();
+        let h = commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(assets.pale.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                ZombieMarker,
+            ))
+            .id();
+        pool.bodies.push(b);
+        pool.heads.push(h);
+    }
+    if pool.beacon.is_none() {
+        pool.beacon = Some(
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(assets.beacon.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                    ZombieMarker,
+                ))
+                .id(),
+        );
+    }
+    for idx in 0..pool.bodies.len() {
+        let (be, he) = (pool.bodies[idx], pool.heads[idx]);
+        match simr.zombies.get(idx) {
+            Some(z) => {
+                let zs = zspec(z.kind);
+                let yaw = (z.target[0] - z.pos[0]).atan2(z.target[1] - z.pos[2]);
+                let lurch = (simr.t * 3.1 + z.id as f32).sin() * 0.06;
+                if let Ok((mut t, mut v)) = q.get_mut(be) {
+                    *t = Transform::from_xyz(z.pos[0], z.pos[1] + zs.height * 0.45, z.pos[2])
+                        .with_rotation(
+                            Quat::from_rotation_y(yaw) * Quat::from_rotation_z(lurch),
+                        )
+                        .with_scale(Vec3::new(
+                            zs.girth * 2.0,
+                            zs.height * 0.72,
+                            zs.girth * 1.6,
+                        ));
+                    *v = Visibility::Visible;
+                }
+                if let Ok((mut t, mut v)) = q.get_mut(he) {
+                    *t = Transform::from_xyz(
+                        z.pos[0],
+                        z.pos[1] + zs.height * 0.90,
+                        z.pos[2],
+                    )
+                    .with_scale(Vec3::splat(zs.girth * 1.1));
+                    *v = Visibility::Visible;
+                }
+            }
+            None => {
+                for e in [be, he] {
+                    if let Ok((_, mut v)) = q.get_mut(e) {
+                        *v = Visibility::Hidden;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(be) = pool.beacon {
+        if let Ok((mut t, mut v)) = q.get_mut(be) {
+            match simr.extract_point() {
+                Some(p2) => {
+                    *t = Transform::from_xyz(p2[0], 20.0, p2[2])
+                        .with_scale(Vec3::new(EXTRACT_RADIUS * 2.0, 40.0, EXTRACT_RADIUS * 2.0));
+                    *v = Visibility::Visible;
+                }
+                None => *v = Visibility::Hidden,
             }
         }
     }
@@ -3011,7 +5242,7 @@ fn sync_health_bars(
             continue;
         };
         let self_view =
-            cam.first_person || (cam.ads && gun(f.gun).scoped && !f.shield_up);
+            cam.person_t < 0.5 || (cam.ads && gun(f.gun).scoped && !f.shield_up);
         if !f.alive() || (hb.index == game.sim.player && self_view) {
             // dead men carry no bar; in first person (or scoped glass)
             // neither do YOU — the HUD panel already shows your numbers
@@ -3059,7 +5290,14 @@ fn camera_system(
     let Ok((mut tf, mut proj)) = q.get_single_mut() else {
         return;
     };
+    let dt = time.delta_secs();
     let p = &game.sim.fighters[game.sim.player];
+    // §5.1: the person toggle BLENDS — boom length eases 0 → target over
+    // PERSON_BLEND_S, framerate-independently, never a snap
+    {
+        let dir = if cam_ctl.first_person { -1.0 } else { 1.0 };
+        cam_ctl.person_t = (cam_ctl.person_t + dir * dt / PERSON_BLEND_S).clamp(0.0, 1.0);
+    }
     let (sy, cy) = (cam_ctl.yaw.sin(), cam_ctl.yaw.cos());
     let (sp, cp) = (cam_ctl.pitch.sin(), cam_ctl.pitch.cos());
     let fwd = Vec3::new(sy * cp, -sp, cy * cp);
@@ -3071,61 +5309,327 @@ fn camera_system(
     // `right` above is the lean-LEFT direction under this game's yaw
     // convention; the true screen-right is its negation
     let screen_right = -right;
-    if (cam_ctl.first_person || scoped_in) && p.alive() {
-        // first person: the camera IS the eye — crouching, rolling, and
-        // LEANING physically move it
-        let eye_h = (p.height() - 0.16).max(0.55);
-        let eye = Vec3::new(p.pos[0], p.pos[1] + eye_h, p.pos[2])
-            + screen_right * (p.lean * LEAN_SHIFT);
-        let k = (34.0 * time.delta_secs()).min(1.0);
-        tf.translation = tf.translation.lerp(eye, k);
-        let look = tf.translation + fwd;
-        tf.look_at(look, Vec3::Y);
-        // the head tilts with the lean
-        tf.rotate_local_z(p.lean * 0.10);
+
+    // first-person eye — exact, no positional smoothing (aim never swims)
+    let eye_h = (p.height() - 0.16).max(0.55);
+    let eye = Vec3::new(p.pos[0], p.pos[1] + eye_h, p.pos[2])
+        + screen_right * (p.lean * LEAN_SHIFT);
+
+    // third person: over-the-RIGHT-shoulder boom off the head pivot;
+    // ADS pulls in tight. The boom pitch is clamped so a near-vertical
+    // look never degenerates the frame.
+    let crouch_drop = if p.roll_t > 0.0 {
+        0.75
+    } else if p.crouch {
+        0.62
     } else {
-        // third person, over-the-right-shoulder; ADS pulls in tight
-        let crouch_drop = if p.roll_t > 0.0 {
-            0.75
-        } else if p.crouch {
-            0.62
-        } else {
-            0.0
-        };
-        let anchor = Vec3::new(p.pos[0], p.pos[1] + 1.6 - crouch_drop, p.pos[2])
-            + screen_right * (p.lean * LEAN_SHIFT * 0.8);
-        let dist = if cam_ctl.ads { 1.7 } else { 2.6 };
-        let lift = if cam_ctl.ads { 0.22 } else { 0.35 };
-        let desired = anchor - fwd * dist + right * 0.5 + Vec3::Y * lift;
-        let k = (20.0 * time.delta_secs()).min(1.0);
-        tf.translation = tf.translation.lerp(desired, k);
-        let look = anchor + fwd * 12.0;
-        tf.look_at(look, Vec3::Y);
+        0.0
+    };
+    let anchor = Vec3::new(p.pos[0], p.pos[1] + 1.6 - crouch_drop, p.pos[2])
+        + screen_right * (p.lean * LEAN_SHIFT * 0.8);
+    let ads_e = ease_out(cam_ctl.ads_t);
+    let boom_target = TP_BOOM + (1.7 - TP_BOOM) * ads_e;
+    let lift = TP_UP + (0.22 - TP_UP) * ads_e;
+    let bp = cam_ctl.pitch.clamp(-1.2, 1.2);
+    let bfwd = Vec3::new(sy * bp.cos(), -bp.sin(), cy * bp.cos());
+    // §10: auto-mirror the shoulder when hugging a wall on the camera
+    // side — peeking left out of cover must not bury the camera in it
+    let want = if game
+        .sim
+        .raycast_cover(anchor.to_array(), screen_right.to_array(), 1.2)
+        .is_some()
+    {
+        -1.0
+    } else {
+        1.0
+    };
+    cam_ctl.shoulder += (want - cam_ctl.shoulder) * (dt / 0.15).min(1.0);
+    let desired = anchor - bfwd * boom_target
+        + screen_right * (TP_RIGHT * cam_ctl.shoulder)
+        + Vec3::Y * lift;
+    // §5.2 boom collision: cast anchor → desired with a pad; pull the
+    // camera in INSTANTLY on contact, push it back out slowly — instant
+    // push-out pops every time you clear a corner
+    let off = desired - anchor;
+    let len = off.length().max(1e-4);
+    let dirn = off / len;
+    let mut allowed = len;
+    if let Some((t, _)) = game
+        .sim
+        .raycast_cover(anchor.to_array(), dirn.to_array(), len)
+    {
+        allowed = (t - CAM_PAD).max(0.25);
     }
+    if allowed < cam_ctl.boom {
+        cam_ctl.boom = allowed;
+    } else {
+        cam_ctl.boom += (allowed - cam_ctl.boom) * (dt / CAM_RECOVER_S).min(1.0);
+    }
+    let tp_pos = anchor + dirn * cam_ctl.boom.min(len);
+
+    // blend eye ↔ boom on the eased person fraction; the dead spectate
+    // from the boom, the scoped AWM is always the eye
+    let pe = if !p.alive() {
+        1.0
+    } else if scoped_in {
+        0.0
+    } else {
+        ease_out(cam_ctl.person_t)
+    };
+    // landing weight-absorb: the camera DIPS on the grounded edge, in
+    // proportion to the impact, and springs back over ~90 ms — the body
+    // absorbing the landing instead of the world stopping dead
+    if p.grounded && !cam_ctl.prev_grounded && p.alive() {
+        let impact = (-cam_ctl.prev_vy - 3.0).max(0.0);
+        cam_ctl.land_dip = (cam_ctl.land_dip + impact * 0.016).min(0.15);
+    }
+    cam_ctl.land_dip *= (1.0 - dt * 11.0).max(0.0);
+    cam_ctl.prev_vy = p.vy;
+    cam_ctl.prev_grounded = p.grounded;
+    // the mech has a CADENCE: a slow, heavy sway while it walks — the
+    // pilot feels the tonnage (render-only, first person mostly)
+    let mech_bob = if p.armor_set == ArmorSet::RobotSuit && p.hull > 0.0 && p.grounded {
+        let sp = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
+        (game.sim.t * std::f32::consts::TAU * 0.9).sin()
+            * 0.022
+            * (sp / MOVE_SPEED).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // nearby detonations SHAKE the frame — amplitude by proximity, only
+    // while the boom is fresh (its ttl starts at 2.0), decaying with it
+    let mut shake = 0.0_f32;
+    for (b, ttl) in &game.sim.booms {
+        if *ttl < 1.55 || b.kind == ThrowKind::Smoke {
+            continue;
+        }
+        let d = Vec3::from_array(b.at).distance(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
+        shake += (1.0 - d / 22.0).max(0.0) * 0.09 * ((*ttl - 1.55) / 0.45);
+    }
+    let shake = shake.min(0.14);
+    let sh = if shake > 0.0 {
+        let n = game.sim.t * 113.0;
+        Vec3::new(n.sin(), (n * 1.31).cos(), (n * 0.77).sin()) * shake
+    } else {
+        Vec3::ZERO
+    };
+    tf.translation = eye.lerp(tp_pos, pe) + sh;
+    tf.translation.y -= (cam_ctl.land_dip + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
+    let look = tf.translation + fwd;
+    tf.look_at(look, Vec3::Y);
+    // the head tilts with the lean — first person only
+    tf.rotate_local_z(p.lean * 0.10 * (1.0 - pe));
+    // ...and rolls a breath with the mech's stride
+    tf.rotate_local_z(mech_bob * 0.35 * (1.0 - pe));
+
+    // §3.4: FOV rides ads_t (ease-out, framerate-independent) — never the
+    // `+= (target-fov)*k` exponential that stalls and never arrives
     if let Projection::Perspective(persp) = &mut *proj {
-        // each gun has its own zoom: the sniper's is a real scope —
-        // but not from behind a raised shield
-        let target = if cam_ctl.ads && p.armed() && !p.shield_up {
+        let zoom = if p.armed() && !p.shield_up {
             gun(p.gun).zoom_deg
         } else {
-            62.0
-        }
-        .to_radians();
-        persp.fov += (target - persp.fov) * (16.0 * time.delta_secs()).min(1.0);
+            FOV_HIP_DEG
+        };
+        let hip = FOV_HIP_DEG.to_radians();
+        let fov = hip + (zoom.to_radians() - hip) * ads_e;
+        persp.fov = fov;
+        cam_ctl.fov_now = fov; // §3.2 reads the live value next frame
     }
 }
 
-/// First-person hands + weapon: only in FP, swapped to the carried gun,
-/// bobbing with the run, kicking with each shot, dipping through reloads.
+/// §2.3: `RenderLayers` does not propagate to children in Bevy 0.15 —
+/// walk the viewmodel hierarchy once (after the spawn flush) and stamp
+/// every descendant onto the viewmodel layer so only the fixed-FOV
+/// viewmodel camera renders it.
+fn tag_viewmodel_layer(
+    mut done: Local<bool>,
+    mut commands: Commands,
+    vm: Res<VmRig>,
+    children: Query<&Children>,
+) {
+    if *done {
+        return;
+    }
+    let mut stack = vec![vm.root];
+    let mut count = 0usize;
+    while let Some(e) = stack.pop() {
+        commands
+            .entity(e)
+            .insert(RenderLayers::layer(VIEWMODEL_LAYER));
+        count += 1;
+        if let Ok(ch) = children.get(e) {
+            stack.extend(ch.iter().copied());
+        }
+    }
+    if count > 10 {
+        *done = true; // hierarchy flushed and stamped — nothing left to do
+    }
+}
+
+/// §2.2 first-person carry motion ("gunpowder motion"): figure-8 bob,
+/// critically-damped mouse sway, breathing idle, pitch lag, landing dip,
+/// sprint low-ready — ALL on the viewmodel transform only. Brief I §3.1
+/// is absolute: nothing here touches the yaw/pitch used for shooting.
+/// §3 (Brief IV): signature reloads — per-class choreography as pose
+/// curves over reload progress r ∈ 0..1. The SIM's reload clock is the
+/// master (the animation fits the duration, never the reverse), so
+/// interrupts and resumes can never desync ammo from motion. Returns
+/// (translation offset, euler xyz) for the viewmodel root.
+fn reload_pose(kind: GunKind, r: f32) -> (Vec3, Vec3) {
+    let pulse = |a: f32, b: f32| -> f32 {
+        if r < a || r > b {
+            0.0
+        } else {
+            ((r - a) / (b - a) * PI).sin()
+        }
+    };
+    match kind {
+        GunKind::Glock | GunKind::Deagle => {
+            // mag drops free with a flick, new mag rocks in, thumb rides
+            // the slide release
+            let drop = pulse(0.05, 0.35);
+            let seat = pulse(0.45, 0.75);
+            let slide = pulse(0.82, 0.97);
+            (
+                Vec3::new(0.02 * drop, -0.09 * drop - 0.05 * seat, 0.02 * seat),
+                Vec3::new(
+                    0.30 * drop + 0.18 * seat - 0.10 * slide,
+                    0.0,
+                    -0.45 * drop - 0.20 * seat,
+                ),
+            )
+        }
+        GunKind::Ak47 | GunKind::M4 => {
+            // rotational mag strip, rock-in with a wrist snap, charging
+            // pull while the muzzle dips
+            let strip = pulse(0.05, 0.35);
+            let rock = pulse(0.40, 0.70);
+            let charge = pulse(0.78, 0.96);
+            (
+                Vec3::new(0.0, -0.10 * strip - 0.06 * rock, 0.03 * charge),
+                Vec3::new(
+                    0.35 * strip + 0.22 * rock + 0.14 * charge,
+                    -0.12 * rock,
+                    -0.50 * strip - 0.25 * rock + 0.20 * charge,
+                ),
+            )
+        }
+        GunKind::Shotgun => {
+            // shell-by-shell underside feed — one dip per shell; the SIM
+            // already allows firing mid-reload, so the rhythm just stops
+            let shell = ((r * 5.0).fract() * PI).sin();
+            (
+                Vec3::new(0.0, -0.06 - 0.03 * shell, 0.0),
+                Vec3::new(0.35 + 0.10 * shell, 0.15, -0.30),
+            )
+        }
+        GunKind::M249 => {
+            // box swap, feed cover up, belt laid flat, cover SLAMS
+            let boxs = pulse(0.0, 0.30);
+            let cover = pulse(0.30, 0.55);
+            let belt = pulse(0.55, 0.85);
+            let slam = pulse(0.88, 1.0);
+            (
+                Vec3::new(0.02, -0.14 * boxs - 0.08 * belt, 0.0),
+                Vec3::new(
+                    0.30 * boxs + 0.55 * cover + 0.35 * belt - 0.15 * slam,
+                    0.10,
+                    -0.55 * (boxs + belt).min(1.0),
+                ),
+            )
+        }
+        GunKind::Mp5 => {
+            // the classic: mag out, mag in, SLAP the charging handle
+            let out = pulse(0.05, 0.35);
+            let inn = pulse(0.42, 0.68);
+            let slap = pulse(0.80, 0.95);
+            (
+                Vec3::new(0.03 * slap, -0.09 * out - 0.05 * inn, 0.0),
+                Vec3::new(
+                    0.28 * out + 0.18 * inn,
+                    -0.30 * slap,
+                    -0.40 * out - 0.35 * slap,
+                ),
+            )
+        }
+        GunKind::Awm => {
+            // cants 30° left, rounds fed singly from the top
+            let cant = (r * PI).sin().min(1.0);
+            let feed = ((r * 5.0).fract() * PI).sin() * pulse(0.15, 0.9);
+            (
+                Vec3::new(-0.02 * cant, -0.08 * cant - 0.02 * feed, 0.02),
+                Vec3::new(0.25 * cant + 0.08 * feed, 0.10 * cant, 0.52 * cant),
+            )
+        }
+        _ => {
+            // bow nock / spear heft / bare hands: a simple settle
+            let s = (r * PI).sin();
+            (
+                Vec3::new(0.0, -0.06 * s, 0.02 * s),
+                Vec3::new(0.25 * s, 0.0, -0.15 * s),
+            )
+        }
+    }
+}
+
+/// All of the viewmodel's per-frame state in one bundle — Bevy systems
+/// cap at 16 parameters, and the carry motion earns its keep.
+#[derive(Default)]
+struct VmState {
+    theta: f32,
+    sway: Vec2,
+    sway_v: Vec2,
+    pitch_lag: f32,
+    prev_pitch: f32,
+    prev_vy: f32,
+    land_t: f32,
+    sprint_t: f32,
+    inspect: bool,
+    inspect_t: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fp_viewmodel(
     time: Res<Time>,
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
     vm: Res<VmRig>,
-    mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
+    mut motion: EventReader<MouseMotion>,
+    mut st: Local<VmState>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut q: Query<(&mut Transform, &mut Visibility), (Without<MainCam>, Without<TriggerFinger>)>,
+    mut trig: Query<(&mut Transform, &TriggerFinger), Without<MainCam>>,
 ) {
+    let dt = time.delta_secs().max(1e-5);
     let p = &game.sim.fighters[game.sim.player];
-    let show = cam_ctl.first_person && p.alive() && p.roll_t <= 0.0;
+    // this system keeps its OWN MouseMotion cursor — reading here does
+    // not consume the events the aim path reads
+    let mut mdelta = Vec2::ZERO;
+    for ev in motion.read() {
+        mdelta += ev.delta;
+    }
+    let spec = gun(p.gun);
+    // §2.1 trigger finger: 40 ms press, 90 ms return — LEADS the shot
+    // (fire_cd is set the same tick the shot resolves)
+    let t_since = if p.armed() && p.fire_cd > 0.0 {
+        spec.fire_period - p.fire_cd
+    } else {
+        1.0
+    };
+    let press = if t_since < 0.04 {
+        t_since / 0.04
+    } else {
+        (1.0 - (t_since - 0.04) / 0.09).max(0.0)
+    };
+    // §2.2 trigger discipline: the index finger rests ON THE RECEIVER in
+    // every state except Aimed — it moves to the trigger during the ADS
+    // blend. Nearly free, and it reads as "trained".
+    let on_trigger = cam_ctl.ads_t;
+    for (mut t, tf_) in &mut trig {
+        let rest = -0.12 + (tf_.rest + 0.12) * on_trigger;
+        t.rotation = Quat::from_rotation_x(rest - press * 0.38);
+    }
+    let show = cam_ctl.person_t < 0.5 && p.alive() && p.roll_t <= 0.0;
     if let Ok((_, mut v)) = q.get_mut(vm.root) {
         *v = if show {
             Visibility::Visible
@@ -3137,7 +5641,7 @@ fn fp_viewmodel(
         return;
     }
     let slot = weapon_slot(p.gun);
-    let scoped = cam_ctl.ads && gun(p.gun).scoped;
+    let scoped = cam_ctl.ads && spec.scoped;
     for (wi, we) in vm.weapons.iter().enumerate() {
         if let Ok((_, mut v)) = q.get_mut(*we) {
             // the raised shield replaces the gun view; a scoped AWM view
@@ -3156,48 +5660,226 @@ fn fp_viewmodel(
             Visibility::Hidden
         };
     }
-    let spec = gun(p.gun);
-    let jerk = if p.armed() && spec.fire_period > 0.0 {
-        ((p.fire_cd / spec.fire_period).clamp(0.0, 1.0)).powi(3)
+    let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
+    // §2.2 suppression during ADS: ×(1 − 0.85·ads_t) — a trace of life
+    // stays at full zoom, but a scoped gun does not swim
+    let supp = 1.0 - cam_ctl.ads_t * 0.85;
+    // §2.3 (Brief IV): MINIMAL bob — half the old amplitudes. CS:GO's
+    // gun barely bobs; steadiness is what reads as professional.
+    st.theta += speed * dt * 4.4;
+    let s = (speed / SPRINT_SPEED).clamp(0.0, 1.0);
+    let bob = Vec2::new(
+        0.0065 * s * st.theta.sin(),
+        0.004 * s * (2.0 * st.theta).sin(),
+    ) * supp;
+    // sway: the gun lags the camera — critically damped spring (ω = 14,
+    // ζ = 1), stepped with the CLOSED FORM so 60 fps and 240 fps agree
+    let tgt = Vec2::new(
+        (-mdelta.x * 0.02).clamp(-3.5, 3.5),
+        (-mdelta.y * 0.02).clamp(-3.5, 3.5),
+    );
+    let w = 14.0_f32;
+    let decay = (-w * dt).exp();
+    let x0 = st.sway - tgt;
+    let v0 = st.sway_v;
+    st.sway = tgt + (x0 + (v0 + x0 * w) * dt) * decay;
+    st.sway_v = (v0 - (v0 + x0 * w) * w * dt) * decay;
+    let sway_rad = st.sway * (PI / 180.0) * supp;
+    // breathing idle: 0.28 Hz, ±0.4°
+    let breathe = (time.elapsed_secs() * std::f32::consts::TAU * 0.28).sin() * 0.007 * supp;
+    // pitch lag: the muzzle trails fast camera pitch by up to ~4°
+    let pv = (cam_ctl.pitch - st.prev_pitch) / dt;
+    st.prev_pitch = cam_ctl.pitch;
+    let lag_tgt = (-pv * 0.05).clamp(-0.07, 0.07) * supp;
+    st.pitch_lag += (lag_tgt - st.pitch_lag) * (1.0 - (-10.0 * dt).exp());
+    // landing dip: 0.04 m over 180 ms on a real impact
+    if p.grounded && st.prev_vy < -3.0 {
+        st.land_t = 0.18;
+    }
+    st.prev_vy = if p.grounded { 0.0 } else { p.vy };
+    st.land_t = (st.land_t - dt).max(0.0);
+    let dip = if st.land_t > 0.0 {
+        0.04 * (PI * (1.0 - st.land_t / 0.18)).sin()
     } else {
         0.0
     };
-    let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
-    let t = time.elapsed_secs();
-    let (bx, by) = if speed > 0.5 {
-        let a = (speed / SPRINT_SPEED).clamp(0.0, 1.0);
-        ((t * 7.0).sin() * 0.014 * a, (t * 14.0).sin().abs() * 0.011 * a)
-    } else {
-        (0.0, (t * 2.2).sin() * 0.004) // idle breathing
-    };
+    // sprint low-ready: in over 220 ms, OUT over 140 ms — the out-blend
+    // gates the player's ability to shoot, so it must be the fast one
+    let sprinting = speed > SPRINT_SPEED * 0.85 && !cam_ctl.ads && p.armed();
+    {
+        let dir = if sprinting { 1.0 } else { -1.0 };
+        let rate = if sprinting { 0.22 } else { 0.14 };
+        st.sprint_t = (st.sprint_t + dir * dt / rate).clamp(0.0, 1.0);
+    }
+    let sp = ease_out(st.sprint_t);
     let reloading = p.reload_t > 0.0;
+    // §3: the spear windup reads in FIRST person too — the arm hauls
+    // back and up through the wind, then the release whips through
+    let wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
+        1.0 - p.spear_wind_t / SPEAR_WINDUP_S
+    } else {
+        0.0
+    };
+    // §2.3: ROTATIONAL recoil that SNAPS back — kick is ~70% pitch-up /
+    // 30% roll, recovered inside 140 ms regardless of the gun's cadence;
+    // translation kick capped at 1.5 cm. The gun never wanders.
+    let kick_vm = if p.armed() && p.fire_cd > 0.0 {
+        ((0.14 - (spec.fire_period - p.fire_cd)) / 0.14).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // §2.4: the inspect pose (T) — image-3 angled presentation with a
+    // slow idle drift; any combat input cancels instantly
+    if keys.just_pressed(KeyCode::KeyT) {
+        st.inspect = !st.inspect;
+    }
+    if cam_ctl.ads || p.fire_cd > 0.0 || p.reload_t > 0.0 || p.switch_t > 0.0 || sprinting {
+        st.inspect = false;
+    }
+    {
+        let dir = if st.inspect { 1.0 } else { -1.0 };
+        st.inspect_t = (st.inspect_t + dir * dt / 0.35).clamp(0.0, 1.0);
+    }
+    let ie = ease_out(st.inspect_t);
+    let drift = (time.elapsed_secs() * 0.7).sin() * 0.05 * ie;
+    // §2.1: ADS drives the sights to exact screen center over the blend
+    let ads_e = ease_out(cam_ctl.ads_t);
+    let ads_shift = Vec3::new(-0.11, 0.052, 0.10) * ads_e;
+    // §3 (Brief IV): the signature reload replaces the flat dip — the
+    // hands and weapon do the acting, on the sim's own reload clock
+    let (rl_t, rl_e) = if reloading && p.armed() {
+        reload_pose(p.gun, 1.0 - (p.reload_t / spec.reload_s).clamp(0.0, 1.0))
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
+    // §6 (Brief IV): the melee swing reads in first person — wind pulls
+    // the hands up-right, the strike whips across the screen. The axe
+    // version is slower and twice as heavy.
+    let (mel_t, mel_e) = if p.knife_phase > 0.0 && p.gun == GunKind::Spear {
+        // §2 (Brief V): the first-person THRUST — the spear draws back
+        // through the load, drives past full extension (overshoot), and
+        // settles. The whiff holds the recovery longer via the sim clock.
+        let w = THRUST_WIND_S;
+        let ph = p.knife_phase;
+        if ph < w {
+            let e = ease_out((ph / w).clamp(0.0, 1.0));
+            (
+                Vec3::new(0.02, -0.012, 0.11 * e),
+                Vec3::new(-0.06 * e, 0.10 * e, 0.05 * e),
+            )
+        } else {
+            let r = ((ph - w) / (THRUST_ACTIVE_S + THRUST_RECOVER_HIT_S))
+                .clamp(0.0, 1.0);
+            let jab = if r < 0.3 {
+                ease_out(r / 0.3) * 1.08 // past full reach — the overshoot
+            } else {
+                1.08 - 0.34 * ease_out((r - 0.3) / 0.7) // and the settle
+            };
+            (
+                Vec3::new(-0.012, 0.006, -0.26 * jab),
+                Vec3::new(0.055 * jab, -0.045 * jab, -0.02 * jab),
+            )
+        }
+    } else if p.knife_phase > 0.0 {
+        let axe = p.melee_axe;
+        let w = if axe { AXE_QUICK_WIND_S } else { KNIFE_QUICK_WIND_S };
+        let total = w
+            + if axe {
+                AXE_QUICK_ACTIVE_S + AXE_QUICK_RECOVER_S
+            } else {
+                KNIFE_QUICK_ACTIVE_S + KNIFE_QUICK_RECOVER_S
+            };
+        let ph = p.knife_phase;
+        let amp = if axe { 1.0 } else { 0.5 };
+        if ph < w {
+            let e = ease_out((ph / w).clamp(0.0, 1.0)) * amp;
+            (
+                Vec3::new(0.10 * e, 0.09 * e, 0.05 * e),
+                Vec3::new(0.20 * e, -0.45 * e, 0.35 * e),
+            )
+        } else {
+            let r = ((ph - w) / (total - w)).clamp(0.0, 1.0);
+            // snap through, then settle home over the recovery
+            let e = (1.0 - ease_out(r)) * amp;
+            (
+                Vec3::new(-0.14 * e, -0.06 * e, -0.10 * e),
+                Vec3::new(-0.30 * e, 0.55 * e, -0.50 * e),
+            )
+        }
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
+    // §1 (Brief V): the aimed throw reads in first person too — the
+    // whole frame coils back and up, deepening as the power charges
+    let gr = if p.cook_t > 0.0
+        && !(p.armor_set == ArmorSet::RobotSuit && p.hull > 0.0)
+    {
+        ease_out((p.cook_t / THROW_CHARGE_MAX_S).clamp(0.0, 1.0))
+    } else {
+        0.0
+    };
     if let Ok((mut tf, _)) = q.get_mut(vm.root) {
-        tf.translation = Vec3::new(
-            bx,
-            by - if reloading { 0.14 } else { 0.0 },
-            jerk * 0.07, // camera -Z is forward, so +Z kicks the gun back
-        );
-        tf.rotation = Quat::from_rotation_x(
-            jerk * 0.20 + if reloading { 0.45 } else { 0.0 },
-        );
+        tf.translation = ads_shift
+            + Vec3::new(-0.06, -0.02, 0.06) * ie
+            + rl_t
+            + mel_t
+            + Vec3::new(0.03, 0.035, -0.05) * gr
+            + Vec3::new(
+                bob.x + sp * 0.02 + wind * 0.07,
+                bob.y - dip - sp * 0.06 + wind * 0.09,
+                kick_vm * 0.015 + wind * 0.30, // ≤1.5 cm translation kick
+            );
+        tf.rotation = Quat::from_rotation_y(
+            sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y,
+        ) * Quat::from_rotation_x(
+            kick_vm * 0.16
+                + breathe
+                + sway_rad.y
+                + st.pitch_lag
+                + rl_e.x
+                + mel_e.x
+                - 0.12 * gr
+                + sp * 0.61
+                - wind * 0.55
+                + 0.22 * ie,
+        ) * Quat::from_rotation_z(kick_vm * 0.07 + rl_e.z + mel_e.z + 0.08 * gr);
     }
 }
 
-/// The red aiming laser for bow/spear: sample the sim's own `predict_arc`
-/// so the dots trace EXACTLY the flight the projectile will take, and drop
-/// a landing ring where it ends.
+/// §4.2: the aiming preview for bow/spear. It calls the sim's OWN
+/// `predict_arc` — never a reimplementation — so the dots trace exactly
+/// the flight the projectile will take. Dots are spaced by ARC LENGTH
+/// (even spacing, no bunching at the apex) and size down along the arc;
+/// a ±spread cone of fainter arcs widens as the §4 stability degrades,
+/// so the player can watch their own accuracy in real time.
+#[allow(clippy::too_many_arguments)]
 fn arc_preview(
+    time: Res<Time>,
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
     arc: Res<ArcVis>,
+    mut arc_state: ResMut<ArcState>,
+    mut prev_yaw: Local<Option<f32>>,
     cam_q: Query<&Transform, With<MainCam>>,
     mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let spec = gun(p.gun);
     let show = cam_ctl.ads && p.alive() && spec.projectile.is_some() && p.roll_t <= 0.0;
+    // client-side yaw rate for the cone width (mirrors the sim's model)
+    let dt = time.delta_secs().max(1e-4);
+    let yaw_rate = prev_yaw
+        .map(|py| (wrap_angle(cam_ctl.yaw - py) / dt).abs())
+        .unwrap_or(0.0);
+    *prev_yaw = Some(cam_ctl.yaw);
     if !show {
-        for e in arc.dots.iter().chain(std::iter::once(&arc.ring)) {
+        arc_state.range = None;
+        for e in arc
+            .dots
+            .iter()
+            .chain(arc.cone.iter())
+            .chain([&arc.ring, &arc.drop_line])
+        {
             if let Ok((_, mut v)) = q.get_mut(*e) {
                 *v = Visibility::Hidden;
             }
@@ -3207,64 +5889,150 @@ fn arc_preview(
     let Ok(cam_tf) = cam_q.get_single() else {
         return;
     };
-    // the same launch the sim will use: from the muzzle (crouch + lean
-    // included), toward the crosshair
-    let fwd = cam_tf.forward().as_vec3();
-    let far = cam_tf.translation + fwd * 90.0;
+    // the same launch the sim will use: same two-stage aim, same charge
     let eye = Vec3::from_array(game.sim.muzzle_origin(game.sim.player));
-    let d = (far - eye).normalize_or_zero();
-    let (v0, _) = spec.projectile.unwrap();
-    let (pts, impact, normal) = game.sim.predict_arc(
-        [eye.x, eye.y, eye.z],
-        [d.x, d.y, d.z],
-        v0,
-        p.gun == GunKind::Spear,
-        5.0,
-    );
-    for (i, e) in arc.dots.iter().enumerate() {
-        let Ok((mut t, mut v)) = q.get_mut(*e) else {
-            continue;
-        };
-        // short flights use one dot per sample; long ones spread evenly
-        let idx = if pts.len() > arc.dots.len() {
-            i * (pts.len() - 1) / (arc.dots.len() - 1).max(1)
-        } else {
-            i
-        };
-        match pts.get(idx) {
-            Some(pt) => {
-                t.translation = Vec3::from_array(*pt);
-                *v = Visibility::Visible;
-            }
-            None => {
-                *v = Visibility::Hidden;
-            }
-        }
+    let (d, _) = crosshair_aim_dir(&game.sim, cam_tf);
+    let is_spear = p.gun == GunKind::Spear;
+    let settled = cam_ctl.ads_t > 0.9;
+    let (v0_full, _) = spec.projectile.unwrap();
+    let v0 = if is_spear && !settled { SPEAR_V0_MIN } else { v0_full };
+    // current spread, mirroring `try_fire`: base + move + bloom, ADS and
+    // crouch multipliers, divided by the stability factor
+    let moving = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
+    let mut spread = spec.spread + if moving > 0.5 { spec.spread_move } else { 0.0 } + p.bloom;
+    if settled {
+        spread *= ADS_SPREAD_MULT;
     }
+    if p.crouch {
+        spread *= CROUCH_SPREAD_MULT;
+    }
+    let stability = (1.0
+        - AIM_TURN_K * (yaw_rate - AIM_TURN_FREE).max(0.0)
+        - AIM_MOVE_K * (moving - AIM_MOVE_FREE).max(0.0))
+    .clamp(AIM_STABILITY_MIN, 1.0);
+    spread /= stability;
+
+    let place_arc = |q: &mut Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
+                     ents: &[Entity],
+                     dir: Vec3,
+                     scale0: f32|
+     -> ([f32; 3], [f32; 3], f32) {
+        let (pts, impact, normal) = game.sim.predict_arc(
+            [eye.x, eye.y, eye.z],
+            [dir.x, dir.y, dir.z],
+            v0,
+            is_spear,
+            8.0,
+        );
+        // arc-length resample: even spacing along the flight
+        let mut cum = vec![0.0_f32];
+        for w in pts.windows(2) {
+            let d2 = Vec3::from_array(w[1]) - Vec3::from_array(w[0]);
+            cum.push(cum.last().unwrap() + d2.length());
+        }
+        let total = *cum.last().unwrap_or(&0.0);
+        for (i, e) in ents.iter().enumerate() {
+            let Ok((mut t, mut v)) = q.get_mut(*e) else {
+                continue;
+            };
+            if pts.len() < 2 || total < 0.4 {
+                *v = Visibility::Hidden;
+                continue;
+            }
+            let want = total * (i as f32 + 0.5) / ents.len() as f32;
+            let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
+            let frac = i as f32 / ents.len() as f32;
+            t.translation = Vec3::from_array(pts[k]);
+            t.scale = Vec3::splat(scale0 * (1.0 - 0.55 * frac)); // size down
+            *v = Visibility::Visible;
+        }
+        let range = (Vec3::from_array(impact) - eye).length();
+        (impact, normal, range)
+    };
+
+    // ±spread cone first (under the main arc): pitch the direction
+    let up_dir = perturb_v(d, spread);
+    let dn_dir = perturb_v(d, -spread);
+    place_arc(&mut q, &arc.cone[..8], up_dir, 0.8);
+    place_arc(&mut q, &arc.cone[8..], dn_dir, 0.8);
+    let (impact, normal, range) = place_arc(&mut q, &arc.dots, d, 1.0);
+    arc_state.range = Some(range);
+
+    // landing ring: oriented to the surface; on a valid target it
+    // THICKENS (shape change — §0.4 forbids a colour change)
+    let near_enemy = game.sim.fighters.iter().enumerate().any(|(j, g)| {
+        j != game.sim.player
+            && g.team != p.team
+            && g.alive()
+            && {
+                let dx = g.pos[0] - impact[0];
+                let dz = g.pos[2] - impact[2];
+                dx * dx + dz * dz < 1.3 * 1.3 && (impact[1] - g.pos[1]).abs() < 2.2
+            }
+    });
     if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
         let n = Vec3::from_array(normal).normalize_or(Vec3::Y);
         t.translation = Vec3::from_array(impact) + n * 0.05;
         t.rotation = Quat::from_rotation_arc(Vec3::Y, n);
+        t.scale = if near_enemy {
+            Vec3::new(1.0, 3.0, 1.0) // filled-in read: taller, denser ring
+        } else {
+            Vec3::ONE
+        };
         *v = Visibility::Visible;
     }
+    // drop-line from the marker straight down to the ground
+    if let Ok((mut t, mut v)) = q.get_mut(arc.drop_line) {
+        let h = impact[1].max(0.0);
+        if h > 0.4 {
+            t.translation = Vec3::new(impact[0], h * 0.5, impact[2]);
+            t.scale = Vec3::new(1.0, h, 1.0);
+            *v = Visibility::Visible;
+        } else {
+            *v = Visibility::Hidden;
+        }
+    }
+}
+
+/// Pitch a direction up/down by `angle` radians in its vertical plane —
+/// used for the preview's ±spread cone.
+fn perturb_v(d: Vec3, angle: f32) -> Vec3 {
+    let flat = Vec3::new(d.x, 0.0, d.z).normalize_or(Vec3::Z);
+    let axis = flat.cross(Vec3::Y).normalize_or(Vec3::X);
+    Quat::from_axis_angle(axis, -angle) * d
 }
 
 /// The AWM's full-screen glass (§4): curtains + lens ring + fine cross,
 /// shown only while scoped in. The FOV drop rides the normal ADS path.
 fn scope_overlay(
+    time: Res<Time>,
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
-    mut q: Query<&mut Visibility, With<ScopeRoot>>,
+    mut prev_show: Local<bool>,
+    mut settle_t: Local<f32>,
+    mut q: Query<(&mut Visibility, &mut Node), With<ScopeRoot>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let show =
         cam_ctl.ads && p.alive() && gun(p.gun).scoped && p.roll_t <= 0.0 && !p.shield_up;
-    for mut v in &mut q {
+    // §9 (Brief III): a 0.06 s scope-in settle — the reticle drifts in
+    // and STOPS, giving the eye something to lock onto. Cosmetic only;
+    // the shot ray never moves.
+    if show && !*prev_show {
+        *settle_t = 0.06;
+    }
+    *prev_show = show;
+    *settle_t = (*settle_t - time.delta_secs()).max(0.0);
+    let k = *settle_t / 0.06;
+    let drift = 7.0 * k * k;
+    for (mut v, mut node) in &mut q {
         *v = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
+        node.left = Val::Px(drift);
+        node.top = Val::Px(drift * 0.6);
     }
 }
 
@@ -3402,7 +6170,149 @@ fn minimap_system(
     }
 }
 
+// ---- §1.2 debug: hit-zone bands ------------------------------------------
+
+/// F3 toggles translucent rings at the sim's hit-zone boundaries
+/// (legs <0.35< torso <0.66< arms <0.82< head — `apply_hit`) on the local
+/// player and the nearest living enemy. Every rig geometry change gets
+/// eyeballed against these lines: the sim is not to be changed, the model
+/// fits the bands.
+#[derive(Resource, Default)]
+struct DebugZones {
+    zones: bool,
+    /// §1.3 (Brief IV) F4 gap view: joint pivots rendered as markers so
+    /// any daylight between segments is immediately visible.
+    joints: bool,
+}
+
+fn zone_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut dz: ResMut<DebugZones>,
+    game: Res<Game>,
+    rigs: Query<&FighterRig>,
+    gt: Query<&GlobalTransform>,
+    mut gizmos: Gizmos,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        dz.zones = !dz.zones;
+    }
+    if keys.just_pressed(KeyCode::F4) {
+        dz.joints = !dz.joints;
+    }
+    if dz.joints {
+        for rig in &rigs {
+            for e in rig
+                .leg_l
+                .iter()
+                .chain(rig.leg_r.iter())
+                .chain(rig.arm_l.iter())
+                .chain(rig.arm_r.iter())
+                .chain([rig.torso, rig.neck, rig.weapon_root].iter())
+            {
+                if let Ok(g) = gt.get(*e) {
+                    gizmos.sphere(
+                        Isometry3d::from_translation(g.translation()),
+                        0.03,
+                        Color::srgb(1.0, 0.2, 0.2),
+                    );
+                }
+            }
+        }
+    }
+    if !dz.zones {
+        return;
+    }
+    let simr = &game.sim;
+    let me = simr.player;
+    let mpos = simr.fighters[me].pos;
+    let mteam = simr.fighters[me].team;
+    let mut targets = vec![me];
+    targets.extend(
+        simr.fighters
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != me && f.team != mteam && f.alive())
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.pos[0] - mpos[0]).powi(2) + (a.pos[2] - mpos[2]).powi(2);
+                let db = (b.pos[0] - mpos[0]).powi(2) + (b.pos[2] - mpos[2]).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i),
+    );
+    for &i in &targets {
+        let f = &simr.fighters[i];
+        if !f.alive() {
+            continue;
+        }
+        let h = f.height();
+        for (frac, col) in [
+            (0.35, Color::srgb(0.30, 0.90, 0.40)), // legs → torso
+            (0.66, Color::srgb(0.95, 0.95, 0.95)), // torso → arms
+            (0.82, Color::srgb(1.00, 0.60, 0.15)), // arms → head
+            (1.00, Color::srgb(1.00, 0.25, 0.20)), // crown
+        ] {
+            let y = f.pos[1] + h * frac;
+            gizmos.circle(
+                Isometry3d::new(
+                    Vec3::new(f.pos[0], y, f.pos[2]),
+                    Quat::from_rotation_x(FRAC_PI_2),
+                ),
+                BODY_RADIUS + 0.06,
+                col,
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------------------- sound
+
+/// §8.2 (Brief III): the distance model — sound arrives at 343 m/s. At
+/// 100 m the muzzle flash leads the report by ~0.29 s, and that gap is
+/// most of why gunfire in a big space feels PHYSICAL rather than like a
+/// sound effect. Every non-player shot queues with its travel delay and
+/// a distance-blended volume.
+#[derive(Resource, Default)]
+struct DistantShots {
+    prev_cd: Vec<f32>,
+    queue: Vec<(f32, GunKind, f32)>,
+}
+
+fn distant_gunfire(
+    mut commands: Commands,
+    time: Res<Time>,
+    game: Res<Game>,
+    sfx: Res<Sfx>,
+    mut st: ResMut<DistantShots>,
+) {
+    let now = time.elapsed_secs();
+    let simr = &game.sim;
+    let me = simr.fighters[simr.player].pos;
+    st.prev_cd.resize(simr.fighters.len(), 0.0);
+    for i in 0..simr.fighters.len() {
+        let f = &simr.fighters[i];
+        let prev = st.prev_cd[i];
+        st.prev_cd[i] = f.fire_cd;
+        if i == simr.player || f.fire_cd <= prev {
+            continue; // no new shot from this fighter this frame
+        }
+        let dx = f.pos[0] - me[0];
+        let dy = f.pos[1] - me[1];
+        let dz = f.pos[2] - me[2];
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let delay = dist / 343.0; // the speed of sound
+        let vol = (1.0 - dist / 140.0).clamp(0.08, 0.9);
+        let gun_now = f.gun;
+        st.queue.push((now + delay, gun_now, vol));
+    }
+    st.queue.retain(|&(at, gun_k, vol)| {
+        if at <= now {
+            play(&mut commands, shot_sound(&sfx, gun_k), vol);
+            false
+        } else {
+            true
+        }
+    });
+}
 
 fn play(commands: &mut Commands, h: &Handle<AudioSource>, vol: f32) {
     commands.spawn((
@@ -3592,6 +6502,8 @@ fn fmt_clock(t: f32) -> String {
 fn hud_system(
     game: Res<Game>,
     settings: Res<GameSettings>,
+    cam: Res<CamCtl>,
+    arc_state: Res<ArcState>,
     mut texts: ParamSet<(
         Query<&mut Text, With<HudText>>,
         Query<&mut Text, With<ScoreTimerText>>,
@@ -3600,8 +6512,9 @@ fn hud_system(
         Query<&mut Text, With<BannerText>>,
         Query<&mut Text, With<PanelInfoText>>,
         Query<&mut Text, With<PanelAmmoText>>,
+        Query<&mut Text, With<RangeText>>,
     )>,
-    mut cross: Query<&mut TextColor, With<CrosshairText>>,
+    mut cross: Query<(&mut Text, &mut TextColor), With<CrosshairText>>,
 ) {
     let simr = &game.sim;
     let p = &simr.fighters[simr.player];
@@ -3622,14 +6535,9 @@ fn hud_system(
                 ""
             }
         );
-        let mouse = if settings.swap_mouse {
-            "RMB aim  LMB/T fire"
-        } else {
-            "LMB aim  RMB/T fire"
-        };
-        s += &format!(
-            "WASD move  SPACE jump  Q roll  E shield  O 1st/3rd  Z/X lean  1-3 weapons  {mouse}  CTRL crouch  M map  ESC menu"
-        );
+        // §7: no permanent controls strip — the first-run card and the
+        // Controls screen teach binds; the HUD stays clean
+        let _ = &settings;
         **t = s;
     }
 
@@ -3649,13 +6557,30 @@ fn hud_system(
                 "HILL   BLUE {:>3.0}s — {:<3.0}s RED   (hold {:.0}s)",
                 simr.score[0], simr.score[1], KOTH_TARGET_S
             ),
+            Mode::Extraction => {
+                // §8: the run readout — horde count, pressure, objective
+                let obj = match simr.extract_point() {
+                    None => "extraction reveals at 4:00".to_string(),
+                    Some(_) if simr.extract_hold > 0.0 => format!(
+                        "HOLD THE RING  {:.0}/{:.0}s",
+                        simr.extract_hold, EXTRACT_HOLD_S
+                    ),
+                    Some(p2) => format!("EXTRACT at ({:.0}, {:.0})", p2[0], p2[2]),
+                };
+                format!(
+                    "HORDE {:>2}   pressure {:>3.0}%   {obj}",
+                    simr.zombies.len(),
+                    simr.pressure * 100.0
+                )
+            }
         };
         **t = format!("{head}\n{score}");
     }
 
     if let Ok(mut t) = texts.p2().get_single_mut() {
         let mut s = String::new();
-        for (ev, _) in simr.kill_feed.iter().rev().take(6) {
+        // §7: killfeed capped at three entries
+        for (ev, _) in simr.kill_feed.iter().rev().take(3) {
             s += &format!(
                 "{} killed {}{}\n",
                 simr.fighters[ev.killer].name,
@@ -3701,24 +6626,40 @@ fn hud_system(
         **t = if !p.alive() {
             format!("DOWN — respawn in {:.1}s", p.respawn_t.max(0.0))
         } else {
-            let slots = (0..3)
-                .map(|s| {
-                    let tag = if s == p.active { ">" } else { " " };
-                    format!("{}{} {}", tag, s + 1, gun(p.inventory[s]).name)
-                })
-                .collect::<Vec<_>>()
-                .join("  ");
+            // §9.2 (Brief IV): the regen box — countdown while the 12 s
+            // clock runs, a pulsing + while healing, hidden at full
+            let regen = if p.health >= MAX_HEALTH - 0.01 {
+                String::new()
+            } else {
+                let since = simr.t - p.last_dmg_at;
+                if since < REGEN_DELAY_S {
+                    format!("   [{:.0}]", (REGEN_DELAY_S - since).ceil())
+                } else if (simr.t * 3.0) as i32 % 2 == 0 {
+                    "   [+]".to_string()
+                } else {
+                    "   [ ]".to_string()
+                }
+            };
+            // §9.1: the slots line moved to the right-edge strip
             format!(
-                "{}\n{}{}\n{}   HP {:.0}{}",
-                slots,
+                "{}{}\nHP {:.0}{regen}{}",
                 gun(p.gun).name.to_uppercase(),
                 if p.shield_up { "  [SHIELD]" } else { "" },
-                ammo_kind(p.gun),
                 p.health.max(0.0),
-                if p.armor > 0.0 {
-                    format!("  ARMOR {:.0}", p.armor)
-                } else {
-                    String::new()
+                match p.armor_set {
+                    ArmorSet::None => String::new(),
+                    ArmorSet::RobotSuit => {
+                        format!("  MECH — HULL {:.0} · POWER {:.0}", p.hull, p.armor)
+                    }
+                    ArmorSet::Pyro => format!("  PYRO — FUEL {:.1}s", p.fuel),
+                    ArmorSet::Folk => {
+                        if p.brace {
+                            "  FOLK ARMOR [BRACED]".to_string()
+                        } else {
+                            "  FOLK ARMOR (hold F: brace)".to_string()
+                        }
+                    }
+                    ArmorSet::Recon => "  RECON WEAVE".to_string(),
                 }
             )
         };
@@ -3730,48 +6671,192 @@ fn hud_system(
             "SHIELD".to_string()
         } else if p.reload_t > 0.0 {
             "RELOADING".to_string()
+        } else if p.cook_t > 0.0 {
+            // §5: the fuse in your hand
+            let k = ThrowKind::ALL[p.throw_sel as usize];
+            let left = (throw_spec(k).fuse_s - p.cook_t).max(0.0);
+            if k == ThrowKind::Frag {
+                format!("COOKING {left:.1}")
+            } else {
+                format!("{} ARMED", k.name())
+            }
+        } else if p.ammo_full_t > 0.0 {
+            // §3: the missing feedback that hid the pickup bug
+            format!("AMMO FULL   {} / {}", p.ammo, p.reserve)
+        } else if p.gun == GunKind::Minigun {
+            // §7 (Brief IV): the heat readout IS the minigun's HUD —
+            // rounds, heat percent, and the vent state
+            let k = ThrowKind::ALL[p.throw_sel as usize];
+            let heat_line = if p.vent_t > 0.0 {
+                format!("VENTING {:.1}s", p.vent_t.max(0.0))
+            } else {
+                format!("{}  HEAT {:.0}%", p.ammo, p.heat)
+            };
+            format!(
+                "{heat_line}\n{} x{}",
+                k.name(),
+                p.grenades[p.throw_sel as usize]
+            )
         } else {
-            format!("{} / {}", p.ammo, p.reserve)
+            // §7 (Brief III): CS:GO-minimal — numerals ONLY, no per-bullet
+            // blocks. The selected throwable rides below in small type.
+            let k = ThrowKind::ALL[p.throw_sel as usize];
+            format!(
+                "{} / {}\n{} x{}",
+                p.ammo,
+                p.reserve,
+                k.name(),
+                p.grenades[p.throw_sel as usize]
+            )
         };
     }
 
-    // crosshair flash: white → gold on a fresh headshot, red on a fresh hit
-    if let Ok(mut tc) = cross.get_single_mut() {
+    // §4.2: range readout while the trajectory preview is live
+    if let Ok(mut t) = texts.p7().get_single_mut() {
+        **t = match arc_state.range {
+            Some(r) => format!("{r:.0} m"),
+            None => String::new(),
+        };
+    }
+
+    // crosshair flash: white → gold on a fresh headshot, red on a fresh
+    // hit; §5.3 amber when the muzzle→crosshair path is blocked close-by
+    // (the shot will hit YOUR cover — not a mystery, a warning)
+    if let Ok((mut tx, mut tc)) = cross.get_single_mut() {
         let fresh = simr
             .hits
             .iter()
             .rev()
             .find(|(ev, ttl)| ev.shooter == simr.player && *ttl > 2.0);
+        // a fresh KILL pops the crosshair into an ✕ for a beat — the
+        // confirm reads without looking at the feed
+        let fresh_kill = simr
+            .kill_feed
+            .iter()
+            .rev()
+            .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
+        **tx = if fresh_kill { "✕".to_string() } else { "+".to_string() };
         *tc = TextColor(match fresh {
+            _ if fresh_kill => Color::srgb(1.0, 0.55, 0.2),
             Some((ev, _)) if ev.zone == HitZone::Head => Color::srgb(1.0, 0.85, 0.2),
             Some(_) => Color::srgb(1.0, 0.3, 0.25),
+            None if cam.blocked && p.alive() => Color::srgba(1.0, 0.55, 0.1, 0.9),
             None => Color::srgba(1.0, 1.0, 1.0, 0.9),
         });
     }
 }
 
-fn own_bars(
+/// §10: tint the edges below 35% health; pulse gently once the regen
+/// timer has elapsed so the recovery is readable without a HUD element.
+fn health_vignette(
     game: Res<Game>,
-    mut hp: Query<
-        (&mut Node, &mut BackgroundColor),
-        (With<OwnHpFill>, Without<OwnArmorFill>),
-    >,
-    mut ar: Query<&mut Node, (With<OwnArmorFill>, Without<OwnHpFill>)>,
+    mut q: Query<&mut BackgroundColor, With<HealthVignette>>,
+) {
+    let Ok(mut bg) = q.get_single_mut() else {
+        return;
+    };
+    let p = &game.sim.fighters[game.sim.player];
+    let low = (1.0 - p.health / 35.0).clamp(0.0, 1.0);
+    let regening =
+        p.alive() && p.health < MAX_HEALTH && game.sim.t - p.last_dmg_at > REGEN_DELAY_S;
+    let pulse = if regening {
+        ((game.sim.t * 4.0).sin() * 0.5 + 0.5) * 0.06
+    } else {
+        0.0
+    };
+    *bg = BackgroundColor(Color::srgba(
+        0.5,
+        0.02,
+        0.02,
+        (low * 0.22 + pulse).min(0.30),
+    ));
+}
+
+/// §7: the compass strip — a 9-slot cardinal window over the view yaw
+/// (chevrons and objective markers ride the same ring later).
+fn compass_system(cam: Res<CamCtl>, mut q: Query<&mut Text, With<CompassText>>) {
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    const RING: [&str; 16] = [
+        "N", "·", "·", "·", "E", "·", "·", "·", "S", "·", "·", "·", "W", "·", "·", "·",
+    ];
+    let idx = ((cam.yaw / std::f32::consts::TAU * 16.0).round() as i32).rem_euclid(16);
+    let mut s = String::new();
+    for k in -4i32..=4 {
+        let i = (idx + k).rem_euclid(16) as usize;
+        if k == 0 {
+            s.push('[');
+            s.push_str(RING[i]);
+            s.push(']');
+        } else {
+            s.push_str(RING[i]);
+        }
+        s.push(' ');
+    }
+    **t = s;
+}
+
+/// §7: the stability bracket widens with the live spread — bloom, stance,
+/// movement, ADS all feed it. The value already exists; this just shows it.
+fn stability_bracket(
+    game: Res<Game>,
+    cam: Res<CamCtl>,
+    mut q: Query<(&StabilityBracket, &mut Node, &mut Visibility)>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
-    let frac = (p.health / MAX_HEALTH).clamp(0.0, 1.0);
-    if let Ok((mut node, mut bg)) = hp.get_single_mut() {
-        node.width = Val::Percent(frac * 100.0);
-        *bg = BackgroundColor(if frac > 0.55 {
-            Color::srgb(0.25, 0.9, 0.35)
-        } else if frac > 0.28 {
-            Color::srgb(0.95, 0.65, 0.15)
-        } else {
-            Color::srgb(0.92, 0.18, 0.15)
-        });
+    let spec = gun(p.gun);
+    let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
+    let mut spread = spec.spread + if speed > 0.5 { spec.spread_move } else { 0.0 } + p.bloom;
+    if cam.ads_t > 0.9 {
+        spread *= ADS_SPREAD_MULT;
     }
-    if let Ok(mut node) = ar.get_single_mut() {
-        node.width = Val::Percent((p.armor / ROBOT_ARMOR_HP).clamp(0.0, 1.0) * 100.0);
+    if p.crouch {
+        spread *= CROUCH_SPREAD_MULT;
+    }
+    let px = 12.0 + spread * 2400.0;
+    for (b, mut node, mut vis) in &mut q {
+        *vis = if p.alive() && p.armed() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        node.margin = UiRect::left(Val::Px(if b.0 == 0 { -px - 8.0 } else { px }));
+    }
+}
+
+/// §7 (Brief III): everything except the crosshair fades to 45% opacity
+/// after 4 s without a state change, and snaps back the instant a value
+/// moves — the HUD gets out of the way.
+#[allow(clippy::type_complexity)]
+fn hud_fade(
+    time: Res<Time>,
+    game: Res<Game>,
+    mut last: Local<(u32, u32, i32, u8)>,
+    mut idle_t: Local<f32>,
+    mut q: Query<
+        &mut TextColor,
+        Or<(With<PanelInfoText>, With<PanelAmmoText>, With<HudText>)>,
+    >,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let snap = (
+        p.ammo,
+        p.reserve,
+        p.health as i32,
+        p.throw_sel + if p.shield_up { 100 } else { 0 },
+    );
+    if snap != *last {
+        *last = snap;
+        *idle_t = 0.0;
+    } else {
+        *idle_t += time.delta_secs();
+    }
+    let alpha = if *idle_t > 4.0 { 0.45 } else { 1.0 };
+    for mut tc in &mut q {
+        let mut c = tc.0.to_srgba();
+        c.alpha = alpha;
+        *tc = TextColor(Color::Srgba(c));
     }
 }
 
@@ -3800,6 +6885,7 @@ fn scoreboard_system(
                 match game.sim.mode {
                     Mode::Tdm => format!("{:.0}", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Koth => format!("{:.0}s", game.sim.score[TdmSim::team_idx(team)]),
+                    Mode::Extraction => format!("{} horde", game.sim.zombies.len()),
                 },
                 "NAME",
                 "K",
@@ -3891,10 +6977,181 @@ fn esc_toggle(
         match state.get() {
             GameState::Playing => next.set(GameState::Paused),
             GameState::Paused => next.set(GameState::Playing),
-            GameState::Settings | GameState::Manual => next.set(GameState::Paused),
+            GameState::Settings | GameState::Manual | GameState::Controls => {
+                next.set(GameState::Paused)
+            }
             GameState::Intro => {}
         }
     }
+}
+
+/// §1.2: the Controls screen — GENERATED from the keybind registry, so it
+/// can never drift from what the game actually binds.
+fn open_controls(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.92)),
+            GlobalZIndex(30),
+            ControlsRoot,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new("CONTROLS"),
+                TextFont {
+                    font_size: 34.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                Node {
+                    margin: UiRect::bottom(Val::Px(16.0)),
+                    ..default()
+                },
+            ));
+            let mut body = String::new();
+            for b in BIND_REGISTRY {
+                body += &format!("{:<12}  {}\n", b.key, b.action);
+            }
+            body += "\nESC — back";
+            p.spawn((
+                Text::new(body),
+                TextFont {
+                    font_size: 19.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.92, 0.93, 0.95)),
+            ));
+        });
+}
+
+fn close_controls(mut commands: Commands, q: Query<Entity, With<ControlsRoot>>) {
+    for e in &q {
+        commands.entity(e).despawn_recursive();
+    }
+}
+
+/// §1.2: the one-time first-run card — the non-obvious binds, dismissed
+/// by any key. A feature that ships without a way to learn it has not
+/// shipped; this is the systemic fix.
+fn first_run_card(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut card: ResMut<FirstRunCard>,
+    q: Query<Entity, With<FirstRunRoot>>,
+) {
+    if card.dismissed {
+        return;
+    }
+    if !card.shown {
+        card.shown = true;
+        commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(18.0),
+                    top: Val::Percent(24.0),
+                    padding: UiRect::all(Val::Px(14.0)),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.10, 0.85)),
+                GlobalZIndex(25),
+                FirstRunRoot,
+            ))
+            .with_children(|p| {
+                p.spawn((
+                    Text::new("GOOD TO KNOW"),
+                    TextFont {
+                        font_size: 20.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.8, 0.3)),
+                ));
+                let mut body = String::new();
+                for b in BIND_REGISTRY.iter().filter(|b| b.essential) {
+                    body += &format!("{:<10} {}\n", b.key, b.action);
+                }
+                body += "\nARMOR SETS lie on glowing pads — walk over one.\nFull list: ESC > Controls.  (any key to dismiss)";
+                p.spawn((
+                    Text::new(body),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.9, 0.92, 0.95)),
+                ));
+            });
+        return;
+    }
+    // any key or click dismisses
+    if keys.get_just_pressed().next().is_some() || buttons.get_just_pressed().next().is_some() {
+        card.dismissed = true;
+        for e in &q {
+            commands.entity(e).despawn_recursive();
+        }
+    }
+}
+
+/// §1.2 contextual prompts: near a pad → name it and say how to take it;
+/// on equipping a set → 4 s of its ability binds.
+fn contextual_prompts(
+    time: Res<Time>,
+    game: Res<Game>,
+    mut toast: ResMut<Toast>,
+    mut prev_set: Local<Option<ArmorSet>>,
+    mut hint_t: Local<f32>,
+    mut hint: Local<String>,
+    mut q: Query<&mut Text, With<PromptText>>,
+) {
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    // toasts outrank everything — they confirm a player action
+    if toast.t > 0.0 {
+        toast.t -= time.delta_secs();
+        **t = toast.text.clone();
+        return;
+    }
+    let p = &game.sim.fighters[game.sim.player];
+    // equip hint has priority, for 4 s
+    if *prev_set != Some(p.armor_set) {
+        if prev_set.is_some() && p.armor_set != ArmorSet::None {
+            *hint = equip_hint(p.armor_set).to_string();
+            *hint_t = 4.0;
+        }
+        *prev_set = Some(p.armor_set);
+    }
+    if *hint_t > 0.0 {
+        *hint_t -= time.delta_secs();
+        **t = hint.clone();
+        return;
+    }
+    // otherwise: the nearest live pickup within 3 m announces itself
+    let mut best: Option<(f32, PickupKind)> = None;
+    for pk in &game.sim.pickups {
+        if pk.respawn_t > 0.0 {
+            continue;
+        }
+        let dx = p.pos[0] - pk.pos[0];
+        let dz = p.pos[2] - pk.pos[2];
+        let d2 = dx * dx + dz * dz;
+        if d2 < 3.0 * 3.0 && best.map_or(true, |(b, _)| d2 < b) {
+            best = Some((d2, pk.kind));
+        }
+    }
+    **t = match best {
+        Some((_, kind)) => pickup_prompt(kind).to_string(),
+        None => String::new(),
+    };
 }
 
 /// One row of pick-buttons on the loadout screen.
@@ -3959,6 +7216,24 @@ fn open_intro(
 ) {
     release_cursor(&mut cam, &mut windows);
     cam.ads = false;
+    // §14: the tech readout — real numbers, pulled from the live table
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 15.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.62, 0.85, 0.90)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(18.0),
+            bottom: Val::Px(16.0),
+            ..default()
+        },
+        GlobalZIndex(12),
+        TechReadout,
+        IntroRoot, // despawns with the screen
+    ));
     commands
         .spawn((
             Node {
@@ -4000,6 +7275,19 @@ fn open_intro(
                 .map(|g| (gun(*g).name, LoadoutButton(2, *g)))
                 .collect();
             pick_row(p, "SPECIAL", &spc, 128.0);
+            // §6 (Brief IV): the melee slot is a CHOICE now
+            let melee: Vec<(&str, MeleeButton)> = vec![
+                ("Combat Knife", MeleeButton(false)),
+                ("War Axe", MeleeButton(true)),
+            ];
+            pick_row(p, "MELEE", &melee, 128.0);
+            // §8 (Brief IV): 6-point grenade budget presets
+            let nades: Vec<(&str, NadeButton)> = GRENADE_PRESETS
+                .iter()
+                .enumerate()
+                .map(|(i, (_, n))| (*n, NadeButton(i)))
+                .collect();
+            pick_row(p, "GRENADES", &nades, 128.0);
             let hats: Vec<(&str, CosmeticButton)> = HAT_CHOICES
                 .iter()
                 .enumerate()
@@ -4013,7 +7301,13 @@ fn open_intro(
                 .collect();
             pick_row(p, "OUTFIT", &tunics, 90.0);
             let maps: Vec<(&str, MapButton)> =
-                MapKind::ALL.iter().map(|m| (m.name(), MapButton(*m))).collect();
+                MapKind::ALL
+                    .iter()
+                    // §12: Battlefield left the PvP rotation — it is the
+                    // zombie-extraction adventure map now
+                    .filter(|m| **m != MapKind::Battlefield)
+                    .map(|m| (m.name(), MapButton(*m)))
+                    .collect();
             pick_row(p, "BATTLEFIELD", &maps, 160.0);
             let diffs: Vec<(&str, DiffButton)> = Difficulty::ALL
                 .iter()
@@ -4031,6 +7325,7 @@ fn open_intro(
             for (label, which) in [
                 ("TEAM DEATHMATCH — first to 30", ModeButton::Tdm),
                 ("KING OF THE HILL — hold the center 90 s", ModeButton::Koth),
+                ("ZOMBIE EXTRACTION — survive, then hold the ring", ModeButton::Extraction),
             ] {
                 p.spawn((
                     Button,
@@ -4072,14 +7367,24 @@ fn intro_buttons(
                 let mode = match which {
                     ModeButton::Tdm => Mode::Tdm,
                     ModeButton::Koth => Mode::Koth,
+                    ModeButton::Extraction => Mode::Extraction,
+                };
+                // §12: extraction ALWAYS runs on the Battlefield — the
+                // adventure map; PvP always runs on the tight maps
+                let map = if mode == Mode::Extraction {
+                    MapKind::Battlefield
+                } else {
+                    sel.map
                 };
                 game.sim = TdmSim::new(MatchConfig {
                     seed: 0x7EA9,
                     per_team: sel.per_team,
                     mode,
-                    map: sel.map,
+                    map,
                     difficulty: sel.difficulty,
                     loadout: sel.loadout,
+                    melee_axe: sel.melee_axe,
+                    grenade_preset: sel.grenade_preset,
                 });
                 game.accum = 0.0;
                 game.last_t = 0.0;
@@ -4149,6 +7454,34 @@ fn intro_cosmetic_buttons(
             sel.tunic == cb.1
         };
         paint(&mut bg, selected, *i == Interaction::Hovered);
+    }
+}
+
+fn intro_melee_buttons(
+    mut q: Query<(&Interaction, &MeleeButton, &mut BackgroundColor), With<Button>>,
+    mut sel: ResMut<Selected>,
+) {
+    for (i, mb, _) in &mut q {
+        if *i == Interaction::Pressed {
+            sel.melee_axe = mb.0;
+        }
+    }
+    for (i, mb, mut bg) in &mut q {
+        paint(&mut bg, sel.melee_axe == mb.0, *i == Interaction::Hovered);
+    }
+}
+
+fn intro_nade_buttons(
+    mut q: Query<(&Interaction, &NadeButton, &mut BackgroundColor), With<Button>>,
+    mut sel: ResMut<Selected>,
+) {
+    for (i, nb, _) in &mut q {
+        if *i == Interaction::Pressed {
+            sel.grenade_preset = nb.0;
+        }
+    }
+    for (i, nb, mut bg) in &mut q {
+        paint(&mut bg, sel.grenade_preset == nb.0, *i == Interaction::Hovered);
     }
 }
 
@@ -4246,6 +7579,7 @@ fn open_menu(
                 ("Restart Match", MenuButton::Restart),
                 ("Change Mode / Loadout", MenuButton::BackToLoadout),
                 ("Settings", MenuButton::Settings),
+                ("Controls", MenuButton::Controls),
                 ("Rules & Manual", MenuButton::Manual),
                 ("Quit", MenuButton::Quit),
             ] {
@@ -4558,10 +7892,119 @@ fn menu_buttons(
                 MenuButton::BackToLoadout => next.set(GameState::Intro),
                 MenuButton::Settings => next.set(GameState::Settings),
                 MenuButton::Manual => next.set(GameState::Manual),
+                MenuButton::Controls => next.set(GameState::Controls),
                 MenuButton::Quit => {
                     exit.send(AppExit::Success);
                 }
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    /// §5 (Brief IV): the interpenetration sweep — for every weapon in
+    /// every firearm stance, the rear point (grip + stock) must land
+    /// OUTSIDE the chest ellipse. Same static-guarantee machinery as the
+    /// §1.3 gap test: the offsets are constants, so this holds per-frame.
+    #[test]
+    fn weapon_stock_clears_the_chest_in_every_stance() {
+        // chest ellipse half-extents at weapon height (x, z)
+        let (cx, cz) = (0.20_f32, 0.15_f32);
+        for gun_k in ALL_WEAPONS {
+            if matches!(gun_k, GunKind::Bow | GunKind::Spear) {
+                continue; // carried on other mounts, cleared vertically
+            }
+            let rear = weapon_rear_extent(gun_k);
+            if rear < 0.25 {
+                continue; // no stock — a pistol grip NEAR the chest is
+                          // a grip, not a clip
+            }
+            for z_root in [WR_Z_HIP, WR_Z_ADS] {
+                let rz = z_root - rear;
+                let inside = (WR_X / cx).powi(2) + (rz / cz).powi(2) < 1.0 - 0.05;
+                assert!(
+                    !inside,
+                    "{gun_k:?}: stock at (x {WR_X}, z {rz:.3}) pierces the chest"
+                );
+            }
+        }
+    }
+
+    /// §1.3 (Brief IV): connectivity — every parent–child pair overlaps
+    /// its joint geometry by ≥5 mm. Bone lengths are rotation-invariant,
+    /// so these static assertions hold at every phase of every clip:
+    /// the overlay finds gaps, this test keeps them fixed.
+    #[test]
+    fn rig_joints_bridge_with_no_daylight() {
+        let min = 0.005_f32;
+        // NECK: sunk into the yoke below, past the head pivot above,
+        // and still inside the head across the full ±48° pitch
+        let yoke_top = 0.625 + 0.07;
+        assert!(yoke_top - NECK_BOT >= 0.02, "neck must sink into the yoke");
+        assert!(NECK_TOP - 0.846 >= 0.015, "neck must pierce the head base");
+        assert!(
+            NECK_TOP - 0.846 >= NECK_R * 0.75,
+            "neck crossing survives full head pitch"
+        );
+        // YOKE reaches past the shoulder pivots
+        assert!(YOKE_HALF_W - SHOULDER_X >= min, "yoke must reach the shoulders");
+        // ELBOW: the upper shell reaches through the ball's span, and the
+        // forearm starts inside it
+        let upper_end = UPPER_CENTER - UPPER_HALF;
+        assert!(
+            upper_end <= ELBOW_Y + ELBOW_R - min,
+            "upper shell reaches the elbow ball: end {upper_end}"
+        );
+        let fore_start = FORE_CENTER + FORE_HALF;
+        assert!(
+            fore_start >= -ELBOW_R + min,
+            "forearm starts inside the elbow ball: start {fore_start}"
+        );
+        // WRIST: forearm reaches the wrist ball; the mitten overlaps it
+        let fore_end = FORE_CENTER - FORE_HALF;
+        assert!(
+            fore_end <= WRIST_Y + WRIST_R - min,
+            "forearm reaches the wrist ball: end {fore_end}"
+        );
+        let mitten_top = -0.02 + 0.05;
+        assert!(mitten_top >= -WRIST_R + min, "mitten overlaps the wrist ball");
+        // LEGS (spawn literals): hip ball ↔ pelvis, thigh ↔ knee ball,
+        // shin ↔ ankle ball
+        let pelvis_bottom = 0.09 - 0.08;
+        assert!(0.055 - pelvis_bottom >= min, "hip ball meets the pelvis");
+        let thigh_end = -0.145 - (0.15 / 2.0 + 0.072);
+        assert!(thigh_end <= -0.29 + 0.065 - min, "thigh reaches the knee");
+        let shin_end = -0.14 - (0.15 / 2.0 + 0.060);
+        assert!(shin_end <= -0.28 + 0.045 - min, "shin reaches the ankle");
+    }
+
+    /// §0.2 (Brief II): the head's minimum world-Y across the FULL
+    /// animation phase must stay at or above the 0.82 hit-band line for
+    /// every grounded gait — idle, walk, run, sprint, strafe, backpedal,
+    /// crouch-walk. A gait that dips the head below the line silently
+    /// converts headshots into arm hits; this test makes that a failure,
+    /// not a mystery. It samples the SAME pure pose function the renderer
+    /// uses, so it cannot drift from what's on screen.
+    #[test]
+    fn head_never_leaves_its_band_in_any_gait() {
+        for crouch in [false, true] {
+            let band = 0.82 * if crouch { CROUCH_HEIGHT } else { BODY_HEIGHT };
+            for amp in [0.0_f32, 0.2, 0.36, 0.6] {
+                for lean in [-0.07_f32, 0.0, 0.07] {
+                    for k in 0..=128 {
+                        let th = k as f32 / 128.0 * std::f32::consts::TAU;
+                        let y = head_base_y(crouch, th, amp, lean);
+                        assert!(
+                            y >= band - 1e-3,
+                            "crouch={crouch} amp={amp} lean={lean} theta={th:.2}: \
+                             head base {y:.4} below band {band:.4}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
