@@ -65,15 +65,28 @@ Full breakdown of everything since Brief VII v2 began: 49 → 82 → 91.
 **Chose A3: 1.7× (≈3.03m).** Matches the document's own recommendation.
 `MECH_SCALE` is a single formula-driving constant in this codebase
 (`MECH_RADIUS`, `f.height()`, and the client's `tf.scale` all derive from
-it), so the change itself was low-risk. What was NOT low-risk, and did
-break: **the third-person camera's anchor height and boom distance were
+it), so the change itself was low-risk. One real regression DID surface:
+**the third-person camera's anchor height and boom distance were
 hardcoded** (`p.pos[1] + 1.6`, boom 2.2m flat) rather than derived from
 the fighter's actual height — at 1.15× this was invisible (soldier and
 mech heights were close enough), at 1.7× it put the camera partially
-inside the mech's own hull. Fixed both to scale proportionally
-(`anchor_h = 1.6 × (height / BODY_HEIGHT)`, `boom × height_boom_mult`).
-Screenshots before/after show real improvement (sky became visible) but
-**framing is not fully resolved** — see §8.
+inside the mech's own hull on a first capture attempt. Fixed both to
+scale proportionally (`anchor_h = 1.6 × (height / BODY_HEIGHT)`,
+`boom × height_boom_mult`).
+
+That fix alone still produced a bad frame on the next attempt - root
+cause turned out to be a SEPARATE, unrelated confound: the capture
+script's default spawn point happened to sit close to map cover, and
+the (correctly-functioning) boom-collision system was pulling the
+camera in against that wall, not the mech. Once the capture script
+planted the mech at a known-clear spot (Arena center) instead of an
+arbitrary spawn, framing resolved cleanly - see the committed
+`01-mech-third-person.png` / `02-mech-side-on.png`, the latter of which
+incidentally captured the mech taking live bot fire (two logged
+headshots, hull 1000→946), confirming the damage/visor-bonus system
+is fully wired at the new scale. **Both the camera-scaling fix and the
+spawn-position fix were real and necessary; together they resolve
+framing at 1.7× with no further open issue.**
 
 ## 5. Mech vs. concept art
 
@@ -121,9 +134,13 @@ work, not a per-task add-on, and was not attempted this session.
   requirement specifically), so there is no new mechanical reason for
   this answer to have changed.
 - **Does the mech read as a machine — do exposed mechanisms sell it?**
-  Scale and palette changed; no new geometry (exposed knee/waist
-  mechanism, hydraulic detail) was added. Likely reads as "a bigger
-  olive-drab version of the same shape," not yet "an assembled machine."
+  Confirmed visually (see `handback/brief-vii/mech_scale/`): scale and
+  palette both read clearly against the map's crates and a soldier-scale
+  HUD. No new geometry (exposed knee/waist mechanism, hydraulic detail,
+  hazard chevrons, stencils) was added, so it reads as "a bigger
+  olive-drab version of the same shape" rather than "a newly-detailed
+  assembled machine" — the geometry gap named below is real, just not
+  a framing/visibility problem on top of it.
 - **Does the autocannon's recoil make the mech feel heavy?** There is no
   autocannon — the mech still fires its Brief VI loadout (minigun/AWP-
   class rifle) plus the missile pod. Not attempted this session.
@@ -146,12 +163,6 @@ work, not a per-task add-on, and was not attempted this session.
   lean) — not implemented; the mech still stands upright.
 - **Exposed knee/waist mechanism geometry, hazard chevrons, wear masking,
   stencils** — not implemented; palette changed, geometry did not.
-- **Camera framing at the new scale is IMPROVED, not FULLY fixed** — two
-  real fixes landed (anchor height, boom distance both now scale with
-  fighter height) and measurably helped (sky became visible in the
-  capture where it wasn't before), but the mech's own body still
-  dominates the frame at the default third-person distance. This needs
-  another iteration this session didn't have room for.
 - **Task 1's literal deliverable** (12-20 committed image files) — not
   achievable with this session's tools (no image-download capability).
   Real research was done and written into `NOTES.md` with sources

@@ -1595,14 +1595,15 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(2.8) },
 ];
 
-// Task 5.7 (MISSION doc): the mech at its new scale/palette, third
-// person, letting the player walk a few steps to get a clean silhouette
-// read before the snap.
+// Task 5.7 (MISSION doc): the mech at its new scale/palette, held
+// stationary at a known-clear spot (Arena center, set in
+// capture_quick_deploy) with the camera aimed level and slightly down -
+// no WASD movement, so unknown nearby cover can't confound the shot.
 const MECH_CAPTURE_BEATS: &[CapBeat] = &[
-    CapBeat { press: &[CapKey::K(KeyCode::KeyS)], ..beat(0.3) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyS)], snap: Some("01-mech-third-person"), ..beat(1.0) },
-    CapBeat { press: &[CapKey::K(KeyCode::KeyA)], ..beat(1.2) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyA)], snap: Some("02-mech-side-on"), ..beat(2.0) },
+    CapBeat { look: Some((0.0, 0.15)), ..beat(0.3) },
+    CapBeat { snap: Some("01-mech-third-person"), ..beat(1.0) },
+    CapBeat { look: Some((1.2, 0.15)), ..beat(1.2) },
+    CapBeat { snap: Some("02-mech-side-on"), ..beat(2.0) },
     CapBeat { end: true, ..beat(2.4) },
 ];
 
@@ -1647,12 +1648,17 @@ fn capture_quick_deploy(
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
     if cap.script.as_deref() == Some("mech_scale") {
         // Task 5.7: board the mech directly - no need to walk to a pad
-        // just to prove the scale/palette read.
+        // just to prove the scale/palette read. Also plant it at a KNOWN
+        // clear spot (Arena center) - the default spawn's proximity to
+        // cover was a confound in earlier capture attempts, independent
+        // of the camera-scaling fix itself.
         let f = &mut game.sim.fighters[0];
         f.armor_set = ArmorSet::RobotSuit;
         f.armor = POWER_MAX;
         f.hull = MECH_HULL;
         f.mech_transition_t = 0.0; // skip the seal-up window for the capture
+        f.pos = [0.0, 0.0, 0.0];
+        f.yaw = 0.0;
     }
 }
 
