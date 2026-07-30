@@ -2734,7 +2734,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 30] = [
+    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 33] = [
         // chest: two canted khaki facets meeting on the centerline
         (kit.mech_khaki.clone(), Vec3::new(0.13, 0.34, 0.10),
          Quat::from_rotation_y(-0.22), Vec3::new(0.30, 0.46, 0.16)),
@@ -2815,6 +2815,22 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
          Quat::from_rotation_x(0.15), Vec3::new(0.14, 0.06, 0.06)),
         (kit.mech_shadow.clone(), Vec3::new(0.09, -0.01, 0.19),
          Quat::from_rotation_z(0.4), Vec3::new(0.03, 0.09, 0.03)),
+        // hazard/wear detail pass: the pod cover was the ONLY hazard
+        // stripe on the whole hull, so the right side read as an
+        // unfinished mirror. A matching stripe on the (pod-less) right
+        // shoulder pod restores the left/right read as one assembled
+        // machine, not "pod side gets details, other side doesn't."
+        (kit.mech_hazard.clone(), Vec3::new(0.36, 0.685, 0.02),
+         Quat::from_rotation_z(-0.12), Vec3::new(0.20, 0.02, 0.22)),
+        // power-pack warning band - a thin hazard strip across the top
+        // edge, where a real power unit would carry a stenciled warning
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.50, -0.135),
+         Quat::IDENTITY, Vec3::new(0.30, 0.02, 0.02)),
+        // scuffed metal patch on the abdomen - bare metal showing through
+        // worn khaki paint, the cheapest possible "this hull has seen use"
+        // cue without a real decal/stencil system
+        (kit.mech_metal.clone(), Vec3::new(0.09, 0.05, 0.16),
+         Quat::from_rotation_z(0.3), Vec3::new(0.08, 0.05, 0.01)),
     ];
     for (mat, tr, rot, sc) in plates {
         commands
