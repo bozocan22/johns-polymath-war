@@ -1604,7 +1604,12 @@ const MECH_CAPTURE_BEATS: &[CapBeat] = &[
     CapBeat { snap: Some("01-mech-third-person"), ..beat(1.0) },
     CapBeat { look: Some((1.2, 0.15)), ..beat(1.2) },
     CapBeat { snap: Some("02-mech-side-on"), ..beat(2.0) },
-    CapBeat { end: true, ..beat(2.4) },
+    // Task 5.4 verification: pitch steeply down to bring the knee/waist
+    // exposed-mechanism plates (added this pass) into frame - the
+    // standing eye-level shots above crop them below the HUD.
+    CapBeat { look: Some((0.5, 0.55)), ..beat(2.2) },
+    CapBeat { snap: Some("03-mech-knee-waist-detail"), ..beat(3.0) },
+    CapBeat { end: true, ..beat(3.4) },
 ];
 
 fn capture_script(name: &str) -> &'static [CapBeat] {
@@ -1635,11 +1640,19 @@ fn capture_quick_deploy(
     mut sel: ResMut<Selected>,
     mut game: ResMut<Game>,
     mut next: ResMut<NextState<GameState>>,
+    mut card: ResMut<FirstRunCard>,
 ) {
     if *started || cap.script.is_none() {
         return;
     }
     *started = true;
+    // The §1.2 first-run "GOOD TO KNOW" card is dismissed by any keypress,
+    // but scripts like mech_scale only synthesize `look`, never a key -
+    // so it sat on screen through every snap. Capture scripts test game
+    // mechanics, not tutorial UX; skip spawning it entirely instead of
+    // relying on some other beat's keypress to incidentally clear it.
+    card.shown = true;
+    card.dismissed = true;
     match cap.script.as_deref() {
         Some("spear_throw") => sel.loadout[2] = GunKind::Spear,
         Some("bow_pierce") | Some("bow_draw") => sel.loadout[2] = GunKind::Bow,
@@ -2698,7 +2711,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 26] = [
+    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 30] = [
         // chest: two canted khaki facets meeting on the centerline
         (kit.mech_khaki.clone(), Vec3::new(0.13, 0.34, 0.10),
          Quat::from_rotation_y(-0.22), Vec3::new(0.30, 0.46, 0.16)),
@@ -2764,6 +2777,21 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // §4.2: antenna mast, rear-left
         (kit.mech_metal.clone(), Vec3::new(-0.20, 0.86, -0.24),
          Quat::from_rotation_x(-0.12), Vec3::new(0.015, 0.34, 0.015)),
+        // Task 5.4 (MISSION doc): knee and waist mechanisms stay EXPOSED
+        // - dark actuator/piston stubs poking past the plates, deliberately
+        // uncovered. This is what reads as "real machinery" rather than a
+        // smooth robot costume, per the doc's own explicit rule.
+        (kit.mech_metal.clone(), Vec3::new(0.155, -0.30, 0.16),
+         Quat::from_rotation_x(0.35), Vec3::new(0.035, 0.10, 0.035)),
+        (kit.mech_metal.clone(), Vec3::new(-0.155, -0.30, 0.16),
+         Quat::from_rotation_x(0.35), Vec3::new(0.035, 0.10, 0.035)),
+        // waist actuator block - the busiest area on the real art
+        // reference (Task 1 notes): visible linkage where the pelvis
+        // skirt doesn't reach
+        (kit.mech_metal.clone(), Vec3::new(0.0, 0.02, 0.18),
+         Quat::from_rotation_x(0.15), Vec3::new(0.14, 0.06, 0.06)),
+        (kit.mech_shadow.clone(), Vec3::new(0.09, -0.01, 0.19),
+         Quat::from_rotation_z(0.4), Vec3::new(0.03, 0.09, 0.03)),
     ];
     for (mat, tr, rot, sc) in plates {
         commands
