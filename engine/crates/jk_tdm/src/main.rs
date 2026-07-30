@@ -245,7 +245,30 @@ fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
     CHAIN_ONSET_OFFSETS[segment_index] + ramp_s
 }
 
-fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, jerk: f32) -> f32 {
+/// Task 3.3 real consumer: the spear's post-action settle, for BOTH a
+/// throw release and a thrust's recovery (torso_coil_yaw routes either
+/// one here once `spear_wind_t`/`knife_phase` both hit zero). The torso
+/// doesn't stop dead - it keeps unwinding through the kinetic chain's
+/// tip segment (the last and most amplified one, `CHAIN_PEAK_SCALE[7]`)
+/// before settling to neutral. Replaces a flat `jerk`-driven curve that
+/// borrowed the unrelated gun-recoil cooldown for this melee follow-
+/// through.
+fn spear_followthrough_yaw(idle_since_s: f32) -> f32 {
+    const RAMP_S: f32 = 0.05;
+    const OVERSHOOT_RAD: f32 = 0.12; // ~7deg past neutral, whip-cracking through
+    const SETTLE_RATE: f32 = 9.0;
+    const TIP: usize = 7;
+    let peak_tick = chain_peak_tick(TIP, RAMP_S);
+    let drive = chain_segment_scale(TIP, idle_since_s, RAMP_S) / CHAIN_PEAK_SCALE[TIP];
+    let decay = if idle_since_s > peak_tick {
+        (-SETTLE_RATE * (idle_since_s - peak_tick)).exp()
+    } else {
+        1.0
+    };
+    -OVERSHOOT_RAD * drive * decay
+}
+
+fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, idle_since_s: f32) -> f32 {
     if gun == GunKind::Spear {
         if spear_wind_t > 0.0 {
             let wp = 1.0 - spear_wind_t / SPEAR_WINDUP_S;
@@ -264,7 +287,7 @@ fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bo
                 -0.45 + 0.80 * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
             }
         } else {
-            0.35 * jerk // follow-through, decaying with the cooldown
+            spear_followthrough_yaw(idle_since_s)
         }
     } else {
         0.0
@@ -5061,6 +5084,11 @@ struct LifeState {
     /// §1.2: seconds since this fighter last did anything combat-shaped;
     /// Relaxed posture eases in once this clears 10s.
     since_combat: f32,
+    /// Task 3.3: seconds since this fighter's spear last stopped actively
+    /// winding a throw or thrusting - drives `spear_followthrough_yaw`'s
+    /// chain-sequenced snap-through settle. 0.0 default is safe: the tip
+    /// segment's onset is 0.125s in, so a fresh spawn produces no yaw.
+    spear_idle_since: f32,
 }
 
 fn sync_fighters(
@@ -5293,7 +5321,22 @@ fn sync_fighters(
         // root (legs) carries `f.yaw` alone, torso is root's CHILD with
         // this as its own additive local yaw, so torso_world - root_world
         // = this value exactly. Extracted so it's independently testable.
-        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, jerk);
+        // Task 3.3 real consumer: track idle-since-last-spear-action here
+        // (client-side only, per §1.3's `LifeState` pattern) so the
+        // follow-through curve is driven by the actual kinetic chain
+        // rather than the gun-recoil `jerk` proxy it used before.
+        {
+            let spear_active =
+                f.gun == GunKind::Spear && (f.spear_wind_t > 0.0 || f.knife_phase > 0.0);
+            let ls0 = &mut life[vis.index];
+            if spear_active {
+                ls0.spear_idle_since = 0.0;
+            } else {
+                ls0.spear_idle_since += dt;
+            }
+        }
+        let spear_idle_since = life[vis.index].spear_idle_since;
+        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, spear_idle_since);
         // §1 (Brief VII), extending §4 (Brief IV): the living-motion
         // layer - breathing, weight shift, micro-sway, grip fidget, and
         // reactions (suppression/explosion flinch, ally-death snap, kill
@@ -9883,5 +9926,33 @@ mod elastic_load_tests {
         let t_early = CHAIN_ONSET_OFFSETS[1] * 0.5; // between pelvis onset and lumbar onset
         assert!(chain_segment_scale(0, t_early, 0.05) > 0.0, "pelvis should already be moving");
         assert_eq!(chain_segment_scale(7, t_early, 0.05), 0.0, "tip must still be silent");
+    }
+
+    /// Task 3.3 real consumer test: `spear_followthrough_yaw` (now the
+    /// spear throw-release AND thrust-recovery settle curve, routed
+    /// through `torso_coil_yaw`'s final branch) must be silent before the
+    /// chain's tip segment has begun, reach a real overshoot near its
+    /// peak, and actually settle back down rather than holding forever.
+    #[test]
+    fn spear_followthrough_yaw_is_silent_then_snaps_then_settles() {
+        assert_eq!(
+            spear_followthrough_yaw(0.0), 0.0,
+            "at the instant of release the tip segment hasn't onset yet"
+        );
+        let mut peak = 0.0_f32;
+        let mut peak_t = 0.0_f32;
+        for i in 0..400 {
+            let t = i as f32 * 0.002;
+            let y = spear_followthrough_yaw(t).abs();
+            if y > peak {
+                peak = y;
+                peak_t = t;
+            }
+        }
+        assert!(peak > 0.10, "peak overshoot should be close to the full 0.12rad, got {peak}");
+        assert!(
+            spear_followthrough_yaw(peak_t + 1.0).abs() < 0.001,
+            "must settle back to neutral, not hold the overshoot forever"
+        );
     }
 }
