@@ -412,15 +412,21 @@ pub fn gun(kind: GunKind) -> GunSpec {
             spread: 0.006,
             spread_move: 0.015,
             kick: 0.0024,
-            damage: 55.0,
-            // §4 (Brief II): 26 m/s full charge at gravity ×0.72 — 4.7 m
-            // of drop at 30 m, a learnable holdover (was 15.3 m: blind)
-            projectile: Some((26.0, 55.0)),
+            // §3.2 (Brief VII v2): 85 body base - ×2 head, ×0.75 legs,
+            // applied at hit resolution (SPEAR_HEAD_MULT/LEG_MULT).
+            damage: 85.0,
+            // §3.1 (Brief VII v2): 22 m/s full-throw, gravity ×0.72.
+            projectile: Some((22.0, 85.0)),
             zoom_deg: 50.0,
             ..base
         },
     }
 }
+
+/// §3.2 (Brief VII v2): the spear's head shot is a LETHAL SKILL SHOT
+/// (170 on an 85 base) but deliberately NOT the guns' ×4 - a thrown
+/// weapon should never out-snipe a rifle.
+pub const SPEAR_HEAD_MULT: f32 = 2.0;
 
 // ------------------------------------------------------------------ world
 
@@ -1269,6 +1275,13 @@ pub struct Fighter {
     pub hull: f32,
     /// Pyro flame-projector fuel seconds.
     pub fuel: f32,
+    /// §6.2 (Brief VII v2): boarding the mech is COMMITTED, not instant -
+    /// counts down from MECH_ENTER_S; while >0 the chassis is sealing up
+    /// and can't fight yet (blocked in try_fire, crawl-speed movement).
+    pub mech_transition_t: f32,
+    /// §6.3: HP-threshold armor-drop events already fired this life -
+    /// bitmask (bit0=70%, bit1=40%, bit2=15%) so each stage fires once.
+    pub mech_plates_dropped: u8,
     /// Folk Shieldwall Brace held: planted, shielded, slow.
     pub brace: bool,
     /// §5 knife swing clock — 0 idle; counts up through wind → active →
@@ -1313,6 +1326,13 @@ pub struct Fighter {
     pub spear_wind_t: f32,
     pub spear_aim: [f32; 3],
     pub spear_v0: f32,
+    /// §4.1 (Brief VII v2): the bow's draw clock - counts UP while aim
+    /// is held (unlike the spear's committal countdown), 0.15s to
+    /// 0.7s mapping 35%-100% power, held past 10s force-letdown.
+    /// `bow_aim` tracks the aim direction through the hold, same as the
+    /// spear's `spear_aim`.
+    pub bow_draw_t: f32,
+    pub bow_aim: [f32; 3],
     /// §4 aerial flip: remaining rotation time, direction of travel,
     /// the flip kind (0 front / 1 back / 2 left / 3 right), whether this
     /// airborne period's one flip is spent, and the landing recovery.
@@ -1492,6 +1512,57 @@ pub struct Missile {
     pub damage: f32,
     pub is_spear: bool,
     pub stuck_t: Option<f32>,
+    /// §3.2 (Brief VII v2): set at the moment of a world/ground hit -
+    /// true = embedded (steep enough to stick), false = a shallow
+    /// glancing hit that bounced off with a clatter. Only meaningful for
+    /// spears (arrows always use their own recovery-probability roll);
+    /// body/zombie hits never touch this (always effectively embedded).
+    pub embedded: bool,
+    /// §4.2 (Brief VII v2): arrows only - how many more bodies this
+    /// shot can pass through (starts at BOW_MAX_PIERCES, 0 = the next
+    /// body hit embeds instead of piercing).
+    pub pierces_left: u8,
+    /// §4.2: fighters already pierced by THIS shot - a multi-tick
+    /// overlap with the same body must not double-count.
+    pub pierced: Vec<usize>,
+    /// §4.1: this shot's draw-power fraction (0.35-1.0) - scales every
+    /// pierce's damage, not just the first.
+    pub power: f32,
+}
+
+/// §3.2 (Brief VII v2): impact angle from surface (0 deg = grazing,
+/// 90 deg = straight-on), given the travel direction and surface normal.
+pub fn impact_angle_to_surface_deg(dir: [f32; 3], normal: [f32; 3]) -> f32 {
+    let dot = (dir[0] * normal[0] + dir[1] * normal[1] + dir[2] * normal[2]).clamp(-1.0, 1.0);
+    dot.abs().asin().to_degrees()
+}
+
+/// §3.2: at or above this angle-to-surface, a thrown spear embeds;
+/// shallower and it bounces off (arrows are unaffected - own mechanic).
+pub const SPEAR_STICK_ANGLE_DEG: f32 = 30.0;
+
+// ---- §4.1/§4.2 (Brief VII v2): the bow's draw-and-pierce rework -----------
+/// Release under this = letdown, no shot (prevents accidental dribbles).
+pub const BOW_DRAW_MIN_S: f32 = 0.15;
+/// Full draw - 100% power reached here; holding longer doesn't add more.
+pub const BOW_DRAW_FULL_S: f32 = 0.7;
+/// Held this long total with no release - forced letdown, no shot.
+pub const BOW_DRAW_FORCE_S: f32 = 10.0;
+/// Full-draw arrow speed, gravity ×0.42 (unchanged factor from Brief II).
+pub const BOW_V0_FULL: f32 = 55.0;
+/// §4.2: passes through up to 3 soldiers - 90 -> 68 -> 45 (×0.75/pierce),
+/// each scaled by the shot's own draw-power fraction.
+pub const BOW_PIERCE_DMG: [f32; 3] = [90.0, 67.5, 50.625];
+pub const BOW_MAX_PIERCES: u8 = 3;
+
+/// §4.1: draw power fraction (35% -> 100%, linear) for a hold of
+/// `held_s` seconds; `None` means letdown (too short or forced at 10s).
+pub fn bow_power_fraction(held_s: f32) -> Option<f32> {
+    if held_s < BOW_DRAW_MIN_S || held_s >= BOW_DRAW_FORCE_S {
+        return None;
+    }
+    let t = ((held_s - BOW_DRAW_MIN_S) / (BOW_DRAW_FULL_S - BOW_DRAW_MIN_S)).clamp(0.0, 1.0);
+    Some(0.35 + 0.65 * t)
 }
 
 // ---------------------------------------------------------------- pickups
@@ -1519,7 +1590,8 @@ pub struct DroppedAmmo {
 /// arrows break 35% of the time.
 pub const ARROW_RECOVER_P: f32 = 0.65;
 pub const AMMO_CAP_ARROW: u32 = 24;
-pub const AMMO_CAP_SPEAR: u32 = 6;
+// §3.2 (Brief VII v2): "carry max 2" - a spear is heavy, not ammo.
+pub const AMMO_CAP_SPEAR: u32 = 2;
 pub const DROPPED_RADIUS: f32 = 1.1;
 pub const DROPPED_MERGE_M: f32 = 0.75;
 pub const DROPPED_TTL_TICKS: u64 = 7200; // 60 s at 120 Hz
@@ -2018,6 +2090,16 @@ pub const MECH_HULL: f32 = 1000.0;
 pub const MECH_VISOR_MULT: f32 = 2.0;
 pub const MECH_RADIUS: f32 = BODY_RADIUS * MECH_SCALE; // cannot fit doorways
 pub const MECH_EJECT_HP: f32 = 25.0;
+// §6.2 (Brief VII v2): boarding/leaving the mech is COMMITTED, not
+// instant - the chassis needs real seconds to seal up or power down.
+pub const MECH_ENTER_S: f32 = 1.6;
+pub const MECH_EXIT_S: f32 = 1.2;
+// §6.3: armor drops in three stages as hull falls - the exposed
+// under-frame at each stage takes MORE damage, rewarding the strip.
+pub const MECH_PLATE_70_PCT: f32 = 0.70;
+pub const MECH_PLATE_40_PCT: f32 = 0.40;
+pub const MECH_PLATE_15_PCT: f32 = 0.15;
+pub const MECH_EXPOSED_DMG_MULT: f32 = 1.25;
 /// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
 pub const MECH_RED_FRONT: f32 = 0.85;
 pub const MECH_RED_SIDE: f32 = 0.70;
@@ -2100,7 +2182,9 @@ pub const SHIELD_DIP_S: f32 = 0.62;
 /// correct counterweight to its flat trajectory. The release uses the
 /// thrower's aim AT RELEASE (athletes track their target through the
 /// plant), refreshed while winding.
-pub const SPEAR_WINDUP_S: f32 = 0.50;
+// §3.1 (Brief VII v2): the raise is 0.4s (was 0.5s) - Sons of the Forest's
+// grammar, retuned.
+pub const SPEAR_WINDUP_S: f32 = 0.40;
 
 // ---- §4 (Brief III): aerial flips ----------------------------------------
 // Q + direction while airborne. ONE flip per airborne period, no firing
@@ -2424,6 +2508,8 @@ impl TdmSim {
                     armor_set: ArmorSet::None,
                     hull: 0.0,
                     fuel: 0.0,
+                    mech_transition_t: 0.0,
+                    mech_plates_dropped: 0,
                     brace: false,
                     knife_phase: 0.0,
                     knife_committed: false,
@@ -2448,6 +2534,8 @@ impl TdmSim {
                     spear_wind_t: 0.0,
                     spear_aim: [0.0, 0.0, 1.0],
                     spear_v0: 0.0,
+                    bow_draw_t: 0.0,
+                    bow_aim: [0.0, 0.0, 1.0],
                     flip_t: 0.0,
                     flip_dir: [0.0, 0.0],
                     flip_kind: 1,
@@ -2614,6 +2702,7 @@ impl TdmSim {
             f.fire_cd = (f.fire_cd - DT).max(0.0);
             f.protect_t = (f.protect_t - DT).max(0.0);
             f.switch_t = (f.switch_t - DT).max(0.0);
+            f.mech_transition_t = (f.mech_transition_t - DT).max(0.0);
             f.roll_cd = (f.roll_cd - DT).max(0.0);
             f.ammo_full_t = (f.ammo_full_t - DT).max(0.0);
             f.blind_t = (f.blind_t - DT).max(0.0);
@@ -2766,6 +2855,8 @@ impl TdmSim {
                     f.armor_set = ArmorSet::None; // §6: gear is lost on death
                     f.hull = 0.0;
                     f.fuel = 0.0;
+                    f.mech_transition_t = 0.0;
+                    f.mech_plates_dropped = 0;
                     f.brace = false;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
@@ -2886,6 +2977,12 @@ impl TdmSim {
                             f.armor = POWER_MAX;
                             f.hull = MECH_HULL;
                             f.fuel = 0.0;
+                            // §6.2 (Brief VII v2): boarding is committed,
+                            // not instant - the chassis seals for 1.6s
+                            // before it can fight (gated in try_fire and
+                            // the movement code below).
+                            f.mech_transition_t = MECH_ENTER_S;
+                            f.mech_plates_dropped = 0;
                             // §5.3 (Brief VI): 4 tubes per chassis —
                             // resupply is a fresh chassis, not a pickup
                             f.pod_ammo = POD_TUBES;
@@ -3296,7 +3393,12 @@ impl TdmSim {
             if cmd.reload {
                 self.try_reload(p);
             }
-            if cmd.shoot {
+            // §4.1 (Brief VII v2): the bow draws on HOLD-FIRE and looses
+            // on RELEASE - it needs the call every tick (held or not) to
+            // see the release edge, unlike try_fire's "only while held".
+            if self.fighters[p].gun == GunKind::Bow {
+                self.step_bow_draw(p, cmd.aim, cmd.shoot);
+            } else if cmd.shoot {
                 self.try_fire(p, cmd.aim, cmd.ads);
             }
             // ---- §5 throwables: G cycles, hold arms, release throws ----
@@ -4035,7 +4137,89 @@ impl TdmSim {
             damage: dmg,
             is_spear,
             stuck_t: None,
+            embedded: true,
+            pierces_left: 0,
+            pierced: Vec::new(),
+            power: 1.0,
         });
+    }
+
+    /// §4.1/§4.2 (Brief VII v2): fire the bow itself, once, at the given
+    /// draw power - spawns a PIERCING arrow. Separate from `spawn_missile`
+    /// (which spears/legacy call sites use) because arrows now carry
+    /// pierce state spawn_missile's callers don't need to know about.
+    fn spawn_arrow(&mut self, o: [f32; 3], d: [f32; 3], power: f32, i: usize) {
+        let id = self.next_missile_id;
+        self.next_missile_id += 1;
+        let v0 = BOW_V0_FULL * power;
+        self.missiles.push(Missile {
+            id,
+            pos: o,
+            vel: [d[0] * v0, d[1] * v0, d[2] * v0],
+            team: self.fighters[i].team,
+            shooter: i,
+            damage: BOW_PIERCE_DMG[0] * power,
+            is_spear: false,
+            stuck_t: None,
+            embedded: true,
+            pierces_left: BOW_MAX_PIERCES,
+            pierced: Vec::new(),
+            power,
+        });
+    }
+
+    /// §4.1 (Brief VII v2): the bow's draw-and-release. Called every
+    /// tick regardless of whether fire is held - it needs to see the
+    /// RELEASE edge (held this tick -> not held) to decide whether to
+    /// loose an arrow, which `try_fire`'s "only called while held"
+    /// convention can't express.
+    fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], held: bool) {
+        let blocked = {
+            let f = &self.fighters[i];
+            !f.armed()
+                || f.gun != GunKind::Bow
+                || !f.alive()
+                || f.roll_t > 0.0
+                || f.shield_up
+                || f.knife_phase > 0.0
+                || f.flip_t > 0.0
+                || f.flip_used
+                || f.reload_t > 0.0
+                || f.ammo == 0
+        };
+        if blocked {
+            self.fighters[i].bow_draw_t = 0.0;
+            return;
+        }
+        if held {
+            let f = &mut self.fighters[i];
+            f.bow_aim = normalize(aim); // tracked through the draw, like the spear
+            f.bow_draw_t += DT;
+            if f.bow_draw_t >= BOW_DRAW_FORCE_S {
+                f.bow_draw_t = 0.0; // §4.1: forced letdown past 10s, no shot
+            }
+            return;
+        }
+        // release edge: was drawing, isn't anymore
+        let held_s = self.fighters[i].bow_draw_t;
+        self.fighters[i].bow_draw_t = 0.0;
+        if held_s <= 0.0 {
+            return; // wasn't drawing at all
+        }
+        let Some(power) = bow_power_fraction(held_s) else {
+            return; // §4.1: under 0.15s or forced-letdown boundary - no shot
+        };
+        let d = self.fighters[i].bow_aim;
+        let o = self.muzzle_origin(i);
+        {
+            let f = &mut self.fighters[i];
+            f.ammo -= 1;
+            f.fire_cd = gun(GunKind::Bow).fire_period;
+            f.protect_t = 0.0;
+        }
+        let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
+        self.spawn_arrow(o, d, power, i);
+        self.emit_noise(at, gun_noise_m(GunKind::Bow));
     }
 
     fn try_fire(&mut self, i: usize, aim: [f32; 3], ads: bool) -> bool {
@@ -4059,6 +4243,7 @@ impl TdmSim {
                 || f.knife_phase > 0.0 // §5: the blade owns both hands too
                 || f.flip_t > 0.0 // §4.2: a flip is PURE mobility
                 || f.flip_used // ...and the gun returns on landing recovery
+                || f.mech_transition_t > 0.0 // §6.2: the chassis is still sealing up
             {
                 return false;
             }
@@ -4497,7 +4682,7 @@ impl TdmSim {
 
     fn step_missiles(&mut self) {
         let t_now = self.t;
-        let mut hits: Vec<(usize, usize, f32, [f32; 3], [f32; 3])> = Vec::new();
+        let mut hits: Vec<(usize, usize, f32, [f32; 3], [f32; 3], bool)> = Vec::new();
         let snap: Vec<(Team, [f32; 3], f32, f32, bool)> = self
             .fighters
             .iter()
@@ -4532,14 +4717,35 @@ impl TdmSim {
             m.pos[2] += m.vel[2] * DT;
             // body check
             for (j, &(team, pos, h, r, alive)) in snap.iter().enumerate() {
-                if team == m.team || !alive || j == m.shooter {
+                if team == m.team || !alive || j == m.shooter || m.pierced.contains(&j) {
                     continue;
                 }
                 let dx = m.pos[0] - pos[0];
                 let dz = m.pos[2] - pos[2];
                 let rr = (r + 0.11) * (r + 0.11);
                 if dx * dx + dz * dz < rr && m.pos[1] > pos[1] && m.pos[1] < pos[1] + h {
-                    hits.push((m.shooter, j, m.damage, m.pos, m.vel));
+                    // §4.2 (Brief VII v2): an arrow with pierces left
+                    // keeps FLYING through this body - damage this pass
+                    // uses the cascade table (already scaled by power at
+                    // spawn for pass 0; later passes re-scale here).
+                    let pass = BOW_MAX_PIERCES - m.pierces_left;
+                    let dmg = if !m.is_spear && m.pierces_left > 0 {
+                        BOW_PIERCE_DMG[pass.min(2) as usize] * m.power
+                    } else {
+                        m.damage
+                    };
+                    hits.push((m.shooter, j, dmg, m.pos, m.vel, m.is_spear));
+                    m.pierced.push(j);
+                    if !m.is_spear && m.pierces_left > 0 {
+                        m.pierces_left -= 1;
+                        if m.pierces_left == 0 {
+                            m.stuck_t = Some(t_now); // last pierce spent - embeds
+                        }
+                        // else: still flying, no stuck_t, no break - the
+                        // arrow keeps going and may hit ANOTHER body the
+                        // very same tick if they're lined up close enough
+                        continue;
+                    }
                     m.stuck_t = Some(t_now);
                     break;
                 }
@@ -4575,8 +4781,10 @@ impl TdmSim {
             // §9.1 grid broadphase — and NEAREST hit, so a segment that
             // clips two boxes sticks at the first surface along the path
             // (predict_arc already used nearest; now they agree exactly)
-            if let Some((t, _)) = grid.ray_hit(cover, old, dn, seg_len) {
+            if let Some((t, normal)) = grid.ray_hit(cover, old, dn, seg_len) {
                 m.pos = [old[0] + dn[0] * t, old[1] + dn[1] * t, old[2] + dn[2] * t];
+                // §3.2 (Brief VII v2): stick vs. bounce, spear only.
+                m.embedded = impact_angle_to_surface_deg(dn, normal) >= SPEAR_STICK_ANGLE_DEG;
                 m.stuck_t = Some(t_now);
             }
             if m.pos[1] <= 0.0 {
@@ -4594,6 +4802,10 @@ impl TdmSim {
                     0.0,
                     old[2] + (m.pos[2] - old[2]) * t,
                 ];
+                // §3.2 (Brief VII v2): ground counts as a flat surface,
+                // normal straight up.
+                m.embedded = impact_angle_to_surface_deg(dn, [0.0, 1.0, 0.0])
+                    >= SPEAR_STICK_ANGLE_DEG;
                 m.stuck_t = Some(t_now);
             }
         }
@@ -4607,7 +4819,10 @@ impl TdmSim {
                 continue; // only missiles that stuck THIS tick
             }
             let recovered = if m.is_spear {
-                true
+                // §3.2 (Brief VII v2): a spear that embedded (steep
+                // enough) always survives as a pickup; one that bounced
+                // off shallow is lost, exactly like a broken arrow.
+                m.embedded
             } else {
                 let mut r = Pcg32::new(
                     self.cfg.seed ^ (m.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
@@ -4668,14 +4883,38 @@ impl TdmSim {
                 self.damage_zombie(zi, if head { dmg * 1.5 } else { dmg }, head);
             }
         }
-        for (i, j, dmg, at, vel) in hits {
+        for (i, j, dmg, at, vel, is_spear) in hits {
             // a corpse from an earlier missile this same tick stays down —
             // no double deaths, no double score
             if !self.fighters[j].alive() {
                 continue;
             }
-            // projectile damage: flat, no zone bonus (mass does the work)
-            let mut d = dmg;
+            // §3.2/§4.2 (Brief VII v2): both projectiles read hit height -
+            // the spear's full zone table (85/×2 head/×0.75 legs), the
+            // arrow's headshot-only bonus (×2 head at EVERY pierce, no
+            // leg reduction - piercing is the arrow's whole fantasy).
+            // Neither applies against a mech - angle-armor replaces zone
+            // bands there entirely.
+            let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
+                && self.fighters[j].hull > 0.0;
+            let zone_mult = if !in_mech {
+                let base = self.fighters[j].pos[1];
+                let h = self.fighters[j].height();
+                let frac = ((at[1] - base) / h).clamp(0.0, 1.0);
+                let uniform = self.fighters[j].hit_zone_mode() == HitZoneMode::Uniform;
+                if uniform {
+                    1.0
+                } else if frac > 0.82 {
+                    if is_spear { SPEAR_HEAD_MULT } else { 2.0 }
+                } else if frac > 0.35 || !is_spear {
+                    1.0
+                } else {
+                    LEG_MULT
+                }
+            } else {
+                1.0
+            };
+            let mut d = dmg * zone_mult;
             // arrows and spears respect the shield too — the attack comes
             // from BACK ALONG the flight path, not from the impact point
             // (the impact point sits ON the victim and has no direction)
@@ -4686,7 +4925,7 @@ impl TdmSim {
                 shielded = true;
             }
             // §6.1 flats + floor (projectiles are flat-torso damage)
-            d = self.apply_armor(j, d, dmg, HitZone::Torso, Some(from_dir));
+            d = self.apply_armor(j, d, dmg * zone_mult, HitZone::Torso, Some(from_dir));
             self.fighters[j].health -= d;
             self.fighters[i].hits_dealt += 1;
             let fatal = self.fighters[j].health <= 0.0;
@@ -5485,17 +5724,40 @@ impl TdmSim {
                 // sees it). Front visor: ×0.15×2.0 = 0.30 — rewarded,
                 // not dominant. Fire has no precision to reward.
                 let visor = zone == HitZone::Head && front && !fire;
-                let d = dmg
+                let mut d = dmg
                     * (1.0 - red)
                     * if visor { MECH_VISOR_MULT } else { 1.0 };
                 let f = &mut self.fighters[j];
+                // §6.3 (Brief VII v2): once a plate has dropped, the
+                // exposed frame takes ×1.25 - applied AFTER angle armor,
+                // same as the spec. (This mech's damage model is angle-
+                // based, not part-based, so the bonus is frame-wide once
+                // ANY plate is gone rather than gap-specific; documented
+                // honestly rather than faked with fake per-part hits.)
+                if f.mech_plates_dropped != 0 {
+                    d *= MECH_EXPOSED_DMG_MULT;
+                }
                 f.hull = (f.hull - d).max(0.0);
                 f.last_dmg_at = self.t;
+                // §6.3: HP-threshold plate-detach events - each stage
+                // fires exactly once (bitmask), replay-identical since
+                // it's driven purely by hull/MECH_HULL.
+                let frac = f.hull / MECH_HULL;
+                if frac <= MECH_PLATE_70_PCT {
+                    f.mech_plates_dropped |= 0b001;
+                }
+                if frac <= MECH_PLATE_40_PCT {
+                    f.mech_plates_dropped |= 0b010;
+                }
+                if frac <= MECH_PLATE_15_PCT {
+                    f.mech_plates_dropped |= 0b100;
+                }
                 if f.hull <= 0.0 {
                     // destroyed: the pilot ejects, vulnerable and on foot
                     f.armor_set = ArmorSet::None;
                     f.armor = 0.0;
                     f.health = f.health.min(MECH_EJECT_HP);
+                    f.mech_plates_dropped = 0;
                 }
                 return 0.0; // the pilot takes nothing while the hull holds
             }
@@ -6166,6 +6428,10 @@ mod tests {
                 damage: 55.0,
                 is_spear: true,
                 stuck_t: None,
+                embedded: true,
+                pierces_left: 0,
+                pierced: Vec::new(),
+                power: 1.0,
             });
         }
         s.step_missiles();
@@ -6279,22 +6545,33 @@ mod tests {
         s.fighters[0].reserve = 10;
         s.fighters[0].pos = [0.0, 0.0, -8.0];
         s.fighters[1].pos = [0.0, 0.0, 8.0];
-        // flat release: from a 1.62 m eye, drop over 16 m at 38 m/s is
-        // ~0.5 m — the arrow arrives at chest height. (A 0.06 rad loft
-        // overcorrects and sails over the head.)
-        let cmd = PlayerCmd {
+        // §4.1 (Brief VII v2): the bow now DRAWS on hold and looses on
+        // release - hold past full draw (0.7s) for a reliable, full-power
+        // 55 m/s shot; flat aim, from a 1.62 m eye, drops chest-high over
+        // 16 m at full draw.
+        let hold = PlayerCmd {
             aim: [0.0, 0.0, 1.0],
             shoot: true,
+            ..Default::default()
+        };
+        let released = PlayerCmd {
+            aim: [0.0, 0.0, 1.0],
+            shoot: false,
             ..Default::default()
         };
         // disarm the target so it can't kill the archer mid-test
         s.fighters[1].ammo = 0;
         s.fighters[1].reserve = 0;
+        for _ in 0..((0.75 * SIM_HZ as f32) as usize) {
+            s.step(hold);
+            s.fighters[1].pos = [0.0, 0.0, 8.0];
+            s.fighters[1].protect_t = 0.0;
+        }
         let mut hit = false;
         for _ in 0..(8 * SIM_HZ as usize) {
-            s.step(cmd);
+            s.step(released); // the release tick looses the arrow
             // pin the target: bot AI re-sets vel INSIDE step, so resetting
-            // vel after the step is not enough — hold the position itself
+            // vel after the step is not enough - hold the position itself
             s.fighters[1].pos = [0.0, 0.0, 8.0];
             s.fighters[1].protect_t = 0.0;
             if s.fighters[0].hits_dealt > 0 {
@@ -6432,6 +6709,10 @@ mod tests {
             damage: 0.0,
             is_spear: true,
             stuck_t: None,
+            embedded: true,
+            pierces_left: 0,
+            pierced: Vec::new(),
+            power: 1.0,
         });
         let mut landed = None;
         for _ in 0..(6 * SIM_HZ as usize) {
@@ -8130,6 +8411,10 @@ mod tests {
                 damage: 0.0,
                 is_spear,
                 stuck_t: None,
+                embedded: true,
+                pierces_left: 0,
+                pierced: Vec::new(),
+                power: 1.0,
             });
             let mut landed = None;
             for _ in 0..(8 * SIM_HZ as usize) {
@@ -8195,6 +8480,10 @@ mod tests {
                     damage: 0.0,
                     is_spear: !arrows,
                     stuck_t: None,
+                    embedded: true,
+                    pierces_left: 0,
+                    pierced: Vec::new(),
+                    power: 1.0,
                 });
             }
             for _ in 0..SIM_HZ as usize {
@@ -8309,5 +8598,283 @@ mod tests {
             )
         };
         assert_eq!(outcome(), outcome(), "same seed must replay identically");
+    }
+
+    // ---- §3.2/§3.4 (Brief VII v2) - spear throw completion gate:
+    // stick-vs-bounce angle threshold and the zone-damage table.
+
+    #[test]
+    fn stick_angle_threshold_matches_spec() {
+        // straight down into flat ground = 90deg, embeds
+        assert!(impact_angle_to_surface_deg([0.0, -1.0, 0.0], [0.0, 1.0, 0.0]) > SPEAR_STICK_ANGLE_DEG);
+        // dead level, skimming the surface = 0deg, bounces
+        assert!(impact_angle_to_surface_deg([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
+        // exactly at the 30deg boundary (within float tolerance)
+        let at_30 = (SPEAR_STICK_ANGLE_DEG.to_radians()).sin();
+        let dir = normalize([((1.0 - at_30 * at_30).max(0.0)).sqrt(), -at_30, 0.0]);
+        assert!((impact_angle_to_surface_deg(dir, [0.0, 1.0, 0.0]) - SPEAR_STICK_ANGLE_DEG).abs() < 0.5);
+        // 25/35 either side of the 30 boundary, unambiguously
+        let steep = normalize([0.3, -1.0, 0.0]); // ~73deg - well above 30
+        let shallow = normalize([1.0, -0.2, 0.0]); // ~11deg - well below 30
+        assert!(impact_angle_to_surface_deg(steep, [0.0, 1.0, 0.0]) >= SPEAR_STICK_ANGLE_DEG);
+        assert!(impact_angle_to_surface_deg(shallow, [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
+    }
+
+    #[test]
+    fn a_shallow_spear_throw_bounces_and_is_lost_not_a_pickup() {
+        let mut s = range(21);
+        // a near-horizontal throw at the ground from just above it -
+        // guaranteed shallow (well under 30deg) when it grazes in
+        s.missiles.push(Missile {
+            id: 9001,
+            pos: [0.0, 0.15, 0.0],
+            vel: [12.0, 0.0, 0.0],
+            team: Team::Blue,
+            shooter: 0,
+            damage: 85.0,
+            is_spear: true,
+            stuck_t: None,
+            embedded: true,
+            pierces_left: 0,
+            pierced: Vec::new(),
+            power: 1.0,
+        });
+        let before = s.dropped.len();
+        for _ in 0..(2 * SIM_HZ as usize) {
+            s.step_missiles();
+        }
+        assert_eq!(s.dropped.len(), before, "a shallow bounce must NOT leave a pickup");
+    }
+
+    #[test]
+    fn a_steep_spear_throw_embeds_and_becomes_a_pickup() {
+        let mut s = range(22);
+        s.missiles.push(Missile {
+            id: 9002,
+            pos: [0.0, 3.0, 0.0],
+            vel: [0.2, -9.0, 0.0], // nearly straight down
+            team: Team::Blue,
+            shooter: 0,
+            damage: 85.0,
+            is_spear: true,
+            stuck_t: None,
+            embedded: true,
+            pierces_left: 0,
+            pierced: Vec::new(),
+            power: 1.0,
+        });
+        let before = s.dropped.len();
+        for _ in 0..(2 * SIM_HZ as usize) {
+            s.step_missiles();
+        }
+        assert_eq!(s.dropped.len(), before + 1, "a steep embed must leave exactly one pickup");
+    }
+
+    /// §3.2: 85 body, ×2 head (170, a lethal skill shot but not the
+    /// guns' ×4), ×0.75 legs - measured through the real hit path.
+    #[test]
+    fn spear_zone_damage_matches_85_170_64() {
+        let dmg_at = |frac: f32| {
+            let mut s = range(23);
+            let h = s.fighters[1].height();
+            let base_y = s.fighters[1].pos[1];
+            let hp0 = s.fighters[1].health;
+            s.missiles.push(Missile {
+                id: 9100,
+                pos: [0.0, base_y + h * frac, 5.0],
+                vel: [0.0, 0.0, -1.0],
+                team: Team::Blue,
+                shooter: 0,
+                damage: 85.0,
+                is_spear: true,
+                stuck_t: None,
+                embedded: true,
+                pierces_left: 0,
+                pierced: Vec::new(),
+                power: 1.0,
+            });
+            s.step_missiles();
+            hp0 - s.fighters[1].health
+        };
+        assert!((dmg_at(0.9) - 170.0).abs() < 0.5, "head: {}", dmg_at(0.9));
+        assert!((dmg_at(0.5) - 85.0).abs() < 0.5, "torso: {}", dmg_at(0.5));
+        assert!((dmg_at(0.1) - 63.75).abs() < 0.5, "legs: {}", dmg_at(0.1));
+    }
+
+    /// §3.4: the ammo cap is genuinely 2, not a leftover 6.
+    #[test]
+    fn spear_carry_cap_is_two() {
+        assert_eq!(AMMO_CAP_SPEAR, 2, "Brief VII v2 §3.2: carry max 2");
+    }
+
+    // ---- §4.3 (Brief VII v2) - bow draw-and-pierce completion gate ----
+
+    #[test]
+    fn draw_power_golden_curve() {
+        assert_eq!(bow_power_fraction(0.0), None, "an instant tap is a letdown");
+        assert_eq!(bow_power_fraction(0.10), None, "under 0.15s is a letdown");
+        let p15 = bow_power_fraction(BOW_DRAW_MIN_S).unwrap();
+        assert!((p15 - 0.35).abs() < 0.01, "35% right at the 0.15s floor: {p15}");
+        let p_mid = bow_power_fraction(0.425).unwrap(); // halfway 0.15->0.7
+        assert!((p_mid - 0.675).abs() < 0.02, "linear midpoint ~67.5%: {p_mid}");
+        let p_full = bow_power_fraction(BOW_DRAW_FULL_S).unwrap();
+        assert!((p_full - 1.0).abs() < 0.001, "100% right at 0.7s: {p_full}");
+        let p_held = bow_power_fraction(5.0).unwrap();
+        assert_eq!(p_held, 1.0, "holding past full draw doesn't overcharge");
+        assert_eq!(bow_power_fraction(BOW_DRAW_FORCE_S), None, "10s = forced letdown");
+        assert_eq!(bow_power_fraction(12.0), None, "well past 10s is still a letdown");
+    }
+
+    #[test]
+    fn letdown_under_015s_fires_nothing() {
+        let mut s = range(24);
+        s.fighters[0].gun = GunKind::Bow;
+        s.fighters[0].ammo = 1;
+        let ammo0 = s.fighters[0].ammo;
+        let hold = PlayerCmd { aim: [0.0, 0.0, 1.0], shoot: true, ..Default::default() };
+        let released = PlayerCmd { shoot: false, ..Default::default() };
+        // hold for 6 ticks at 120Hz = 0.05s - well under the 0.15s floor
+        for _ in 0..6 {
+            s.step(hold);
+        }
+        s.step(released);
+        assert!(s.missiles.is_empty(), "a sub-0.15s tap must not loose an arrow");
+        assert_eq!(s.fighters[0].ammo, ammo0, "a letdown must not spend ammo");
+    }
+
+    /// §4.2: the fantasy - three soldiers in a row, one behind that line,
+    /// all take the arrow: damage cascades 90 -> 67.5 -> 50.625 (×0.75
+    /// per pierce, at full draw), and the fourth body is untouched.
+    #[test]
+    fn full_draw_arrow_pierces_three_and_stops() {
+        // needs 1 shooter + 4 targets - `range()`'s 1v1 fixture is too
+        // small, so build a wider roster directly
+        let mut s = TdmSim::new(cfg(25, 3, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.fighters[0].gun = GunKind::Bow;
+        for k in 1..5usize {
+            s.fighters[k].team = Team::Red;
+            s.fighters[k].pos = [0.0, 0.0, 5.0 + (k - 1) as f32 * 1.5];
+            s.fighters[k].health = MAX_HEALTH;
+            s.fighters[k].protect_t = 0.0; // spawn protection would no-sell every hit
+        }
+        let before: Vec<f32> = (1..5).map(|k| s.fighters[k].health).collect();
+        // torso height (0.5 of body height), NOT eye height - eye level
+        // reads as a headshot (×2) and would confound the cascade values
+        let torso_y = 0.5 * BODY_HEIGHT;
+        s.spawn_arrow([0.0, torso_y, 0.0], [0.0, 0.0, 1.0], 1.0, 0);
+        for _ in 0..(2 * SIM_HZ as usize) {
+            s.step_missiles();
+        }
+        let taken: Vec<f32> = (1..5).map(|k| before[k - 1] - s.fighters[k].health).collect();
+        assert!((taken[0] - BOW_PIERCE_DMG[0]).abs() < 0.5, "1st: {}", taken[0]);
+        assert!((taken[1] - BOW_PIERCE_DMG[1]).abs() < 0.5, "2nd: {}", taken[1]);
+        assert!((taken[2] - BOW_PIERCE_DMG[2]).abs() < 0.5, "3rd: {}", taken[2]);
+        assert_eq!(taken[3], 0.0, "the 4th body is untouched - only 3 pierces");
+    }
+
+    #[test]
+    fn bow_draw_and_pierce_replay_identically() {
+        let outcome = || {
+            let mut s = TdmSim::new(cfg(0xB0B0, 5, Mode::Tdm, MapKind::Arena));
+            s.fighters[0].gun = GunKind::Bow;
+            let hold = PlayerCmd { aim: [0.05, 0.0, 1.0], shoot: true, ..Default::default() };
+            let released = PlayerCmd { aim: [0.05, 0.0, 1.0], shoot: false, ..Default::default() };
+            for i in 0..(10 * SIM_HZ as usize) {
+                s.step(if i % 90 < 60 { hold } else { released });
+            }
+            s.fighters.iter().map(|f| (f.health, f.deaths)).collect::<Vec<_>>()
+        };
+        assert_eq!(outcome(), outcome(), "the bow's draw/release/pierce cycle must replay identically");
+    }
+
+    // ---- §6.4 (Brief VII v2) - mech overhaul completion gate: entry
+    // committal, exit, and the damage-state plate matrix.
+
+
+    #[test]
+    fn boarding_is_committed_not_instant() {
+        let mut s = range(30);
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_transition_t = MECH_ENTER_S;
+        s.fighters[0].ammo = 30;
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "a freshly-boarded mech can't fight yet - still sealing up"
+        );
+        // let the seal finish
+        for _ in 0..((MECH_ENTER_S * SIM_HZ as f32) as usize + 2) {
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(s.fighters[0].mech_transition_t, 0.0, "sealed - ready to fight");
+    }
+
+    /// §6.3: drive hull down through 70/40/15% and assert each plate
+    /// stage fires EXACTLY once, in order, and never re-fires going the
+    /// other way (health doesn't regenerate for a mech, but the bitmask
+    /// itself must be monotonic regardless).
+    #[test]
+    fn damage_state_matrix_fires_each_stage_once_in_order() {
+        let mut s = range(31);
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].yaw = std::f32::consts::PI; // face the shooter - front arc
+        assert_eq!(s.fighters[1].mech_plates_dropped, 0, "starts fully plated");
+        // front-arc hits land ~15% of raw damage; hammer it down in
+        // small increments so we can observe each threshold distinctly
+        for _ in 0..40 {
+            if s.fighters[1].hull <= 0.0 {
+                break;
+            }
+            s.apply_hit(0, 1, 1.3, [0.0, 1.3, 5.0]);
+        }
+        // whatever stages the hull fraction crossed must be SET, and
+        // none beyond what the final fraction implies
+        let frac = s.fighters[1].hull / MECH_HULL;
+        let mask = s.fighters[1].mech_plates_dropped;
+        assert_eq!(frac <= MECH_PLATE_70_PCT, mask & 0b001 != 0, "70% stage vs actual fraction");
+        assert_eq!(frac <= MECH_PLATE_40_PCT, mask & 0b010 != 0, "40% stage vs actual fraction");
+        assert_eq!(frac <= MECH_PLATE_15_PCT, mask & 0b100 != 0, "15% stage vs actual fraction");
+        // monotonic: a HIGHER stage set implies every lower stage is ALSO set
+        if mask & 0b100 != 0 {
+            assert_eq!(mask & 0b011, 0b011, "15% implies 70% and 40% already dropped");
+        }
+        if mask & 0b010 != 0 {
+            assert_eq!(mask & 0b001, 0b001, "40% implies 70% already dropped");
+        }
+    }
+
+    #[test]
+    fn exposed_frame_takes_the_1_25x_bonus_only_after_a_plate_drops() {
+        let mut s = range(32);
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].yaw = 0.0; // REAR arc - full damage, cleanest to compare
+        let h0 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        let plain = h0 - s.fighters[1].hull;
+        s.fighters[1].mech_plates_dropped = 0b001; // force one plate off
+        let h1 = s.fighters[1].hull;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        let exposed = h1 - s.fighters[1].hull;
+        assert!(
+            (exposed - plain * MECH_EXPOSED_DMG_MULT).abs() < 0.5,
+            "exposed frame must take exactly ×1.25: plain {plain} exposed {exposed}"
+        );
+    }
+
+    #[test]
+    fn destruction_clears_the_plate_mask_for_the_next_chassis() {
+        let mut s = range(33);
+        s.fighters[1].armor_set = ArmorSet::RobotSuit;
+        s.fighters[1].hull = 1.0; // one hit from destroyed
+        s.fighters[1].mech_plates_dropped = 0b111;
+        s.fighters[1].yaw = 0.0;
+        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        assert_eq!(s.fighters[1].armor_set, ArmorSet::None, "chassis destroyed");
+        assert_eq!(s.fighters[1].mech_plates_dropped, 0, "a fresh chassis starts fully plated");
     }
 }
