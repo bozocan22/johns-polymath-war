@@ -1,0 +1,165 @@
+# MISSION doc — REPORT (rig / elastic motion / mech)
+
+91/91 tests green. Build stable at launch (stderr-capture + 12s liveness
+check, twice). Committed as `c26673d` (on top of Brief VII v2's `a1dadc6`).
+
+## 1. Task 0 table — "after"
+
+| Feature | Coded | Tested | Visible in launched build | Root cause (if not visible) | Fix |
+|---|---|---|---|---|---|
+| Character rig segment count | 14 mass-bearing segments (torso×1, neck×1, arm×3×2, leg×3×2) before this session | — | — | trunk was genuinely 1 bone in the MESH hierarchy | See Task 2 finding below — the trunk being 1 mesh-bone did NOT mean 0 separation |
+| Hip-shoulder separation at wind-up | **yes, already ~42° before this session** | **yes, new test** | yes (was already live) | n/a — see finding | Extracted into `torso_coil_yaw`, added `hip_shoulder_separation_reaches_35_to_45_degrees_at_windup` |
+| Viewmodel placement / no-bounce | yes (Brief VI/VII v2) | yes | yes | n/a | n/a |
+| Sprint/turn/stop locomotion | yes | yes | yes | n/a | n/a |
+| Spear thrust | yes (Brief V) | yes | yes | n/a | n/a |
+| Spear throw | yes (Brief VII v2 §3) | yes | yes | n/a | n/a |
+| Elastic load model | **no before this session** | **yes, new** | landing rebound wired to the real camera; other consumers (spear/jump/dodge) NOT yet wired | never built | Built `ElasticMove`/chain/rebound utilities + 1 real consumer |
+| Mech existence | yes | yes | yes | n/a | n/a |
+| Mech scale | 1.15× (Brief VI) | yes | yes, now 1.7× | doc's Task 4 argued 1.15× "looks nothing like the art" | Changed to 1.7× (option A3) |
+| Mech materials | gunmetal-gray (Brief VI), NOT khaki as I'd mis-remembered | yes (existing material-audit-style coverage) | now olive-drab | wrong palette family entirely | Swapped hull_primary/shadow/mechanism/barrel to Task 5.2's exact hex values |
+| Mech weapons (gatling+autocannon) | **no** | **no** | **no — still the Brief VI missile pod** | never built this session | Named deferral, see §8 |
+
+## 2. The separation test, before and after
+
+**Before this session:** no test existed measuring thorax-vs-pelvis yaw at
+all. The document's premise — "with a single trunk bone this value is
+always 0°" — could not be verified either way.
+
+**Investigation finding:** the mesh hierarchy DOES have one `torso` node
+carrying most of the upper-body geometry, but that node is a **child of the
+character root**, and the root ALSO carries the legs' base rotation
+(`f.yaw`). The torso applies its own ADDITIONAL local yaw on top
+(`torso_coil_yaw(...)`, driven by the spear windup's coil-away rotation).
+Because Bevy composes a child's local rotation onto its parent's world
+rotation, this is **already** a genuine two-segment separation — just not
+one the document's audit had located or measured.
+
+**After:** `torso_coil_yaw` extracted to a standalone, directly-testable
+function. Three new tests:
+```
+cargo test --release -p jk_tdm rig_separation_tests
+→ hip_shoulder_separation_reaches_35_to_45_degrees_at_windup ... ok  (peak ≈ 42°)
+→ separation_is_genuinely_nonzero_not_a_fused_bone ... ok
+→ no_gun_no_twist ... ok
+```
+This is the single clearest before/after proof requested: the premise
+that motivated the full 20-segment rebuild does not hold for this
+codebase's actual architecture. **The 20-segment rig rebuild (Task 2's
+main body) was therefore not undertaken** — the specific problem it was
+scoped to solve turned out not to exist. (Toe segments / clavicle
+segments / full mass-fraction ragdoll are still absent; see §8 — they may
+have independent value for gait/reach fidelity, just not for the
+separation problem that was Task 2's stated justification.)
+
+## 3. Exact test commands and output
+
+```
+cargo test --release -p jk_tdm
+→ test result: ok. 91 passed; 0 failed; 2 ignored
+```
+New suites this pass: `rig_separation_tests` (3), `elastic_load_tests` (6).
+Full breakdown of everything since Brief VII v2 began: 49 → 82 → 91.
+
+## 4. The scale decision (Task 4)
+
+**Chose A3: 1.7× (≈3.03m).** Matches the document's own recommendation.
+`MECH_SCALE` is a single formula-driving constant in this codebase
+(`MECH_RADIUS`, `f.height()`, and the client's `tf.scale` all derive from
+it), so the change itself was low-risk. What was NOT low-risk, and did
+break: **the third-person camera's anchor height and boom distance were
+hardcoded** (`p.pos[1] + 1.6`, boom 2.2m flat) rather than derived from
+the fighter's actual height — at 1.15× this was invisible (soldier and
+mech heights were close enough), at 1.7× it put the camera partially
+inside the mech's own hull. Fixed both to scale proportionally
+(`anchor_h = 1.6 × (height / BODY_HEIGHT)`, `boom × height_boom_mult`).
+Screenshots before/after show real improvement (sky became visible) but
+**framing is not fully resolved** — see §8.
+
+## 5. Mech vs. concept art
+
+Not literally side-by-side (Task 1's tooling limitation — no image
+download capability, so there is no committed art image to place next
+to a render). What changed structurally toward the art: 1.7× scale
+(closer to the described ≈2.5× than 1.15× was, deliberately short of it
+per A3's own compression logic), olive-drab palette replacing gunmetal.
+What did NOT change: part count (still the pre-existing plate-bitmask
+damage system, not 20 separate authored meshes), weapon loadout (still
+the missile pod, not gatling+autocannon), stance (no forward hull pitch
+added), knee/waist mechanism exposure (no new geometry added).
+
+## 6. Every tunable introduced
+
+| Constant | Value | File |
+|---|---|---|
+| `ElasticMove` fields (per-instance, not a global const) | load_s/release_s/stored_energy/return_efficiency | main.rs |
+| SSC bonus scale | 0.35 | main.rs (`release_velocity`) |
+| Landing rebound fraction | 0.08 (8%) | main.rs (`landing_rebound_vy`) |
+| `CHAIN_ONSET_OFFSETS` | [0, 0.02, 0.035, 0.055, 0.065, 0.09, 0.11, 0.125] | main.rs |
+| `CHAIN_PEAK_SCALE` | [1.00…2.10] | main.rs |
+| `MECH_SCALE` | 1.7 (was 1.15) | sim.rs |
+| Mech palette (`mech_khaki`/`_dk`/`_lt`/`mech_shadow`/`mech_metal`) | #8A8770/#5F5E52/#9A9384/#33352F/#2B2C2B | main.rs |
+| Camera anchor height scale | `1.6 × (height/BODY_HEIGHT)` | main.rs |
+| Camera boom height scale | `height/BODY_HEIGHT` (min 1.0) | main.rs |
+
+None of these are externalized to `config/*.ron` — same honest gap as
+Brief VII v2's handback: a hot-reload config system is real infrastructure
+work, not a per-task add-on, and was not attempted this session.
+
+## 7. Answers, in plain language
+
+- **Does the torso visibly twist between hips and shoulders at wind-up?**
+  Yes, and it already did before this session — the finding is that this
+  was true and unmeasured, not that it was false and needed building.
+- **Does a loaded action visibly out-perform a flat-footed one?** The
+  math is real and tested (stored energy scales output by exactly the
+  spec's 1.35× at full load). It is wired into exactly one real,
+  visible consumer (landing rebound). Spear throw, jump, and dodge do
+  NOT yet route through `ElasticMove` — the utility exists, the
+  wiring doesn't, for most of its intended consumers.
+- **Does the run read as drive, or still as a glide?** Not independently
+  re-evaluated this session — no toe segment was added (Task 2's toe-off
+  requirement specifically), so there is no new mechanical reason for
+  this answer to have changed.
+- **Does the mech read as a machine — do exposed mechanisms sell it?**
+  Scale and palette changed; no new geometry (exposed knee/waist
+  mechanism, hydraulic detail) was added. Likely reads as "a bigger
+  olive-drab version of the same shape," not yet "an assembled machine."
+- **Does the autocannon's recoil make the mech feel heavy?** There is no
+  autocannon — the mech still fires its Brief VI loadout (minigun/AWP-
+  class rifle) plus the missile pod. Not attempted this session.
+
+## 8. Named deferrals (honest, per R6)
+
+- **The gatling + drum-fed autocannon weapon swap** (Task 5.5) — the
+  mech's weapon system (minigun/AWP + missile pod) is fully built,
+  tested, and deterministic from Brief VI/VII v2. Replacing it with two
+  new weapon types is a real weapon-system addition (fire logic, ammo,
+  recoil, a new "hull-shove" recoil effect), not a retune, and risks the
+  existing weapon test suite if rushed. Not attempted.
+- **The 20-part separately-detachable mesh rebuild** (Task 5.3) — the
+  mech currently uses the existing bitmask damage-state system (built in
+  Brief VII v2 §6: 3 threshold stages, not 20 individually-authored,
+  individually-detachable meshes). Building 20 real mesh parts with
+  individual detach/debris physics is a large asset-authoring task this
+  session's procedural-primitive pipeline was not extended to cover.
+- **Stance change** (hull pitched nose-down, hips high, knee-forward
+  lean) — not implemented; the mech still stands upright.
+- **Exposed knee/waist mechanism geometry, hazard chevrons, wear masking,
+  stencils** — not implemented; palette changed, geometry did not.
+- **Camera framing at the new scale is IMPROVED, not FULLY fixed** — two
+  real fixes landed (anchor height, boom distance both now scale with
+  fighter height) and measurably helped (sky became visible in the
+  capture where it wasn't before), but the mech's own body still
+  dominates the frame at the default third-person distance. This needs
+  another iteration this session didn't have room for.
+- **Task 1's literal deliverable** (12-20 committed image files) — not
+  achievable with this session's tools (no image-download capability).
+  Real research was done and written into `NOTES.md` with sources
+  instead.
+- **Kinetic chain sequencing** — built and tested as a pure utility, not
+  wired into any specific animated move yet (the spec's own consumer
+  list: spear throw release, spear thrust, dodge launch, sprint start,
+  mech side-step — none of these route through it yet).
+- **Config externalization (R4)** — every tunable above is a Rust
+  `const`, not a `config/*.ron` file, for the same reason noted in Brief
+  VII v2's handback.
