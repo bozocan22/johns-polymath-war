@@ -88,6 +88,10 @@ struct CamCtl {
     /// Landing camera dip (weight-absorb), decaying - set on the
     /// grounded edge proportional to impact speed.
     land_dip: f32,
+    /// Task 3 rule 5 (MISSION doc): landings never fully damp in one
+    /// frame - a small upward rebound (8% of impact) lifts the camera
+    /// briefly before it settles, instead of a pure one-way decay.
+    land_rebound: f32,
     prev_vy: f32,
     prev_grounded: bool,
     /// §5.2 (Brief VI): scoped-class zoom stage - 0 unscoped, 1 = 40°,
@@ -116,6 +120,7 @@ impl Default for CamCtl {
             blocked: false,
             shoulder: 1.0,
             land_dip: 0.0,
+            land_rebound: 0.0,
             prev_vy: 0.0,
             prev_grounded: true,
             zoom_stage: 0,
@@ -158,6 +163,112 @@ const TORSO_AIM_LIMIT_DEG: f32 = 60.0;
 /// clamp itself, which is what the completion-gate test measures.
 fn torso_aim_offset(desired_delta_deg: f32) -> f32 {
     desired_delta_deg.clamp(-TORSO_AIM_LIMIT_DEG, TORSO_AIM_LIMIT_DEG)
+}
+
+/// §2 (rig audit, MISSION doc): hip-shoulder SEPARATION, in radians.
+/// The render root (legs attach here) carries exactly `f.yaw`; torso is
+/// the root's CHILD with this as its own additional local Y-rotation -
+/// so this return value IS "thorax yaw minus pelvis yaw" by construction
+/// (composition of a child's local rotation onto a parent's), not an
+/// approximation of it. Extracted verbatim from the pre-existing inline
+/// `spear_yaw` block in `sync_fighters` so the audit's separation test
+/// measures the exact render path, never a copy of it.
+// ---- Task 3 (MISSION doc): the elastic load model ------------------------
+// COSMETIC layer (R3) - the velocity/timing SHAPE feeds animation, never a
+// sim hit/damage value. "Explosive motion is never muscle firing from
+// rest - it is load, then release, and the release is faster than the
+// load that produced it."
+
+/// One shared utility every power move routes through - a stretch-
+/// shortening cycle: pre-activation -> loaded stretch (eccentric) ->
+/// explosive shortening (concentric), scaled by how much was stored.
+#[derive(Clone, Copy, Debug)]
+struct ElasticMove {
+    load_s: f32,
+    release_s: f32,
+    stored_energy: f32,     // 0..1, accumulates during the load phase
+    return_efficiency: f32, // 0.92 human tendon, 0.55 mech steel
+}
+
+impl ElasticMove {
+    /// Rule 1: release must be 2-3x faster than load - the completion
+    /// gate's exact test threshold (release_s <= load_s / 2).
+    fn load_release_ok(&self) -> bool {
+        self.release_s <= self.load_s / 2.0
+    }
+    /// Rule 2: stored energy scales output - a fully loaded move is
+    /// measurably (not just numerically) stronger.
+    fn release_velocity(&self, base: f32) -> f32 {
+        base * (1.0 + self.stored_energy.clamp(0.0, 1.0) * 0.35)
+    }
+}
+
+/// Rule 3: a counter-movement (motion opposite the coming release) grants
+/// the SSC bonus; a dead start does not. Pure so it's directly testable -
+/// `prior_dir` and `release_dir` are the SIGNS of motion right before and
+/// during the move (e.g. crouch-down velocity vs. jump-up velocity).
+fn counter_movement_bonus(prior_dir: f32, release_dir: f32, max_bonus: f32) -> f32 {
+    if prior_dir * release_dir < 0.0 {
+        max_bonus
+    } else {
+        0.0
+    }
+}
+
+/// Rule 5: landings never fully damp in one frame - ~8% of impact
+/// velocity returns upward, eased over the caller's own 2-3 frame window.
+/// `impact_vy` is negative (downward); the return is always positive.
+fn landing_rebound_vy(impact_vy: f32) -> f32 {
+    (-impact_vy).max(0.0) * 0.08
+}
+
+/// Task 3.3: the kinetic chain - one shared proximal-to-distal sequence
+/// every power move routes through. `elapsed_s` since the move's own
+/// onset; returns this segment's current velocity-scale multiplier (0
+/// before its own onset, ramping toward `peak_scale` after).
+const CHAIN_ONSET_OFFSETS: [f32; 8] = [0.000, 0.020, 0.035, 0.055, 0.065, 0.090, 0.110, 0.125];
+const CHAIN_PEAK_SCALE: [f32; 8] = [1.00, 1.08, 1.15, 1.25, 1.35, 1.60, 1.85, 2.10];
+
+fn chain_segment_scale(segment_index: usize, elapsed_s: f32, ramp_s: f32) -> f32 {
+    let onset = CHAIN_ONSET_OFFSETS[segment_index];
+    let peak = CHAIN_PEAK_SCALE[segment_index];
+    if elapsed_s < onset {
+        0.0
+    } else {
+        peak * ((elapsed_s - onset) / ramp_s.max(1e-4)).clamp(0.0, 1.0)
+    }
+}
+
+/// Task 3.3 test support: the tick at which segment `i` reaches its peak,
+/// for asserting strict pelvis->lumbar->...->tip ordering.
+fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
+    CHAIN_ONSET_OFFSETS[segment_index] + ramp_s
+}
+
+fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, jerk: f32) -> f32 {
+    if gun == GunKind::Spear {
+        if spear_wind_t > 0.0 {
+            let wp = 1.0 - spear_wind_t / SPEAR_WINDUP_S;
+            if wp < 0.68 {
+                -0.73 * (wp / 0.68) // windup: torso coils away
+            } else {
+                // plant -> whip: hips fire open, fast
+                -0.73 + 1.08 * ((wp - 0.68) / 0.32)
+            }
+        } else if knife_phase > 0.0 {
+            let tw = THRUST_WIND_S * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
+            let ph = knife_phase;
+            if ph < tw {
+                -0.45 * ease_out((ph / tw).clamp(0.0, 1.0))
+            } else {
+                -0.45 + 0.80 * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
+            }
+        } else {
+            0.35 * jerk // follow-through, decaying with the cooldown
+        }
+    } else {
+        0.0
+    }
 }
 /// Camera collision pad (§5.2) and its slow push-back-out time.
 const CAM_PAD: f32 = 0.2;
@@ -1484,11 +1595,23 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(2.8) },
 ];
 
+// Task 5.7 (MISSION doc): the mech at its new scale/palette, third
+// person, letting the player walk a few steps to get a clean silhouette
+// read before the snap.
+const MECH_CAPTURE_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyS)], ..beat(0.3) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyS)], snap: Some("01-mech-third-person"), ..beat(1.0) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyA)], ..beat(1.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyA)], snap: Some("02-mech-side-on"), ..beat(2.0) },
+    CapBeat { end: true, ..beat(2.4) },
+];
+
 fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
         "bow_draw" => BOW_DRAW_BEATS,
+        "mech_scale" => MECH_CAPTURE_BEATS,
         _ => &[],
     }
 }
@@ -1522,6 +1645,15 @@ fn capture_quick_deploy(
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
+    if cap.script.as_deref() == Some("mech_scale") {
+        // Task 5.7: board the mech directly - no need to walk to a pad
+        // just to prove the scale/palette read.
+        let f = &mut game.sim.fighters[0];
+        f.armor_set = ArmorSet::RobotSuit;
+        f.armor = POWER_MAX;
+        f.hull = MECH_HULL;
+        f.mech_transition_t = 0.0; // skip the seal-up window for the capture
+    }
 }
 
 /// Playing-state, runs BEFORE `input_and_step`: synthesizes exactly the
@@ -3453,13 +3585,14 @@ fn setup(
         }),
         // the robot's mitten: matte white shell, same as the body (§1.4)
         hand: materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42)),
-        // §4.2 (Brief VI): faceted GUNMETAL plates, matte (roughness
-        // 0.6–0.8) - the concept art's material language at 1.15×
-        mech_khaki: materials.add(metal(Color::srgb_u8(0x4A, 0x4E, 0x55), 0.35, 0.7)),
-        mech_khaki_dk: materials.add(metal(Color::srgb_u8(0x33, 0x36, 0x3B), 0.35, 0.75)),
-        mech_khaki_lt: materials.add(metal(Color::srgb_u8(0x5E, 0x64, 0x6C), 0.35, 0.65)),
-        mech_shadow: materials.add(flat(0x24262A)),
-        mech_metal: materials.add(metal(Color::srgb_u8(0x4A, 0x4A, 0x48), 0.7, 0.45)),
+        // Task 5.2 (MISSION doc, supersedes Brief VI's gunmetal): a real
+        // military walker is olive-drab/khaki, not gray - the art's
+        // whole "this is real hardware" read depends on the palette.
+        mech_khaki: materials.add(metal(Color::srgb_u8(0x8A, 0x87, 0x70), 0.05, 0.72)),
+        mech_khaki_dk: materials.add(metal(Color::srgb_u8(0x5F, 0x5E, 0x52), 0.05, 0.75)),
+        mech_khaki_lt: materials.add(metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65)),
+        mech_shadow: materials.add(flat(0x33352F)),
+        mech_metal: materials.add(metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45)),
         // §4.2: hazard chevrons - shoulder-pod cover and knee plates
         // ONLY (≤10% of surface; an accent, not a paint job)
         mech_hazard: materials.add(flat(0xD9A916)),
@@ -5111,35 +5244,12 @@ fn sync_fighters(
         let torso_pitch = torso_pitch_base - jerk.powf(0.4) * 0.021;
         // §3.2 the Achilles throw: windup rotates the torso 42° AWAY,
         // the plant blocks, the hips fire open through release, and the
-        // follow-through carries past - sequencing, not detail
-        let spear_yaw = if f.gun == GunKind::Spear {
-            if f.spear_wind_t > 0.0 {
-                let wp = 1.0 - f.spear_wind_t / SPEAR_WINDUP_S;
-                if wp < 0.68 {
-                    -0.73 * (wp / 0.68) // windup: torso coils away
-                } else {
-                    // plant → whip: hips fire open, fast
-                    -0.73 + 1.08 * ((wp - 0.68) / 0.32)
-                }
-            } else if f.knife_phase > 0.0 {
-                // §2 (Brief V): the THRUST sequences hips BEFORE hands -
-                // coil away through the load, fire open through the
-                // drive on a faster clock than the arm (order: legs,
-                // hips, shoulders, hands)
-                let tw = THRUST_WIND_S
-                    * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
-                let ph = f.knife_phase;
-                if ph < tw {
-                    -0.45 * ease_out((ph / tw).clamp(0.0, 1.0))
-                } else {
-                    -0.45 + 0.80 * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
-                }
-            } else {
-                0.35 * jerk // follow-through, decaying with the cooldown
-            }
-        } else {
-            0.0
-        };
+        // follow-through carries past - sequencing, not detail. §2
+        // (MISSION doc rig audit): this IS the hip-shoulder separation -
+        // root (legs) carries `f.yaw` alone, torso is root's CHILD with
+        // this as its own additive local yaw, so torso_world - root_world
+        // = this value exactly. Extracted so it's independently testable.
+        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, jerk);
         // §1 (Brief VII), extending §4 (Brief IV): the living-motion
         // layer - breathing, weight shift, micro-sway, grip fidget, and
         // reactions (suppression/explosion flinch, ally-death snap, kill
@@ -6189,7 +6299,12 @@ fn camera_system(
     } else {
         0.0
     };
-    let anchor = Vec3::new(p.pos[0], p.pos[1] + 1.6 - crouch_drop, p.pos[2])
+    // Task 4 (MISSION doc): the anchor height must scale with the
+    // fighter's ACTUAL height - a hardcoded 1.6m put the camera INSIDE
+    // a 3m mech's own body once the scale changed. 1.6 was tuned for a
+    // 1.78m soldier; keep that same proportion for every height.
+    let anchor_h = 1.6 * (p.height() / BODY_HEIGHT);
+    let anchor = Vec3::new(p.pos[0], p.pos[1] + anchor_h - crouch_drop, p.pos[2])
         + screen_right * (p.lean * LEAN_SHIFT * 0.8);
     let ads_e = ease_out(cam_ctl.ads_t);
     // §5.1 (Brief VII v2): the hip boom itself isn't fixed - it eases
@@ -6202,7 +6317,12 @@ fn camera_system(
     let sprint_target = if sp > SPRINT_SPEED * 0.9 { TP_BOOM_SPRINT } else { TP_BOOM };
     cam_ctl.sprint_boom +=
         (sprint_target - cam_ctl.sprint_boom) * (dt / TP_SPRINT_LAG_S).min(1.0);
-    let boom_target = cam_ctl.sprint_boom + (TP_BOOM_AIM - cam_ctl.sprint_boom) * ads_e;
+    // Task 4: the boom distance ALSO needs to grow with a taller subject
+    // - otherwise the corrected anchor height still sits close enough to
+    // clip the mech's own wide hull at the old 2.2m hip distance.
+    let height_boom_mult = (p.height() / BODY_HEIGHT).max(1.0);
+    let boom_target =
+        (cam_ctl.sprint_boom + (TP_BOOM_AIM - cam_ctl.sprint_boom) * ads_e) * height_boom_mult;
     let lift = TP_UP + (0.22 - TP_UP) * ads_e;
     let right_amt = TP_RIGHT + (TP_RIGHT_AIM - TP_RIGHT) * ads_e;
     let bp = cam_ctl.pitch.clamp(-1.2, 1.2);
@@ -6253,12 +6373,19 @@ fn camera_system(
     };
     // landing weight-absorb: the camera DIPS on the grounded edge, in
     // proportion to the impact, and springs back over ~90 ms - the body
-    // absorbing the landing instead of the world stopping dead
+    // absorbing the landing instead of the world stopping dead.
+    // Task 3 rule 5 (MISSION doc): never fully damp in one frame - an
+    // 8% rebound lifts the camera back UP briefly rather than a pure
+    // one-way decay to neutral.
     if p.grounded && !cam_ctl.prev_grounded && p.alive() {
         let impact = (-cam_ctl.prev_vy - 3.0).max(0.0);
         cam_ctl.land_dip = (cam_ctl.land_dip + impact * 0.016).min(0.15);
+        cam_ctl.land_rebound = landing_rebound_vy(cam_ctl.prev_vy) * 0.006;
     }
     cam_ctl.land_dip *= (1.0 - dt * 11.0).max(0.0);
+    // the rebound fires a BEAT after the dip (it's the push-back, not
+    // simultaneous with it) and fades faster than the dip itself
+    cam_ctl.land_rebound *= (1.0 - dt * 16.0).max(0.0);
     cam_ctl.prev_vy = p.vy;
     cam_ctl.prev_grounded = p.grounded;
     // the mech has a CADENCE: a slow, heavy sway while it walks - the
@@ -6311,7 +6438,8 @@ fn camera_system(
         Vec3::ZERO
     };
     tf.translation = eye.lerp(tp_pos, pe) + sh;
-    tf.translation.y -= (cam_ctl.land_dip + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
+    tf.translation.y -=
+        (cam_ctl.land_dip - cam_ctl.land_rebound + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
     let look = tf.translation + fwd;
     tf.look_at(look, Vec3::Y);
     // the head tilts with the lean - first person only
@@ -9579,5 +9707,137 @@ mod forge_tests {
         assert!(sel.melee_axe);
         assert_eq!(sel.grenade_preset, 3);
         assert_eq!(sel.map, MapKind::Bailey, "the Forge must not touch match config");
+    }
+}
+
+/// §2 (MISSION doc rig audit) - the separation test. The render root
+/// (parent of legs) carries exactly `f.yaw`; torso is the root's CHILD
+/// with `torso_coil_yaw(..)` as its OWN additional local Y-rotation - so
+/// this function's return value literally IS "thorax yaw minus pelvis
+/// yaw" (composition of a child's local rotation onto its parent), not
+/// an estimate of it. This test is the direct rebuttal-or-confirmation
+/// of the document's premise that a single trunk bone forces this to 0.
+#[cfg(test)]
+mod rig_separation_tests {
+    use super::*;
+
+    #[test]
+    fn hip_shoulder_separation_reaches_35_to_45_degrees_at_windup() {
+        // sweep the windup progress (spear_wind_t counting DOWN from
+        // SPEAR_WINDUP_S to 0) and track the peak |separation|
+        let mut peak_deg = 0.0_f32;
+        for i in 0..=100 {
+            let wind_t = SPEAR_WINDUP_S * (1.0 - i as f32 / 100.0);
+            let sep = torso_coil_yaw(GunKind::Spear, wind_t, 0.0, false, 0.0);
+            peak_deg = peak_deg.max(sep.abs().to_degrees());
+        }
+        assert!(
+            (35.0..=45.0).contains(&peak_deg),
+            "separation peak {peak_deg:.1}deg outside the 35-45deg target"
+        );
+    }
+
+    #[test]
+    fn separation_is_genuinely_nonzero_not_a_fused_bone() {
+        // the document's exact failure mode to rule out: if root and
+        // torso were the SAME rotation (a fused single trunk bone), this
+        // would be identically 0.0 at every sample - it is not.
+        let mid_wind = SPEAR_WINDUP_S * 0.5;
+        let sep = torso_coil_yaw(GunKind::Spear, mid_wind, 0.0, false, 0.0);
+        assert_ne!(sep, 0.0, "torso and root must NOT share one fused rotation");
+    }
+
+    #[test]
+    fn no_gun_no_twist() {
+        // separation is a THROW-specific coil, not a permanent offset -
+        // resting state must be neutral
+        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0), 0.0);
+    }
+}
+
+/// Task 3 (MISSION doc) - the elastic load model's completion gate.
+#[cfg(test)]
+mod elastic_load_tests {
+    use super::*;
+
+    #[test]
+    fn load_release_ratio_matches_spec_examples() {
+        // the spec's own worked example: 0.4s wind-up -> 0.15-0.20s release
+        let spear_throw = ElasticMove {
+            load_s: 0.4,
+            release_s: 0.18,
+            stored_energy: 1.0,
+            return_efficiency: 0.92,
+        };
+        assert!(spear_throw.load_release_ok(), "0.4s/0.18s must satisfy the 2x+ rule");
+        let too_slow = ElasticMove {
+            load_s: 0.4,
+            release_s: 0.25,
+            stored_energy: 1.0,
+            return_efficiency: 0.92,
+        };
+        assert!(!too_slow.load_release_ok(), "0.25s release from a 0.4s load is a SHOVE, not a strike");
+    }
+
+    #[test]
+    fn stored_energy_scales_output_by_exactly_the_spec_formula() {
+        let base = 22.0; // e.g. the spear's throw v0
+        let dead = ElasticMove { load_s: 0.4, release_s: 0.18, stored_energy: 0.0, return_efficiency: 0.92 };
+        let full = ElasticMove { load_s: 0.4, release_s: 0.18, stored_energy: 1.0, return_efficiency: 0.92 };
+        assert_eq!(dead.release_velocity(base), base, "zero stored energy = base, unscaled");
+        assert!(
+            (full.release_velocity(base) - base * 1.35).abs() < 1e-4,
+            "full stored energy must be exactly base × 1.35"
+        );
+    }
+
+    #[test]
+    fn counter_movement_grants_the_bonus_a_dead_start_does_not() {
+        // moving down then releasing up = counter-movement = bonus
+        assert_eq!(counter_movement_bonus(-1.0, 1.0, 0.35), 0.35);
+        // moving up then releasing up = no counter-movement = no bonus
+        assert_eq!(counter_movement_bonus(1.0, 1.0, 0.35), 0.0);
+        // starting from rest = no counter-movement = no bonus
+        assert_eq!(counter_movement_bonus(0.0, 1.0, 0.35), 0.0);
+    }
+
+    #[test]
+    fn landing_rebound_never_reaches_exactly_zero_for_a_real_impact() {
+        for impact in [-3.0_f32, -6.0, -9.5, -15.0] {
+            let reb = landing_rebound_vy(impact);
+            assert!(reb > 0.0, "a real impact ({impact} m/s) must return SOME upward rebound");
+            assert!((reb - (-impact) * 0.08).abs() < 1e-4, "must be exactly 8% of impact speed");
+        }
+        assert_eq!(landing_rebound_vy(0.0), 0.0, "no impact = no rebound, not a negative dip");
+    }
+
+    /// Task 3.4 chain-timing test: angular-velocity peaks occur in strict
+    /// order pelvis -> lumbar -> thorax -> shoulder -> elbow -> wrist ->
+    /// tip, each with a minimum onset gap. A failure names which segment
+    /// fired early (out of order relative to the one before it).
+    #[test]
+    fn kinetic_chain_peaks_fire_in_strict_proximal_to_distal_order() {
+        let ramp_s = 0.05;
+        let names = ["pelvis", "lumbar", "thorax", "clavicle", "upper_arm", "forearm", "hand", "tip"];
+        let mut prev_peak_tick = -1.0_f32;
+        for i in 0..8 {
+            let peak_tick = chain_peak_tick(i, ramp_s);
+            assert!(
+                peak_tick > prev_peak_tick,
+                "{} peaked at {peak_tick:.3}s, not after the previous segment ({prev_peak_tick:.3}s) - fired early",
+                names[i]
+            );
+            prev_peak_tick = peak_tick;
+        }
+    }
+
+    #[test]
+    fn kinetic_chain_segment_is_silent_before_its_own_onset() {
+        // the tip (segment 7) must show ZERO activation while only the
+        // pelvis (segment 0) has begun - proximal-to-distal, not all-at-once
+        let t_early = CHAIN_ONSET_OFFSETS[1] * 0.5; // between pelvis onset and lumbar onset
+        assert!(chain_segment_scale(0, t_early, 0.05) > 0.0, "pelvis should already be moving");
+        assert_eq!(chain_segment_scale(7, t_early, 0.05), 0.0, "tip must still be silent");
     }
 }

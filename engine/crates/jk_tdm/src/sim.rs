@@ -2080,10 +2080,14 @@ pub const RECON_REGEN_DELAY: f32 = 5.0;
 // between the shot and the mech's BODY FACING (never the camera): a
 // frontal fortress, a flanking objective. The hull is a resource you
 // spend — it never regenerates; at zero the pilot ejects at 25 HP.
-// §4.1 (Brief VI, supersedes 1.5×): 1.15× soldier height — 2.05 m. An
-// elite heavy unit that uses the same doors, nav, and cover as
-// soldiers; the concept art's silhouette LANGUAGE, not its scale.
-pub const MECH_SCALE: f32 = 1.15;
+// Task 4 (MISSION doc, supersedes Brief VI's 1.15x/2.05m): the art
+// measures the hull at ~2.5x soldier height with the soldier's helmet
+// only reaching the mech's KNEE - 1.15x threw that presence away
+// entirely. Decision: A3 (recommended) - 1.7x, ~3.03m. Keeps the
+// tower/leg-cover read the art sells, at the cost of only a widened nav
+// radius (MECH_RADIUS below is already a formula, not a bespoke system -
+// this scale change needed no new collision/doorway infrastructure).
+pub const MECH_SCALE: f32 = 1.7;
 // §4.5 (Brief VI): hull 1000, and the sensor visor is a ×2.0 weak
 // point applied AFTER the angle multiplier (front-arc only).
 pub const MECH_HULL: f32 = 1000.0;
@@ -6804,6 +6808,9 @@ mod tests {
     /// the cut; the hull soaks everything until the pilot ejects at 25.
     #[test]
     fn mech_arcs_follow_body_facing_and_eject() {
+        // height-relative, not a magic number - survives Task 4's scale
+        // change (or any future one) automatically
+        let mech_visor_y = BODY_HEIGHT * MECH_SCALE * 0.90;
         let mut s = range(141);
         s.fighters[1].ammo = 0;
         s.fighters[1].reserve = 0;
@@ -6842,7 +6849,7 @@ mod tests {
         // multiplier, front-arc only (12.5 × 0.15 × 2.0 = 3.75)…
         s.fighters[1].yaw = std::f32::consts::PI;
         let hv = s.fighters[1].hull;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]); // 1.9/2.05 → visor band
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]); // 1.9/2.05 → visor band
         let visor = hv - s.fighters[1].hull;
         assert!(
             (visor - 12.5 * (1.0 - MECH_RED_FRONT) * MECH_VISOR_MULT).abs() < 0.01,
@@ -6852,7 +6859,7 @@ mod tests {
         // take plain rear damage, no bonus
         s.fighters[1].yaw = 0.0;
         let hb = s.fighters[1].hull;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]);
         let rear_head = hb - s.fighters[1].hull;
         assert!(
             (rear_head - 12.5).abs() < 0.01,
@@ -7751,9 +7758,10 @@ mod tests {
             f.armor = POWER_MAX;
             f.hull = MECH_HULL;
         }
-        // SCALE: 1.15 × soldier, ±2%
+        // SCALE (Task 4, MISSION doc: A3 recommended, 1.7x - supersedes
+        // Brief VI's 1.15x): MECH_SCALE x soldier, +/-2%
         let h = s.fighters[0].height();
-        let want = BODY_HEIGHT * 1.15;
+        let want = BODY_HEIGHT * MECH_SCALE;
         assert!(
             (h / want - 1.0).abs() < 0.02,
             "mech height {h:.3} vs {want:.3}"
@@ -7843,6 +7851,9 @@ mod tests {
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
         s.fighters[1].yaw = std::f32::consts::PI; // facing the shooter
+        // height-relative, not a magic number - survives Task 4's scale
+        // change (or any future one) automatically
+        let mech_visor_y = BODY_HEIGHT * MECH_SCALE * 0.90;
         let h0 = s.fighters[1].hull;
         s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
         assert!(
@@ -7850,7 +7861,7 @@ mod tests {
             "an AWP does NOT counter a mech frontally"
         );
         let h1 = s.fighters[1].hull;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]); // visor band
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]); // visor band
         assert!(
             (h1 - s.fighters[1].hull - 115.0 * 0.15 * 2.0).abs() < 0.01,
             "front visor ≈ 34.5"
@@ -8849,16 +8860,17 @@ mod tests {
 
     #[test]
     fn exposed_frame_takes_the_1_25x_bonus_only_after_a_plate_drops() {
+        let mech_visor_y = BODY_HEIGHT * MECH_SCALE * 0.90;
         let mut s = range(32);
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
         s.fighters[1].yaw = 0.0; // REAR arc - full damage, cleanest to compare
         let h0 = s.fighters[1].hull;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]);
         let plain = h0 - s.fighters[1].hull;
         s.fighters[1].mech_plates_dropped = 0b001; // force one plate off
         let h1 = s.fighters[1].hull;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]);
         let exposed = h1 - s.fighters[1].hull;
         assert!(
             (exposed - plain * MECH_EXPOSED_DMG_MULT).abs() < 0.5,
@@ -8868,12 +8880,13 @@ mod tests {
 
     #[test]
     fn destruction_clears_the_plate_mask_for_the_next_chassis() {
+        let mech_visor_y = BODY_HEIGHT * MECH_SCALE * 0.90;
         let mut s = range(33);
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = 1.0; // one hit from destroyed
         s.fighters[1].mech_plates_dropped = 0b111;
         s.fighters[1].yaw = 0.0;
-        s.apply_hit(0, 1, 1.9, [0.0, 1.9, 5.0]);
+        s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]);
         assert_eq!(s.fighters[1].armor_set, ArmorSet::None, "chassis destroyed");
         assert_eq!(s.fighters[1].mech_plates_dropped, 0, "a fresh chassis starts fully plated");
     }
