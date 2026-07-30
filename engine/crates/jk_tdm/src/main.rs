@@ -5124,9 +5124,19 @@ fn sync_fighters(
             // lean tilts the whole body sideways off the hips (positive
             // lean = peek screen-right = roll clockwise)
             let lean_roll = Quat::from_rotation_z(f.lean * 0.24);
-            tf.rotation = tf
-                .rotation
-                .slerp(Quat::from_rotation_y(f.yaw) * lean_roll, 0.35);
+            // Task 5.1 (MISSION doc): the mech stands hull-forward, hips
+            // high and set back, leaning INTO its own mass - a level
+            // upright hull loses the silhouette entirely. A soldier's
+            // rotation is untouched (mech_pitch is 0 off-mech).
+            let mech_pitch = if f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0 {
+                0.085
+            } else {
+                0.0
+            };
+            tf.rotation = tf.rotation.slerp(
+                Quat::from_rotation_y(f.yaw) * lean_roll * Quat::from_rotation_x(mech_pitch),
+                0.35,
+            );
         }
         // §11: the MECH is the same rig at walker scale - unmistakable
         tf.scale = Vec3::splat(
