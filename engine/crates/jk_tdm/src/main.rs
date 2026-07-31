@@ -9565,8 +9565,17 @@ fn release_cursor(cam: &mut CamCtl, windows: &mut Query<&mut Window, With<Primar
     }
 }
 
-fn close_intro(mut commands: Commands, intro: Query<Entity, With<IntroRoot>>) {
-    for e in &intro {
+fn close_intro(
+    mut commands: Commands,
+    intro: Query<Entity, With<IntroRoot>>,
+    // `open_intro` spawns these two as TOP-LEVEL entities, not children
+    // of IntroRoot, so despawning the root alone left them on screen for
+    // the whole match - the loadout spec sat in the corner during
+    // gameplay (visible in every committed mech capture).
+    readout: Query<Entity, With<TechReadout>>,
+    toast: Query<Entity, With<LobbyToast>>,
+) {
+    for e in intro.iter().chain(readout.iter()).chain(toast.iter()) {
         commands.entity(e).despawn_recursive();
     }
 }
