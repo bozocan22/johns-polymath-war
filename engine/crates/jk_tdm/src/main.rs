@@ -91,7 +91,12 @@ struct CamCtl {
     /// Task 3 rule 5 (MISSION doc): landings never fully damp in one
     /// frame - a small upward rebound (8% of impact) lifts the camera
     /// briefly before it settles, instead of a pure one-way decay.
+    /// This is the rebound AMPLITUDE; `landing_offset` shapes it against
+    /// `land_t` rather than decaying it per-frame.
     land_rebound: f32,
+    /// Seconds since the last touchdown - the single clock both the
+    /// landing dip and its delayed rebound are sampled from.
+    land_t: f32,
     prev_vy: f32,
     prev_grounded: bool,
     /// §5.2 (Brief VI): scoped-class zoom stage - 0 unscoped, 1 = 40°,
@@ -106,6 +111,11 @@ struct CamCtl {
     /// (`SPRING_K_CAMERA_BOOM`) - zeroed on every instant pull-in so a
     /// recovery in progress never fights the next snap.
     boom_vel: f32,
+    /// Whether the boom is currently shortened by cover. Explicit state
+    /// because "boom < free-space target" is equally true while
+    /// recovering from a wall and while an eased target is growing - the
+    /// spring must govern only the former.
+    boom_occluded: bool,
 }
 
 impl Default for CamCtl {
@@ -125,6 +135,8 @@ impl Default for CamCtl {
             shoulder: 1.0,
             land_dip: 0.0,
             land_rebound: 0.0,
+            land_t: 99.0, // no landing yet
+            boom_occluded: false,
             prev_vy: 0.0,
             prev_grounded: true,
             zoom_stage: 0,
@@ -333,49 +345,76 @@ fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
     CHAIN_ONSET_OFFSETS[segment_index] + ramp_s
 }
 
-/// Task 3.3 real consumer: the spear's post-action settle, for BOTH a
-/// throw release and a thrust's recovery (torso_coil_yaw routes either
-/// one here once `spear_wind_t`/`knife_phase` both hit zero). The torso
-/// doesn't stop dead - it keeps unwinding through the kinetic chain's
-/// tip segment (the last and most amplified one, `CHAIN_PEAK_SCALE[7]`)
-/// before settling to neutral. Replaces a flat `jerk`-driven curve that
-/// borrowed the unrelated gun-recoil cooldown for this melee follow-
-/// through.
-fn spear_followthrough_yaw(idle_since_s: f32) -> f32 {
-    const RAMP_S: f32 = 0.05;
-    const OVERSHOOT_RAD: f32 = 0.12; // ~7deg past neutral, whip-cracking through
-    const SETTLE_RATE: f32 = 9.0;
+// §3.2 the coil: named so the follow-through can start from the EXACT
+// value the windup/thrust branch ends on. Both branches deliberately
+// land on the same release yaw, so a throw and a thrust hand off to the
+// same follow-through with no discontinuity.
+const COIL_AWAY_RAD: f32 = -0.73; // windup: torso coils away from the target
+const COIL_SWING_RAD: f32 = 1.08; // plant -> whip: hips fire open through it
+const COIL_PLANT_FRAC: f32 = 0.68; // windup fraction where the plant blocks
+const THRUST_AWAY_RAD: f32 = -0.45;
+const THRUST_SWING_RAD: f32 = 0.80;
+/// The yaw BOTH the throw windup and the thrust end on (COIL_AWAY +
+/// COIL_SWING == THRUST_AWAY + THRUST_SWING == 0.35). The follow-through
+/// must begin here or release visibly pops.
+const SPEAR_RELEASE_YAW: f32 = COIL_AWAY_RAD + COIL_SWING_RAD;
+
+/// Task 3.3 real consumer: the spear's post-action follow-through, for
+/// BOTH a throw release and a thrust's recovery (torso_coil_yaw routes
+/// either one here once `spear_wind_t`/`knife_phase` both hit zero).
+///
+/// The torso does not stop dead at the release angle: it CARRIES PAST it
+/// (the tip segment is the chain's last and most amplified one,
+/// `CHAIN_PEAK_SCALE[7]`), then relaxes back to neutral.
+///
+/// `release_t` is seconds since the action ended. NEGATIVE means no
+/// release has happened yet (fresh spawn, or the spear was never
+/// swung) - that returns 0, so a fighter who merely holds a spear is
+/// not born mid-unwind.
+///
+/// The tip is sampled from its OWN onset (`CHAIN_ONSET_OFFSETS[7]`,
+/// 0.125 s) rather than from zero: that offset is the tip's delay
+/// behind the PELVIS when a chain starts, but here the chain already
+/// ran during the windup and the release IS the tip's moment. Sampling
+/// from zero made this silent for the first 0.125 s - a hard snap to
+/// neutral exactly when the motion should be at its most alive.
+fn spear_followthrough_yaw(release_t: f32) -> f32 {
+    const RAMP_S: f32 = 0.12;
+    const OVERSHOOT_RAD: f32 = 0.10; // carried PAST the release, not back through it
+    const HOLD_S: f32 = 0.05; // the carry-past runs before the settle starts
+    const SETTLE_RATE: f32 = 6.0;
     const TIP: usize = 7;
-    let peak_tick = chain_peak_tick(TIP, RAMP_S);
-    let drive = chain_segment_scale(TIP, idle_since_s, RAMP_S) / CHAIN_PEAK_SCALE[TIP];
-    let decay = if idle_since_s > peak_tick {
-        (-SETTLE_RATE * (idle_since_s - peak_tick)).exp()
-    } else {
-        1.0
-    };
-    -OVERSHOOT_RAD * drive * decay
+    if release_t < 0.0 {
+        return 0.0; // nothing has been thrown or thrust yet
+    }
+    let onset = CHAIN_ONSET_OFFSETS[TIP];
+    let drive = chain_segment_scale(TIP, release_t + onset, RAMP_S) / CHAIN_PEAK_SCALE[TIP];
+    let decay = (-SETTLE_RATE * (release_t - HOLD_S).max(0.0)).exp();
+    (SPEAR_RELEASE_YAW + OVERSHOOT_RAD * drive) * decay
 }
 
-fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, idle_since_s: f32) -> f32 {
+fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, release_t: f32) -> f32 {
     if gun == GunKind::Spear {
         if spear_wind_t > 0.0 {
             let wp = 1.0 - spear_wind_t / SPEAR_WINDUP_S;
-            if wp < 0.68 {
-                -0.73 * (wp / 0.68) // windup: torso coils away
+            if wp < COIL_PLANT_FRAC {
+                COIL_AWAY_RAD * (wp / COIL_PLANT_FRAC) // windup: torso coils away
             } else {
                 // plant -> whip: hips fire open, fast
-                -0.73 + 1.08 * ((wp - 0.68) / 0.32)
+                COIL_AWAY_RAD
+                    + COIL_SWING_RAD * ((wp - COIL_PLANT_FRAC) / (1.0 - COIL_PLANT_FRAC))
             }
         } else if knife_phase > 0.0 {
             let tw = THRUST_WIND_S * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
             let ph = knife_phase;
             if ph < tw {
-                -0.45 * ease_out((ph / tw).clamp(0.0, 1.0))
+                THRUST_AWAY_RAD * ease_out((ph / tw).clamp(0.0, 1.0))
             } else {
-                -0.45 + 0.80 * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
+                THRUST_AWAY_RAD
+                    + THRUST_SWING_RAD * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
             }
         } else {
-            spear_followthrough_yaw(idle_since_s)
+            spear_followthrough_yaw(release_t)
         }
     } else {
         0.0
@@ -657,13 +696,30 @@ fn weapon_rear_extent(kind: GunKind) -> f32 {
     }
 }
 
+/// §0.2: the head-band fraction the sim's hit-zone classifier uses.
+/// Rendered head geometry must never fall below this fraction of the
+/// fighter's height, or you can see a head you cannot shoot.
+const HEAD_BAND_FRAC: f32 = 0.82;
+/// The vertical offset from hip to head base at zero torso pitch.
+const HEAD_OVER_HIP: f32 = 0.846;
+/// §2 (Brief V): peak weight-absorb dip after a roll/side-step ends.
+/// Requested depth - the band clamp below may allow less.
+const ROLL_SETTLE_DIP: f32 = 0.055;
+
 /// §1.4 pose core: (hip_y, torso_pitch) for a grounded gait at phase θ.
 /// PURE - shared by `sync_fighters` and the §0.2 band test, so the test
 /// can never drift from the render. Pelvis bob is 2× frequency with its
 /// MINIMUM at double support, and only ever ADDS height; total torso
 /// pitch is capped so the head can never dip below the 0.82 line.
-fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32) -> (f32, f32) {
-    if crouch {
+///
+/// `settle` (0..1) is the post-roll weight-absorb dip. It lives HERE
+/// rather than at the call site because it MOVES THE WHOLE RIG DOWN:
+/// applied afterwards, the renderer was writing a hip 5.5 cm below the
+/// value `head_base_y` reported, which put the head base at ~0.79 of
+/// height - outside the 0.82 band the test claims to guard, and
+/// classified as Arms by the sim while looking like a head.
+fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -> (f32, f32) {
+    let (hip, pitch) = if crouch {
         (
             0.54 + 0.018 * (1.0 - (2.0 * theta).cos()) * amp,
             0.90, // ~52°: projects the 0.324 m head into the crouch band
@@ -674,15 +730,26 @@ fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32) -> (f32, f32) 
             // stronger run lean - the band cap still rules (§0.2 test)
             (0.05 + amp * 0.09 + accel_lean).min(0.185),
         )
-    }
+    };
+    // The band is law, so the dip is clamped BY it rather than checked
+    // against it afterwards: whatever depth still leaves the head base on
+    // the 0.82 line is what the settle gets. At a hard run lean that is
+    // nearly nothing; standing, it is ~1.5 cm. A deeper absorb would need
+    // to raise the torso to compensate, which is a pose change, not a
+    // constant - noted in the handback rather than guessed at here.
+    let drop = if crouch { 0.12 } else { 0.0 };
+    let height = if crouch { CROUCH_HEIGHT } else { BODY_HEIGHT };
+    let min_hip = HEAD_BAND_FRAC * height + drop - HEAD_OVER_HIP * pitch.cos();
+    let dipped = (hip - ROLL_SETTLE_DIP * settle.clamp(0.0, 1.0)).max(min_hip);
+    (dipped, pitch)
 }
 
 /// §0.2: world-Y of the head's LOWEST geometry for a grounded pose (the
 /// head pivot - geometry sits entirely above it).
-fn head_base_y(crouch: bool, theta: f32, amp: f32, accel_lean: f32) -> f32 {
-    let (hip, pitch) = gait_pose(crouch, theta, amp, accel_lean);
+fn head_base_y(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -> f32 {
+    let (hip, pitch) = gait_pose(crouch, theta, amp, accel_lean, settle);
     let drop = if crouch { 0.12 } else { 0.0 };
-    hip - drop + 0.846 * pitch.cos()
+    hip - drop + HEAD_OVER_HIP * pitch.cos()
 }
 
 /// §2.3 (Brief III): weapon-mass settle - (lag seconds, damping). Heavy
@@ -720,6 +787,30 @@ fn clamp_elbow_flex(flex_rad: f32) -> f32 {
 const DIP_PIP_COUPLING: f32 = 0.7;
 fn dip_from_driving_joint(driving_rot: f32) -> f32 {
     driving_rot * DIP_PIP_COUPLING
+}
+
+/// Task 3 rule 5 (MISSION doc): the landing camera offset `t` seconds
+/// after touchdown. POSITIVE pushes the camera down.
+///
+/// The rebound is a DELAYED counter-push. Run simultaneously with the
+/// dip, a rebound that starts smaller and decays faster can only ever
+/// shrink the dip - it can never carry the camera past neutral, which
+/// makes "landings never fully damp in one frame" just a slower one-way
+/// decay. Delaying its onset until the dip has mostly decayed is what
+/// actually produces the lift the rule asks for.
+const LAND_DIP_DECAY: f32 = 11.0;
+const LAND_REBOUND_DELAY_S: f32 = 0.085;
+const LAND_REBOUND_WIN_S: f32 = 0.13;
+
+fn landing_offset(dip_amp: f32, rebound_amp: f32, t: f32) -> f32 {
+    let t = t.max(0.0);
+    let dip = dip_amp * (-LAND_DIP_DECAY * t).exp();
+    let reb = if t >= LAND_REBOUND_DELAY_S && t <= LAND_REBOUND_DELAY_S + LAND_REBOUND_WIN_S {
+        rebound_amp * ((t - LAND_REBOUND_DELAY_S) / LAND_REBOUND_WIN_S * PI).sin()
+    } else {
+        0.0
+    };
+    dip - reb
 }
 
 /// §2.5 (Brief VII v2): the critically-damped spring - closed form, so
@@ -763,6 +854,60 @@ fn boom_recover(boom: f32, boom_vel: f32, allowed: f32, dt: f32) -> (f32, f32) {
         dt,
     );
     (nx.x, nv.x)
+}
+
+/// §5.2: one boom update. `allowed` is the collision-limited distance
+/// (== `free_len` when nothing is in the way); `free_len` is what the
+/// boom would be with no cover at all.
+///
+/// The k=90 spring exists to stop the camera POPPING when it clears a
+/// corner, so it must apply to exactly that case and nothing else.
+/// Applying it to every increase in `allowed` also filtered ordinary
+/// free-space boom changes - the 0.12 s sprint ease, the 0.12 s ADS
+/// blend, and the length change from plain vertical mouse-look - putting
+/// two filters in series and letting the heavier one silently win
+/// (measured: the sprint boom-out reached 90% at ~0.55 s instead of the
+/// documented ~0.25 s, and pitching down lagged ~18 cm while pitching up
+/// snapped instantly).
+/// Returns `(boom, boom_vel, still_occluded)`. `hit` is whether the
+/// collision ray actually struck cover this frame; `was_occluded` is the
+/// same flag from last frame.
+///
+/// The occlusion flag has to be explicit state: "boom is shorter than the
+/// free-space target" is TRUE both while recovering from a wall and while
+/// an eased target is simply growing, so a distance comparison alone
+/// cannot tell them apart and ends up springing both.
+fn boom_step(
+    boom: f32,
+    boom_vel: f32,
+    was_occluded: bool,
+    allowed: f32,
+    free_len: f32,
+    hit: bool,
+    dt: f32,
+) -> (f32, f32, bool) {
+    const CLEAR_EPS: f32 = 0.01;
+    if hit {
+        if allowed < boom {
+            // contact: pull in immediately, or the camera ends up inside
+            // the very wall it is avoiding
+            (allowed, 0.0, true)
+        } else {
+            // still occluded but the gap is opening
+            let (nb, nv) = boom_recover(boom, boom_vel, allowed, dt);
+            (nb, nv, true)
+        }
+    } else if was_occluded && boom < free_len - CLEAR_EPS {
+        // just cleared the corner - THIS is the pop the k=90 spring
+        // exists to smooth, and the only case it should govern
+        let (nb, nv) = boom_recover(boom, boom_vel, free_len, dt);
+        (nb, nv, true)
+    } else {
+        // free space: the sprint ease, the ADS blend and mouse-look all
+        // own their own documented timings. Track them directly instead
+        // of re-filtering through a heavier spring on top.
+        (free_len, 0.0, false)
+    }
 }
 
 /// §2.4 (Brief VII v2): trigger finger travel curve - out over 0.06s,
@@ -1741,12 +1886,32 @@ const MECH_CAPTURE_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(3.4) },
 ];
 
+// §7 audit: hold the trigger through spin-up, sustained fire (barrels
+// full speed, heat climbing), and release - all from a fixed, known-
+// clear spot so barrel spin / tracers / heat-driven spread are all
+// checkable against a real capture rather than taken on faith.
+const MINIGUN_CHECK_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.08)), ..beat(0.2) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(0.3) },
+    CapBeat { snap: Some("01-minigun-spinup"), ..beat(0.55) },
+    CapBeat { snap: Some("02-minigun-sustained-fire"), ..beat(1.6) },
+    CapBeat { snap: Some("03-minigun-hot"), ..beat(3.6) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left)],
+        snap: Some("04-minigun-release"),
+        ..beat(4.0)
+    },
+    CapBeat { snap: Some("05-minigun-spindown"), ..beat(4.5) },
+    CapBeat { end: true, ..beat(4.9) },
+];
+
 fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
         "bow_draw" => BOW_DRAW_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
+        "minigun_check" => MINIGUN_CHECK_BEATS,
         _ => &[],
     }
 }
@@ -1801,6 +1966,49 @@ fn capture_quick_deploy(
         f.mech_transition_t = 0.0; // skip the seal-up window for the capture
         f.pos = [0.0, 0.0, 0.0];
         f.yaw = 0.0;
+    }
+    if cap.script.as_deref() == Some("minigun_check") {
+        // §7 audit: minigun is pickup-only (no `Selected.loadout` slot),
+        // so hand it over the same way a pad pickup does (mirrors
+        // `PickupKind::Minigun` in sim.rs exactly) rather than faking a
+        // loadout path that doesn't exist for this weapon.
+        let f = &mut game.sim.fighters[0];
+        f.inventory[0] = GunKind::Minigun;
+        f.slot_ammo[0] = (gun(GunKind::Minigun).mag, 0);
+        f.active = 0;
+        f.gun = GunKind::Minigun;
+        f.ammo = f.slot_ammo[0].0;
+        f.reserve = 0;
+        f.reload_t = 0.0;
+        f.pos = [0.0, 0.0, 0.0];
+        f.yaw = 0.0;
+    }
+}
+
+/// Scripts that capture a WEAPON being fired for several seconds in the
+/// open. Firing deliberately clears spawn protection (sim.rs, the
+/// `protect_t = 0.0` in the fire path), so a subject holding the trigger
+/// in a live match is a legitimate target and simply dies mid-script -
+/// which is correct game behavior, but destroys the capture. These
+/// scripts pin the subject's health so the weapon-feel frames actually
+/// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
+/// never runs for a human-launched game.
+const CAPTURE_KEEP_ALIVE: [&str; 1] = ["minigun_check"];
+
+fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
+    let Some(name) = cap.script.as_deref() else { return };
+    if !CAPTURE_KEEP_ALIVE.contains(&name) {
+        return;
+    }
+    let p = game.sim.player;
+    if let Some(f) = game.sim.fighters.get_mut(p) {
+        // `alive()` is `respawn_t <= 0.0 && health > 0.0` - restoring
+        // health alone leaves the death already latched, so the subject
+        // still reads as DOWN. Clearing respawn_t directly (rather than
+        // letting it tick down) also skips the respawn reposition, so
+        // the subject stays planted where the script put it.
+        f.health = MAX_HEALTH;
+        f.respawn_t = 0.0;
     }
 }
 
@@ -2022,7 +2230,11 @@ fn main() {
         // Update systems for that single frame non-deterministically.
         .add_systems(
             PreUpdate,
-            (capture_input_driver, capture_screenshot_driver)
+            (
+                capture_keep_subject_alive,
+                capture_input_driver,
+                capture_screenshot_driver,
+            )
                 .chain()
                 .run_if(in_state(GameState::Playing)),
         )
@@ -2189,7 +2401,14 @@ fn grenade_arc(
 }
 
 /// §7: the viewmodel barrels turn with the sim's spin state - idle
-/// crawl at rest, a blur at full spin, frozen mid-vent.
+/// crawl at rest, a blur at full spin, frozen mid-vent. All three states
+/// are distinct on screen: the rest crawl is what stops "holding a
+/// minigun" from looking identical to "the gun is seized mid-vent",
+/// which is exactly what a purely spin_t-proportional rate produced
+/// (spin_t is pinned to 0 at rest, so the cluster was bolt-still).
+const MINIGUN_IDLE_CRAWL_RAD_S: f32 = 0.55;
+const MINIGUN_SPIN_FULL_RAD_S: f32 = 46.0;
+
 fn spin_minigun_barrels(
     game: Res<Game>,
     time: Res<Time>,
@@ -2199,7 +2418,8 @@ fn spin_minigun_barrels(
     let rate = if p.vent_t > 0.0 {
         0.0 // vent locks the cluster while it dumps heat
     } else {
-        (p.spin_t / MINIGUN_SPINUP_S) * 46.0
+        MINIGUN_IDLE_CRAWL_RAD_S
+            + (p.spin_t / MINIGUN_SPINUP_S) * MINIGUN_SPIN_FULL_RAD_S
     };
     if rate <= 0.0 {
         return;
@@ -5190,7 +5410,7 @@ fn head_glance(tnow: f32, ph: f32, target_yaw: f32) -> f32 {
 /// Per-fighter persistent state the pure functions above can't carry on
 /// their own - decaying reaction timers and edge-detected counters. All
 /// cosmetic/render-only; never touches `sim.rs`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct LifeState {
     /// 0..1, ramps toward 1 while sprinting (~1.5s), decays over 8s once
     /// it stops - drives the breathing-rate ramp/decay from §1.1.
@@ -5209,11 +5429,31 @@ struct LifeState {
     /// §1.2: seconds since this fighter last did anything combat-shaped;
     /// Relaxed posture eases in once this clears 10s.
     since_combat: f32,
-    /// Task 3.3: seconds since this fighter's spear last stopped actively
-    /// winding a throw or thrusting - drives `spear_followthrough_yaw`'s
-    /// chain-sequenced snap-through settle. 0.0 default is safe: the tip
-    /// segment's onset is 0.125s in, so a fresh spawn produces no yaw.
-    spear_idle_since: f32,
+    /// Task 3.3: seconds since this fighter's spear throw/thrust ENDED -
+    /// the follow-through clock for `spear_followthrough_yaw`.
+    /// NEGATIVE means no release has happened yet, which is the state a
+    /// fresh or just-respawned fighter must start in: the follow-through
+    /// now begins at the release yaw (0.35 rad), so a 0.0 default would
+    /// make every fighter who merely PICKS UP a spear spawn mid-unwind
+    /// with a 20-degree torso twist.
+    spear_release_t: f32,
+}
+
+impl Default for LifeState {
+    fn default() -> Self {
+        LifeState {
+            breath_heat: 0.0,
+            prev_deaths_seen: 0,
+            prev_player_kills: 0,
+            suppress_t: 0.0,
+            boom_flinch_t: 0.0,
+            ally_snap_t: 0.0,
+            ally_snap_yaw: 0.0,
+            exhale_t: 0.0,
+            since_combat: 0.0,
+            spear_release_t: -1.0, // no throw/thrust has happened yet
+        }
+    }
 }
 
 fn sync_fighters(
@@ -5254,6 +5494,9 @@ fn sync_fighters(
             tf.translation = Vec3::new(f.pos[0], f.pos[1] - 0.10, f.pos[2]);
             tf.rotation = Quat::from_rotation_y(f.yaw)
                 * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+            // Task 3.3: clear the follow-through clock so the fighter does
+            // not respawn mid-unwind from the throw they died during.
+            life[vis.index].spear_release_t = -1.0;
             continue;
         }
         let rolling = f.roll_t > 0.0;
@@ -5368,6 +5611,18 @@ fn sync_fighters(
         } else {
             0.0
         };
+        // §2 (Brief V): the landing SETTLES - a weight-absorb dip in the
+        // first 0.20 s after a roll/side-step ends, easing back up. The
+        // window is read straight off the cooldown clock: no new state.
+        // Computed BEFORE the pose so it can go through `gait_pose`,
+        // which is what keeps the §0.2 band test sampling the same hip
+        // the renderer writes.
+        let settle = if !rolling && f.roll_t <= 0.0 {
+            let cd_base = if in_mech { MECH_STEP_CD_S } else { ROLL_CD_S };
+            ((f.roll_cd - (cd_base - ROLL_SETTLE_S)) / ROLL_SETTLE_S).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         // §1.4 pose core - the SAME pure function the §0.2 band test
         // samples, so the render cannot drift out of the hit bands
         let (hip_y, torso_pitch_base) = if rolling {
@@ -5375,18 +5630,8 @@ fn sync_fighters(
         } else if airborne {
             (0.63, 0.10)
         } else {
-            gait_pose(f.crouch, rig.phase, amp, rig.accel_lean)
+            gait_pose(f.crouch, rig.phase, amp, rig.accel_lean, settle)
         };
-        // §2 (Brief V): the landing SETTLES - a weight-absorb dip in the
-        // first 0.20 s after a roll/side-step ends, easing back up. The
-        // window is read straight off the cooldown clock: no new state.
-        let settle = if !rolling && f.roll_t <= 0.0 {
-            let cd_base = if in_mech { MECH_STEP_CD_S } else { ROLL_CD_S };
-            ((f.roll_cd - (cd_base - ROLL_SETTLE_S)) / ROLL_SETTLE_S).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let hip_y = hip_y - 0.055 * settle;
         // legs: thigh (hip), shin (knee), foot (ankle) per side.
         // Sign convention: +X rotation swings the limb BACKWARD, so knees
         // fold positive and a raised thigh is negative.
@@ -5446,22 +5691,26 @@ fn sync_fighters(
         // root (legs) carries `f.yaw` alone, torso is root's CHILD with
         // this as its own additive local yaw, so torso_world - root_world
         // = this value exactly. Extracted so it's independently testable.
-        // Task 3.3 real consumer: track idle-since-last-spear-action here
-        // (client-side only, per §1.3's `LifeState` pattern) so the
-        // follow-through curve is driven by the actual kinetic chain
-        // rather than the gun-recoil `jerk` proxy it used before.
+        // Task 3.3 real consumer: the follow-through clock (client-side
+        // only, per §1.3's `LifeState` pattern) so the curve is driven by
+        // the actual kinetic chain rather than the gun-recoil `jerk`
+        // proxy it used before. Held at 0 for as long as the action is
+        // live, then counts up from the frame it ends - so the
+        // follow-through always starts at the release yaw. A negative
+        // value (the default, and what death restores) means "nothing
+        // thrown yet", which keeps the curve silent.
         {
             let spear_active =
                 f.gun == GunKind::Spear && (f.spear_wind_t > 0.0 || f.knife_phase > 0.0);
             let ls0 = &mut life[vis.index];
             if spear_active {
-                ls0.spear_idle_since = 0.0;
-            } else {
-                ls0.spear_idle_since += dt;
+                ls0.spear_release_t = 0.0;
+            } else if ls0.spear_release_t >= 0.0 {
+                ls0.spear_release_t += dt;
             }
         }
-        let spear_idle_since = life[vis.index].spear_idle_since;
-        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, spear_idle_since);
+        let spear_release_t = life[vis.index].spear_release_t;
+        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, spear_release_t);
         // §1 (Brief VII), extending §4 (Brief IV): the living-motion
         // layer - breathing, weight shift, micro-sway, grip fidget, and
         // reactions (suppression/explosion flinch, ally-death snap, kill
@@ -5769,8 +6018,25 @@ fn sync_fighters(
             )
         };
         if let Ok((mut t, _)) = parts.get_mut(rig.weapon_root) {
-            t.translation = wr_pos;
-            t.rotation = wr_rot;
+            // §1.1: the grip fidget - a brief re-settle of the hands on
+            // the weapon once every 8-15 s, per-fighter phase from the
+            // id hash (never the sim RNG). It was written, tested, and
+            // named in the living-motion comment but never actually
+            // reached a Transform; this is its consumer. Suppressed
+            // while the fighter is doing something committed, so it can
+            // only ever read as idle life.
+            let idle_hands = !rolling
+                && f.spear_wind_t <= 0.0
+                && f.knife_phase <= 0.0
+                && f.reload_t <= 0.0
+                && jerk < 0.05;
+            let fidget = if idle_hands {
+                grip_fidget(tnow, ph, id_period(vis.index as u32 + 41, 8.0, 15.0))
+            } else {
+                0.0
+            };
+            t.translation = wr_pos + Vec3::new(0.0, -0.4 * fidget, 0.25 * fidget);
+            t.rotation = wr_rot * Quat::from_rotation_x(-0.5 * fidget);
         }
         let mut arrow_vis = Visibility::Hidden;
         // hand IK targets in torso space: the weapon's OWN sockets
@@ -6556,31 +6822,38 @@ fn camera_system(
         + screen_right * (right_amt * cam_ctl.shoulder)
         + Vec3::Y * lift;
     // §5.2 boom collision: cast anchor → desired with a pad; pull the
-    // camera in INSTANTLY on contact, push it back out slowly - instant
-    // push-out pops every time you clear a corner. §2.5: the push-out is
-    // the actual SPRING_K_CAMERA_BOOM consumer named in the brief's
-    // table - a critically-damped spring accelerates smoothly out of the
-    // pull-in rather than the constant-time-constant chase CAM_RECOVER_S
-    // used to produce, and (being critically damped) still can't overshoot
-    // back into the wall it just recovered from.
+    // camera in INSTANTLY on contact, push it back out on the k=90
+    // SPRING_K_CAMERA_BOOM critical spring - instant push-out pops every
+    // time you clear a corner. `boom_step` owns that asymmetry AND the
+    // distinction the spring must respect: it only filters recovery from
+    // an occlusion, never ordinary free-space boom changes (the sprint
+    // ease, the ADS blend, and mouse-look all move `len` on their own
+    // documented timings and must not be re-filtered through a heavier
+    // spring on top).
     let off = desired - anchor;
     let len = off.length().max(1e-4);
     let dirn = off / len;
     let mut allowed = len;
+    let mut hit = false;
     if let Some((t, _)) = game
         .sim
         .raycast_cover(anchor.to_array(), dirn.to_array(), len)
     {
         allowed = (t - CAM_PAD).max(0.25);
+        hit = true;
     }
-    if allowed < cam_ctl.boom {
-        cam_ctl.boom = allowed;
-        cam_ctl.boom_vel = 0.0;
-    } else {
-        let (nb, nv) = boom_recover(cam_ctl.boom, cam_ctl.boom_vel, allowed, dt);
-        cam_ctl.boom = nb;
-        cam_ctl.boom_vel = nv;
-    }
+    let (nb, nv, occ) = boom_step(
+        cam_ctl.boom,
+        cam_ctl.boom_vel,
+        cam_ctl.boom_occluded,
+        allowed,
+        len,
+        hit,
+        dt,
+    );
+    cam_ctl.boom = nb;
+    cam_ctl.boom_vel = nv;
+    cam_ctl.boom_occluded = occ;
     let tp_pos = anchor + dirn * cam_ctl.boom.min(len);
 
     // blend eye ↔ boom on the eased person fraction; the dead spectate
@@ -6601,12 +6874,17 @@ fn camera_system(
     if p.grounded && !cam_ctl.prev_grounded && p.alive() {
         let impact = (-cam_ctl.prev_vy - 3.0).max(0.0);
         cam_ctl.land_dip = (cam_ctl.land_dip + impact * 0.016).min(0.15);
-        cam_ctl.land_rebound = landing_rebound_vy(cam_ctl.prev_vy) * 0.006;
+        // Task 3 rule 5: scaled so the delayed rebound actually EXCEEDS
+        // the dip's residue at its own peak - otherwise it can only ever
+        // shrink the dip and the camera never crosses neutral.
+        cam_ctl.land_rebound = landing_rebound_vy(cam_ctl.prev_vy) * 0.05;
+        cam_ctl.land_t = 0.0;
     }
-    cam_ctl.land_dip *= (1.0 - dt * 11.0).max(0.0);
-    // the rebound fires a BEAT after the dip (it's the push-back, not
-    // simultaneous with it) and fades faster than the dip itself
-    cam_ctl.land_rebound *= (1.0 - dt * 16.0).max(0.0);
+    cam_ctl.land_t += dt;
+    // both curves are now sampled from one clock by `landing_offset` -
+    // decaying them independently per-frame is what made the rebound
+    // inert (it started smaller and faded faster than the dip).
+    let land_offset = landing_offset(cam_ctl.land_dip, cam_ctl.land_rebound, cam_ctl.land_t);
     cam_ctl.prev_vy = p.vy;
     cam_ctl.prev_grounded = p.grounded;
     // the mech has a CADENCE: a slow, heavy sway while it walks - the
@@ -6659,8 +6937,7 @@ fn camera_system(
         Vec3::ZERO
     };
     tf.translation = eye.lerp(tp_pos, pe) + sh;
-    tf.translation.y -=
-        (cam_ctl.land_dip - cam_ctl.land_rebound + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
+    tf.translation.y -= (land_offset + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
     let look = tf.translation + fwd;
     tf.look_at(look, Vec3::Y);
     // the head tilts with the lean - first person only
@@ -8187,7 +8464,12 @@ fn stability_bracket(
     let p = &game.sim.fighters[game.sim.player];
     let spec = gun(p.gun);
     let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
-    let mut spread = spec.spread + if speed > 0.5 { spec.spread_move } else { 0.0 } + p.bloom;
+    // §5.1: `GunSpec.spread` is only the COLD value for the minigun -
+    // `base_spread` is the sim's own heat-widened number, so the bracket
+    // tracks the cone the shots actually use instead of a constant.
+    let mut spread = base_spread(p.gun, p.heat)
+        + if speed > 0.5 { spec.spread_move } else { 0.0 }
+        + p.bloom;
     if cam.ads_t > 0.9 {
         spread *= ADS_SPREAD_MULT;
     }
@@ -9591,21 +9873,41 @@ mod band_tests {
     #[test]
     fn head_never_leaves_its_band_in_any_gait() {
         for crouch in [false, true] {
-            let band = 0.82 * if crouch { CROUCH_HEIGHT } else { BODY_HEIGHT };
+            let band = HEAD_BAND_FRAC * if crouch { CROUCH_HEIGHT } else { BODY_HEIGHT };
             for amp in [0.0_f32, 0.2, 0.36, 0.6] {
                 for lean in [-0.07_f32, 0.0, 0.07] {
-                    for k in 0..=128 {
-                        let th = k as f32 / 128.0 * std::f32::consts::TAU;
-                        let y = head_base_y(crouch, th, amp, lean);
-                        assert!(
-                            y >= band - 1e-3,
-                            "crouch={crouch} amp={amp} lean={lean} theta={th:.2}: \
-                             head base {y:.4} below band {band:.4}"
-                        );
+                    // the post-roll weight-absorb dip is part of the pose
+                    // and must be swept too - it moves the WHOLE rig down,
+                    // and was previously applied outside gait_pose where
+                    // this test could not see it at all
+                    for settle in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                        for k in 0..=128 {
+                            let th = k as f32 / 128.0 * std::f32::consts::TAU;
+                            let y = head_base_y(crouch, th, amp, lean, settle);
+                            assert!(
+                                y >= band - 1e-3,
+                                "crouch={crouch} amp={amp} lean={lean} settle={settle} \
+                                 theta={th:.2}: head base {y:.4} below band {band:.4}"
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// The settle dip must still DO something when there is headroom for
+    /// it - a clamp that silently zeroed the whole effect would pass the
+    /// band test above while deleting the feature.
+    #[test]
+    fn roll_settle_still_dips_when_the_band_allows_it() {
+        let standing = gait_pose(false, 0.0, 0.0, 0.0, 0.0).0;
+        let settled = gait_pose(false, 0.0, 0.0, 0.0, 1.0).0;
+        assert!(
+            settled < standing,
+            "a standing fighter has band headroom, so the settle must visibly dip: \
+             {standing} -> {settled}"
+        );
     }
 }
 
@@ -9911,6 +10213,110 @@ mod camera_v2_tests {
             "k=90 should move well past the start but not fully settle in 100ms, got {b}"
         );
     }
+
+    /// Task 3 rule 5: the landing must actually REBOUND - the camera has
+    /// to cross above neutral, not merely decay toward it more slowly.
+    /// The previous shape (dip and rebound decaying independently, the
+    /// rebound both smaller and faster) made this provably impossible.
+    #[test]
+    fn landing_rebound_actually_lifts_the_camera_past_neutral() {
+        // a real 10 m/s impact, using the same scalings camera_system uses
+        let dip_amp = ((10.0_f32 - 3.0) * 0.016).min(0.15);
+        let reb_amp = landing_rebound_vy(-10.0) * 0.05;
+
+        assert!(
+            landing_offset(dip_amp, reb_amp, 0.0) > 0.0,
+            "the frame of impact must be a DIP (positive = camera pushed down)"
+        );
+
+        let mut min_offset = f32::INFINITY;
+        let mut t_min = 0.0_f32;
+        for i in 0..600 {
+            let t = i as f32 * 0.002;
+            let o = landing_offset(dip_amp, reb_amp, t);
+            if o < min_offset {
+                min_offset = o;
+                t_min = t;
+            }
+        }
+        assert!(
+            min_offset < -1e-4,
+            "the rebound must carry the camera ABOVE neutral, best was {min_offset} at {t_min}s"
+        );
+        assert!(
+            t_min > 0.05,
+            "the rebound is a delayed counter-push, not simultaneous with the dip (peaked at {t_min}s)"
+        );
+        assert!(
+            landing_offset(dip_amp, reb_amp, 1.0).abs() < 1e-3,
+            "and it must settle back to neutral"
+        );
+    }
+
+    /// The k=90 spring must govern ONLY collision recovery. Applying it
+    /// to every boom increase also filtered the sprint ease, the ADS
+    /// blend, and plain mouse-look - two filters in series, heavier one
+    /// wins. These pin the three cases apart.
+    #[test]
+    fn boom_step_tracks_free_space_directly_and_springs_only_out_of_occlusion() {
+        let dt = 1.0 / 120.0;
+
+        // free space, no cover hit, target grows: must track it EXACTLY.
+        // This is the case the old distance-only heuristic got wrong - it
+        // looked identical to a collision recovery and got sprung.
+        let (b, v, occ) = boom_step(2.20, 0.0, false, 2.50, 2.50, false, dt);
+        assert!((b - 2.50).abs() < 1e-6, "free-space growth must track directly, got {b}");
+        assert_eq!(v, 0.0, "no spring velocity should accumulate in free space");
+        assert!(!occ, "nothing was hit, so nothing is occluded");
+
+        // contact: pull in immediately
+        let (b, v, occ) = boom_step(2.50, 0.0, false, 1.10, 2.50, true, dt);
+        assert!((b - 1.10).abs() < 1e-6, "pull-in must be instant, got {b}");
+        assert_eq!(v, 0.0);
+        assert!(occ, "a ray hit means occluded");
+
+        // cleared the corner (no hit this frame, but we WERE occluded):
+        // spring back out rather than popping
+        let (b, _, occ) = boom_step(1.10, 0.0, true, 2.50, 2.50, false, dt);
+        assert!(
+            b > 1.10 && b < 2.50,
+            "recovery must be sprung, not instant: got {b}"
+        );
+        assert!(occ, "still recovering, so still flagged occluded");
+
+        // ...and once recovered, the flag clears and it tracks again
+        let (b, _, occ) = boom_step(2.50, 0.0, true, 2.50, 2.50, false, dt);
+        assert!((b - 2.50).abs() < 1e-6);
+        assert!(!occ, "fully recovered: back to free-space tracking");
+    }
+
+    #[test]
+    fn boom_step_sprint_ease_is_not_re_filtered_by_the_spring() {
+        // Simulate the documented sprint boom-out (2.2 -> 2.5 on the
+        // 0.12s first-order lag) in FREE SPACE and confirm the boom
+        // arrives on the ease's own schedule. Before the fix the spring
+        // stretched this to roughly double.
+        let dt = 1.0 / 120.0;
+        let (mut eased, mut boom, mut vel) = (2.2_f32, 2.2_f32, 0.0_f32);
+        let mut t = 0.0_f32;
+        let mut t_90 = None;
+        while t < 1.0 {
+            eased += (2.5 - eased) * (dt / 0.12_f32).min(1.0);
+            // no cover anywhere: allowed == free_len, hit == false
+            let (nb, nv, _) = boom_step(boom, vel, false, eased, eased, false, dt);
+            boom = nb;
+            vel = nv;
+            t += dt;
+            if t_90.is_none() && boom >= 2.2 + 0.9 * (2.5 - 2.2) {
+                t_90 = Some(t);
+            }
+        }
+        let t90 = t_90.expect("boom must reach 90% of the sprint ease within 1s");
+        assert!(
+            t90 < 0.35,
+            "sprint boom-out should follow the 0.12s ease (~0.25s to 90%), took {t90}s"
+        );
+    }
 }
 
 /// R4 - config externalization's completion gate (camera-tuning slice).
@@ -10043,9 +10449,18 @@ mod rig_separation_tests {
     #[test]
     fn no_gun_no_twist() {
         // separation is a THROW-specific coil, not a permanent offset -
-        // resting state must be neutral
+        // resting state must be neutral. The last parameter is the
+        // follow-through clock; NEGATIVE is "nothing thrown yet", which
+        // is the actual resting state this test means. (It used to pass
+        // 0.0 and still read as rest only because the old curve was
+        // silent at t=0 - which was itself the bug: a real release
+        // starts at the release yaw, not at neutral.)
+        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0), 0.0);
+        // a gun that is not a spear never twists, whatever the clock says
         assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, 0.0), 0.0);
-        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0), 0.0);
+        // and long after a throw, the follow-through has fully settled
+        assert!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 3.0).abs() < 1e-3);
     }
 }
 
@@ -10134,31 +10549,58 @@ mod elastic_load_tests {
         assert_eq!(chain_segment_scale(7, t_early, 0.05), 0.0, "tip must still be silent");
     }
 
-    /// Task 3.3 real consumer test: `spear_followthrough_yaw` (now the
-    /// spear throw-release AND thrust-recovery settle curve, routed
-    /// through `torso_coil_yaw`'s final branch) must be silent before the
-    /// chain's tip segment has begun, reach a real overshoot near its
-    /// peak, and actually settle back down rather than holding forever.
+    /// Task 3.3 real consumer test: `spear_followthrough_yaw` is the
+    /// spear throw-release AND thrust-recovery curve, routed through
+    /// `torso_coil_yaw`'s final branch.
+    ///
+    /// This test replaces an earlier one that asserted the follow-through
+    /// was SILENT at release. That was encoding a bug, not a spec: the
+    /// old curve sampled the chain's tip from zero, so it returned 0 for
+    /// the first 0.125 s (a hard snap to neutral from the release angle)
+    /// and then swung NEGATIVE - back toward the coil - which is the
+    /// opposite of the "carries past" the docs promise.
     #[test]
-    fn spear_followthrough_yaw_is_silent_then_snaps_then_settles() {
-        assert_eq!(
-            spear_followthrough_yaw(0.0), 0.0,
-            "at the instant of release the tip segment hasn't onset yet"
-        );
-        let mut peak = 0.0_f32;
-        let mut peak_t = 0.0_f32;
-        for i in 0..400 {
-            let t = i as f32 * 0.002;
-            let y = spear_followthrough_yaw(t).abs();
-            if y > peak {
-                peak = y;
-                peak_t = t;
-            }
-        }
-        assert!(peak > 0.10, "peak overshoot should be close to the full 0.12rad, got {peak}");
+    fn spear_followthrough_carries_past_the_release_then_settles() {
+        // 1. nothing thrown yet = no twist at all (a fighter merely
+        //    holding a spear must not be born mid-unwind)
+        assert_eq!(spear_followthrough_yaw(-1.0), 0.0, "no release yet: silent");
+
+        // 2. it BEGINS at the release yaw - no snap to neutral
         assert!(
-            spear_followthrough_yaw(peak_t + 1.0).abs() < 0.001,
-            "must settle back to neutral, not hold the overshoot forever"
+            (spear_followthrough_yaw(0.0) - SPEAR_RELEASE_YAW).abs() < 1e-5,
+            "follow-through must start exactly where the windup ended, got {}",
+            spear_followthrough_yaw(0.0)
+        );
+
+        // 3. handoff continuity: the last windup frame and the first
+        //    follow-through frame must be within a couple of degrees
+        let last_windup = torso_coil_yaw(GunKind::Spear, DT, 0.0, false, -1.0);
+        let first_follow = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0);
+        assert!(
+            (last_windup - first_follow).abs() < 0.09, // ~5 deg
+            "release must not pop: windup ended at {last_windup}, follow-through starts at {first_follow}"
+        );
+
+        // 4. it CARRIES PAST the release angle (same sign, larger
+        //    magnitude) rather than reversing through neutral
+        let mut peak = 0.0_f32;
+        for i in 0..400 {
+            let y = spear_followthrough_yaw(i as f32 * 0.002);
+            assert!(
+                y >= -1e-4,
+                "must never swing back the other way (that is the coil direction), got {y}"
+            );
+            peak = peak.max(y);
+        }
+        assert!(
+            peak > SPEAR_RELEASE_YAW,
+            "must carry PAST the release yaw {SPEAR_RELEASE_YAW}, peaked at only {peak}"
+        );
+
+        // 5. and it actually relaxes back to neutral
+        assert!(
+            spear_followthrough_yaw(1.5).abs() < 0.001,
+            "must settle to neutral, not hold the carry forever"
         );
     }
 }

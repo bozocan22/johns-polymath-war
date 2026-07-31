@@ -1286,10 +1286,16 @@ pub struct Fighter {
     pub hull: f32,
     /// Pyro flame-projector fuel seconds.
     pub fuel: f32,
-    /// §6.2 (Brief VII v2): boarding the mech is COMMITTED, not instant -
-    /// counts down from MECH_ENTER_S; while >0 the chassis is sealing up
-    /// and can't fight yet (blocked in try_fire, crawl-speed movement).
+    /// §6.2 (Brief VII v2): mounting AND dismounting the mech are
+    /// COMMITTED, not instant - counts down from MECH_ENTER_S or
+    /// MECH_EXIT_S; while >0 the chassis is sealing up or powering down
+    /// and can't fight (blocked in try_fire).
     pub mech_transition_t: f32,
+    /// Which direction `mech_transition_t` is running. On an exit, the
+    /// chassis teardown is DEFERRED to the end of the window - that
+    /// deferral is what makes leaving committal rather than a one-tick
+    /// state flip.
+    pub mech_exiting: bool,
     /// §6.3: HP-threshold armor-drop events already fired this life -
     /// bitmask (bit0=70%, bit1=40%, bit2=15%) so each stage fires once.
     pub mech_plates_dropped: u8,
@@ -2253,6 +2259,24 @@ pub const MINIGUN_HEAT_DECAY: f32 = 16.5;
 /// (as tangents: tan 1.2° = 0.021, tan 3.5° = 0.061).
 pub const MINIGUN_SPREAD_COLD: f32 = 0.021;
 pub const MINIGUN_SPREAD_HOT: f32 = 0.061;
+
+/// §5.1 (Brief VI): a gun's base cone BEFORE movement/bloom. For the
+/// minigun this WIDENS with heat instead of blooming - 1.2 deg cold to
+/// 3.5 deg at full heat - which is that weapon's entire cost model.
+///
+/// Public and shared because the client's crosshair must show the same
+/// number the sim shoots: `GunSpec.spread` holds only the COLD value, so
+/// a client reading the spec directly showed a stability bracket that
+/// never moved across a full heat cycle while the real cone nearly
+/// tripled.
+pub fn base_spread(kind: GunKind, heat: f32) -> f32 {
+    if kind == GunKind::Minigun {
+        MINIGUN_SPREAD_COLD
+            + (MINIGUN_SPREAD_HOT - MINIGUN_SPREAD_COLD) * (heat / 100.0).clamp(0.0, 1.0)
+    } else {
+        gun(kind).spread
+    }
+}
 /// Carrying the mass: ×0.70 walk; barrels spun: ×0.55.
 pub const MINIGUN_MOVE_MULT: f32 = 0.70;
 pub const MINIGUN_SPUN_MOVE_MULT: f32 = 0.55;
@@ -2596,6 +2620,7 @@ impl TdmSim {
                     hull: 0.0,
                     fuel: 0.0,
                     mech_transition_t: 0.0,
+                    mech_exiting: false,
                     mech_plates_dropped: 0,
                     brace: false,
                     knife_phase: 0.0,
@@ -2789,7 +2814,24 @@ impl TdmSim {
             f.fire_cd = (f.fire_cd - DT).max(0.0);
             f.protect_t = (f.protect_t - DT).max(0.0);
             f.switch_t = (f.switch_t - DT).max(0.0);
-            f.mech_transition_t = (f.mech_transition_t - DT).max(0.0);
+            // §6.2: the mech transition timer covers BOTH directions.
+            // When an EXIT finishes, the chassis actually powers down
+            // here - deferring the teardown to the end of the window is
+            // what makes leaving committal instead of a single-tick
+            // state flip (MECH_EXIT_S was a dead constant before this).
+            if f.mech_transition_t > 0.0 {
+                f.mech_transition_t = (f.mech_transition_t - DT).max(0.0);
+                if f.mech_transition_t <= 0.0 && f.mech_exiting {
+                    f.mech_exiting = false;
+                    f.armor_set = ArmorSet::None;
+                    f.armor = 0.0;
+                    f.hull = 0.0;
+                    f.fuel = 0.0;
+                    f.mech_plates_dropped = 0;
+                }
+            } else {
+                f.mech_exiting = false;
+            }
             f.roll_cd = (f.roll_cd - DT).max(0.0);
             f.ammo_full_t = (f.ammo_full_t - DT).max(0.0);
             f.blind_t = (f.blind_t - DT).max(0.0);
@@ -2943,6 +2985,7 @@ impl TdmSim {
                     f.hull = 0.0;
                     f.fuel = 0.0;
                     f.mech_transition_t = 0.0;
+                    f.mech_exiting = false;
                     f.mech_plates_dropped = 0;
                     f.brace = false;
                     f.knife_phase = 0.0;
@@ -3190,7 +3233,14 @@ impl TdmSim {
         // ---- player -----------------------------------------------------
         let p = self.player;
         if self.fighters[p].alive() {
-            self.fighters[p].crouch = cmd.crouch;
+            // §6: a mech does NOT crouch. `height()` returns the chassis
+            // height unconditionally for a live mech, so a crouching mech
+            // kept its full 3.03 m hitbox while the renderer played the
+            // full soldier squat - the x2.0 visor band ended up floating
+            // in empty air above the model, and unreachable on it.
+            let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
+                && self.fighters[p].hull > 0.0;
+            self.fighters[p].crouch = cmd.crouch && !in_mech;
             self.fighters[p].lean = cmd.lean.clamp(-1.0, 1.0);
             // slot select (number keys) + shield toggle (E)
             if let Some(s) = cmd.slot {
@@ -3379,15 +3429,19 @@ impl TdmSim {
             // dead input for the mech by design.
             // §4.6 (Brief VI): U dismounts — the pilot steps out on
             // foot; the spent chassis is scrapped (the pad respawns)
+            // §6.2: leaving is COMMITTED too - the chassis powers down
+            // over MECH_EXIT_S and only then hands the pilot back. The
+            // teardown itself runs in the timer loop; pressing exit only
+            // STARTS it, and cannot be started while a transition (in
+            // either direction) is already running.
             if cmd.exit_mech
                 && self.fighters[p].armor_set == ArmorSet::RobotSuit
                 && self.fighters[p].hull > 0.0
+                && self.fighters[p].mech_transition_t <= 0.0
             {
                 let f = &mut self.fighters[p];
-                f.armor_set = ArmorSet::None;
-                f.armor = 0.0;
-                f.hull = 0.0;
-                f.fuel = 0.0;
+                f.mech_transition_t = MECH_EXIT_S;
+                f.mech_exiting = true;
             }
             // §5.3 (Brief VI): the missile pod. HOLD = targeting: a MECH
             // under the reticle (6° cone, ≤250 m, LOS) accrues lock —
@@ -3683,6 +3737,12 @@ impl TdmSim {
                 && self.fighters[p].roll_t <= 0.0
                 && !self.fighters[p].shield_up
                 && self.fighters[p].cook_t <= 0.0
+                // §3: a spear already committed to a THROW cannot also
+                // thrust - the weapon is mid-air-or-about-to-be. try_fire
+                // already has the mirror of this guard (`knife_phase >
+                // 0.0` blocks a throw during a thrust); without this side
+                // one spear landed two separate attacks.
+                && self.fighters[p].spear_wind_t <= 0.0
             {
                 let f = &mut self.fighters[p];
                 f.knife_phase = DT;
@@ -4330,7 +4390,15 @@ impl TdmSim {
                 || f.knife_phase > 0.0 // §5: the blade owns both hands too
                 || f.flip_t > 0.0 // §4.2: a flip is PURE mobility
                 || f.flip_used // ...and the gun returns on landing recovery
-                || f.mech_transition_t > 0.0 // §6.2: the chassis is still sealing up
+                // §6.2: the chassis is still sealing up. Scoped to
+                // ACTUALLY being in a chassis: the timer is mech state,
+                // but this gate is not, so a pilot who dismounts (or is
+                // blown out) mid-entry used to stay disarmed on foot for
+                // the rest of the window, with nothing in the HUD saying
+                // why.
+                || (f.mech_transition_t > 0.0
+                    && f.armor_set == ArmorSet::RobotSuit
+                    && f.hull > 0.0)
             {
                 return false;
             }
@@ -4355,15 +4423,7 @@ impl TdmSim {
                 .clamp(0.0, 1.0)
         };
         let airborne_pen = if self.fighters[i].grounded { 0.0 } else { 1.5 };
-        // §5.1 (Brief VI): the minigun's cone WIDENS with heat instead
-        // of bloom — 1.2° cold to 3.5° at full heat
-        let base_spread = if self.fighters[i].gun == GunKind::Minigun {
-            MINIGUN_SPREAD_COLD
-                + (MINIGUN_SPREAD_HOT - MINIGUN_SPREAD_COLD)
-                    * (self.fighters[i].heat / 100.0)
-        } else {
-            spec.spread
-        };
+        let base_spread = base_spread(self.fighters[i].gun, self.fighters[i].heat);
         let mut spread = base_spread
             + spec.spread_move * (move_frac + airborne_pen)
             + self.fighters[i].bloom;
@@ -5847,6 +5907,9 @@ impl TdmSim {
                     f.armor = 0.0;
                     f.health = f.health.min(MECH_EJECT_HP);
                     f.mech_plates_dropped = 0;
+                    // being blown out mid-boarding must not leave the
+                    // ejected pilot disarmed on top of everything else
+                    f.mech_transition_t = 0.0;
                 }
                 return 0.0; // the pilot takes nothing while the hull holds
             }
@@ -7874,15 +7937,25 @@ mod tests {
                 s.fighters[0].vy
             );
         }
-        // DISMOUNT: U sheds the chassis, pilot on foot
+        // DISMOUNT: U starts the power-down; §6.2 makes leaving COMMITTED
+        // (MECH_EXIT_S) rather than a one-tick flip, so the pilot is on
+        // foot only once the window closes.
         s.step(PlayerCmd {
             exit_mech: true,
             ..Default::default()
         });
         assert_eq!(
             s.fighters[0].armor_set,
+            ArmorSet::RobotSuit,
+            "the chassis powers down over MECH_EXIT_S - not instantly"
+        );
+        for _ in 0..((MECH_EXIT_S * SIM_HZ as f32) as usize + 3) {
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(
+            s.fighters[0].armor_set,
             ArmorSet::None,
-            "U must dismount the mech"
+            "U must dismount the mech once the power-down completes"
         );
         // KILLABLE: re-board with a scrap hull, burn it → eject at ≤25
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
@@ -9067,6 +9140,124 @@ mod tests {
             s.step(PlayerCmd::default());
         }
         assert_eq!(s.fighters[0].mech_transition_t, 0.0, "sealed - ready to fight");
+    }
+
+    /// §6.2: the entry timer is CHASSIS state, but `try_fire`'s gate was
+    /// not scoped to actually being in a chassis - so a pilot who
+    /// dismounted (or was blown out) mid-boarding stayed disarmed ON
+    /// FOOT for the rest of the window, with nothing in the HUD saying
+    /// why. Both teardown paths must hand back a pilot who can fight.
+    #[test]
+    fn leaving_the_chassis_mid_entry_does_not_disarm_the_pilot() {
+        // -- destroyed mid-entry: the ejected pilot must be able to fight
+        let mut s = range(36);
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_transition_t = MECH_ENTER_S;
+        s.fighters[0].ammo = 30;
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "still sealing up inside a live chassis: correctly blocked"
+        );
+        // blow the chassis out from under them
+        s.fighters[0].hull = 0.0;
+        s.fighters[0].armor_set = ArmorSet::None;
+        assert!(
+            s.fighters[0].mech_transition_t > 0.0,
+            "the entry timer is still running - that is the whole point"
+        );
+        assert!(
+            s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "an ejected pilot on foot must be able to defend themselves"
+        );
+
+        // -- voluntary dismount: exit is committal, then the pilot is free
+        let mut s = range(37);
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].ammo = 30;
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(
+            s.fighters[0].mech_exiting && s.fighters[0].mech_transition_t > 0.0,
+            "leaving must be COMMITTED (MECH_EXIT_S), not a one-tick state flip"
+        );
+        assert_eq!(
+            s.fighters[0].armor_set,
+            ArmorSet::RobotSuit,
+            "the chassis is still powering down - teardown is deferred"
+        );
+        for _ in 0..((MECH_EXIT_S * SIM_HZ as f32) as usize + 3) {
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(
+            s.fighters[0].armor_set,
+            ArmorSet::None,
+            "power-down finished: the pilot is back on foot"
+        );
+        assert_eq!(s.fighters[0].hull, 0.0);
+        assert!(!s.fighters[0].mech_exiting, "exit flag must clear");
+        s.fighters[0].ammo = 30;
+        s.fighters[0].fire_cd = 0.0;
+        assert!(
+            s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "a dismounted pilot must be able to fire"
+        );
+    }
+
+    /// §5.1: the minigun's cone is its cost model, so the number the
+    /// client shows and the number the sim shoots must be ONE function.
+    /// `GunSpec.spread` holds only the cold value.
+    #[test]
+    fn base_spread_widens_with_minigun_heat_and_is_flat_for_everything_else() {
+        assert!(
+            (base_spread(GunKind::Minigun, 0.0) - MINIGUN_SPREAD_COLD).abs() < 1e-6,
+            "cold minigun must be exactly the cold constant"
+        );
+        assert!(
+            (base_spread(GunKind::Minigun, 100.0) - MINIGUN_SPREAD_HOT).abs() < 1e-6,
+            "fully hot minigun must be exactly the hot constant"
+        );
+        let mid = base_spread(GunKind::Minigun, 50.0);
+        assert!(
+            mid > MINIGUN_SPREAD_COLD && mid < MINIGUN_SPREAD_HOT,
+            "half heat must land between the two, got {mid}"
+        );
+        assert!(
+            base_spread(GunKind::Minigun, 100.0) > base_spread(GunKind::Minigun, 0.0) * 2.5,
+            "the widening must be the big multiplier the brief specifies"
+        );
+        // heat is a minigun-only concept - every other gun ignores it
+        for k in [GunKind::M4, GunKind::Awm, GunKind::Glock] {
+            assert_eq!(
+                base_spread(k, 0.0),
+                base_spread(k, 100.0),
+                "{k:?} must not react to heat at all"
+            );
+            assert_eq!(base_spread(k, 0.0), gun(k).spread);
+        }
+    }
+
+    /// §3: one spear, one attack. `try_fire` already refused to start a
+    /// throw during a live thrust; nothing guarded the reverse, so
+    /// holding the melee key inside a throw windup landed BOTH.
+    #[test]
+    fn a_thrust_cannot_be_started_during_a_throw_windup() {
+        let mut s = range(38);
+        s.fighters[0].gun = GunKind::Spear;
+        s.fighters[0].ammo = 2;
+        assert!(
+            s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "the throw itself must start"
+        );
+        assert!(s.fighters[0].spear_wind_t > 0.0, "windup is live");
+        // hold the melee key well inside the windup
+        for _ in 0..10 {
+            s.step(PlayerCmd { knife_hold: true, ..Default::default() });
+            assert_eq!(
+                s.fighters[0].knife_phase, 0.0,
+                "a thrust must not start while the same spear is mid-throw"
+            );
+        }
     }
 
     /// §6.3: drive hull down through 70/40/15% and assert each plate
