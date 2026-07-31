@@ -18,8 +18,14 @@ the session which briefs to read.
 | `BRIEF_VIII_master.md` | spec | **Master brief.** Consolidates briefs II–VII into one standalone document. Motion doctrine, first-person, HUD anatomy, spear, mech, third-person camera, Forge, handback. Read this first if you are new to the project. |
 | `BRIEF_VIII_B_addendum.md` | spec | Corrections after concept art. 20-segment body with mass fractions and joint limits, the elastic load model (stretch-shortening cycle), mech scale decision, mech visual spec with palette. |
 | `BRIEF_IX_castle_grenade_customization.md` | spec | Castle maps with three elevation tiers and sightline rules; grenade opening mechanics, blast falloff and environmental interaction; layered character customization bound to the 26-piece armour set. |
-| `PROMPT_mech_rebuild.md` | prompt | 6-task workflow: audit, reference gathering, 20-segment body rebuild, elastic load model, scale decision, mech rebuild, report. |
-| `PROMPT_brief_X_research.md` | prompt | 8-task workflow: self-directed research into first-person dynamics, layered character creation, and reload / weapon render / runtime asset console — then implement, test, capture, report. Research lands in `research/` and is committed. |
+| **`PROMPT_MASTER_research_build.md`** | **prompt** | **The one to paste.** 13-task workflow covering eight research topics — first-person dynamics, aiming, traversal (dodge/jump/flip/climb/vault), layered character creation, weapon systems (reload FSM / render / runtime console), grenade aiming physics, map design, and powered armour — then synthesis, implementation, tests, captures, report. Ships with a seeded source ledger. Supersedes the two prompts below. |
+| `PROMPT_mech_rebuild.md` | prompt | *Superseded.* 6-task mech workflow: audit, reference gathering, 20-segment body rebuild, elastic load model, scale decision, mech rebuild, report. Kept for the mech-specific detail not carried into the master prompt. |
+| `PROMPT_brief_X_research.md` | prompt | *Superseded by the master prompt,* which absorbs all three of its topics. Kept for its per-section changelog. |
+
+## If you are pasting something into Claude Code
+
+Paste `PROMPT_MASTER_research_build.md`, between its BEGIN and END markers. Nothing else.
+It reads the specification briefs from disk itself.
 
 ## Reading order for someone new
 
