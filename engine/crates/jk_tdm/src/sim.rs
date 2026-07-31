@@ -1899,13 +1899,47 @@ pub enum GrenadeTick {
     Rest,
 }
 
+/// Brief IX-B "Bounce & Rolling Physics": each cover material's own
+/// bounce coefficient, overriding the throw kind's default restitution
+/// on contact with that specific material. Organic surfaces (brief:
+/// "cloth, flesh, sandbagged positions") are sticky - effectively zero
+/// bounce, the grenade stays where it lands - mapped onto the two
+/// vegetation `CoverKind`s (hedge/tree) as this game's closest analog;
+/// stone is stone, crates stand in for the brief's "wood/metal".
+fn surface_restitution(kind: CoverKind) -> f32 {
+    match kind {
+        CoverKind::Stone => 0.40,
+        CoverKind::Crate => 0.50,
+        CoverKind::Hedge | CoverKind::Tree => 0.05,
+    }
+}
+
+/// Which cover object (if any) a bounce contact point actually landed
+/// on, to look up its material. An independent short scan rather than
+/// threading an index through `CoverGrid::ray_hit`'s return type (used
+/// by seven unrelated systems - bullets, LOS, rockets, smoke) - cover
+/// counts are small (tens, not thousands) per map, so this stays cheap.
+fn cover_kind_at(cover: &[Aabb], cover_kind: &[CoverKind], contact: [f32; 3]) -> Option<CoverKind> {
+    const PAD: f32 = 0.05;
+    cover.iter().position(|a| {
+        (0..3).all(|k| contact[k] >= a.min[k] - PAD && contact[k] <= a.max[k] + PAD)
+    })
+    .and_then(|i| cover_kind.get(i).copied())
+}
+
 /// One 120 Hz grenade physics tick — THE integrator, shared verbatim by
 /// the live flight (`step_grenades`) and the §1 (Brief V) aim preview
 /// (`predict_grenade`). There is deliberately no second arc formula
 /// anywhere: a preview that can diverge from the throw is worse than no
-/// preview. 9.81 gravity, friction+restitution bounce, rest test,
+/// preview. 9.81 gravity, friction+restitution bounce (material-specific
+/// per Brief IX-B where the contact is a known cover object), rest test,
 /// settle guarantee, molotov shatter, fuse expiry.
-pub fn grenade_tick(g: &mut Grenade, grid: &CoverGrid, cover: &[Aabb]) -> GrenadeTick {
+pub fn grenade_tick(
+    g: &mut Grenade,
+    grid: &CoverGrid,
+    cover: &[Aabb],
+    cover_kind: &[CoverKind],
+) -> GrenadeTick {
     g.fuse_t -= DT;
     if g.fuse_t <= 0.0 {
         return GrenadeTick::Boom;
@@ -1949,14 +1983,21 @@ pub fn grenade_tick(g: &mut Grenade, grid: &CoverGrid, cover: &[Aabb]) -> Grenad
             old[1] + dn[1] * (t - 0.01).max(0.0),
             old[2] + dn[2] * (t - 0.01).max(0.0),
         ];
+        // Brief IX-B: a contact on a KNOWN cover object uses that
+        // material's own bounce coefficient in place of the throw kind's
+        // default (ground-plane hits, with no cover object, keep the
+        // kind's own restitution unchanged - unaffected by this).
+        let material = cover_kind_at(cover, cover_kind, contact);
+        let base_restitution = material.map_or(spec.restitution, surface_restitution);
+        let sticky = matches!(material, Some(CoverKind::Hedge) | Some(CoverKind::Tree));
         let vn = g.vel[0] * n[0] + g.vel[1] * n[1] + g.vel[2] * n[2];
         let vnv = [n[0] * vn, n[1] * vn, n[2] * vn];
         let vt = [g.vel[0] - vnv[0], g.vel[1] - vnv[1], g.vel[2] - vnv[2]];
         g.bounces += 1;
         let rest_coef = if g.bounces > 3 {
-            spec.restitution * 0.5_f32.powi(g.bounces as i32 - 3)
+            base_restitution * 0.5_f32.powi(g.bounces as i32 - 3)
         } else {
-            spec.restitution
+            base_restitution
         };
         g.vel = [
             vt[0] * (1.0 - spec.friction) - vnv[0] * rest_coef,
@@ -1964,9 +2005,14 @@ pub fn grenade_tick(g: &mut Grenade, grid: &CoverGrid, cover: &[Aabb]) -> Grenad
             vt[2] * (1.0 - spec.friction) - vnv[2] * rest_coef,
         ];
         g.pos = contact;
+        if sticky {
+            // "sticks on contact... does not bounce; detonates in place"
+            g.rest = true;
+            g.vel = [0.0; 3];
+        }
         // §5.2 rest test — without it: infinite micro-bounces
         let speed = (g.vel[0] * g.vel[0] + g.vel[1] * g.vel[1] + g.vel[2] * g.vel[2]).sqrt();
-        if vn.abs() * rest_coef < 0.35 && speed < 0.6 {
+        if !g.rest && vn.abs() * rest_coef < 0.35 && speed < 0.6 {
             g.rest = true;
             g.vel = [0.0; 3];
             g.pos[1] = g.pos[1].max(0.02);
@@ -5365,10 +5411,11 @@ impl TdmSim {
             grenades_air,
             grid,
             cover,
+            cover_kind,
             ..
         } = self;
         for g in grenades_air.iter_mut() {
-            if let GrenadeTick::Boom = grenade_tick(g, grid, cover) {
+            if let GrenadeTick::Boom = grenade_tick(g, grid, cover, cover_kind) {
                 boom_ids.push(g.id);
             }
         }
@@ -5409,7 +5456,7 @@ impl TdmSim {
         let mut first_bounce: Option<usize> = None;
         let steps = (max_s / DT) as usize;
         for _ in 0..steps {
-            match grenade_tick(&mut g, &self.grid, &self.cover) {
+            match grenade_tick(&mut g, &self.grid, &self.cover, &self.cover_kind) {
                 GrenadeTick::Boom | GrenadeTick::Rest => {
                     return (pts, g.pos, first_bounce)
                 }
@@ -8451,6 +8498,92 @@ mod tests {
         assert!(
             s.fighters[1].health < h0,
             "a frag well past the old 6m radius must still tick damage under the new 20m falloff"
+        );
+    }
+
+    /// Brief IX-B "Bounce & Rolling Physics": the exact per-material
+    /// coefficient table.
+    #[test]
+    fn surface_restitution_matches_the_brief_ix_b_table() {
+        assert_eq!(surface_restitution(CoverKind::Stone), 0.40);
+        assert_eq!(surface_restitution(CoverKind::Crate), 0.50, "wood/metal analog");
+        assert_eq!(surface_restitution(CoverKind::Hedge), 0.05, "organic: sticky");
+        assert_eq!(surface_restitution(CoverKind::Tree), 0.05, "organic: sticky");
+    }
+
+    #[test]
+    fn cover_kind_at_finds_the_containing_object_and_none_for_open_air() {
+        let cover = vec![Aabb { min: [-1.0, 0.0, -1.0], max: [1.0, 2.0, 1.0] }];
+        let kind = vec![CoverKind::Stone];
+        assert_eq!(cover_kind_at(&cover, &kind, [0.0, 1.0, 0.0]), Some(CoverKind::Stone));
+        assert_eq!(
+            cover_kind_at(&cover, &kind, [50.0, 1.0, 50.0]),
+            None,
+            "far from any cover object must read as open air, not a false match"
+        );
+    }
+
+    /// Brief IX-B: grenades bounce at each surface's OWN coefficient
+    /// instead of a single per-throw-kind default - organic cover sticks
+    /// (immediate rest, zero velocity) rather than bouncing at all, stone
+    /// bounces normally.
+    #[test]
+    fn grenade_bounce_uses_surface_material_stone_bounces_organic_sticks() {
+        // -- organic (hedge): sticks on contact
+        let mut s = range(57);
+        s.cover.push(Aabb { min: [-3.0, 0.0, 2.0], max: [3.0, 3.0, 2.5] });
+        s.cover_kind.push(CoverKind::Hedge);
+        s.rebuild_grid();
+        s.grenades_air.push(Grenade {
+            id: 9300,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.5, 1.8],
+            vel: [0.0, 0.0, 4.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 5.0, // long fuse - only checking the bounce, not the boom
+            bounces: 0,
+            rest: false,
+        });
+        for _ in 0..15 {
+            s.step_grenades();
+        }
+        let g = s
+            .grenades_air
+            .iter()
+            .find(|g| g.id == 9300)
+            .expect("must still be tracked (long fuse, no detonation yet)");
+        assert!(g.rest, "organic surfaces must stick (rest) rather than bounce");
+        assert_eq!(g.vel, [0.0, 0.0, 0.0], "sticking means zero residual velocity");
+
+        // -- stone: bounces at ~40% restitution, does not immediately stick
+        let mut s = range(58);
+        s.cover.push(Aabb { min: [-3.0, 0.0, 2.0], max: [3.0, 3.0, 2.5] });
+        s.cover_kind.push(CoverKind::Stone);
+        s.rebuild_grid();
+        s.grenades_air.push(Grenade {
+            id: 9301,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.5, 1.8],
+            vel: [0.0, 0.0, 4.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 5.0,
+            bounces: 0,
+            rest: false,
+        });
+        for _ in 0..10 {
+            s.step_grenades();
+        }
+        let g = s
+            .grenades_air
+            .iter()
+            .find(|g| g.id == 9301)
+            .expect("must still be tracked (long fuse, no detonation yet)");
+        assert!(g.bounces >= 1, "must have bounced off stone within 10 ticks");
+        assert!(
+            !g.rest,
+            "a single stone bounce (0.40 restitution) must not immediately stick like organic cover"
         );
     }
 
