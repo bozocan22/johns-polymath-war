@@ -3059,6 +3059,17 @@ impl TdmSim {
                     f.cook_t = 0.0;
                     f.blind_t = 0.0;
                     f.burn_t = 0.0;
+                    // Death mid-action must not tax the NEXT life: dying
+                    // during a 3s reload left reload_t counting through
+                    // the corpse, so the respawn arrived with a full mag
+                    // it could not fire for up to 3 seconds (try_fire
+                    // gates on reload_t). Same for a mid-switch death
+                    // (0.6s), a hot fire_cd, and accumulated bloom
+                    // spreading the fresh body's first shots.
+                    f.reload_t = 0.0;
+                    f.switch_t = 0.0;
+                    f.fire_cd = 0.0;
+                    f.bloom = 0.0;
                     // A bot's fire gate is `los_time > reaction_s`, and
                     // `bot_act` is skipped entirely while dead - so
                     // los_time froze at whatever it held the instant the
@@ -7160,6 +7171,39 @@ mod tests {
         assert!(
             mech_speed <= cap,
             "a bot mech must obey its armor pace: {mech_speed} > {cap}"
+        );
+    }
+
+    /// A death mid-action must not tax the next life. Dying during a
+    /// reload used to leave reload_t counting through the corpse, so the
+    /// respawn arrived with a full magazine it could not fire for up to
+    /// 3 seconds. (The bot mirror of this - los_time surviving death -
+    /// was wave 2's find; this is the player-side sweep of the same
+    /// respawn block.)
+    #[test]
+    fn a_respawned_fighter_can_fire_immediately() {
+        let mut s = range(88);
+        // die mid-reload with a hot barrel and heavy bloom
+        s.fighters[0].reload_t = 2.5;
+        s.fighters[0].switch_t = 0.5;
+        s.fighters[0].fire_cd = 1.2;
+        s.fighters[0].bloom = 0.04;
+        s.fighters[0].health = 0.0;
+        s.fighters[0].respawn_t = RESPAWN_S;
+        for _ in 0..((RESPAWN_S * SIM_HZ as f32) as usize + 2) {
+            s.step(PlayerCmd::default());
+        }
+        assert!(s.fighters[0].alive(), "must have respawned");
+        let f = &s.fighters[0];
+        assert_eq!(f.reload_t, 0.0, "no ghost reload on the fresh body");
+        assert_eq!(f.switch_t, 0.0, "no ghost weapon switch");
+        assert_eq!(f.fire_cd, 0.0, "no ghost fire cooldown");
+        assert_eq!(f.bloom, 0.0, "no inherited spread");
+        let mut s2 = s;
+        s2.fighters[0].protect_t = 0.0; // firing clears it anyway
+        assert!(
+            s2.try_fire(0, [0.0, 0.0, 1.0], false),
+            "a fresh spawn must be able to defend itself immediately"
         );
     }
 
