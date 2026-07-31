@@ -574,6 +574,47 @@ struct GameSettings {
     /// §8: swap the aim/fire mouse buttons back to convention.
     swap_mouse: bool,
     minimap: bool,
+    /// Index into `SENS_CHOICES` - a multiplier on `MOUSE_SENS`. Mouse
+    /// sensitivity was a hard-coded constant with no way to change it,
+    /// which makes the game unplayable for anyone whose mouse DPI does
+    /// not happen to match the one it was tuned on.
+    sens_idx: usize,
+    /// Index into `FOV_CHOICES` - the hip-fire vertical FOV in degrees,
+    /// replacing the fixed `FOV_HIP_DEG`.
+    fov_idx: usize,
+    /// Invert the vertical look axis.
+    invert_y: bool,
+}
+
+/// Sensitivity multipliers applied to `MOUSE_SENS`.
+const SENS_CHOICES: [(&str, f32); 6] = [
+    ("0.50x  (very low)", 0.50),
+    ("0.75x  (low)", 0.75),
+    ("1.00x  (default)", 1.00),
+    ("1.50x  (high)", 1.50),
+    ("2.00x  (very high)", 2.00),
+    ("3.00x  (twitch)", 3.00),
+];
+/// Hip-fire vertical FOV, degrees. The old fixed value was 62, which is
+/// narrow enough to read as claustrophobic on a wide monitor.
+const FOV_CHOICES: [(&str, f32); 6] = [
+    ("62  (original)", 62.0),
+    ("70", 70.0),
+    ("80", 80.0),
+    ("90  (recommended)", 90.0),
+    ("100", 100.0),
+    ("110  (max)", 110.0),
+];
+const SENS_DEFAULT_IDX: usize = 2;
+const FOV_DEFAULT_IDX: usize = 3;
+
+impl GameSettings {
+    fn sens_mult(&self) -> f32 {
+        SENS_CHOICES[self.sens_idx.min(SENS_CHOICES.len() - 1)].1
+    }
+    fn fov_deg(&self) -> f32 {
+        FOV_CHOICES[self.fov_idx.min(FOV_CHOICES.len() - 1)].1
+    }
 }
 
 impl Default for GameSettings {
@@ -581,6 +622,9 @@ impl Default for GameSettings {
         GameSettings {
             swap_mouse: false,
             minimap: true,
+            sens_idx: SENS_DEFAULT_IDX,
+            fov_idx: FOV_DEFAULT_IDX,
+            invert_y: false,
         }
     }
 }
@@ -1942,6 +1986,12 @@ fn capture_quick_deploy(
     if *started || cap.script.is_none() {
         return;
     }
+    // "menus" stays in Intro on purpose - it is capturing the loadout
+    // and settings SCREENS, which never enter Playing at all, so the
+    // Playing-gated drivers below can never see them.
+    if cap.script.as_deref() == Some("menus") {
+        return;
+    }
     *started = true;
     // The §1.2 first-run "GOOD TO KNOW" card is dismissed by any keypress,
     // but scripts like mech_scale only synthesize `look`, never a key -
@@ -2083,6 +2133,53 @@ fn capture_screenshot_driver(
     let _ = &mut shots; // reserved: kept for API-version fallback
 }
 
+/// The loadout (Intro) and Settings screens never enter `Playing`, so the
+/// Playing-gated drivers above can never photograph them - which meant UI
+/// work was the one part of this codebase exempt from "visible or it
+/// didn't happen". This walks Intro -> Settings on a timer and snaps
+/// each. Inert unless `JK_CAPTURE=menus`.
+fn capture_menus(
+    cap: Res<CaptureMode>,
+    time: Res<Time>,
+    mut commands: Commands,
+    mut t: Local<f32>,
+    mut stage: Local<usize>,
+    mut next: ResMut<NextState<GameState>>,
+    window: Query<Entity, With<PrimaryWindow>>,
+) {
+    if cap.script.as_deref() != Some("menus") {
+        return;
+    }
+    *t += time.delta_secs();
+    let snap = |commands: &mut Commands, label: &str| {
+        let dir = "handback/brief-vii/menus".to_string();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(win) = window.get_single() {
+            commands
+                .spawn(Screenshot::window(win))
+                .observe(bevy::render::view::screenshot::save_to_disk(format!(
+                    "{dir}/{label}.png"
+                )));
+        }
+    };
+    match *stage {
+        0 if *t > 1.2 => {
+            snap(&mut commands, "01-loadout-intro");
+            *stage = 1;
+        }
+        1 if *t > 1.8 => {
+            next.set(GameState::Settings);
+            *stage = 2;
+        }
+        2 if *t > 2.8 => {
+            snap(&mut commands, "02-settings");
+            *stage = 3;
+        }
+        3 if *t > 3.6 => std::process::exit(0),
+        _ => {}
+    }
+}
+
 /// §10: low-health screen tint that pulses gently while regenerating -
 /// the regen timer is readable without a HUD element.
 #[derive(Component)]
@@ -2184,6 +2281,9 @@ enum MenuButton {
 enum SettingsButton {
     SwapMouse,
     Minimap,
+    Sens,
+    Fov,
+    InvertY,
     Back,
 }
 
@@ -2195,6 +2295,9 @@ struct SettingsLabel(SettingsButtonKind);
 enum SettingsButtonKind {
     SwapMouse,
     Minimap,
+    Sens,
+    Fov,
+    InvertY,
 }
 
 fn main() {
@@ -2226,6 +2329,8 @@ fn main() {
         .init_resource::<CaptureMode>()
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
+        // menu capture runs in the MENU states, not Playing
+        .add_systems(Update, capture_menus)
         // PreUpdate, not Update: a synthetic `.press()` only sets
         // just_pressed for one frame, same as real OS input — but real
         // input arrives in PreUpdate (guaranteed before every Update
@@ -5133,10 +5238,15 @@ fn input_and_step(
     // §3.2: the one multiplier allowed is the zoom sensitivity match,
     // fed the LIVE mid-transition FOV so tracking stays continuous.
     if cam.grabbed {
-        let zoom_mult = ads_sens_mult(FOV_HIP_DEG.to_radians(), cam.fov_now, ADS_SENS_RATIO);
+        // the zoom match is measured against the player's CHOSEN hip FOV,
+        // not the old fixed one, or picking a wide FOV would silently
+        // change effective ADS sensitivity too
+        let zoom_mult = ads_sens_mult(settings.fov_deg().to_radians(), cam.fov_now, ADS_SENS_RATIO);
+        let sens = MOUSE_SENS * settings.sens_mult();
+        let y_sign = if settings.invert_y { -1.0 } else { 1.0 };
         for ev in motion.read() {
-            cam.yaw -= ev.delta.x * MOUSE_SENS * zoom_mult;
-            cam.pitch = (cam.pitch + ev.delta.y * MOUSE_SENS * zoom_mult)
+            cam.yaw -= ev.delta.x * sens * zoom_mult;
+            cam.pitch = (cam.pitch + ev.delta.y * sens * zoom_mult * y_sign)
                 .clamp(-1.53, 1.53);
         }
     } else {
@@ -6748,6 +6858,7 @@ fn camera_system(
     game: Res<Game>,
     mut cam_ctl: ResMut<CamCtl>,
     cam_tuning: Res<CameraTuning>,
+    settings: Res<GameSettings>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainCam>>,
 ) {
     cam_ctl.recoil = (cam_ctl.recoil - time.delta_secs() * 5.0).max(0.0);
@@ -6975,9 +7086,10 @@ fn camera_system(
                 gun(p.gun).zoom_deg
             }
         } else {
-            FOV_HIP_DEG
+            settings.fov_deg()
         };
-        let hip = FOV_HIP_DEG.to_radians();
+        // the player's chosen hip FOV, not the fixed 62 (Settings)
+        let hip = settings.fov_deg().to_radians();
         let fov = hip + (zoom.to_radians() - hip) * ads_e;
         persp.fov = fov;
         cam_ctl.fov_now = fov; // §3.2 reads the live value next frame
@@ -9392,7 +9504,7 @@ fn open_settings(
                 TextColor(Color::srgb(0.92, 0.75, 0.27)),
             ));
             p.spawn((
-                Text::new("mode / map / difficulty / team size / loadout changes:\nESC menu > Change Mode / Loadout, then redeploy"),
+                Text::new("Click a row to change it.  Settings apply immediately.\nmode / map / difficulty / team size / loadout:  ESC menu > Change Mode / Loadout"),
                 TextFont {
                     font_size: 15.0,
                     ..default()
@@ -9400,6 +9512,21 @@ fn open_settings(
                 TextColor(Color::srgb(0.7, 0.78, 0.95)),
             ));
             for (which, kind, label) in [
+                (
+                    SettingsButton::Sens,
+                    Some(SettingsButtonKind::Sens),
+                    settings_label_text(SettingsButtonKind::Sens, &settings),
+                ),
+                (
+                    SettingsButton::Fov,
+                    Some(SettingsButtonKind::Fov),
+                    settings_label_text(SettingsButtonKind::Fov, &settings),
+                ),
+                (
+                    SettingsButton::InvertY,
+                    Some(SettingsButtonKind::InvertY),
+                    settings_label_text(SettingsButtonKind::InvertY, &settings),
+                ),
                 (
                     SettingsButton::SwapMouse,
                     Some(SettingsButtonKind::SwapMouse),
@@ -9453,6 +9580,15 @@ fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
         SettingsButtonKind::Minimap => {
             format!("Minimap: {}  (M in game)", if s.minimap { "ON" } else { "OFF" })
         }
+        SettingsButtonKind::Sens => {
+            format!("Mouse sensitivity: {}", SENS_CHOICES[s.sens_idx].0)
+        }
+        SettingsButtonKind::Fov => {
+            format!("Field of view: {} deg", FOV_CHOICES[s.fov_idx].0)
+        }
+        SettingsButtonKind::InvertY => {
+            format!("Invert look Y: {}", if s.invert_y { "ON" } else { "OFF" })
+        }
     }
 }
 
@@ -9483,6 +9619,19 @@ fn settings_buttons(
                 }
                 SettingsButton::Minimap => {
                     settings.minimap = !settings.minimap;
+                    dirty = true;
+                }
+                // click cycles forward through the choice list and wraps
+                SettingsButton::Sens => {
+                    settings.sens_idx = (settings.sens_idx + 1) % SENS_CHOICES.len();
+                    dirty = true;
+                }
+                SettingsButton::Fov => {
+                    settings.fov_idx = (settings.fov_idx + 1) % FOV_CHOICES.len();
+                    dirty = true;
+                }
+                SettingsButton::InvertY => {
+                    settings.invert_y = !settings.invert_y;
                     dirty = true;
                 }
                 SettingsButton::Back => next.set(GameState::Paused),
@@ -10429,6 +10578,57 @@ mod forge_tests {
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
         let _ = std::fs::remove_file(forge_slot_path(slot)); // clean up after itself
+    }
+
+    /// Settings must be real: every choice list has to be non-empty,
+    /// ordered, and indexable by the default, or the settings screen
+    /// panics or silently shows the wrong row.
+    #[test]
+    fn settings_choice_lists_are_valid_and_defaults_are_in_range() {
+        assert!(SENS_DEFAULT_IDX < SENS_CHOICES.len());
+        assert!(FOV_DEFAULT_IDX < FOV_CHOICES.len());
+        let s = GameSettings::default();
+        assert!((s.sens_mult() - 1.0).abs() < 1e-6, "default sensitivity is 1.00x");
+        assert_eq!(s.fov_deg(), 90.0, "default FOV is the recommended 90");
+        // strictly increasing, so cycling reads as a real scale
+        for w in SENS_CHOICES.windows(2) {
+            assert!(w[1].1 > w[0].1, "sensitivity choices must ascend");
+        }
+        for w in FOV_CHOICES.windows(2) {
+            assert!(w[1].1 > w[0].1, "FOV choices must ascend");
+        }
+        // and every index is reachable by cycling, landing back at the start
+        let mut idx = 0usize;
+        for _ in 0..SENS_CHOICES.len() {
+            idx = (idx + 1) % SENS_CHOICES.len();
+        }
+        assert_eq!(idx, 0, "cycling must wrap exactly");
+    }
+
+    /// A settings value that cannot be read back is a dead control.
+    #[test]
+    fn every_settings_row_renders_a_distinct_live_label() {
+        let mut s = GameSettings::default();
+        let kinds = [
+            SettingsButtonKind::Sens,
+            SettingsButtonKind::Fov,
+            SettingsButtonKind::InvertY,
+            SettingsButtonKind::SwapMouse,
+            SettingsButtonKind::Minimap,
+        ];
+        for k in kinds {
+            assert!(!settings_label_text(k, &s).is_empty());
+        }
+        // and each row's label actually CHANGES when its value does
+        let before = settings_label_text(SettingsButtonKind::Sens, &s);
+        s.sens_idx = (s.sens_idx + 1) % SENS_CHOICES.len();
+        assert_ne!(before, settings_label_text(SettingsButtonKind::Sens, &s));
+        let before = settings_label_text(SettingsButtonKind::Fov, &s);
+        s.fov_idx = (s.fov_idx + 1) % FOV_CHOICES.len();
+        assert_ne!(before, settings_label_text(SettingsButtonKind::Fov, &s));
+        let before = settings_label_text(SettingsButtonKind::InvertY, &s);
+        s.invert_y = !s.invert_y;
+        assert_ne!(before, settings_label_text(SettingsButtonKind::InvertY, &s));
     }
 
     #[test]
