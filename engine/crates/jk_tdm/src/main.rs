@@ -102,6 +102,10 @@ struct CamCtl {
     /// TP_BOOM/TP_BOOM_SPRINT with a 0.12s lag, independent of the ADS
     /// pull-in which blends further on top of whatever this settles to.
     sprint_boom: f32,
+    /// §2.5/§5.2: velocity state for the boom-collision RECOVERY spring
+    /// (`SPRING_K_CAMERA_BOOM`) - zeroed on every instant pull-in so a
+    /// recovery in progress never fights the next snap.
+    boom_vel: f32,
 }
 
 impl Default for CamCtl {
@@ -126,6 +130,7 @@ impl Default for CamCtl {
             zoom_stage: 0,
             prev_fire_cd: 0.0,
             sprint_boom: TP_BOOM,
+            boom_vel: 0.0,
         }
     }
 }
@@ -376,9 +381,9 @@ fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bo
         0.0
     }
 }
-/// Camera collision pad (§5.2) and its slow push-back-out time.
+/// Camera collision pad (§5.2) - the push-back-out itself is now the
+/// SPRING_K_CAMERA_BOOM critical spring, not a fixed time constant.
 const CAM_PAD: f32 = 0.2;
-const CAM_RECOVER_S: f32 = 0.25;
 
 /// §3.2 monitor-distance sensitivity match: how much to scale raw mouse
 /// input at the current (live, mid-transition) FOV so tracking feels
@@ -741,6 +746,24 @@ const SPRING_K_ELBOW_POLE: f32 = 60.0;
 const SPRING_K_FINGER_SETTLE: f32 = 220.0;
 const SPRING_K_SHOULDER: f32 = 45.0;
 const SPRING_K_CAMERA_BOOM: f32 = 90.0;
+
+/// §2.5/§5.2: the boom-collision push-out - the actual SPRING_K_CAMERA_
+/// BOOM consumer named in the brief's original table (it had been
+/// documented as wired but was actually still a plain first-order
+/// `CAM_RECOVER_S` chase; this closes that gap). Extracted to a scalar
+/// helper (spring state lives on one axis - the boom LENGTH, not a
+/// position) so the critical-damping behavior is directly testable
+/// without a running camera_system.
+fn boom_recover(boom: f32, boom_vel: f32, allowed: f32, dt: f32) -> (f32, f32) {
+    let (nx, nv) = damped_spring(
+        Vec2::new(boom, 0.0),
+        Vec2::new(boom_vel, 0.0),
+        Vec2::new(allowed, 0.0),
+        SPRING_K_CAMERA_BOOM,
+        dt,
+    );
+    (nx.x, nv.x)
+}
 
 /// §2.4 (Brief VII v2): trigger finger travel curve - out over 0.06s,
 /// back over 0.10s, given seconds-since-last-shot. Pure so the exact
@@ -6499,10 +6522,9 @@ fn camera_system(
     let ads_e = ease_out(cam_ctl.ads_t);
     // §5.1 (Brief VII v2): the hip boom itself isn't fixed - it eases
     // OUT to 2.5m under sprint (0.12s lag, a simple first-order chase;
-    // camera boom's own named spring constant from §2.5's table is a
-    // heavier k=90 critical spring, reserved for the collision recovery
-    // below - this lag is a lighter, faster settle by design) and ADS
-    // still pulls IN from whichever hip base is currently active.
+    // the collision-recovery spring below is a separate, heavier k=90
+    // critical spring - this lag is a lighter, faster settle by design)
+    // and ADS still pulls IN from whichever hip base is currently active.
     let sp = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
     let sprint_target = if sp > SPRINT_SPEED * 0.9 { cam_tuning.tp_boom_sprint } else { cam_tuning.tp_boom };
     cam_ctl.sprint_boom +=
@@ -6535,7 +6557,12 @@ fn camera_system(
         + Vec3::Y * lift;
     // §5.2 boom collision: cast anchor → desired with a pad; pull the
     // camera in INSTANTLY on contact, push it back out slowly - instant
-    // push-out pops every time you clear a corner
+    // push-out pops every time you clear a corner. §2.5: the push-out is
+    // the actual SPRING_K_CAMERA_BOOM consumer named in the brief's
+    // table - a critically-damped spring accelerates smoothly out of the
+    // pull-in rather than the constant-time-constant chase CAM_RECOVER_S
+    // used to produce, and (being critically damped) still can't overshoot
+    // back into the wall it just recovered from.
     let off = desired - anchor;
     let len = off.length().max(1e-4);
     let dirn = off / len;
@@ -6548,8 +6575,11 @@ fn camera_system(
     }
     if allowed < cam_ctl.boom {
         cam_ctl.boom = allowed;
+        cam_ctl.boom_vel = 0.0;
     } else {
-        cam_ctl.boom += (allowed - cam_ctl.boom) * (dt / CAM_RECOVER_S).min(1.0);
+        let (nb, nv) = boom_recover(cam_ctl.boom, cam_ctl.boom_vel, allowed, dt);
+        cam_ctl.boom = nb;
+        cam_ctl.boom_vel = nv;
     }
     let tp_pos = anchor + dirn * cam_ctl.boom.min(len);
 
@@ -9849,6 +9879,37 @@ mod camera_v2_tests {
         assert_eq!(TP_BOOM_SPRINT, 2.5, "sprint boom eases to 2.5m");
         assert_eq!(TP_BOOM_AIM, 1.35, "aim boom 1.35m");
         assert_eq!(TP_RIGHT_AIM, 0.55, "aim right 0.55m");
+    }
+
+    /// §2.5's own claim ("this is the ONE spring primitive behind every
+    /// secondary-motion element... camera boom k=90") was false when
+    /// checked: `damped_spring` had exactly one real call site (the
+    /// viewmodel sway, using its own k=196, not any of the five named
+    /// constants) plus a test. This is the boom-recovery fix that makes
+    /// the claim true for at least this one consumer.
+    #[test]
+    fn boom_recover_converges_without_overshoot() {
+        let (mut b, mut v) = (1.0_f32, 0.0_f32);
+        let allowed = 2.2_f32;
+        for _ in 0..300 {
+            let (nb, nv) = boom_recover(b, v, allowed, 1.0 / 120.0);
+            assert!(
+                nb <= allowed + 1e-3,
+                "critically damped: must never overshoot the target ({nb} > {allowed})"
+            );
+            b = nb;
+            v = nv;
+        }
+        assert!((b - allowed).abs() < 1e-3, "must converge to the allowed distance, got {b}");
+    }
+
+    #[test]
+    fn boom_recover_moves_meaningfully_within_100ms_at_k90() {
+        let (b, _) = boom_recover(1.0, 0.0, 2.2, 0.1);
+        assert!(
+            b > 1.2 && b < 2.2,
+            "k=90 should move well past the start but not fully settle in 100ms, got {b}"
+        );
     }
 }
 
