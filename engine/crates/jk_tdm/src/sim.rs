@@ -6217,6 +6217,39 @@ impl TdmSim {
         best.map(|(j, _)| j)
     }
 
+    /// What bot `i` should be shooting at, as (position, height).
+    ///
+    /// Extraction is CO-OP: everyone is on one team, so
+    /// `nearest_visible_enemy` - which only ever looks for an opposing
+    /// FIGHTER - always returned None there. AI teammates stood around
+    /// doing waypoint patrol while the horde ate them. This adds the
+    /// horde as a threat, so the co-op mode actually has allies in it.
+    ///
+    /// Enemy fighters still win ties at equal range: a player shooting at
+    /// you is a worse problem than a zombie walking at you.
+    fn nearest_visible_threat(&self, i: usize) -> Option<([f32; 3], f32)> {
+        let f = &self.fighters[i];
+        let eye = [f.pos[0], f.pos[1] + EYE_REL, f.pos[2]];
+        if let Some(j) = self.nearest_visible_enemy(i) {
+            let g = &self.fighters[j];
+            return Some((g.pos, g.height()));
+        }
+        let mut best: Option<([f32; 3], f32)> = None;
+        let mut best_d2 = f32::INFINITY;
+        for z in &self.zombies {
+            // per-kind height, the same one the bullet zone test uses -
+            // a Brute and a Runner are not the same size
+            let zh = zspec(z.kind).height;
+            let tgt = [z.pos[0], z.pos[1] + zh * 0.6, z.pos[2]];
+            let d2 = (tgt[0] - eye[0]).powi(2) + (tgt[2] - eye[2]).powi(2);
+            if d2 < best_d2 && self.sight_clear(eye, tgt) {
+                best_d2 = d2;
+                best = Some((z.pos, zh));
+            }
+        }
+        best
+    }
+
     fn bot_think(&mut self, i: usize) {
         let half = self.half;
         let f = &self.fighters[i];
@@ -6283,7 +6316,7 @@ impl TdmSim {
                 }
             }
         }
-        let enemy = self.nearest_visible_enemy(i);
+        let enemy = self.nearest_visible_threat(i);
         let (fpos, strafe_phase, waypoint, ammo, reloading) = {
             let f = &self.fighters[i];
             (f.pos, f.strafe_phase, f.waypoint, f.ammo, f.reload_t > 0.0)
@@ -6291,15 +6324,13 @@ impl TdmSim {
         let yaw;
         let mut vel;
         match enemy {
-            Some(j) => {
+            Some((gpos, ghigh)) => {
                 self.fighters[i].los_time += DT;
                 // an empty mag reloads NOW, whatever the range — waiting
                 // until the enemy closes is how bots died mid-clack
                 if ammo == 0 {
                     self.try_reload(i);
                 }
-                let gpos = self.fighters[j].pos;
-                let ghigh = self.fighters[j].height();
                 let (dx, dz) = (gpos[0] - fpos[0], gpos[2] - fpos[2]);
                 let dist = (dx * dx + dz * dz).sqrt().max(0.01);
                 yaw = dx.atan2(dz);
@@ -6946,6 +6977,52 @@ mod tests {
             s.zombies.len() < before,
             "the sweep must actually kill zombies: {before} -> {}",
             s.zombies.len()
+        );
+    }
+
+    /// §8: Extraction is CO-OP - everyone shares one team, so a
+    /// targeting routine that only looks for an opposing FIGHTER finds
+    /// nothing and the AI teammates never fire. The horde has to count
+    /// as a threat or the co-op mode has no allies in it.
+    #[test]
+    fn ai_teammates_actually_shoot_the_horde_in_extraction() {
+        let mut s = TdmSim::new(cfg(85, 3, Mode::Extraction, MapKind::Battlefield));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.zombies.clear();
+        // a bot (not the player) with a clear lane to a zombie
+        let bot = 1usize;
+        s.fighters[bot].pos = [0.0, 0.0, 0.0];
+        s.fighters[bot].yaw = 0.0;
+        s.fighters[bot].protect_t = 0.0;
+        s.next_zombie_id += 1;
+        s.zombies.push(Zombie {
+            id: s.next_zombie_id,
+            kind: ZKind::Shambler,
+            pos: [0.0, 0.0, 12.0],
+            hp: 10_000.0, // survives, so we measure ENGAGEMENT not kills
+            atk_cd: 0.0,
+            scream_t: 0.0,
+            head_hits: 0,
+            target: [0.0, 0.0],
+            alerted: true,
+        });
+        let hp0 = s.zombies[0].hp;
+        for _ in 0..(6 * SIM_HZ as usize) {
+            // keep the pair apart and the zombie in the lane, so this
+            // measures shooting rather than a chase
+            s.fighters[bot].pos = [0.0, 0.0, 0.0];
+            if let Some(z) = s.zombies.first_mut() {
+                z.pos = [0.0, 0.0, 12.0];
+            }
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.zombies
+                .first()
+                .map_or(true, |z| z.hp < hp0),
+            "an armed AI teammate must engage a zombie standing in its lane"
         );
     }
 
