@@ -194,6 +194,20 @@ work, not a per-task add-on, and was not attempted this session.
   achievable with this session's tools (no image-download capability).
   Real research was done and written into `NOTES.md` with sources
   instead.
+- **`SPRING_K_*` spring constants (§2.5)** — `damped_spring`'s own doc
+  comment claimed all five named stiffnesses (hand follow, elbow pole,
+  finger settle, shoulder, camera boom) were wired to real consumers.
+  Checked, and it was false: only one real call site existed anywhere
+  (the viewmodel sway, using its own unrelated k=196) plus a test. Fixed
+  the camera-boom one — the collision-recovery push-out now genuinely
+  uses `SPRING_K_CAMERA_BOOM` via critical damping instead of the flat
+  `CAM_RECOVER_S` chase it was quietly still using (removed that now-
+  dead const). The other four remain unwired: each needs new PER-
+  FIGHTER persistent spring state (the camera is one global resource;
+  hand/elbow/finger/shoulder would need it per-arm, per-fighter),
+  threaded through the arm-IK/finger-curl/shoulder-pose pipeline without
+  disturbing the hit-band-tested pose functions — a real follow-on, not
+  a same-pass tweak.
 - **Kinetic chain sequencing** — wired into a real consumer after this
   report was first written: `torso_coil_yaw`'s post-action follow-
   through branch (covers BOTH a spear throw's release and a thrust's
