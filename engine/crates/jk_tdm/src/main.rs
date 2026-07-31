@@ -7114,6 +7114,11 @@ struct VmState {
     sprint_t: f32,
     inspect: bool,
     inspect_t: f32,
+    /// §3.2: the spear windup fraction, EASED. `spear_wind_t` snaps from
+    /// its last tick straight to 0 on release, and this value drives
+    /// ~30 cm of translation and ~31 deg of rotation - reading it raw
+    /// teleported the viewmodel in a single frame.
+    spear_wind_ease: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7240,11 +7245,23 @@ fn fp_viewmodel(
     let reloading = p.reload_t > 0.0;
     // §3: the spear windup reads in FIRST person too - the arm hauls
     // back and up through the wind, then the release whips through
-    let wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
+    // §3.2: the windup fraction drives ~30 cm of viewmodel translation
+    // and ~31 deg of rotation. Read raw it snaps 0.98 -> 0 the frame the
+    // spear leaves the hand (a 1-frame teleport); winding UP is tracked
+    // exactly, and only the RELEASE gets a tail.
+    let raw_wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
         1.0 - p.spear_wind_t / SPEAR_WINDUP_S
     } else {
         0.0
     };
+    const SPEAR_WIND_RELEASE_S: f32 = 0.13;
+    if raw_wind >= st.spear_wind_ease {
+        st.spear_wind_ease = raw_wind;
+    } else {
+        st.spear_wind_ease +=
+            (raw_wind - st.spear_wind_ease) * (dt / SPEAR_WIND_RELEASE_S).min(1.0);
+    }
+    let wind = st.spear_wind_ease;
     // §2.3: ROTATIONAL recoil that SNAPS back - kick is ~70% pitch-up /
     // 30% roll, recovered inside 140 ms regardless of the gun's cadence;
     // translation kick capped at 1.5 cm. The gun never wanders.
