@@ -279,9 +279,22 @@ fn torso_aim_offset(desired_delta_deg: f32) -> f32 {
 // rest - it is load, then release, and the release is faster than the
 // load that produced it."
 
-/// One shared utility every power move routes through - a stretch-
-/// shortening cycle: pre-activation -> loaded stretch (eccentric) ->
-/// explosive shortening (concentric), scaled by how much was stored.
+/// A stretch-shortening cycle: pre-activation -> loaded stretch
+/// (eccentric) -> explosive shortening (concentric), scaled by how much
+/// was stored.
+///
+/// SPEC FIXTURE, NOT A LIVE PATH. This doc used to claim "every power
+/// move routes through" it; in fact `ElasticMove`, `counter_movement_
+/// bonus` and `chain_peak_tick` have zero production call sites - they
+/// are exercised only by the Task 3 tests. What IS wired from this
+/// module is the kinetic chain proper: `chain_segment_scale` drives the
+/// spear follow-through (`spear_followthrough_yaw`), and
+/// `landing_rebound_vy` drives the camera's landing rebound.
+///
+/// Wiring the rest is blocked on a real design decision rather than
+/// effort - `counter_movement_bonus` needs the pre-move velocity, which
+/// sim.rs overwrites the same frame a dodge triggers, so it needs a new
+/// sim-side snapshot field. Recorded in the handback, not pretended away.
 #[derive(Clone, Copy, Debug)]
 struct ElasticMove {
     load_s: f32,
@@ -607,6 +620,28 @@ const FOV_CHOICES: [(&str, f32); 6] = [
 ];
 const SENS_DEFAULT_IDX: usize = 2;
 const FOV_DEFAULT_IDX: usize = 3;
+
+/// THE mouse mapping: `(aim button, fire button)`. One function, so the
+/// settings label, the manual and the actual input handler cannot
+/// disagree - all three used to derive it independently and BOTH text
+/// versions had it exactly backwards, on the very control that changes
+/// it. Default (`swap == false`) is the conventional LEFT = fire.
+fn mouse_map(swap: bool) -> (MouseButton, MouseButton) {
+    if swap {
+        (MouseButton::Left, MouseButton::Right)
+    } else {
+        (MouseButton::Right, MouseButton::Left)
+    }
+}
+
+/// The same mapping as human-readable button names, in the same order.
+fn mouse_map_names(swap: bool) -> (&'static str, &'static str) {
+    if swap {
+        ("LEFT CLICK", "RIGHT CLICK")
+    } else {
+        ("RIGHT CLICK", "LEFT CLICK")
+    }
+}
 
 impl GameSettings {
     fn sens_mult(&self) -> f32 {
@@ -1839,6 +1874,21 @@ struct CaptureMode {
     script: Option<String>,
     t: f32,
     cursor: usize,
+    /// Snaps that BECAME DUE this frame, queued by the input driver and
+    /// drained exactly once by the screenshot driver.
+    ///
+    /// The two drivers used to communicate through `cursor - 1`, which
+    /// was wrong in both directions: the input driver advances through
+    /// EVERY beat whose time has passed (a long frame can pass several),
+    /// so all but the last had their snap silently skipped - and the
+    /// screenshot driver re-read that same index every frame, so the
+    /// surviving snap was written over and over (one 4-second run wrote
+    /// its files 157 times). A queue makes each beat fire exactly once.
+    pending_snaps: Vec<&'static str>,
+    pending_end: bool,
+    /// Frames to wait after the final beat before exiting, so queued
+    /// screenshots reach disk.
+    exit_in: u32,
 }
 
 enum CapKey {
@@ -1966,8 +2016,28 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
+const CAPTURE_SCRIPTS: [&str; 6] = [
+    "baseline",
+    "idle_life",
+    "bow_draw",
+    "mech_scale",
+    "minigun_check",
+    "menus",
+];
+
 fn init_capture_mode(mut cap: ResMut<CaptureMode>) {
     if let Ok(script) = std::env::var("JK_CAPTURE") {
+        // A name with no beat table produced an EMPTY script, which meant
+        // no beat ever fired, no snap was taken, and the `end` that exits
+        // the process never came - the run just hung forever with a
+        // window open, looking like a slow capture rather than a typo.
+        if !CAPTURE_SCRIPTS.contains(&script.as_str()) {
+            eprintln!(
+                "JK_CAPTURE={script:?} is not a known capture script.\nValid scripts: {}",
+                CAPTURE_SCRIPTS.join(", ")
+            );
+            std::process::exit(2);
+        }
         cap.script = Some(script);
     }
 }
@@ -2001,8 +2071,10 @@ fn capture_quick_deploy(
     card.shown = true;
     card.dismissed = true;
     match cap.script.as_deref() {
-        Some("spear_throw") => sel.loadout[2] = GunKind::Spear,
-        Some("bow_pierce") | Some("bow_draw") => sel.loadout[2] = GunKind::Bow,
+        // (spear_throw / bow_pierce arms lived here with no beat table
+        // behind them, so naming either just hung the process. Validated
+        // against CAPTURE_SCRIPTS at startup now.)
+        Some("bow_draw") => sel.loadout[2] = GunKind::Bow,
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
@@ -2012,12 +2084,13 @@ fn capture_quick_deploy(
         // clear spot (Arena center) - the default spawn's proximity to
         // cover was a confound in earlier capture attempts, independent
         // of the camera-scaling fix itself.
+        let stage = capture_stage_pos(&game.sim);
         let f = &mut game.sim.fighters[0];
         f.armor_set = ArmorSet::RobotSuit;
         f.armor = POWER_MAX;
         f.hull = MECH_HULL;
         f.mech_transition_t = 0.0; // skip the seal-up window for the capture
-        f.pos = [0.0, 0.0, 0.0];
+        f.pos = stage;
         f.yaw = 0.0;
     }
     if cap.script.as_deref() == Some("minigun_check") {
@@ -2025,6 +2098,7 @@ fn capture_quick_deploy(
         // so hand it over the same way a pad pickup does (mirrors
         // `PickupKind::Minigun` in sim.rs exactly) rather than faking a
         // loadout path that doesn't exist for this weapon.
+        let stage = capture_stage_pos(&game.sim);
         let f = &mut game.sim.fighters[0];
         f.inventory[0] = GunKind::Minigun;
         f.slot_ammo[0] = (gun(GunKind::Minigun).mag, 0);
@@ -2033,9 +2107,41 @@ fn capture_quick_deploy(
         f.ammo = f.slot_ammo[0].0;
         f.reserve = 0;
         f.reload_t = 0.0;
-        f.pos = [0.0, 0.0, 0.0];
+        f.pos = stage;
         f.yaw = 0.0;
     }
+}
+
+/// A spot on the CURRENT map that is provably outside every cover block,
+/// for capture scripts that need a clean, unobstructed stage.
+///
+/// The two scripts that needed one both hard-coded `[0,0,0]` and called
+/// it "a KNOWN clear spot (Arena center)". It is not: Arena builds a
+/// central 8x8x3 m stone block spanning [-4,-4] to [4,4], so [0,0,0] is
+/// its exact centroid - every mech and minigun capture was staged INSIDE
+/// a rock, relying on the collision push-out to shove it somewhere
+/// arbitrary. Search a ring of candidates and take the first that is
+/// genuinely clear, so this cannot silently rot when a map changes.
+fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
+    let clear = |x: f32, z: f32| {
+        const PAD: f32 = 1.5; // room for a 3m mech's radius
+        !sim.cover.iter().any(|a| {
+            x >= a.min[0] - PAD
+                && x <= a.max[0] + PAD
+                && z >= a.min[2] - PAD
+                && z <= a.max[2] + PAD
+        })
+    };
+    for ring in [12.0_f32, 16.0, 20.0, 8.0, 24.0] {
+        for k in 0..12 {
+            let ang = k as f32 / 12.0 * std::f32::consts::TAU;
+            let (x, z) = (ang.cos() * ring, ang.sin() * ring);
+            if x.abs() < sim.half - 3.0 && z.abs() < sim.half - 3.0 && clear(x, z) {
+                return [x, 0.0, z];
+            }
+        }
+    }
+    [0.0, 0.0, 0.0] // nothing clear found - better than looping forever
 }
 
 /// Scripts that capture a WEAPON being fired for several seconds in the
@@ -2098,7 +2204,18 @@ fn capture_input_driver(
             cam.yaw = yaw;
             cam.pitch = pitch;
         }
+        // queue this beat's snap/end for the screenshot driver instead of
+        // letting it infer them from the cursor - a frame that passes
+        // several beats must fire ALL their snaps, not just the last
+        let (snap, end) = (b.snap, b.end);
         cap.cursor += 1;
+        if let Some(label) = snap {
+            cap.pending_snaps.push(label);
+        }
+        if end {
+            cap.pending_end = true;
+            cap.exit_in = 12; // frames of flush grace
+        }
     }
 }
 
@@ -2111,22 +2228,27 @@ fn capture_screenshot_driver(
     window: Query<Entity, With<PrimaryWindow>>,
 ) {
     let Some(name) = cap.script.clone() else { return };
-    let script = capture_script(&name);
-    // re-scan from 0 each frame is fine at this scale (≤10 beats); track
-    // which ones already fired so a snap/end only ever happens once
-    let idx = cap.cursor.saturating_sub(1);
-    if let Some(b) = script.get(idx) {
-        if let Some(label) = b.snap {
-            let dir = format!("handback/brief-vii/{name}");
-            let _ = std::fs::create_dir_all(&dir);
-            let path = format!("{dir}/{label}.png");
-            if let Ok(win) = window.get_single() {
-                commands
-                    .spawn(Screenshot::window(win))
-                    .observe(bevy::render::view::screenshot::save_to_disk(path));
-            }
+    // drain the queue: every beat that came due fires EXACTLY once, and
+    // a frame that passed several fires all of them
+    let due: Vec<&'static str> = cap.pending_snaps.drain(..).collect();
+    for label in due {
+        let dir = format!("handback/brief-vii/{name}");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{dir}/{label}.png");
+        if let Ok(win) = window.get_single() {
+            commands
+                .spawn(Screenshot::window(win))
+                .observe(bevy::render::view::screenshot::save_to_disk(path));
         }
-        if b.end {
+    }
+    if cap.pending_end {
+        // Grace frames before exiting: `save_to_disk` is an observer that
+        // runs after the render, so exiting the same frame the last snap
+        // is queued would lose it. The old code got away with this only
+        // because it re-fired the same snap every frame until exit.
+        if cap.exit_in > 0 {
+            cap.exit_in -= 1;
+        } else {
             std::process::exit(0);
         }
     }
@@ -2180,10 +2302,38 @@ fn capture_menus(
     }
 }
 
-/// §10: low-health screen tint that pulses gently while regenerating -
-/// the regen timer is readable without a HUD element.
+/// The full-screen low-health tint overlay. §3.7 (Brief VI) turned this
+/// OFF - it is held fully transparent by `health_vignette`, and danger
+/// reads through the vitals colour instead. Kept as an entity so the
+/// decision lives in one place. (Its doc used to describe a pulsing
+/// regen tint as though it were live; it has not been since Brief VI.)
 #[derive(Component)]
 struct HealthVignette;
+
+/// The lobby's toast line. The Forge (Ctrl+1/2/3 save, 1/2/3 load) runs
+/// ONLY in the Intro state and its sole feedback is the shared `Toast`
+/// resource - but the only system that rendered or decayed a toast was
+/// `contextual_prompts`, which is Playing-gated. So every Forge
+/// confirmation was invisible where the Forge lives, AND never decayed,
+/// so it surfaced stale on the first frame of the next match instead.
+#[derive(Component)]
+struct LobbyToast;
+
+fn lobby_toast(
+    time: Res<Time>,
+    mut toast: ResMut<Toast>,
+    mut q: Query<&mut Text, With<LobbyToast>>,
+) {
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    if toast.t > 0.0 {
+        toast.t -= time.delta_secs();
+        **t = toast.text.clone();
+    } else {
+        **t = String::new();
+    }
+}
 
 /// §14: the loadout tech readout - real numbers from the live weapon
 /// table. "spear - 26 m/s, 4.70 m drop at 30 m" tells the player the
@@ -2408,6 +2558,7 @@ fn main() {
                 intro_size_buttons,
                 tech_readout, // §14: live weapon numbers on the loadout
                 forge_keybinds, // §7.2 (Brief VII v2): Ctrl+1/2/3 save, 1/2/3 load
+                lobby_toast,    // ...and where its confirmations appear
             )
                 .run_if(in_state(GameState::Intro)),
         )
@@ -4028,6 +4179,13 @@ fn setup(
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
+        // §2.3: the ONLY light in the game must reach the viewmodel too.
+        // Bevy filters lights per view by render layer, and the viewmodel
+        // camera is on its own layer - with no RenderLayers here the
+        // light defaulted to layer 0 only, so the first-person weapon was
+        // lit by AmbientLight alone: flat, shadowless, and visibly a
+        // different material from the same gun seen in third person.
+        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
     ));
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.85, 0.82, 0.78),
@@ -5282,19 +5440,17 @@ fn input_and_step(
         Vec3::Z
     };
 
-    // v6 mapping: LEFT = aim/zoom, RIGHT or T = fire (swap in settings),
     // SPACE jump, Q roll (or tap crouch at a sprint), E shield,
     // O or V first/third person, Z/X lean, 1-3 weapon slots, M minimap.
-    // Edge inputs latch until a sim step runs.
+    // CTRL crouch, C armor ability, T inspect. Edge inputs latch until a
+    // sim step runs. (The v6 mapping this comment used to describe -
+    // LEFT aim / RIGHT-or-T fire - has been dead since Brief VI; its
+    // leftovers were still being printed to the player in three places.)
     // §1 (Brief VI): CS:GO grammar - LEFT fires, always. RIGHT is an ALT
     // function that only exists on scoped weapons (camera zoom, Rule 2)
     // and projectile draws (bow/spear, Brief II grammar). Standard guns
     // have NO aim-down-sights state of any kind. swap_mouse still swaps.
-    let (aim_btn, fire_btn) = if settings.swap_mouse {
-        (MouseButton::Left, MouseButton::Right)
-    } else {
-        (MouseButton::Right, MouseButton::Left)
-    };
+    let (aim_btn, fire_btn) = mouse_map(settings.swap_mouse);
     let p_gun = game.sim.fighters[game.sim.player].gun;
     let scoped_gun = gun(p_gun).scoped;
     let alt_capable = scoped_gun || gun(p_gun).projectile.is_some();
@@ -7797,9 +7953,15 @@ fn minimap_system(
     let simr = &game.sim;
     let half = simr.half;
     let px = MINIMAP_PX - 10.0;
+    // §9: the horizontal axis is MIRRORED, because in this game's yaw
+    // convention screen-right is -X when facing +Z (camera_system derives
+    // `screen_right = -right`, and damage_indicator honours the same
+    // rule). Mapping +X to map-right drew every teammate, enemy and
+    // objective on the wrong side: glance down, see an ally on your left,
+    // turn left, and they are actually on your right.
     let to_map = |x: f32, z: f32| {
         (
-            (x + half) / (half * 2.0) * px,
+            (half - x) / (half * 2.0) * px,
             (1.0 - (z + half) / (half * 2.0)) * px,
         )
     };
@@ -8042,11 +8204,10 @@ fn sfx_system(
     // dry fire: trigger down on an empty magazine → the click (whatever
     // the reserve says - an empty chamber clicks until you reload)
     st.click_cd = (st.click_cd - elapsed).max(0.0);
-    let fire_held = if settings.swap_mouse {
-        buttons.pressed(MouseButton::Right)
-    } else {
-        buttons.pressed(MouseButton::Left)
-    } || keys.pressed(KeyCode::KeyT);
+    // the shared mapping, and NOT T: T has been inspect since Brief VI,
+    // so holding it on an empty mag played a dry-fire click for a trigger
+    // pull that never happened
+    let fire_held = buttons.pressed(mouse_map(settings.swap_mouse).1);
     if fire_held
         && p.alive()
         && p.armed()
@@ -8372,7 +8533,9 @@ fn hud_system(
                         if p.brace {
                             "  FOLK ARMOR [BRACED]".to_string()
                         } else {
-                            "  FOLK ARMOR (hold F: brace)".to_string()
+                            // brace is the armor ability (C). F is the
+                            // knife - this told Folk players to stab.
+                            "  FOLK ARMOR (hold C: brace)".to_string()
                         }
                     }
                     ArmorSet::Recon => "  RECON WEAVE".to_string(),
@@ -8559,29 +8722,17 @@ fn health_vignette(
     let Ok(mut bg) = q.get_single_mut() else {
         return;
     };
-    // §3.7 (Brief VI): NO persistent low-HP screen vignette - CS:GO
-    // doesn't have one and it keeps the center clean. Danger reads
-    // through the vitals color (hud_colors) instead.
-    if true {
-        *bg = BackgroundColor(Color::srgba(0.5, 0.02, 0.02, 0.0));
-        return;
-    }
-    #[allow(unreachable_code)]
-    let p = &game.sim.fighters[game.sim.player];
-    let low = (1.0 - p.health / 35.0).clamp(0.0, 1.0);
-    let regening =
-        p.alive() && p.health < MAX_HEALTH && game.sim.t - p.last_dmg_at > REGEN_DELAY_S;
-    let pulse = if regening {
-        ((game.sim.t * 4.0).sin() * 0.5 + 0.5) * 0.06
-    } else {
-        0.0
-    };
-    *bg = BackgroundColor(Color::srgba(
-        0.5,
-        0.02,
-        0.02,
-        (low * 0.22 + pulse).min(0.30),
-    ));
+    // §3.7 (Brief VI) DELIBERATELY OFF: no persistent low-HP screen
+    // vignette - CS:GO doesn't have one and it keeps the center clean.
+    // Danger reads through the vitals colour (`hud_colors`) instead.
+    //
+    // This used to be an `if true { ... return }` guard in front of a
+    // full, unreachable implementation, while comments elsewhere still
+    // described the vignette as a live feature. The overlay entity is
+    // kept (and held transparent here) so the decision stays reversible
+    // in one place instead of being re-derived from dead code.
+    let _ = &game;
+    *bg = BackgroundColor(Color::srgba(0.5, 0.02, 0.02, 0.0));
 }
 
 /// §7: the compass strip - a 9-slot cardinal window over the view yaw
@@ -9084,6 +9235,24 @@ fn open_intro(
         },
         GlobalZIndex(12),
         TechReadout,
+    ));
+    // the Forge's save/load confirmations, where the Forge actually runs
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 19.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.85, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(18.0),
+            bottom: Val::Px(16.0),
+            max_width: Val::Px(340.0),
+            ..default()
+        },
+        GlobalZIndex(13),
+        LobbyToast,
         IntroRoot, // despawns with the screen
     ));
     commands
@@ -9584,11 +9753,12 @@ fn open_settings(
 fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
     match kind {
         SettingsButtonKind::SwapMouse => {
-            if s.swap_mouse {
-                "Mouse: LEFT fire / RIGHT aim  (conventional)".to_string()
-            } else {
-                "Mouse: LEFT aim / RIGHT fire  (this game's default)".to_string()
-            }
+            // derived from the SAME mapping input_and_step uses - both
+            // arms of the old hand-written version were backwards, so the
+            // toggle promised the opposite of what it did
+            let (aim, fire) = mouse_map_names(s.swap_mouse);
+            let tag = if s.swap_mouse { "swapped" } else { "default" };
+            format!("Mouse: {fire} fire / {aim} aim  ({tag})")
         }
         SettingsButtonKind::Minimap => {
             format!("Minimap: {}  (M in game)", if s.minimap { "ON" } else { "OFF" })
@@ -9667,17 +9837,18 @@ fn open_manual(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     release_cursor(&mut cam, &mut windows);
-    let (aim_b, fire_b) = if settings.swap_mouse {
-        ("RIGHT CLICK", "LEFT CLICK")
-    } else {
-        ("LEFT CLICK", "RIGHT CLICK")
-    };
+    // from the shared mapping - this block had it inverted, and also
+    // still listed T as a fire key (T is INSPECT) and C as crouch (C is
+    // the armor ability; a player following it fired the flamethrower
+    // while trying to duck)
+    let (aim_b, fire_b) = mouse_map_names(settings.swap_mouse);
     let mut manual = format!(
         "CONTROLS\n\
          WASD move - SPACE jump - Q dodge roll (hard landings roll automatically)\n\
          E shield up/down - O or V first/third person - Z / X lean - M minimap\n\
          {aim_b} aim (bow/spear draw the flight arc; AWM opens the scope)\n\
-         {fire_b} or T fire - 1/2/3 weapon slots - CTRL/C full crouch\n\
+         {fire_b} fire - 1/2/3 weapon slots - CTRL crouch - C armor ability\n\
+         T inspect weapon\n\
          SHIFT sprint (tap crouch at a sprint to roll) - R reload - TAB scores\n\n\
          THE SHIELD\n\
          Always carried. Blocks the FRONT ARC only (+/-60deg): standing cuts\n\
@@ -10591,6 +10762,40 @@ mod forge_tests {
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
         let _ = std::fs::remove_file(forge_slot_path(slot)); // clean up after itself
+    }
+
+    /// The mouse mapping must come from ONE place. The settings label
+    /// and the manual each derived it independently and BOTH had it
+    /// backwards - on the very control that changes it.
+    #[test]
+    fn the_mouse_map_label_matches_the_actual_binding() {
+        for swap in [false, true] {
+            let (aim_btn, fire_btn) = mouse_map(swap);
+            let (aim_name, fire_name) = mouse_map_names(swap);
+            let name_of = |b: MouseButton| match b {
+                MouseButton::Left => "LEFT CLICK",
+                MouseButton::Right => "RIGHT CLICK",
+                _ => "OTHER",
+            };
+            assert_eq!(
+                name_of(aim_btn), aim_name,
+                "swap={swap}: the aim NAME must match the aim BUTTON"
+            );
+            assert_eq!(
+                name_of(fire_btn), fire_name,
+                "swap={swap}: the fire NAME must match the fire BUTTON"
+            );
+            assert_ne!(aim_btn, fire_btn, "aim and fire cannot be the same button");
+        }
+        // the default is the conventional LEFT-fires mapping
+        assert_eq!(mouse_map(false).1, MouseButton::Left, "default: LEFT fires");
+        // and the settings row says so
+        let s = GameSettings::default();
+        let label = settings_label_text(SettingsButtonKind::SwapMouse, &s);
+        assert!(
+            label.contains("LEFT CLICK fire"),
+            "the default label must advertise LEFT as fire, got {label:?}"
+        );
     }
 
     /// Settings must be real: every choice list has to be non-empty,

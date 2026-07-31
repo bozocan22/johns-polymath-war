@@ -59,6 +59,58 @@ crosshair not reflecting minigun *heat*, since fixed).
 
 ---
 
+## Topic 1b — Ballistics / grenade arcs  (sources supplied by the user)
+
+The user did this research themselves and supplied it verified. Recorded
+here with their own `SNIPPET-ONLY` discipline preserved — I have not
+read the six snippet-only items either, so they stay uncounted rather
+than being written up from a search result.
+
+| ID | Source | Type | Status | Extracted |
+|---|---|---|---|---|
+| S-09 | [Analytical Ballistic Trajectories with Approximately Linear Drag](https://www.decarpentier.nl/ballistic-trajectories) (de Carpentier, Int. J. Computer Games Technology 2014) | **primary, peer-reviewed** | COUNTED | Approximates drag as linear to obtain a **closed-form** trajectory instead of stepping a sim. Solves launch velocity given: time-to-target, an intermediate waypoint (throwing *over* a battlement to a point behind it), arc height, impact angle, or **minimum energy** — the last being what humans naturally throw. Ships C++ snippets and an open-source Unity demo. |
+| S-10 | [Level Design Book — blockout metrics](https://book.leveldesignbook.com/process/blockout/metrics) | reference | COUNTED | Cross-engine hard numbers. Unity player box 1.0 x 1.8 m, eye 1.5-1.7 m; Unreal 60 x 176 cm, eye 152 cm. Min hallway 2.0 m. Stairs 15 x 25 cm, 30-35 deg slope, landings every 12-16 steps. TF2 ranges: close <=256 u, medium <=1024 u, max safe drop 256 u. |
+
+**SNIPPET-ONLY (do NOT count, not yet read):** [Weihs, GDC 2013 aim
+assist](https://archive.org/details/GDC2013Weihs) (names magnetism /
+centering / friction); [Brink's SMART traversal](https://gdcvault.com/play/1015930/Vault-Slide-Mantle-Building-Brink);
+[Bournemouth procedural parkour thesis](https://nccastaff.bournemouth.ac.uk/jmacey/MastersProject/MSc24/02/ProceduralParkourandTraversalAnimationTechniques.pdf);
+[Yoder, multiplayer level design](https://gdcvault.com/play/1025183/Level-Design-Workshop-The-Holy);
+[Reitich on projectile prediction](https://sreitich.github.io/projectile-prediction-1/);
+[Wagar on i-frames](https://critpoints.net/2017/07/25/how-iframes-augment-dodge-rolls/).
+
+**Explicit negative result (worth as much as a positive one):** searches
+for aim response curves and deadzone values return almost entirely
+affiliate-SEO content quoting each other. No primary source was found,
+so no numbers are carried forward for those.
+
+### What S-09 changes here: the rule was already enforced, by accident
+
+S-09's central warning is that most games step a physics sim to draw the
+preview arc and then throw with *different* code, so the grenade does not
+land on the shown line. This codebase already routes both through ONE
+`grenade_tick`, and audit wave 2 independently caught the one weapon that
+had drifted from that discipline — the bow's arc preview was flying at a
+stale 52 m/s while the sim launched at 19-55 m/s. Fixed before this
+source arrived; the source explains *why* it mattered.
+
+Not adopted: the closed-form solver itself. This sim is a fixed-timestep
+120 Hz integrator whose determinism is load-bearing (see R11 below), and
+swapping in an analytical solution would change every existing throw's
+trajectory and invalidate the golden-value tests. S-09's *solve-for-
+launch* capability (arc height, impact angle, over-a-wall waypoints)
+would be a genuine addition for a throw-assist or a bot's grenade aim —
+recorded as a real opportunity, not silently skipped.
+
+### R11 — determinism, now tested
+
+The user's R11 requires that a seeded sim produce bit-identical throws.
+Implemented as `a_thousand_identical_throws_land_bit_identically`: 1000
+throws from one seed compared on RAW BITS (not float `==`, which would
+let a NaN or -0.0/+0.0 pair pass), plus an assertion that
+`predict_grenade`'s preview endpoint lands within 0.1 mm of the live
+flight — the S-09 property, asserted rather than assumed.
+
 ## Topic 2 — Layered character creation
 
 **Counted: 0/16.** No searches run. The layer design (L0 identity →

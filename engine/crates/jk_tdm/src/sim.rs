@@ -3712,6 +3712,28 @@ impl TdmSim {
                             // and never matches a brace at all.
                             self.apply_plain_damage(p, j, FLAME_DPS * DT, ppos, false, true);
                         }
+                        // §8: the flame CONE reaches the horde. In
+                        // Extraction there is only one team, so the team
+                        // filter above left this ability with zero
+                        // possible targets - the Pyro armour the map
+                        // hands out was completely inert in the only
+                        // mode with a horde.
+                        let mut zhits: Vec<u32> = Vec::new();
+                        for z in &self.zombies {
+                            let dx = z.pos[0] - ppos[0];
+                            let dz = z.pos[2] - ppos[2];
+                            let d = (dx * dx + dz * dz).sqrt().max(0.01);
+                            if d <= FLAME_REACH
+                                && (fwd[0] * dx + fwd[1] * dz) / d >= FLAME_ARC_COS
+                            {
+                                zhits.push(z.id);
+                            }
+                        }
+                        for zid in zhits {
+                            if let Some(zi) = self.zombies.iter().position(|z| z.id == zid) {
+                                self.damage_zombie(zi, FLAME_DPS * DT, false);
+                            }
+                        }
                     }
                 }
                 ArmorSet::RobotSuit => {
@@ -3764,6 +3786,14 @@ impl TdmSim {
                             // attacker's position - see the flame note
                             self.apply_plain_damage(p, j, REPULSOR_DMG, ppos, true, false);
                         }
+                        // §8: the repulsor shoves the HORDE too - same
+                        // one-team problem as the flame projector, so the
+                        // mech's panic button did nothing against zombies
+                        self.blast_zombies(
+                            [ppos[0], ppos[1] + EYE_REL, ppos[2]],
+                            6.0,
+                            |_| REPULSOR_DMG,
+                        );
                     }
                 }
                 _ => {
@@ -4385,6 +4415,23 @@ impl TdmSim {
     /// while sprinting, mid-whip-turn, or airborne, with `GunSpec.spread`
     /// / `spread_move` dead for that weapon and the §4 stability model
     /// unwired. Any future third fire path gets it by construction.
+    /// How long a fighter who just died stays down. §8: an Extraction
+    /// RUN has no respawns at all - dying is the end of your run.
+    ///
+    /// Hoisted because every death site used to hard-code this, and
+    /// `apply_plain_damage` hard-coded the WRONG one: a frag or molotov
+    /// death in Extraction handed back a full-health, fully-rearmed
+    /// fighter after 3 seconds, so cooking a grenade at your own feet was
+    /// a free heal. The claw path had already been special-cased for
+    /// exactly this reason; the explosive paths had not.
+    fn death_respawn_t(&self) -> f32 {
+        if self.mode == Mode::Extraction {
+            9999.0
+        } else {
+            RESPAWN_S
+        }
+    }
+
     /// Public view of `aim_spread` for the client's arc preview, so the
     /// HUD cannot show a cone the simulation does not shoot.
     pub fn aim_spread_of(&self, i: usize, ads: bool) -> f32 {
@@ -5544,6 +5591,42 @@ impl TdmSim {
         }
     }
 
+    /// §8: apply an area effect centred on `at` to every zombie within
+    /// `radius`, with `dmg_at(distance)` giving the falloff.
+    ///
+    /// Every explosive/area path in this sim looped `self.fighters` only,
+    /// so grenades, molotovs, pod rockets, the flame projector and the
+    /// repulsor could not touch a zombie at ALL - in Extraction, which is
+    /// the only mode that spawns a horde. The flamethrower and repulsor
+    /// were worse than useless there: Extraction runs a single team, so
+    /// their team filter left them with zero possible targets while the
+    /// map still handed out the armour that grants them.
+    ///
+    /// Collects IDs, never indices: `damage_zombie` swap_removes on a
+    /// kill, which is what panicked the axe sweep.
+    fn blast_zombies<F: Fn(f32) -> f32>(&mut self, at: [f32; 3], radius: f32, dmg_at: F) {
+        let mut hits: Vec<(u32, f32)> = Vec::new();
+        for z in &self.zombies {
+            let zc = [z.pos[0], z.pos[1] + zspec(z.kind).height * 0.5, z.pos[2]];
+            let dx = zc[0] - at[0];
+            let dy = zc[1] - at[1];
+            let dz = zc[2] - at[2];
+            let d = (dx * dx + dy * dy + dz * dz).sqrt();
+            if d <= radius && self.los_clear(at, zc) {
+                hits.push((z.id, d));
+            }
+        }
+        for (zid, d) in hits {
+            let dmg = dmg_at(d);
+            if dmg <= 0.0 {
+                continue;
+            }
+            if let Some(zi) = self.zombies.iter().position(|z| z.id == zid) {
+                self.damage_zombie(zi, dmg, false);
+            }
+        }
+    }
+
     /// §8: damage a zombie (zone multiplier already applied). Brutes
     /// stagger on every third headshot; Bloaters burst on death.
     fn damage_zombie(&mut self, zi: usize, dmg: f32, headshot: bool) {
@@ -5856,6 +5939,12 @@ impl TdmSim {
                     let dmg = FRAG_DMG * frag_falloff_frac(d);
                     self.apply_plain_damage(g.thrower, j, dmg, g.pos, true, false);
                 }
+                // §8: the horde is made of BODIES, so a frag has to reach
+                // them. Every explosive path here looped fighters only,
+                // which meant grenades did literally nothing in the one
+                // mode that spawns a horde. Collected by ID, not index -
+                // damage_zombie swap_removes on a kill.
+                self.blast_zombies(g.pos, spec.radius_m, |d| FRAG_DMG * frag_falloff_frac(d));
             }
             ThrowKind::Flash => {
                 // blind = 3.2 s × LOS × facing × distance (§5.3); bots eat
@@ -5924,6 +6013,9 @@ impl TdmSim {
                     self.apply_plain_damage(thrower, j, FIRE_DPS * 0.25, fpos, false, true);
                 }
             }
+            // §8: fire burns the horde too - a molotov choke point is the
+            // obvious answer to a horde and did nothing to it before
+            self.blast_zombies(fpos, r, |_| FIRE_DPS * 0.25);
         }
         self.fires.retain(|f| f.ttl > 0.0);
     }
@@ -6118,7 +6210,7 @@ impl TdmSim {
         ));
         if fatal {
             self.fighters[victim].deaths += 1;
-            self.fighters[victim].respawn_t = RESPAWN_S;
+            self.fighters[victim].respawn_t = self.death_respawn_t();
             self.fighters[victim].vel = [0.0, 0.0];
             self.fighters[victim].shield_up = false;
             // A TEAM kill credits nobody. Frag blast and molotov fire are
@@ -7185,6 +7277,74 @@ mod tests {
         assert_eq!(
             s.fighters[0].health, hp0,
             "the pilot must be untouched while the hull holds"
+        );
+    }
+
+    /// R11: grenade physics lives in the SIM layer, which is seeded and
+    /// fixed-timestep, so the SAME seed and the SAME throw must produce a
+    /// bit-identical impact point - not "close", identical. 1000 throws.
+    ///
+    /// This is the guarantee the aim preview rests on: `predict_grenade`
+    /// runs the very same `grenade_tick` integrator the live flight does,
+    /// so if the integrator were not deterministic the preview could not
+    /// be trusted no matter how carefully it was called.
+    #[test]
+    fn a_thousand_identical_throws_land_bit_identically() {
+        let throw_once = |seed: u64| -> [f32; 3] {
+            let mut s = range(seed);
+            s.grenades_air.push(Grenade {
+                id: 1,
+                kind: ThrowKind::Frag,
+                pos: [0.0, 1.45, 0.0],
+                vel: [3.0, 6.5, 11.0],
+                thrower: 0,
+                team: Team::Blue,
+                fuse_t: 100.0, // long: measure the RESTING point, not the boom
+                bounces: 0,
+                rest: false,
+            });
+            for _ in 0..(6 * SIM_HZ as usize) {
+                s.step_grenades();
+            }
+            s.grenades_air
+                .first()
+                .map(|g| g.pos)
+                .unwrap_or([f32::NAN; 3])
+        };
+        let reference = throw_once(900);
+        assert!(
+            reference.iter().all(|v| v.is_finite()),
+            "the reference throw must actually settle somewhere finite: {reference:?}"
+        );
+        // compare RAW BITS, not floats: `==` on f32 would let a NaN pair
+        // or a -0.0/+0.0 pair pass as "identical"
+        let bits = |p: [f32; 3]| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        for i in 0..1000 {
+            let again = throw_once(900);
+            assert_eq!(
+                bits(again),
+                bits(reference),
+                "throw {i} diverged: {again:?} vs {reference:?}"
+            );
+        }
+        // ...and the aim PREVIEW must agree with that flight, since it is
+        // the same integrator - a preview that can drift is worse than
+        // none, which is why they share one function.
+        let s = range(900);
+        let (_, end, _) = s.predict_grenade(
+            ThrowKind::Frag,
+            [0.0, 1.45, 0.0],
+            [3.0, 6.5, 11.0],
+            100.0,
+            6.0,
+        );
+        let d = ((end[0] - reference[0]).powi(2)
+            + (end[1] - reference[1]).powi(2)
+            + (end[2] - reference[2]).powi(2))
+        .sqrt();
+        assert!(
+            d < 1e-4,
+            "the preview must trace the SAME flight: preview {end:?} vs live {reference:?} ({d} m apart)"
         );
     }
 
