@@ -1698,7 +1698,10 @@ const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "RMB", action: "Alt: scope zoom (heavy rifle) / draw (bow, spear) - rifles have NO aim-down-sights", essential: false },
     Bind { key: "T", action: "Inspect weapon", essential: false },
     Bind { key: "SHIFT", action: "Sprint", essential: false },
-    Bind { key: "SPACE", action: "Jump  (HOLD mid-air: Mech thrusters)", essential: true },
+    // §4.3 (Brief VI): mech FLIGHT IS DELETED in the sim - the chassis
+    // never leaves the ground. These strings promised thrusters the
+    // simulation has not had for two briefs.
+    Bind { key: "SPACE", action: "Jump", essential: true },
     Bind { key: "CTRL", action: "Crouch", essential: false },
     Bind { key: "Q", action: "Ground: dodge roll - Air + direction: FLIP (no firing)", essential: true },
     Bind { key: "V or O", action: "Camera: first <-> third person", essential: true },
@@ -1726,7 +1729,7 @@ fn pickup_prompt(kind: PickupKind) -> &'static str {
     match kind {
         PickupKind::Health => "HEALTH PACK",
         PickupKind::Ammo => "AMMO CACHE",
-        PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (SPACE mid-air: fly, C: repulsor - armored front, soft rear)",
+        PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
         PickupKind::FolkArmor => "FOLK ARMOR - walk over to equip  (hold C: shieldwall brace)",
         PickupKind::PyroArmor => "PYRO ARMOR - walk over to equip  (hold C: flame projector)",
         PickupKind::ReconWeave => "RECON WEAVE - walk over to equip  (fast, quiet, self-healing)",
@@ -1740,7 +1743,7 @@ fn equip_hint(set: ArmorSet) -> &'static str {
         ArmorSet::None => "",
         ArmorSet::Folk => "FOLK ARMOR EQUIPPED - hold C to BRACE the shieldwall",
         ArmorSet::Pyro => "PYRO ARMOR EQUIPPED - hold C: FLAME PROJECTOR - fireproof",
-        ArmorSet::RobotSuit => "MECH BOARDED - SPACE mid-air: FLY - C: REPULSOR - protect your REAR",
+        ArmorSet::RobotSuit => "MECH BOARDED - Q: SIDE-STEP - C: REPULSOR - protect your REAR",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
     }
 }
@@ -5300,10 +5303,16 @@ fn input_and_step(
     let mut steps = 0;
     while game.accum >= DT && steps < 8 {
         game.sim.step(cmd);
-        // the shield TOGGLE must fire exactly once per press - repeating
-        // it across a multi-step frame flips it right back (jump/reload/
-        // dodge/slot are idempotent across steps; the toggle is not)
+        // EDGE commands must fire exactly once per press. The whole `cmd`
+        // is replayed for every fixed sub-step, so anything that ADVANCES
+        // or TOGGLES state has to be cleared here; only the idempotent
+        // ones (jump/reload/dodge/slot - each a "set to this" ) survive a
+        // repeat. The shield toggle would flip right back; the throwable
+        // cycle would advance 2+ slots in a single G press whenever the
+        // frame ran more than one sub-step (i.e. at any framerate below
+        // the 120Hz sim, so 60 FPS always).
         cmd.shield = false;
+        cmd.cycle_throw = false;
         game.accum -= DT;
         steps += 1;
     }
@@ -5814,7 +5823,17 @@ fn sync_fighters(
             } else {
                 0.0
             };
-            dmg + ls.boom_flinch_t * 0.5 + ls.suppress_t * 0.3
+            // §5.5: BURNING is a continuous panic, not a single flinch -
+            // a fast irregular shudder for as long as the fighter is
+            // alight. `burn_t` is set by fire pools and the flame
+            // projector and was, until this, written by the sim and read
+            // by nothing at all despite its doc claiming a client FX.
+            let burn = if f.burn_t > 0.0 {
+                0.035 * (tnow * 27.0 + ph * 5.0).sin().abs() * f.burn_t.min(1.0)
+            } else {
+                0.0
+            };
+            dmg + burn + ls.boom_flinch_t * 0.5 + ls.suppress_t * 0.3
         };
         if let Ok((mut t, _)) = parts.get_mut(rig.torso) {
             // §1.4 pelvis layers: lateral sway toward the stance foot,
@@ -7448,22 +7467,29 @@ fn arc_preview(
     let is_spear = p.gun == GunKind::Spear;
     let settled = cam_ctl.ads_t > 0.9;
     let (v0_full, _) = spec.projectile.unwrap();
-    let v0 = if is_spear && !settled { SPEAR_V0_MIN } else { v0_full };
-    // current spread, mirroring `try_fire`: base + move + bloom, ADS and
-    // crouch multipliers, divided by the stability factor
+    // §4.1: the BOW does not launch at its GunSpec speed. The player's
+    // release goes through `step_bow_draw` -> `spawn_arrow`, which uses
+    // `BOW_V0_FULL * bow_power_fraction(draw)` - 19.25 m/s at a fresh
+    // draw up to 55 at full. Reading the spec's legacy 52.0 drew a
+    // preview that was wildly long early in the draw AND completely
+    // static across it, hiding the one thing the draw mechanic exists to
+    // teach. `gun(Bow).projectile` is now only the bots' path.
+    let v0 = if p.gun == GunKind::Bow {
+        BOW_V0_FULL * bow_power_fraction(p.bow_draw_t).unwrap_or(BOW_POWER_MIN)
+    } else if is_spear && !settled {
+        SPEAR_V0_MIN
+    } else {
+        v0_full
+    };
+    // The sim's OWN cone, not a parallel copy of it. The copy that used
+    // to live here had already drifted: it applied `spread_move` as a
+    // hard on/off at 0.5 m/s instead of the sim's 34%->95% ramp, and read
+    // `spec.spread` where the sim uses `base_spread` (heat-aware). A
+    // drawn bow is aimed, matching `step_bow_draw`'s own ADS-true call.
     let moving = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
-    let mut spread = spec.spread + if moving > 0.5 { spec.spread_move } else { 0.0 } + p.bloom;
-    if settled {
-        spread *= ADS_SPREAD_MULT;
-    }
-    if p.crouch {
-        spread *= CROUCH_SPREAD_MULT;
-    }
-    let stability = (1.0
-        - AIM_TURN_K * (yaw_rate - AIM_TURN_FREE).max(0.0)
-        - AIM_MOVE_K * (moving - AIM_MOVE_FREE).max(0.0))
-    .clamp(AIM_STABILITY_MIN, 1.0);
-    spread /= stability;
+    let spread = game
+        .sim
+        .aim_spread_of(game.sim.player, settled || p.gun == GunKind::Bow);
 
     let place_arc = |q: &mut Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
                      ents: &[Entity],
@@ -8479,20 +8505,13 @@ fn stability_bracket(
     mut q: Query<(&StabilityBracket, &mut Node, &mut Visibility)>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
-    let spec = gun(p.gun);
-    let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
-    // §5.1: `GunSpec.spread` is only the COLD value for the minigun -
-    // `base_spread` is the sim's own heat-widened number, so the bracket
-    // tracks the cone the shots actually use instead of a constant.
-    let mut spread = base_spread(p.gun, p.heat)
-        + if speed > 0.5 { spec.spread_move } else { 0.0 }
-        + p.bloom;
-    if cam.ads_t > 0.9 {
-        spread *= ADS_SPREAD_MULT;
-    }
-    if p.crouch {
-        spread *= CROUCH_SPREAD_MULT;
-    }
+    // The sim's OWN cone. The copy that used to live here had drifted
+    // three ways: it applied `spread_move` as a hard on/off at 0.5 m/s
+    // instead of the sim's 34%->95% ramp, it had no airborne penalty at
+    // all, and it missed the scoped override entirely - so an AWM player
+    // saw a bracket that ignored the flat 0.002 laser value the sim
+    // actually shoots with.
+    let spread = game.sim.aim_spread_of(game.sim.player, cam.ads_t > 0.9);
     let px = 12.0 + spread * 2400.0;
     for (b, mut node, mut vis) in &mut q {
         *vis = if p.alive() && p.armed() {

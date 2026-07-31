@@ -1402,6 +1402,22 @@ impl Fighter {
     pub fn alive(&self) -> bool {
         self.respawn_t <= 0.0 && self.health > 0.0
     }
+    /// Is this fighter currently piloting a live chassis?
+    pub fn in_mech(&self) -> bool {
+        self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0
+    }
+    /// §6: apply crouch INTENT. A mech never crouches - `height()`
+    /// returns the chassis height unconditionally for a live mech, so a
+    /// crouching mech kept its full 3.03 m hitbox while the renderer
+    /// played the soldier squat: the x2.0 visor band floated in empty air
+    /// above the model and was unreachable on it.
+    ///
+    /// This lives on `Fighter` so the PLAYER and BOT paths cannot drift -
+    /// the guard was originally added to the player path only, leaving
+    /// every bot-piloted mech still able to crouch.
+    pub fn set_crouch(&mut self, want: bool) {
+        self.crouch = want && !self.in_mech();
+    }
     pub fn height(&self) -> f32 {
         if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
             BODY_HEIGHT * MECH_SCALE // §11: a 2.7 m powered exosuit
@@ -1572,6 +1588,11 @@ pub const BOW_V0_FULL: f32 = 55.0;
 pub const BOW_PIERCE_DMG: [f32; 3] = [90.0, 67.5, 50.625];
 pub const BOW_MAX_PIERCES: u8 = 3;
 
+/// §4.1: the power a shot carries at the MINIMUM valid draw. Named
+/// because the client's arc preview needs the same floor to draw the
+/// early-draw arc correctly.
+pub const BOW_POWER_MIN: f32 = 0.35;
+
 /// §4.1: draw power fraction (35% -> 100%, linear) for a hold of
 /// `held_s` seconds; `None` means letdown (too short or forced at 10s).
 pub fn bow_power_fraction(held_s: f32) -> Option<f32> {
@@ -1579,7 +1600,7 @@ pub fn bow_power_fraction(held_s: f32) -> Option<f32> {
         return None;
     }
     let t = ((held_s - BOW_DRAW_MIN_S) / (BOW_DRAW_FULL_S - BOW_DRAW_MIN_S)).clamp(0.0, 1.0);
-    Some(0.35 + 0.65 * t)
+    Some(BOW_POWER_MIN + (1.0 - BOW_POWER_MIN) * t)
 }
 
 // ---------------------------------------------------------------- pickups
@@ -3040,6 +3061,13 @@ impl TdmSim {
                     f.cook_t = 0.0;
                     f.blind_t = 0.0;
                     f.burn_t = 0.0;
+                    // A bot's fire gate is `los_time > reaction_s`, and
+                    // `bot_act` is skipped entirely while dead - so
+                    // los_time froze at whatever it held the instant the
+                    // bot died and carried straight through respawn. A
+                    // bot killed mid-firefight came back shooting with
+                    // ZERO reaction delay. A fresh body re-acquires.
+                    f.los_time = 0.0;
                 }
             }
         }
@@ -3233,14 +3261,7 @@ impl TdmSim {
         // ---- player -----------------------------------------------------
         let p = self.player;
         if self.fighters[p].alive() {
-            // §6: a mech does NOT crouch. `height()` returns the chassis
-            // height unconditionally for a live mech, so a crouching mech
-            // kept its full 3.03 m hitbox while the renderer played the
-            // full soldier squat - the x2.0 visor band ended up floating
-            // in empty air above the model, and unreachable on it.
-            let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
-                && self.fighters[p].hull > 0.0;
-            self.fighters[p].crouch = cmd.crouch && !in_mech;
+            self.fighters[p].set_crouch(cmd.crouch);
             self.fighters[p].lean = cmd.lean.clamp(-1.0, 1.0);
             // slot select (number keys) + shield toggle (E)
             if let Some(s) = cmd.slot {
@@ -3265,7 +3286,10 @@ impl TdmSim {
             } else {
                 MOVE_SPEED
             };
-            if cmd.crouch {
+            // read the AUTHORITATIVE flag, not the raw intent: a mech is
+            // denied crouch, so reading `cmd.crouch` here charged it the
+            // crouch speed tax for a stance it never entered
+            if self.fighters[p].crouch {
                 speed *= CROUCH_SPEED_MULT;
             }
             // the raised shield owns the pace — ADS/scope mults don't
@@ -3547,11 +3571,21 @@ impl TdmSim {
                 let f = &mut self.fighters[p];
                 // §8 (Brief IV): G cycles through what you actually
                 // CARRY — empty slots are skipped (4 tries, then stay)
+                let was = f.throw_sel;
                 for _ in 0..4 {
                     f.throw_sel = (f.throw_sel + 1) % 4;
                     if f.grenades[f.throw_sel as usize] > 0 {
                         break;
                     }
+                }
+                if f.throw_sel != was {
+                    // The cook clock belongs to the grenade in your hand,
+                    // not to the hand. Carrying it across a switch meant
+                    // cycling from a nearly-cooked SMOKE (fuse 1.2s, no
+                    // cook cap anywhere in the sim) onto a FRAG detonated
+                    // it instantly in your palm - and cycling the other
+                    // way silently defused a cooked frag.
+                    f.cook_t = 0.0;
                 }
             }
             let sel = self.fighters[p].throw_sel as usize;
@@ -3669,8 +3703,14 @@ impl TdmSim {
                                 continue;
                             }
                             self.fighters[j].burn_t = 1.0;
-                            let at = self.fighters[j].pos;
-                            self.apply_plain_damage(p, j, FLAME_DPS * DT, at, false, true);
+                            // the ATTACKER's position: this is the
+                            // direction the hit came FROM, which is what
+                            // the mech arc and the Folk brace arc are
+                            // measured against. Passing the victim's own
+                            // position makes the direction vector zero,
+                            // which silently reads as "side" for a mech
+                            // and never matches a brace at all.
+                            self.apply_plain_damage(p, j, FLAME_DPS * DT, ppos, false, true);
                         }
                     }
                 }
@@ -3721,8 +3761,8 @@ impl TdmSim {
                             g.pos[1] += 0.06;
                             g.vy = REPULSOR_KNOCK * 0.5;
                             g.grounded = false;
-                            let at = self.fighters[j].pos;
-                            self.apply_plain_damage(p, j, REPULSOR_DMG, at, true, false);
+                            // attacker's position - see the flame note
+                            self.apply_plain_damage(p, j, REPULSOR_DMG, ppos, true, false);
                         }
                     }
                 }
@@ -3864,21 +3904,35 @@ impl TdmSim {
                         let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
                         let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
                         let d_out = if behind { backstab } else { dmg };
-                        let at = self.fighters[j].pos;
-                        self.apply_plain_damage(p, j, d_out, at, false, false);
+                        // attacker's position - the arc model measures
+                        // where the blow came FROM, and the victim's own
+                        // position degenerates it to a zero vector
+                        self.apply_plain_damage(p, j, d_out, ppos, false, false);
                     }
-                    let mut zhits: Vec<usize> = Vec::new();
-                    for (zi, z) in self.zombies.iter().enumerate() {
+                    // Collect zombie IDs, NOT indices: `damage_zombie`
+                    // does `swap_remove` on a kill, which relocates the
+                    // last element into the dead slot and shrinks the
+                    // vec - so any index collected earlier that happened
+                    // to equal the old `len-1` becomes out of range and
+                    // panics the authoritative sim. One axe sweep hits a
+                    // 2.1m / 90deg arc of a horde packed to 0.55m and
+                    // one-shots every zombie type, so multi-kill sweeps
+                    // are the normal case, not an edge case. The missile
+                    // path already avoids this by looking up by id.
+                    let mut zhits: Vec<u32> = Vec::new();
+                    for z in self.zombies.iter() {
                         let dx = z.pos[0] - ppos[0];
                         let dz = z.pos[2] - ppos[2];
                         let d = (dx * dx + dz * dz).sqrt();
                         if d < range && (fx * dx + fz * dz) / d.max(0.05) > AXE_ARC_COS {
-                            zhits.push(zi);
+                            zhits.push(z.id);
                         }
                     }
                     any |= !zhits.is_empty();
-                    for zi in zhits {
-                        self.damage_zombie(zi, dmg, false);
+                    for zid in zhits {
+                        if let Some(zi) = self.zombies.iter().position(|z| z.id == zid) {
+                            self.damage_zombie(zi, dmg, false);
+                        }
                     }
                     if self.mode == Mode::Extraction && any {
                         let at = [ppos[0], ppos[2]];
@@ -3921,8 +3975,10 @@ impl TdmSim {
                         let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
                         let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
                         let d_out = if behind { backstab } else { dmg };
-                        let at = self.fighters[j].pos;
-                        self.apply_plain_damage(p, j, d_out, at, false, false);
+                        // attacker's position - the arc model measures
+                        // where the blow came FROM, and the victim's own
+                        // position degenerates it to a zero vector
+                        self.apply_plain_damage(p, j, d_out, ppos, false, false);
                     } else {
                         // the horde is knife-work too (silent = correct)
                         let mut bz: Option<(usize, f32)> = None;
@@ -4320,6 +4376,66 @@ impl TdmSim {
     /// RELEASE edge (held this tick -> not held) to decide whether to
     /// loose an arrow, which `try_fire`'s "only called while held"
     /// convention can't express.
+    /// The aim cone for fighter `i` firing their CURRENT gun this tick.
+    ///
+    /// Extracted from `try_fire` so every fire path shares one
+    /// computation. The bow's draw/release path (`step_bow_draw`) is a
+    /// second, independent fire path that never called any of this - so
+    /// the player's bow fired with literally zero spread: pixel-perfect
+    /// while sprinting, mid-whip-turn, or airborne, with `GunSpec.spread`
+    /// / `spread_move` dead for that weapon and the §4 stability model
+    /// unwired. Any future third fire path gets it by construction.
+    /// Public view of `aim_spread` for the client's arc preview, so the
+    /// HUD cannot show a cone the simulation does not shoot.
+    pub fn aim_spread_of(&self, i: usize, ads: bool) -> f32 {
+        self.aim_spread(i, ads)
+    }
+
+    fn aim_spread(&self, i: usize, ads: bool) -> f32 {
+        let f = &self.fighters[i];
+        let spec = gun(f.gun);
+        // §2.4 (Brief VI): the movement penalty RAMPS from zero at 34%
+        // of max speed to full at 95% — counter-strafe under 34% and
+        // your shot is already clean. Airborne adds jump inaccuracy.
+        let move_frac = {
+            let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+            ((sp / SPRINT_SPEED - MOVE_INACC_START)
+                / (MOVE_INACC_FULL - MOVE_INACC_START))
+                .clamp(0.0, 1.0)
+        };
+        let airborne_pen = if f.grounded { 0.0 } else { 1.5 };
+        let mut spread = base_spread(f.gun, f.heat)
+            + spec.spread_move * (move_frac + airborne_pen)
+            + f.bloom;
+        if spec.scoped && ads {
+            // §5.2 (Brief VI): the scoped shot is a LASER — a flat
+            // 0.002 standing / 0.0015 crouched, plus ONLY the movement
+            // penalty (0.176 moving is a hard miss in either mode)
+            spread = if f.crouch { 0.0015 } else { 0.002 }
+                + spec.spread_move * (move_frac + airborne_pen);
+        } else {
+            if ads {
+                spread *= ADS_SPREAD_MULT;
+            }
+            if f.crouch {
+                spread *= CROUCH_SPREAD_MULT;
+            }
+        }
+        // §4 stability: bow/spear shots taken mid-whip-turn or on the run
+        // are spoiled — the cost replaces the old feeling of being pinned.
+        // Deterministic: prev_yaw is sim state, updated once per tick.
+        if spec.projectile.is_some() {
+            let ang = wrap_angle(f.yaw - f.prev_yaw).abs() / DT;
+            let plan = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+            let stability = (1.0
+                - AIM_TURN_K * (ang - AIM_TURN_FREE).max(0.0)
+                - AIM_MOVE_K * (plan - AIM_MOVE_FREE).max(0.0))
+            .clamp(AIM_STABILITY_MIN, 1.0);
+            spread /= stability;
+        }
+        spread
+    }
+
     fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], held: bool) {
         let blocked = {
             let f = &self.fighters[i];
@@ -4356,13 +4472,29 @@ impl TdmSim {
         let Some(power) = bow_power_fraction(held_s) else {
             return; // §4.1: under 0.15s or forced-letdown boundary - no shot
         };
-        let d = self.fighters[i].bow_aim;
+        // §4: the SAME cone every other fire path uses. Drawing does not
+        // exempt the bow from movement penalty, bloom, or the whip-turn
+        // stability divide - this path used to fire perfectly straight.
+        // A drawn bow is aimed, so it takes the ADS branch.
+        let spread = self.aim_spread(i, true);
+        let (ex, ey) = (
+            self.rng.range(-spread, spread),
+            self.rng.range(-spread, spread),
+        );
+        let d = perturb(self.fighters[i].bow_aim, ex, ey);
         let o = self.muzzle_origin(i);
+        let spec = gun(GunKind::Bow);
         {
             let f = &mut self.fighters[i];
             f.ammo -= 1;
-            f.fire_cd = gun(GunKind::Bow).fire_period;
+            f.fire_cd = spec.fire_period;
             f.protect_t = 0.0;
+            // nock the next arrow automatically, exactly as try_fire's
+            // projectile branch does - without this the human bow needed
+            // a manual R after every shot while a bot's re-nocked itself
+            if f.ammo == 0 && f.reserve > 0 {
+                f.reload_t = spec.reload_s;
+            }
         }
         let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
         self.spawn_arrow(o, d, power, i);
@@ -4412,48 +4544,7 @@ impl TdmSim {
             }
         }
         let spec = gun(self.fighters[i].gun);
-        // §2.4 (Brief VI): the movement penalty RAMPS from zero at 34%
-        // of max speed to full at 95% — counter-strafe under 34% and
-        // your shot is already clean. Airborne adds jump inaccuracy.
-        let move_frac = {
-            let f = &self.fighters[i];
-            let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
-            ((sp / SPRINT_SPEED - MOVE_INACC_START)
-                / (MOVE_INACC_FULL - MOVE_INACC_START))
-                .clamp(0.0, 1.0)
-        };
-        let airborne_pen = if self.fighters[i].grounded { 0.0 } else { 1.5 };
-        let base_spread = base_spread(self.fighters[i].gun, self.fighters[i].heat);
-        let mut spread = base_spread
-            + spec.spread_move * (move_frac + airborne_pen)
-            + self.fighters[i].bloom;
-        if spec.scoped && ads {
-            // §5.2 (Brief VI): the scoped shot is a LASER — a flat
-            // 0.002 standing / 0.0015 crouched, plus ONLY the movement
-            // penalty (0.176 moving is a hard miss in either mode)
-            spread = if self.fighters[i].crouch { 0.0015 } else { 0.002 }
-                + spec.spread_move * (move_frac + airborne_pen);
-        } else {
-            if ads {
-                spread *= ADS_SPREAD_MULT;
-            }
-            if self.fighters[i].crouch {
-                spread *= CROUCH_SPREAD_MULT;
-            }
-        }
-        // §4 stability: bow/spear shots taken mid-whip-turn or on the run
-        // are spoiled — the cost replaces the old feeling of being pinned.
-        // Deterministic: prev_yaw is sim state, updated once per tick.
-        if spec.projectile.is_some() {
-            let f = &self.fighters[i];
-            let ang = wrap_angle(f.yaw - f.prev_yaw).abs() / DT;
-            let plan = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
-            let stability = (1.0
-                - AIM_TURN_K * (ang - AIM_TURN_FREE).max(0.0)
-                - AIM_MOVE_K * (plan - AIM_MOVE_FREE).max(0.0))
-            .clamp(AIM_STABILITY_MIN, 1.0);
-            spread /= stability;
-        }
+        let spread = self.aim_spread(i, ads);
         // lean shifts the muzzle sideways off the body line and steadies
         // the shoulder a touch (recoil ×0.8 while leaning)
         let lean = self.fighters[i].lean;
@@ -5226,6 +5317,10 @@ impl TdmSim {
         }
         // ---- per-zombie behavior ---------------------------------------
         let mut screams: Vec<[f32; 3]> = Vec::new();
+        // §8: claw hits are collected and applied AFTER the walk, so they
+        // can go through the shared armor pipeline (which needs &mut self)
+        // instead of writing `health` raw. (victim, raw damage, from)
+        let mut claw_hits: Vec<(usize, f32, [f32; 3])> = Vec::new();
         for zi in 0..self.zombies.len() {
             let (zpos, kind) = (self.zombies[zi].pos, self.zombies[zi].kind);
             let spec = zspec(kind);
@@ -5262,18 +5357,15 @@ impl TdmSim {
                         screams.push(z.pos);
                     }
                 }
-                // melee
-                if d2 < 1.4 * 1.4 && z.atk_cd <= 0.0 && spec.dmg > 0.0 {
+                // melee. `d2` is PLANAR only - zombies have no vertical
+                // simulation at all (pos[1] is written once at spawn and
+                // never again), so without a height check the horde claws
+                // players standing on a crate or a rooftop directly above
+                // them. Gate on the same 1.4 m reach vertically.
+                let dy = (fpos[1] - z.pos[1]).abs();
+                if d2 < 1.4 * 1.4 && dy < 1.4 && z.atk_cd <= 0.0 && spec.dmg > 0.0 {
                     z.atk_cd = 1.0;
-                    let f = &mut self.fighters[j];
-                    f.health -= spec.dmg;
-                    f.last_dmg_at = self.t;
-                    if f.health <= 0.0 {
-                        f.deaths += 1;
-                        f.respawn_t = 9999.0; // §8: no respawns in the run
-                        f.vel = [0.0, 0.0];
-                        f.shield_up = false;
-                    }
+                    claw_hits.push((j, spec.dmg, zpos));
                 }
             }
             // §1 (Brief III) audit fix: an unalerted zombie previously
@@ -5369,6 +5461,32 @@ impl TdmSim {
                     self.zombies[b].pos[0] += ux * push;
                     self.zombies[b].pos[2] += uz * push;
                 }
+            }
+        }
+
+        // §8: the horde's claws go through the SAME armor pipeline as
+        // every other damage source. This used to write `health` raw,
+        // which meant armor sets, the Folk brace, the raised shield and
+        // even the mech's 1000-point HULL all did literally nothing
+        // against zombies - a mech was exactly as soft as a bare soldier.
+        // The mode's own death rule (no respawns in a run) is kept here
+        // rather than delegating to apply_plain_damage, which would
+        // overwrite respawn_t with the standard timer.
+        let now = self.t;
+        for (j, raw, from) in claw_hits {
+            if !self.fighters[j].alive() {
+                continue;
+            }
+            let d =
+                self.apply_armor_tagged(j, raw, raw, HitZone::Torso, Some(from), false, false);
+            let f = &mut self.fighters[j];
+            f.health -= d;
+            f.last_dmg_at = now;
+            if f.health <= 0.0 {
+                f.deaths += 1;
+                f.respawn_t = 9999.0; // §8: no respawns in the run
+                f.vel = [0.0, 0.0];
+                f.shield_up = false;
             }
         }
 
@@ -6003,7 +6121,14 @@ impl TdmSim {
             self.fighters[victim].respawn_t = RESPAWN_S;
             self.fighters[victim].vel = [0.0, 0.0];
             self.fighters[victim].shield_up = false;
-            if src != victim {
+            // A TEAM kill credits nobody. Frag blast and molotov fire are
+            // the only damage paths without an upstream team filter
+            // (every other one - bullets, rockets, flame, repulsor, axe,
+            // knife - filters before it ever gets here), so without this
+            // gate a player could farm their own teammates for TDM points
+            // and win the match with a grenade.
+            let team_kill = self.fighters[src].team == self.fighters[victim].team;
+            if src != victim && !team_kill {
                 self.fighters[src].kills += 1;
                 if self.mode == Mode::Tdm {
                     let s = Self::team_idx(self.fighters[src].team);
@@ -6188,7 +6313,10 @@ impl TdmSim {
                 } else {
                     0.0
                 };
-                self.fighters[i].crouch = closing == 0.0 && dist > 9.0;
+                // through the shared guard - a bot-piloted mech must obey
+                // the same crouch ban the player's does
+                let want_crouch = closing == 0.0 && dist > 9.0;
+                self.fighters[i].set_crouch(want_crouch);
                 // shield discipline: caught reloading in the open → turtle
                 // behind the shield until the mag is back in
                 self.fighters[i].shield_up = reloading && dist < 16.0;
@@ -6682,6 +6810,253 @@ mod tests {
             "gravity must land him: y {}",
             s.fighters[0].pos[1]
         );
+    }
+
+    /// §4: the bow's draw/release path is a SECOND fire path that
+    /// bypassed `try_fire` entirely - so the player's bow fired with
+    /// literally zero spread while sprinting and never auto-nocked.
+    /// Both are now shared through `aim_spread`.
+    #[test]
+    fn the_bow_draw_path_applies_spread_and_auto_nocks() {
+        // -- spread: a sprinting draw must NOT be pixel-perfect
+        let mut s = range(70);
+        s.fighters[0].gun = GunKind::Bow;
+        s.fighters[0].ammo = 10;
+        s.fighters[0].reserve = 10;
+        s.fighters[0].vel = [SPRINT_SPEED, 0.0];
+        s.fighters[0].grounded = false; // airborne too - max penalty
+        let moving = s.aim_spread_of(0, true);
+        s.fighters[0].vel = [0.0, 0.0];
+        s.fighters[0].grounded = true;
+        let still = s.aim_spread_of(0, true);
+        assert!(
+            moving > still,
+            "a sprinting airborne bow shot must be less accurate than a planted one: \
+             {moving} vs {still}"
+        );
+        assert!(still > 0.0, "even a planted bow has a real cone, not zero");
+
+        // -- the release actually perturbs: two identical draws from
+        // different RNG states must not produce the same direction
+        let launch_dir = |seed: u64| {
+            let mut s = range(seed);
+            s.fighters[0].gun = GunKind::Bow;
+            s.fighters[0].ammo = 10;
+            s.fighters[0].reserve = 10;
+            s.fighters[0].vel = [SPRINT_SPEED, 0.0];
+            for _ in 0..((0.5 * SIM_HZ as f32) as usize) {
+                s.step(PlayerCmd { shoot: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+            }
+            s.step(PlayerCmd { shoot: false, aim: [0.0, 0.0, 1.0], ..Default::default() });
+            s.missiles.last().map(|m| m.vel)
+        };
+        let a = launch_dir(71).expect("an arrow must have launched");
+        let b = launch_dir(72).expect("an arrow must have launched");
+        assert!(
+            a != b,
+            "spread must actually randomize the launch direction; both were {a:?}"
+        );
+
+        // -- auto-nock: emptying the mag must start a reload by itself
+        let mut s = range(73);
+        s.fighters[0].gun = GunKind::Bow;
+        s.fighters[0].ammo = 1;
+        s.fighters[0].reserve = 5;
+        for _ in 0..((0.5 * SIM_HZ as f32) as usize) {
+            s.step(PlayerCmd { shoot: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+        }
+        s.step(PlayerCmd { shoot: false, aim: [0.0, 0.0, 1.0], ..Default::default() });
+        assert_eq!(s.fighters[0].ammo, 0, "the last arrow was loosed");
+        assert!(
+            s.fighters[0].reload_t > 0.0,
+            "the next arrow must nock automatically, as try_fire's path already does"
+        );
+    }
+
+    /// A TEAM kill must credit nobody. Frag blast and molotov fire are
+    /// the only damage paths with no upstream team filter, so without a
+    /// gate in the fatal block a player could farm teammates with a
+    /// grenade for TDM points and win the match on it.
+    #[test]
+    fn a_team_kill_scores_nothing_and_cannot_win_the_match() {
+        let mut s = TdmSim::new(cfg(80, 3, Mode::Tdm, MapKind::Arena));
+        // find a living teammate of fighter 0
+        let team0 = s.fighters[0].team;
+        let mate = (1..s.fighters.len())
+            .find(|&j| s.fighters[j].team == team0)
+            .expect("a 3v3 must have a teammate");
+        s.fighters[mate].protect_t = 0.0;
+        let score_before = s.score;
+        let kills_before = s.fighters[0].kills;
+        // blow the teammate up at point blank
+        s.apply_plain_damage(0, mate, 500.0, s.fighters[0].pos, true, false);
+        assert!(!s.fighters[mate].alive(), "the teammate must actually die");
+        assert_eq!(
+            s.fighters[0].kills, kills_before,
+            "a team kill must not credit a kill"
+        );
+        assert_eq!(
+            s.score, score_before,
+            "a team kill must not move the scoreboard"
+        );
+    }
+
+    /// §8: an axe sweep through a packed horde kills several zombies in
+    /// one pass. Collecting INDICES and then calling damage_zombie -
+    /// which `swap_remove`s on a kill - panicked the authoritative sim.
+    #[test]
+    fn an_axe_sweep_through_a_packed_horde_does_not_panic() {
+        let mut s = TdmSim::new(cfg(81, 1, Mode::Extraction, MapKind::Arena));
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[0].yaw = 0.0;
+        s.fighters[0].melee_axe = true;
+        s.zombies.clear();
+        // pack the arc directly in front of the player
+        for k in 0..8 {
+            s.next_zombie_id += 1;
+            s.zombies.push(Zombie {
+                id: s.next_zombie_id,
+                kind: ZKind::Shambler,
+                pos: [(k as f32 - 4.0) * 0.2, 0.0, 1.2],
+                hp: zspec(ZKind::Shambler).hp,
+                atk_cd: 0.0,
+                scream_t: 0.0,
+                head_hits: 0,
+                target: [0.0, 0.0],
+                alerted: true,
+            });
+        }
+        let before = s.zombies.len();
+        // a TAP is the quick chop (matching axe_sweeps_the_whole_arc);
+        // hold the horde in the arc so the whole sweep lands at once -
+        // that multi-kill is exactly what used to panic
+        for i in 0..90 {
+            s.step(PlayerCmd {
+                knife_hold: i < 2,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            for k in 0..s.zombies.len() {
+                s.zombies[k].pos = [(k as f32 - 4.0) * 0.2, 0.0, 1.2];
+            }
+            s.fighters[0].pos = [0.0, 0.0, 0.0];
+            s.fighters[0].yaw = 0.0;
+        }
+        assert!(
+            s.zombies.len() < before,
+            "the sweep must actually kill zombies: {before} -> {}",
+            s.zombies.len()
+        );
+    }
+
+    /// §6: the crouch ban is CHASSIS state, so it must hold for a
+    /// bot-piloted mech exactly as it does for the player's. The guard
+    /// originally lived only on the player path.
+    #[test]
+    fn a_mech_never_crouches_for_either_a_player_or_a_bot() {
+        let mut f = TdmSim::new(cfg(83, 1, Mode::Tdm, MapKind::Arena)).fighters.remove(0);
+        // on foot, crouch intent is honoured
+        f.armor_set = ArmorSet::None;
+        f.hull = 0.0;
+        f.set_crouch(true);
+        assert!(f.crouch, "a soldier crouches");
+        // boarded, the same intent is refused
+        f.armor_set = ArmorSet::RobotSuit;
+        f.hull = MECH_HULL;
+        f.set_crouch(true);
+        assert!(!f.crouch, "a live chassis must never crouch");
+        // and a destroyed chassis hands the pilot back their crouch
+        f.hull = 0.0;
+        f.armor_set = ArmorSet::None;
+        f.set_crouch(true);
+        assert!(f.crouch, "an ejected pilot crouches again");
+    }
+
+    /// §8: `d2` in the horde's melee test is PLANAR. Zombies have no
+    /// vertical simulation, so without a height gate they claw players
+    /// standing on a crate directly above them.
+    #[test]
+    fn zombies_cannot_claw_a_player_standing_above_them() {
+        let mut s = TdmSim::new(cfg(84, 1, Mode::Extraction, MapKind::Arena));
+        s.fighters[0].pos = [0.0, 4.0, 0.0]; // up on something
+        s.fighters[0].health = MAX_HEALTH;
+        s.fighters[0].armor_set = ArmorSet::None;
+        s.zombies.clear();
+        s.next_zombie_id += 1;
+        s.zombies.push(Zombie {
+            id: s.next_zombie_id,
+            kind: ZKind::Brute,
+            pos: [0.0, 0.0, 0.3], // directly underneath, planar-adjacent
+            hp: zspec(ZKind::Brute).hp,
+            atk_cd: 0.0,
+            scream_t: 0.0,
+            head_hits: 0,
+            target: [0.0, 0.0],
+            alerted: true,
+        });
+        let hp0 = s.fighters[0].health;
+        for _ in 0..(3 * SIM_HZ as usize) {
+            s.fighters[0].pos = [0.0, 4.0, 0.0]; // hold the high ground
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(
+            s.fighters[0].health, hp0,
+            "a zombie 4m below must not reach a player above it"
+        );
+    }
+
+    /// §8: the horde must go through the shared armor pipeline. Writing
+    /// `health` raw made a 1000-hull mech exactly as soft as a bare
+    /// soldier against claws.
+    #[test]
+    fn zombie_claws_respect_the_mech_hull() {
+        let mut s = TdmSim::new(cfg(82, 1, Mode::Extraction, MapKind::Arena));
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].health = MAX_HEALTH;
+        s.zombies.clear();
+        s.next_zombie_id += 1;
+        s.zombies.push(Zombie {
+            id: s.next_zombie_id,
+            kind: ZKind::Brute,
+            pos: [0.0, 0.0, 1.0],
+            hp: zspec(ZKind::Brute).hp,
+            atk_cd: 0.0,
+            scream_t: 0.0,
+            head_hits: 0,
+            target: [0.0, 0.0],
+            alerted: true,
+        });
+        let hp0 = s.fighters[0].health;
+        let hull0 = s.fighters[0].hull;
+        for _ in 0..(3 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.fighters[0].hull < hull0,
+            "claws must land on the HULL first"
+        );
+        assert_eq!(
+            s.fighters[0].health, hp0,
+            "the pilot must be untouched while the hull holds"
+        );
+    }
+
+    /// §4.1: the power floor is shared, so the client's arc preview and
+    /// the sim's launch cannot disagree about a fresh draw.
+    #[test]
+    fn bow_power_floor_is_the_named_constant() {
+        let at_min = bow_power_fraction(BOW_DRAW_MIN_S).expect("min draw is a valid shot");
+        assert!(
+            (at_min - BOW_POWER_MIN).abs() < 1e-6,
+            "a just-valid draw must be exactly BOW_POWER_MIN, got {at_min}"
+        );
+        let full = bow_power_fraction(BOW_DRAW_FULL_S).expect("full draw is valid");
+        assert!((full - 1.0).abs() < 1e-6, "a full draw must be 1.0, got {full}");
+        // and the launch speeds those imply, which the preview now mirrors
+        assert!((BOW_V0_FULL * at_min - 19.25).abs() < 0.01);
+        assert!((BOW_V0_FULL * full - 55.0).abs() < 0.01);
     }
 
     #[test]
