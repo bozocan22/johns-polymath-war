@@ -31,6 +31,17 @@ pub const BODY_HEIGHT: f32 = 1.78;
 pub const CROUCH_HEIGHT: f32 = 1.15;
 pub const MOVE_SPEED: f32 = 4.8;
 pub const SPRINT_SPEED: f32 = 6.6;
+/// Brief IX-C "Armour Customization": -0.15 m/s per kg of equipped
+/// armour/weapon weight over a class's budget - the brief's exact rule,
+/// worked example included ("+4 kg over budget, -0.60 m/s"). Pure and
+/// currently UNWIRED to real movement: there is no per-piece weight-
+/// tracking system yet (the 26-piece Forge rebuild this needs is a
+/// separate, much larger deferral - see REPORT.md), so this captures
+/// the formula, ready to plug in once real equipped weight exists.
+pub const ARMOR_WEIGHT_PENALTY_PER_KG: f32 = 0.15;
+pub fn armor_weight_movement_penalty(equipped_kg: f32, budget_kg: f32) -> f32 {
+    (equipped_kg - budget_kg).max(0.0) * ARMOR_WEIGHT_PENALTY_PER_KG
+}
 pub const CROUCH_SPEED_MULT: f32 = 0.5;
 pub const CROUCH_SPREAD_MULT: f32 = 0.55;
 pub const ADS_SPREAD_MULT: f32 = 0.32;
@@ -8499,6 +8510,21 @@ mod tests {
             s.fighters[1].health < h0,
             "a frag well past the old 6m radius must still tick damage under the new 20m falloff"
         );
+    }
+
+    /// Brief IX-C "Weight & Movement Test": the brief's own worked
+    /// examples - under/at budget is zero penalty, +4kg over is exactly
+    /// -0.60 m/s.
+    #[test]
+    fn armor_weight_movement_penalty_matches_the_brief_ix_c_worked_example() {
+        assert_eq!(armor_weight_movement_penalty(16.0, 20.0), 0.0, "under budget: no penalty");
+        assert_eq!(armor_weight_movement_penalty(20.0, 20.0), 0.0, "exactly at budget: no penalty");
+        assert!(
+            (armor_weight_movement_penalty(24.0, 20.0) - 0.60).abs() < 1e-4,
+            "+4kg over budget must be exactly -0.60 m/s, the brief's own worked example"
+        );
+        // linear, not just the two sampled points
+        assert!((armor_weight_movement_penalty(21.0, 20.0) - 0.15).abs() < 1e-4);
     }
 
     /// Brief IX-B "Bounce & Rolling Physics": the exact per-material
