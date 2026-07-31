@@ -348,6 +348,16 @@ fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
     CHAIN_ONSET_OFFSETS[segment_index] + ramp_s
 }
 
+/// Task 3.3, sprint-start consumer: the HEAD is the chain's last segment,
+/// so it arrives at a new acceleration lean ~one tip-onset (0.125 s)
+/// behind the pelvis. This chases the pelvis lean with that time
+/// constant; the difference between the two is the head's transient
+/// counter-pitch - present only while the lean is CHANGING, zero at
+/// steady state, so a held sprint looks exactly as before.
+fn chain_lag_chase(lag: f32, target: f32, dt: f32) -> f32 {
+    lag + (target - lag) * (dt / CHAIN_ONSET_OFFSETS[7]).min(1.0)
+}
+
 // §3.2 the coil: named so the follow-through can start from the EXACT
 // value the windup/thrust branch ends on. Both branches deliberately
 // land on the same release yaw, so a throw and a thrust hand off to the
@@ -5693,6 +5703,9 @@ struct LifeState {
     /// §1.2: seconds since this fighter last did anything combat-shaped;
     /// Relaxed posture eases in once this clears 10s.
     since_combat: f32,
+    /// Task 3.3 sprint-start: the head's lagged copy of the acceleration
+    /// lean - the chain ripple's tip. See `chain_lag_chase`.
+    lean_lag: f32,
     /// §5.2 (Brief VII v2): the LEGS' own facing, which LAGS the aim.
     ///
     /// The sim keeps `f.yaw` locked to the aim every tick, so body and
@@ -5728,6 +5741,7 @@ impl Default for LifeState {
             ally_snap_yaw: 0.0,
             exhale_t: 0.0,
             since_combat: 0.0,
+            lean_lag: 0.0,
             leg_yaw: f32::NAN, // uninitialised: snap on the first frame
             spear_release_t: -1.0, // no throw/thrust has happened yet
         }
@@ -6188,8 +6202,19 @@ fn sync_fighters(
         // torso pitch so the head reads as LOOKING, not nodding along
         let aim_pitch_view = if is_player { cam_ctl.pitch } else { 0.05 };
         if let Ok((mut t, _)) = parts.get_mut(rig.neck) {
-            let head_rx =
-                (aim_pitch_view * 0.75).clamp(-0.55, 0.55) - torso_pitch.min(0.30);
+            // Task 3.3 sprint-start: the head is the chain's LAST
+            // segment - it arrives at a new acceleration lean one
+            // tip-onset behind the pelvis, so a hard start reads
+            // hips-first with the head trailing, and a hard stop whips
+            // it forward. Transient only: at steady lean the difference
+            // is zero. Band-safe: a rotation about the neck pivot does
+            // not move the head's lowest geometry, which is what the
+            // §0.2 band measures.
+            ls.lean_lag = chain_lag_chase(ls.lean_lag, rig.accel_lean, dt);
+            let chain_lag_rx = ((rig.accel_lean - ls.lean_lag) * 1.6).clamp(-0.12, 0.12);
+            let head_rx = (aim_pitch_view * 0.75).clamp(-0.55, 0.55)
+                - torso_pitch.min(0.30)
+                + chain_lag_rx;
             // §2.2 cheek weld: on ADS the HEAD comes to the stock - ~6°
             // tilt and 3 cm toward the shoulder. The weapon does not
             // float up to a stationary head. (Previous-frame blend.)
@@ -10837,6 +10862,44 @@ mod forge_tests {
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
         let _ = std::fs::remove_file(forge_slot_path(slot)); // clean up after itself
+    }
+
+    /// Task 3.3 sprint-start: the head arrives at a new lean LAST, one
+    /// tip-onset behind the pelvis, and the transient vanishes at steady
+    /// state - a held sprint must look exactly as before.
+    #[test]
+    fn the_head_trails_a_sprint_start_then_settles() {
+        let dt = 1.0 / 120.0;
+        let lean = 0.07_f32; // a hard sprint start's full lean
+        let mut lag = 0.0_f32;
+        // one tip-onset in, the head must still be visibly behind
+        let onset_ticks = (CHAIN_ONSET_OFFSETS[7] / dt) as usize;
+        for _ in 0..onset_ticks {
+            lag = chain_lag_chase(lag, lean, dt);
+        }
+        let behind = lean - lag;
+        assert!(
+            behind > lean * 0.2,
+            "one onset in, the head should still trail: {behind} of {lean}"
+        );
+        // ...and well before half a second, it has fully arrived
+        for _ in 0..(0.5 / dt) as usize {
+            lag = chain_lag_chase(lag, lean, dt);
+        }
+        assert!(
+            (lean - lag).abs() < lean * 0.02,
+            "at steady state the transient must be gone: {}",
+            lean - lag
+        );
+        // the ripple is strictly monotic toward the target - no wobble
+        let mut lag2 = 0.0_f32;
+        let mut prev_gap = lean;
+        for _ in 0..200 {
+            lag2 = chain_lag_chase(lag2, lean, dt);
+            let gap = lean - lag2;
+            assert!(gap <= prev_gap + 1e-7, "the chase must never overshoot");
+            prev_gap = gap;
+        }
     }
 
     /// §5.2: the turn-in-place. Brief VII v2 shipped `torso_aim_offset`
