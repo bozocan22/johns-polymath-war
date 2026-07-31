@@ -6420,6 +6420,21 @@ impl TdmSim {
             // bots pay the same crouch tax the player does
             vel = [vel[0] * CROUCH_SPEED_MULT, vel[1] * CROUCH_SPEED_MULT];
         }
+        // §6: bots pay the ARMOR-SET pace too. Without this a bot in a
+        // mech ran at full soldier speed while the player's mech is held
+        // to 85%, and a bot's drained chassis never got heavy - the set
+        // that is supposed to be a mobility tradeoff was pure upside for
+        // everyone except the human.
+        {
+            let aspec = armor_spec(fm.armor_set);
+            vel = [vel[0] * aspec.move_mult, vel[1] * aspec.move_mult];
+            if fm.armor_set == ArmorSet::RobotSuit && fm.armor <= 0.0 {
+                vel = [vel[0] * ROBOT_DRAINED_MOVE, vel[1] * ROBOT_DRAINED_MOVE];
+            }
+            if fm.brace {
+                vel = [vel[0] * BRACE_SPEED_MULT, vel[1] * BRACE_SPEED_MULT];
+            }
+        }
         // §7: bots pay the same MASS tax the player does — the minigun's
         // identity is its mobility cost, on every carrier
         if fm.gun == GunKind::Minigun {
@@ -6431,7 +6446,18 @@ impl TdmSim {
             vel = [vel[0] * m, vel[1] * m];
         }
         fm.vel = vel;
-        fm.yaw = yaw;
+        // §11: a mech TURNS at a capped rate - facing a new threat is a
+        // visible, punishable commitment. The player's path enforces
+        // this; the bot path snapped instantly to any new facing, so a
+        // bot mech could whip around in one tick and the "commitment"
+        // that balances the chassis only cost the human.
+        if fm.armor_set == ArmorSet::RobotSuit && fm.hull > 0.0 {
+            let d = wrap_angle(yaw - fm.yaw);
+            let step = (MECH_TURN_RATE * DT).min(d.abs());
+            fm.yaw += d.signum() * step;
+        } else {
+            fm.yaw = yaw;
+        }
     }
 }
 
@@ -6977,6 +7003,48 @@ mod tests {
             s.zombies.len() < before,
             "the sweep must actually kill zombies: {before} -> {}",
             s.zombies.len()
+        );
+    }
+
+    /// §6/§11: a bot in a mech must pay the SAME taxes the player's does.
+    /// The bot path wrote yaw directly (instant whip-turn) and skipped
+    /// the armor-set pace entirely, so the chassis's balancing costs only
+    /// ever applied to the human.
+    #[test]
+    fn a_bot_mech_pays_the_turn_rate_and_armor_pace_taxes() {
+        let mut s = TdmSim::new(cfg(86, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        let bot = 1usize;
+        s.fighters[bot].armor_set = ArmorSet::RobotSuit;
+        s.fighters[bot].hull = MECH_HULL;
+        s.fighters[bot].armor = POWER_MAX;
+        s.fighters[bot].yaw = 0.0;
+        // an enemy directly BEHIND, so the bot wants a 180 this tick
+        let foe = (0..s.fighters.len())
+            .find(|&j| s.fighters[j].team != s.fighters[bot].team)
+            .expect("a 2v2 has an enemy");
+        s.fighters[bot].pos = [0.0, 0.0, 0.0];
+        s.fighters[foe].pos = [0.0, 0.0, -8.0];
+        s.fighters[foe].protect_t = 0.0;
+        let yaw0 = s.fighters[bot].yaw;
+        s.step(PlayerCmd::default());
+        let turned = wrap_angle(s.fighters[bot].yaw - yaw0).abs();
+        assert!(
+            turned <= MECH_TURN_RATE * DT + 1e-4,
+            "a bot mech must be held to the turn-rate cap, turned {turned} rad in one tick"
+        );
+
+        // and the armor-set pace: a mech bot cannot out-run its own spec
+        let mech_speed = {
+            let f = &s.fighters[bot];
+            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
+        };
+        let cap = MOVE_SPEED * armor_spec(ArmorSet::RobotSuit).move_mult + 1e-3;
+        assert!(
+            mech_speed <= cap,
+            "a bot mech must obey its armor pace: {mech_speed} > {cap}"
         );
     }
 
