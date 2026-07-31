@@ -1488,8 +1488,6 @@ pub struct PlayerCmd {
     /// §6: armor ability held (now C — §5 took F) — Folk brace / Pyro
     /// flame / Robot repulsor.
     pub ability: bool,
-    /// §6: SPACE held (not the jump edge) — the Robot Suit's thrusters.
-    pub jump_held: bool,
     /// §5: knife held (F). Tap = quick slash, hold = committed lunge.
     pub knife_hold: bool,
 }
@@ -2092,10 +2090,11 @@ pub enum ArmorSet {
     None,
     /// Mail and plate; Shieldwall Brace (hold F).
     Folk,
-    /// Heat plate; fire immunity + Flame Projector (hold F).
+    /// Heat plate; fire immunity + Flame Projector (hold C).
     Pyro,
-    /// The powered white robot; thruster flight (hold SPACE airborne) +
-    /// Repulsor Blast (F), all running on a power core.
+    /// The grounded walker chassis; side-step (Q) + Repulsor Blast (C),
+    /// running on a power core. (Flight was deleted in Brief VI §4.3 -
+    /// this doc advertised thrusters for two briefs after they died.)
     RobotSuit,
     /// The light counterweight: fast, quiet, self-healing. No abilities.
     Recon,
@@ -2163,13 +2162,12 @@ pub const BRACE_STACK_BONUS: f32 = 0.08;
 pub const BRACE_STACK_CAP: u32 = 3;
 pub const BRACE_SPEED_MULT: f32 = 0.25;
 /// Robot power core: capacity, recharge (grounded, 5 s after ability use),
-/// thruster drain and speeds, repulsor cost/cooldown, EMP/explosive drain.
+/// repulsor cost/cooldown, EMP/explosive drain. (The THRUST_* trio lived
+/// here from Brief IV's flight model - §4.3 deleted mech flight, and the
+/// constants sat dead with a doc claiming live thrusters for two briefs.)
 pub const POWER_MAX: f32 = 100.0;
 pub const POWER_REGEN: f32 = 6.0;
 pub const POWER_REGEN_DELAY: f32 = 5.0;
-pub const THRUST_DRAIN: f32 = 8.0;
-pub const THRUST_VY: f32 = 14.0;
-pub const THRUST_LATERAL: f32 = 9.0;
 pub const REPULSOR_DMG: f32 = 62.0;
 pub const REPULSOR_KNOCK: f32 = 6.0;
 pub const REPULSOR_CD: f32 = 1.4;
@@ -4889,7 +4887,7 @@ impl TdmSim {
         ));
         if fatal {
             self.fighters[j].deaths += 1;
-            self.fighters[j].respawn_t = RESPAWN_S;
+            self.fighters[j].respawn_t = self.death_respawn_t();
             self.fighters[j].vel = [0.0, 0.0];
             self.fighters[j].shield_up = false; // the plate drops with you
             self.fighters[i].kills += 1;
@@ -5233,7 +5231,7 @@ impl TdmSim {
             ));
             if fatal {
                 self.fighters[j].deaths += 1;
-                self.fighters[j].respawn_t = RESPAWN_S;
+                self.fighters[j].respawn_t = self.death_respawn_t();
                 self.fighters[j].vel = [0.0, 0.0];
                 self.fighters[j].shield_up = false;
                 self.fighters[i].kills += 1;
@@ -5520,6 +5518,7 @@ impl TdmSim {
         // rather than delegating to apply_plain_damage, which would
         // overwrite respawn_t with the standard timer.
         let now = self.t;
+        let rt = self.death_respawn_t();
         for (j, raw, from) in claw_hits {
             if !self.fighters[j].alive() {
                 continue;
@@ -5531,7 +5530,7 @@ impl TdmSim {
             f.last_dmg_at = now;
             if f.health <= 0.0 {
                 f.deaths += 1;
-                f.respawn_t = 9999.0; // §8: no respawns in the run
+                f.respawn_t = rt; // §8: no respawns in the run
                 f.vel = [0.0, 0.0];
                 f.shield_up = false;
             }
@@ -5559,12 +5558,29 @@ impl TdmSim {
                 let dx = f.pos[0] - tp[0];
                 let dz = f.pos[2] - tp[2];
                 if dx * dx + dz * dz < TOXIC_R * TOXIC_R && (f.pos[1] - tp[1]).abs() < 2.2 {
+                    // Through the shared armor pipeline, like the claws:
+                    // this wrote `health` raw, so armor sets, the brace
+                    // and the mech's sealed 1000-point hull all did
+                    // nothing against gas - a chassis with its own air
+                    // supply was exactly as gassable as a bare soldier.
+                    // The mode's no-respawn death rule stays local, as
+                    // the claw fix documents.
+                    let d = self.apply_armor_tagged(
+                        j,
+                        TOXIC_DPS * 0.25,
+                        TOXIC_DPS * 0.25,
+                        HitZone::Torso,
+                        Some(tp),
+                        false,
+                        false,
+                    );
+                    let rt = self.death_respawn_t();
                     let f = &mut self.fighters[j];
-                    f.health -= TOXIC_DPS * 0.25;
+                    f.health -= d;
                     f.last_dmg_at = self.t;
                     if f.health <= 0.0 {
                         f.deaths += 1;
-                        f.respawn_t = 9999.0;
+                        f.respawn_t = rt;
                         f.vel = [0.0, 0.0];
                     }
                 }
@@ -5893,7 +5909,10 @@ impl TdmSim {
             let team = self.fighters[shooter].team;
             for j in 0..self.fighters.len() {
                 let g = &self.fighters[j];
-                if j == shooter || g.team == team || !g.alive() {
+                // protect_t: this was the ONE blast path without the
+                // spawn-protection gate every other one has - a rocket
+                // fired before a victim's shimmer expired still landed.
+                if j == shooter || g.team == team || !g.alive() || g.protect_t > 0.0 {
                     continue;
                 }
                 let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
@@ -6194,7 +6213,11 @@ impl TdmSim {
         d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire);
         self.fighters[victim].health -= d;
         let fatal = self.fighters[victim].health <= 0.0;
-        let from = self.fighters[src].pos;
+        // the BLAST origin, not the source fighter's current position:
+        // the client's damage indicator points at `from`, and a grenade
+        // victim needs to be pointed at the explosion, not at wherever
+        // the thrower has run to by the time the fuse burned down.
+        let from = at;
         self.hits.push((
             HitEvent {
                 shooter: src,
@@ -7138,6 +7161,83 @@ mod tests {
             mech_speed <= cap,
             "a bot mech must obey its armor pace: {mech_speed} > {cap}"
         );
+    }
+
+    /// §8: explosives must reach the horde. Every blast path looped
+    /// fighters only, so grenades did literally nothing in the one mode
+    /// that spawns zombies. (Found by wave 3; this is the test the fix
+    /// shipped without - claiming a fix with no test is how the bugs
+    /// this session keeps finding got made.)
+    #[test]
+    fn a_frag_and_a_fire_pool_actually_kill_zombies() {
+        let mut s = TdmSim::new(cfg(87, 1, Mode::Extraction, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.zombies.clear();
+        for k in 0..3 {
+            s.next_zombie_id += 1;
+            s.zombies.push(Zombie {
+                id: s.next_zombie_id,
+                kind: ZKind::Shambler,
+                pos: [k as f32 * 0.8 - 0.8, 0.0, 3.0],
+                hp: zspec(ZKind::Shambler).hp,
+                atk_cd: 0.0,
+                scream_t: 0.0,
+                head_hits: 0,
+                target: [0.0, 0.0],
+                alerted: true,
+            });
+        }
+        let before = s.zombies.len();
+        // a frag at their feet
+        s.grenades_air.push(Grenade {
+            id: 9400,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 0.5, 3.0],
+            vel: [0.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 0.05,
+            bounces: 0,
+            rest: true,
+        });
+        for _ in 0..30 {
+            s.step_grenades();
+        }
+        assert!(
+            s.zombies.len() < before,
+            "a frag in the middle of a packed trio must kill zombies: {before} -> {}",
+            s.zombies.len()
+        );
+
+        // and a fire pool burns whoever survived
+        if let Some(hp0) = s.zombies.first().map(|z| z.hp) {
+            let at = s.zombies[0].pos;
+            s.fires.push(FirePool {
+                pos: [at[0], 0.02, at[2]],
+                ttl: 3.0,
+                thrower: 0,
+                tick_t: 0.0,
+            });
+            for _ in 0..(2 * SIM_HZ as usize) {
+                let zid = s.zombies.first().map(|z| z.id);
+                s.step_fires();
+                // hold the zombie on the pool (it has no pathing here)
+                if let (Some(id), Some(z)) =
+                    (zid, s.zombies.first_mut())
+                {
+                    if z.id == id {
+                        z.pos = [at[0], 0.0, at[2]];
+                    }
+                }
+            }
+            let after = s.zombies.first().map(|z| z.hp).unwrap_or(0.0);
+            assert!(
+                after < hp0,
+                "standing in fire must burn a zombie: {hp0} -> {after}"
+            );
+        }
     }
 
     /// §8: Extraction is CO-OP - everyone shares one team, so a
@@ -8604,7 +8704,6 @@ mod tests {
                 move_z: jz,
                 sprint: i % 100 < 50,
                 jump: i % 37 == 0,
-                jump_held: i % 3 == 0,
                 dodge: i % 200 == 5,
                 aim: [0.0, 0.0, 1.0],
                 ..Default::default()
@@ -9057,7 +9156,6 @@ mod tests {
                     move_z: 0.8,
                     aim: [0.1, 0.0, 1.0],
                     jump: i % 240 == 0,
-                    jump_held: (i % 240) < 100,
                     ability: (i % 180) < 20,
                     ..Default::default()
                 });

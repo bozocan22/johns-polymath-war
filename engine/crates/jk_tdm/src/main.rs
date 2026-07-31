@@ -5560,7 +5560,6 @@ fn input_and_step(
         // §5/§6 (Brief III): F is the KNIFE now; the armor ability
         // (brace / flame / repulsor) moved to held C
         ability: keys.pressed(KeyCode::KeyC),
-        jump_held: keys.pressed(KeyCode::Space),
         knife_hold: keys.pressed(KeyCode::KeyF),
     };
 
