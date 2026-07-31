@@ -1655,7 +1655,10 @@ pub fn throw_spec(k: ThrowKind) -> ThrowSpec {
             fuse_s: 2.4,
             restitution: 0.28,
             friction: 0.55,
-            radius_m: 6.0,
+            // Brief IX-B: falloff extends out to 20m (smooth taper to 0),
+            // not a 6m hard cliff - `frag_falloff_frac` owns the actual
+            // shape of the curve within this range.
+            radius_m: 20.0,
         },
         ThrowKind::Flash => ThrowSpec {
             fuse_s: 1.6,
@@ -1675,6 +1678,29 @@ pub fn throw_spec(k: ThrowKind) -> ThrowSpec {
             friction: 1.0,
             radius_m: 3.4,
         },
+    }
+}
+
+/// Brief IX-B ("Blast Physics & Falloff Curves"): the frag's damage
+/// fraction (0..1 of FRAG_DMG) at distance `d` meters - piecewise-linear,
+/// no hard-edge cliff (non-negotiable #3). Matches the brief's table's
+/// SHAPE exactly (100% out to 2m, then 100%->50%->15%->0% at the 6/12/20m
+/// breakpoints); the brief's own absolute damage numbers were computed
+/// against an illustrative 80 HP baseline that isn't this game's actual
+/// `MAX_HEALTH` (100), so the portable part is the curve, not the raw
+/// numbers - FRAG_DMG (118, already lethal against 100 HP) stays the
+/// peak.
+fn frag_falloff_frac(d: f32) -> f32 {
+    if d <= 2.0 {
+        1.0
+    } else if d <= 6.0 {
+        1.0 - (d - 2.0) / 4.0 * 0.5
+    } else if d <= 12.0 {
+        0.5 - (d - 6.0) / 6.0 * 0.35
+    } else if d <= 20.0 {
+        0.15 - (d - 12.0) / 8.0 * 0.15
+    } else {
+        0.0
     }
 }
 
@@ -5576,7 +5602,8 @@ impl TdmSim {
         ));
         match g.kind {
             ThrowKind::Frag => {
-                // 118 × (1 − d/6)^1.6, LOS-blocked: no damage through walls
+                // Brief IX-B falloff table via frag_falloff_frac, LOS-
+                // blocked: no damage through walls
                 for j in 0..self.fighters.len() {
                     let f = &self.fighters[j];
                     if !f.alive() || f.protect_t > 0.0 {
@@ -5590,7 +5617,7 @@ impl TdmSim {
                     if d > spec.radius_m || !self.los_clear(g.pos, chest) {
                         continue;
                     }
-                    let dmg = FRAG_DMG * (1.0 - d / spec.radius_m).powf(1.6);
+                    let dmg = FRAG_DMG * frag_falloff_frac(d);
                     self.apply_plain_damage(g.thrower, j, dmg, g.pos, true, false);
                 }
             }
@@ -8365,6 +8392,66 @@ mod tests {
         for g in &s.grenades_air {
             assert!(g.pos.iter().all(|v| v.is_finite()), "no NaN positions");
         }
+    }
+
+    /// Brief IX-B: the frag falloff curve's exact shape - flat 100% out
+    /// to 2m, then linear through the 50%-at-6m and 15%-at-12m
+    /// breakpoints, down to 0 at 20m, monotonic and smooth (no cliff)
+    /// the whole way.
+    #[test]
+    fn frag_falloff_matches_the_brief_ix_b_breakpoints() {
+        assert_eq!(frag_falloff_frac(0.0), 1.0, "point-blank is the peak");
+        assert_eq!(frag_falloff_frac(1.5), 1.0, "0-2m is flat at 100%");
+        assert_eq!(frag_falloff_frac(2.0), 1.0, "2m is still the flat edge");
+        assert!(
+            (frag_falloff_frac(6.0) - 0.5).abs() < 1e-4,
+            "6m breakpoint must be exactly 50%: got {}",
+            frag_falloff_frac(6.0)
+        );
+        assert!(
+            (frag_falloff_frac(12.0) - 0.15).abs() < 1e-4,
+            "12m breakpoint must be exactly 15%: got {}",
+            frag_falloff_frac(12.0)
+        );
+        assert_eq!(frag_falloff_frac(20.0), 0.0, "20m breakpoint must be exactly 0%");
+        assert_eq!(frag_falloff_frac(25.0), 0.0, "past 20m stays 0%, never negative");
+        // monotonic non-increasing across the whole range - "no hard edge
+        // cliffs" (non-negotiable #3) means no local jump either
+        let mut prev = frag_falloff_frac(0.0);
+        for i in 1..=200 {
+            let d = i as f32 * 0.1;
+            let cur = frag_falloff_frac(d);
+            assert!(cur <= prev + 1e-6, "falloff must never increase with distance (d={d})");
+            assert!((prev - cur) < 0.05, "no single 0.1m step may drop more than 5% (d={d}) - that's a cliff");
+            prev = cur;
+        }
+    }
+
+    /// Brief IX-B: the frag's usable blast range now reaches 20m (was a
+    /// 6m hard cutoff) - the LOS-blocked damage loop must actually reach
+    /// that far, not just the pure falloff function in isolation.
+    #[test]
+    fn frag_damage_reaches_the_full_20m_range() {
+        let mut s = range(56);
+        let h0 = s.fighters[1].health;
+        s.grenades_air.push(Grenade {
+            id: 9200,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.0, 3.5 + 14.0], // ~14m past the old 6m cutoff
+            vel: [0.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 0.05,
+            bounces: 0,
+            rest: true,
+        });
+        for _ in 0..30 {
+            s.step_grenades();
+        }
+        assert!(
+            s.fighters[1].health < h0,
+            "a frag well past the old 6m radius must still tick damage under the new 20m falloff"
+        );
     }
 
     /// §5: a scripted match WITH thrown grenades replays bit-identically.
