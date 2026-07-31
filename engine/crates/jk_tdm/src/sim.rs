@@ -56,6 +56,24 @@ pub const JUMP_SPEED: f32 = 7.4; // clears a 1.3 m crate (v²/2g ≈ 1.5 m)
 // ---- dodge roll (v5): duck-spin dodge, and the parkour breakfall --------
 pub const ROLL_S: f32 = 0.55; // how long the somersault lasts
 pub const ROLL_SPEED: f32 = 8.6; // faster than a sprint — it's a dodge
+/// Task 3 rule 3 (MISSION doc): a dodge launched AGAINST your current
+/// movement gets the stretch-shortening bonus - the counter-movement
+/// loads the legs, and the release is faster than a dead-start. A dodge
+/// WITH your movement is already riding momentum and gets nothing.
+pub const ROLL_COUNTER_BONUS: f32 = 0.12;
+
+/// Task 3 rule 3, the pure rule: a counter-movement (motion opposite the
+/// coming release) grants the bonus; a dead start does not. `prior_dir`
+/// and `release_dir` are SIGNS of motion before and during the move.
+/// Lives in the SIM because it now changes a real velocity - it sat in
+/// main.rs as a spec fixture with zero call sites for two briefs.
+pub fn counter_movement_bonus(prior_dir: f32, release_dir: f32, max_bonus: f32) -> f32 {
+    if prior_dir * release_dir < 0.0 {
+        max_bonus
+    } else {
+        0.0
+    }
+}
 pub const ROLL_CD_S: f32 = 0.9; // cooldown after a roll ends
 pub const ROLL_HEIGHT: f32 = 0.95; // balled up: a small target
 // ---- §2 (Brief V): motion WEIGHT on the roll -----------------------------
@@ -1274,6 +1292,11 @@ pub struct Fighter {
     pub roll_t: f32,
     pub roll_cd: f32,
     pub roll_dir: [f32; 2],
+    /// Task 3 rule 3: burst multiplier snapshotted at the dodge trigger -
+    /// 1.0 + ROLL_COUNTER_BONUS when the dodge cut against real prior
+    /// movement, 1.0 otherwise (and always 1.0 for the mech and the
+    /// breakfall, which is momentum conversion, not a counter-move).
+    pub roll_boost: f32,
     pub health: f32,
     /// §6: the Robot Suit's POWER CORE charge (0 for every other set) —
     /// thrusters and repulsors spend it, explosions drain it, the ground
@@ -2633,6 +2656,7 @@ impl TdmSim {
                     roll_t: 0.0,
                     roll_cd: 0.0,
                     roll_dir: [0.0, 1.0],
+                    roll_boost: 1.0,
                     health: MAX_HEALTH,
                     armor: 0.0,
                     armor_set: ArmorSet::None,
@@ -3050,6 +3074,7 @@ impl TdmSim {
                     f.crouch = false;
                     f.roll_t = 0.0;
                     f.roll_cd = 0.0;
+                    f.roll_boost = 1.0;
                     f.grenades = if i == 0 {
                         // §8: the player's chosen budget comes back too
                         player_pouch
@@ -3270,6 +3295,15 @@ impl TdmSim {
         // ---- player -----------------------------------------------------
         let p = self.player;
         if self.fighters[p].alive() {
+            // Task 3 rule 3: the PRE-move velocity, captured before the
+            // movement block below overwrites f.vel with this tick's own
+            // input. This sim has no horizontal inertia - vel IS the
+            // input - so "what was I doing before the dodge" only exists
+            // here, one line before it is destroyed. (The first wiring
+            // attempt read f.vel at the dodge trigger, which by then was
+            // already the dodge tick's backward tap: bonus never fired.
+            // The launch test caught it.)
+            let prior_vel = self.fighters[p].vel;
             self.fighters[p].set_crouch(cmd.crouch);
             self.fighters[p].lean = cmd.lean.clamp(-1.0, 1.0);
             // slot select (number keys) + shield toggle (E)
@@ -3398,6 +3432,20 @@ impl TdmSim {
                         [cmd.move_x / m, cmd.move_z / m]
                     } else {
                         [f.yaw.sin(), f.yaw.cos()]
+                    };
+                    // Task 3 rule 3: SNAPSHOT the pre-dodge velocity HERE,
+                    // at the trigger - the burst phase overwrites f.vel
+                    // every tick, which is why this bonus sat unwired for
+                    // two briefs ("the client never sees the pre-dodge
+                    // velocity"). The sim sees it right now. A dodge cut
+                    // against real prior movement launches harder; the
+                    // mech is steel, not tendon - no elastic return.
+                    let along =
+                        prior_vel[0] * f.roll_dir[0] + prior_vel[1] * f.roll_dir[1];
+                    f.roll_boost = if !mech && along < -0.5 {
+                        1.0 + counter_movement_bonus(along, 1.0, ROLL_COUNTER_BONUS)
+                    } else {
+                        1.0
                     };
                     if mech {
                         f.roll_t = MECH_STEP_S + ROLL_EASE_S;
@@ -4112,7 +4160,10 @@ impl TdmSim {
                         // mech's side-step skips the load (servos don't
                         // crouch) but keeps the ease.
                         let mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
-                        let burst = if mech { MECH_STEP_SPEED } else { ROLL_SPEED };
+                        // roll_boost: Task 3 rule 3's counter-movement
+                        // launch, snapshotted at the trigger (1.0 unless
+                        // the dodge cut against real prior movement)
+                        let burst = if mech { MECH_STEP_SPEED } else { ROLL_SPEED * f.roll_boost };
                         let t = f.roll_t.max(0.0);
                         let sp = if !mech && t > ROLL_S + ROLL_EASE_S {
                             burst * 0.25 // the crouch-load creep
@@ -4200,7 +4251,10 @@ impl TdmSim {
                             [f.yaw.sin(), f.yaw.cos()]
                         };
                         // §2 (Brief V): reactive — the breakfall skips
-                        // the crouch-load but keeps the ease-out landing
+                        // the crouch-load but keeps the ease-out landing.
+                        // No counter-move bonus: this is fall momentum
+                        // being converted, not a loaded launch.
+                        f.roll_boost = 1.0;
                         f.roll_t = ROLL_S + ROLL_EASE_S;
                         f.roll_cd = ROLL_S + ROLL_EASE_S + ROLL_CD_S;
                     }
@@ -4424,6 +4478,60 @@ impl TdmSim {
     /// while sprinting, mid-whip-turn, or airborne, with `GunSpec.spread`
     /// / `spread_move` dead for that weapon and the §4 stability model
     /// unwired. Any future third fire path gets it by construction.
+    /// IX-A map-design validator: the longest unobstructed eye-level
+    /// sightline on this map, in metres.
+    ///
+    /// The castle brief's rule 3 says no two standing positions may see
+    /// each other across more than 40 m of open ground - engagements
+    /// belong in the 25-35 m band where weapon balance and movement
+    /// matter. This is the measuring instrument for that rule: it
+    /// samples a grid of standable positions (eye height, outside all
+    /// cover) and raycasts every pair through the real cover grid - the
+    /// same `los_clear` the game itself shoots through, so the validator
+    /// cannot disagree with the gun.
+    ///
+    /// Built BEFORE any castle geometry exists, on the brief's own
+    /// logic: it tells you whether the maps you already have violate the
+    /// rule you are about to hold a new one to.
+    pub fn max_unobstructed_sightline(&self, grid_step: f32) -> f32 {
+        let mut pts: Vec<[f32; 3]> = Vec::new();
+        let h = self.half - 1.0;
+        let mut x = -h;
+        while x <= h {
+            let mut z = -h;
+            while z <= h {
+                // standable: eye height, not inside any cover volume
+                let eye = [x, EYE_REL, z];
+                let buried = self.cover.iter().any(|c| {
+                    x > c.min[0]
+                        && x < c.max[0]
+                        && z > c.min[2]
+                        && z < c.max[2]
+                        && eye[1] > c.min[1]
+                        && eye[1] < c.max[1]
+                });
+                if !buried {
+                    pts.push(eye);
+                }
+                z += grid_step;
+            }
+            x += grid_step;
+        }
+        let mut worst = 0.0_f32;
+        for i in 0..pts.len() {
+            for j in (i + 1)..pts.len() {
+                let dx = pts[i][0] - pts[j][0];
+                let dz = pts[i][2] - pts[j][2];
+                let d2 = dx * dx + dz * dz;
+                // only pairs that could beat the current worst need a ray
+                if d2 > worst * worst && self.los_clear(pts[i], pts[j]) {
+                    worst = d2.sqrt();
+                }
+            }
+        }
+        worst
+    }
+
     /// How long a fighter who just died stays down. §8: an Extraction
     /// RUN has no respawns at all - dying is the end of your run.
     ///
@@ -7172,6 +7280,103 @@ mod tests {
             mech_speed <= cap,
             "a bot mech must obey its armor pace: {mech_speed} > {cap}"
         );
+    }
+
+    /// Task 3 rule 3 (MISSION doc), finally a REAL mechanic: a dodge cut
+    /// against your own movement launches harder than one riding it -
+    /// the counter-movement loads the legs. Snapshotted at the trigger,
+    /// because the burst phase overwrites velocity every tick (which is
+    /// why this sat as an unwired spec fixture for two briefs).
+    #[test]
+    fn a_counter_movement_dodge_launches_harder() {
+        let peak_roll_speed = |counter: bool| -> f32 {
+            let mut s = range(92);
+            s.fighters[0].pos = [0.0, 0.0, 0.0];
+            // sprint forward long enough to be at real speed
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    sprint: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            // dodge: either BACK against the sprint, or WITH it
+            let dodge_z = if counter { -1.0 } else { 1.0 };
+            let mut vmax = 0.0_f32;
+            for i in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: dodge_z,
+                    dodge: i == 0,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                let f = &s.fighters[0];
+                let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+                vmax = vmax.max(sp);
+            }
+            vmax
+        };
+        let with_momentum = peak_roll_speed(false);
+        let counter = peak_roll_speed(true);
+        assert!(
+            counter > with_momentum + 0.5,
+            "a counter-movement dodge must launch measurably harder: \
+             counter {counter:.2} vs with-momentum {with_momentum:.2}"
+        );
+        assert!(
+            (counter - ROLL_SPEED * (1.0 + ROLL_COUNTER_BONUS)).abs() < 0.5,
+            "and by exactly the specced bonus: got {counter:.2}"
+        );
+    }
+
+    /// IX-A slice 1: the sightline validator itself must be trustworthy
+    /// before its numbers mean anything - an empty range reads its own
+    /// diagonal, and a full-height wall provably shortens the answer.
+    /// Then every shipping map gets MEASURED against the castle brief's
+    /// 40 m rule. This does NOT assert the existing maps pass - they
+    /// were built before the rule existed; the test asserts the numbers
+    /// are real and prints them so the violation is on the record.
+    #[test]
+    fn sightline_validator_measures_real_lines_and_reports_every_map() {
+        // instrument check 1: an empty field's worst line is its own span
+        let mut s = TdmSim::new(cfg(90, 1, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        let open = s.max_unobstructed_sightline(s.half / 6.0);
+        let diag = (s.half - 1.0) * 2.0 * std::f32::consts::SQRT_2;
+        assert!(
+            open > diag * 0.9,
+            "an empty map must read ~its own diagonal: got {open:.1} vs {diag:.1}"
+        );
+
+        // instrument check 2: a full-height bisecting wall shortens it
+        s.cover.push(Aabb {
+            min: [-s.half, 0.0, -0.5],
+            max: [s.half, 6.0, 0.5],
+        });
+        s.cover_kind.push(CoverKind::Stone);
+        s.rebuild_grid();
+        let walled = s.max_unobstructed_sightline(s.half / 6.0);
+        assert!(
+            walled < open,
+            "a bisecting wall must strictly shorten the worst line: {walled:.1} vs {open:.1}"
+        );
+
+        // now the real maps, on the record
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(91, 2, Mode::Tdm, map));
+            let worst = s.max_unobstructed_sightline(s.half / 10.0);
+            println!(
+                "IX-A sightline: {map:?} worst = {worst:.1} m ({}the 40 m rule)",
+                if worst <= 40.0 { "PASSES " } else { "exceeds " }
+            );
+            assert!(
+                worst > 0.0 && worst.is_finite(),
+                "{map:?}: the validator must produce a real number"
+            );
+        }
     }
 
     /// A death mid-action must not tax the next life. Dying during a

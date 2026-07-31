@@ -284,17 +284,14 @@ fn torso_aim_offset(desired_delta_deg: f32) -> f32 {
 /// was stored.
 ///
 /// SPEC FIXTURE, NOT A LIVE PATH. This doc used to claim "every power
-/// move routes through" it; in fact `ElasticMove`, `counter_movement_
-/// bonus` and `chain_peak_tick` have zero production call sites - they
-/// are exercised only by the Task 3 tests. What IS wired from this
-/// module is the kinetic chain proper: `chain_segment_scale` drives the
-/// spear follow-through (`spear_followthrough_yaw`), and
-/// `landing_rebound_vy` drives the camera's landing rebound.
-///
-/// Wiring the rest is blocked on a real design decision rather than
-/// effort - `counter_movement_bonus` needs the pre-move velocity, which
-/// sim.rs overwrites the same frame a dodge triggers, so it needs a new
-/// sim-side snapshot field. Recorded in the handback, not pretended away.
+/// move routes through" it; in fact `ElasticMove` and `chain_peak_tick`
+/// have zero production call sites - they are exercised only by the
+/// Task 3 tests. What IS wired from this module: `chain_segment_scale`
+/// drives the spear follow-through, `landing_rebound_vy` drives the
+/// camera's landing rebound, and `counter_movement_bonus` graduated to
+/// sim.rs where it now scales the dodge burst via a trigger-time
+/// velocity snapshot (`roll_boost`) - the sim-side field this doc once
+/// said was the blocker.
 #[derive(Clone, Copy, Debug)]
 struct ElasticMove {
     load_s: f32,
@@ -316,17 +313,10 @@ impl ElasticMove {
     }
 }
 
-/// Rule 3: a counter-movement (motion opposite the coming release) grants
-/// the SSC bonus; a dead start does not. Pure so it's directly testable -
-/// `prior_dir` and `release_dir` are the SIGNS of motion right before and
-/// during the move (e.g. crouch-down velocity vs. jump-up velocity).
-fn counter_movement_bonus(prior_dir: f32, release_dir: f32, max_bonus: f32) -> f32 {
-    if prior_dir * release_dir < 0.0 {
-        max_bonus
-    } else {
-        0.0
-    }
-}
+// Rule 3 (`counter_movement_bonus`) GRADUATED from spec fixture to real
+// sim mechanic: it now lives in sim.rs, snapshotted at the dodge trigger
+// and scaling the roll burst (`roll_boost`). Reachable here via
+// `use sim::*` - the copy that sat here unwired for two briefs is gone.
 
 /// Rule 5: landings never fully damp in one frame - ~8% of impact
 /// velocity returns upward, eased over the caller's own 2-3 frame window.
