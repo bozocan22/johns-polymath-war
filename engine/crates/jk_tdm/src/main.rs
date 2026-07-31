@@ -9071,10 +9071,15 @@ fn open_intro(
             ..default()
         },
         TextColor(Color::srgb(0.62, 0.85, 0.90)),
+        // capped width: the centered mode buttons are 620 wide, so on a
+        // 1280-wide window they start around x=330 - an unconstrained
+        // readout ran straight underneath them and the two texts
+        // overlapped illegibly.
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(18.0),
             bottom: Val::Px(16.0),
+            max_width: Val::Px(300.0),
             ..default()
         },
         GlobalZIndex(12),
@@ -9177,9 +9182,14 @@ fn open_intro(
                 p.spawn((
                     Button,
                     which,
+                    // 620 wide / 18pt: the longest label ("ZOMBIE
+                    // EXTRACTION - survive, then hold the ring") is 46
+                    // chars, which WRAPPED inside the old 420x48 box and
+                    // overlapped the row beneath it. Sized so every label
+                    // stays on one line.
                     Node {
-                        width: Val::Px(420.0),
-                        height: Val::Px(48.0),
+                        width: Val::Px(620.0),
+                        height: Val::Px(50.0),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         ..default()
@@ -9189,7 +9199,7 @@ fn open_intro(
                 .with_children(|b| {
                     b.spawn((
                         Text::new(label),
-                        TextFont { font_size: 20.0, ..default() },
+                        TextFont { font_size: 18.0, ..default() },
                         TextColor(Color::WHITE),
                     ));
                 });
@@ -9542,9 +9552,12 @@ fn open_settings(
                 p.spawn((
                     Button,
                     which,
+                    // 620 wide / 18pt: the mouse-swap row is 48 chars and
+                    // WRAPPED to two lines inside the old 420x48 box,
+                    // spilling past the button's own background.
                     Node {
-                        width: Val::Px(420.0),
-                        height: Val::Px(48.0),
+                        width: Val::Px(620.0),
+                        height: Val::Px(50.0),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         ..default()
@@ -9555,7 +9568,7 @@ fn open_settings(
                     let mut e = b.spawn((
                         Text::new(label),
                         TextFont {
-                            font_size: 19.0,
+                            font_size: 18.0,
                             ..default()
                         },
                         TextColor(Color::WHITE),
