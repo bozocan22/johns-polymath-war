@@ -5704,6 +5704,19 @@ struct LifeState {
     /// §1.2: seconds since this fighter last did anything combat-shaped;
     /// Relaxed posture eases in once this clears 10s.
     since_combat: f32,
+    /// §5.2 (Brief VII v2): the LEGS' own facing, which LAGS the aim.
+    ///
+    /// The sim keeps `f.yaw` locked to the aim every tick, so body and
+    /// aim were always identical and there was no separation to show -
+    /// which is why `torso_aim_offset` sat built, tested and called from
+    /// nowhere. This is the missing half, and it is COSMETIC (C3): the
+    /// legs visually catch up to an aim the sim already considers
+    /// authoritative, and nothing here is ever written back.
+    ///
+    /// NaN-safe sentinel: f32::NAN means "not initialised", so a fresh
+    /// or respawned fighter snaps to its facing instead of spinning up
+    /// from 0.
+    leg_yaw: f32,
     /// Task 3.3: seconds since this fighter's spear throw/thrust ENDED -
     /// the follow-through clock for `spear_followthrough_yaw`.
     /// NEGATIVE means no release has happened yet, which is the state a
@@ -5726,9 +5739,52 @@ impl Default for LifeState {
             ally_snap_yaw: 0.0,
             exhale_t: 0.0,
             since_combat: 0.0,
+            leg_yaw: f32::NAN, // uninitialised: snap on the first frame
             spear_release_t: -1.0, // no throw/thrust has happened yet
         }
     }
+}
+
+/// §5.2: how fast the legs turn to catch up with the aim, rad/s. Slower
+/// than a mouse flick on purpose - that gap IS the turn-in-place.
+const LEG_TURN_RATE: f32 = 6.5;
+
+/// §5.2: advance the legs' facing toward `aim_yaw` and return
+/// `(leg_yaw, torso_offset)`. The torso offset is what puts the shoulders
+/// back on the aim, clamped by `torso_aim_offset` - past the clamp the
+/// legs simply have to catch up, which is the whole mechanic.
+fn step_leg_yaw(prev: f32, aim_yaw: f32, dt: f32) -> (f32, f32) {
+    if !prev.is_finite() {
+        return (aim_yaw, 0.0); // first frame / respawn: snap, never spin
+    }
+    let delta = wrap_pi(aim_yaw - prev);
+    // The legs ALWAYS square up toward the aim - they just do it slowly.
+    // (Only moving them once the gap exceeds the clamp leaves a standing
+    // 60deg twist forever, which is both anatomically absurd and what
+    // this function's first version actually did.)
+    let mut step = (LEG_TURN_RATE * dt).min(delta.abs());
+    // ...but the torso can only cover +/-60deg, so if the gap is wider
+    // than that the legs must move at least enough to close the excess
+    // this frame - otherwise the shoulders could not reach the aim.
+    let clamp = TORSO_AIM_LIMIT_DEG.to_radians();
+    let must_close = (delta.abs() - clamp).max(0.0);
+    step = step.max(must_close).min(delta.abs());
+    let leg = prev + delta.signum() * step;
+    // the torso covers whatever gap is left, clamped
+    let off = torso_aim_offset(wrap_pi(aim_yaw - leg).to_degrees()).to_radians();
+    (leg, off)
+}
+
+/// Wrap to (-PI, PI]. Turning 350 degrees left is really 10 right.
+fn wrap_pi(a: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let mut x = a % tau;
+    if x > std::f32::consts::PI {
+        x -= tau;
+    } else if x < -std::f32::consts::PI {
+        x += tau;
+    }
+    x
 }
 
 fn sync_fighters(
@@ -5772,10 +5828,27 @@ fn sync_fighters(
             // Task 3.3: clear the follow-through clock so the fighter does
             // not respawn mid-unwind from the throw they died during.
             life[vis.index].spear_release_t = -1.0;
+            // §5.2: and un-initialise the legs, so a fighter respawning
+            // to a new facing SNAPS to it instead of visibly spinning
+            // around from wherever the corpse was pointing.
+            life[vis.index].leg_yaw = f32::NAN;
             continue;
         }
         let rolling = f.roll_t > 0.0;
         let in_mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+        // §5.2: the legs LAG the aim; the torso covers the difference, up
+        // to +/-60deg, and past that the legs have to catch up - which is
+        // the turn-in-place. Computed here because the root rotation
+        // below consumes it. A mech turns as ONE piece (its own capped
+        // turn rate is already the commitment), so it never splits.
+        let (leg_yaw, torso_aim) = if in_mech {
+            (f.yaw, 0.0)
+        } else {
+            let prev = life[vis.index].leg_yaw;
+            let (l, o) = step_leg_yaw(prev, f.yaw, dt);
+            life[vis.index].leg_yaw = l;
+            (l, o)
+        };
         if rolling && in_mech {
             // §2 (Brief V): the mech does NOT tumble - the side-step is a
             // braced lean into the travel direction, tall the whole way
@@ -5833,7 +5906,7 @@ fn sync_fighters(
                 0.0
             };
             tf.rotation = tf.rotation.slerp(
-                Quat::from_rotation_y(f.yaw) * lean_roll * Quat::from_rotation_x(mech_pitch),
+                Quat::from_rotation_y(leg_yaw) * lean_roll * Quat::from_rotation_x(mech_pitch),
                 0.35,
             );
         }
@@ -6111,7 +6184,11 @@ fn sync_fighters(
                 hip_y - if f.crouch && !rolling { 0.12 } else { 0.0 } + breath;
             // amplitudes tuned UP so the gait reads from the 2.6 m boom
             t.translation.x = 0.048 * rig.phase.sin() * amp + wshift;
-            t.rotation = Quat::from_rotation_y(0.045 * rig.phase.sin() * amp + spear_yaw)
+            // §5.2: `torso_aim` puts the shoulders back on the aim that
+            // the legs have not caught up to yet - the turn-in-place read
+            t.rotation = Quat::from_rotation_y(
+                0.045 * rig.phase.sin() * amp + spear_yaw + torso_aim,
+            )
                 * Quat::from_rotation_x(
                     (torso_pitch + flinch + 0.07 * settle + relaxed_e * 0.05).min(0.185),
                 )
@@ -10771,6 +10848,85 @@ mod forge_tests {
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
         let _ = std::fs::remove_file(forge_slot_path(slot)); // clean up after itself
+    }
+
+    /// §5.2: the turn-in-place. Brief VII v2 shipped `torso_aim_offset`
+    /// built and tested with ZERO production call sites - the clamp
+    /// existed but nothing ever separated the legs from the aim, so
+    /// there was nothing to clamp. `step_leg_yaw` is the missing half.
+    #[test]
+    fn the_legs_lag_the_aim_and_the_torso_covers_the_difference() {
+        let dt = 1.0 / 60.0;
+        // first frame SNAPS - a fresh fighter must not spin up from 0
+        let (leg, off) = step_leg_yaw(f32::NAN, 2.0, dt);
+        assert_eq!(leg, 2.0, "uninitialised legs snap to the aim");
+        assert_eq!(off, 0.0, "and need no torso compensation");
+
+        // A small flick is covered by the TORSO immediately, while the
+        // legs only creep. (This originally asserted the legs must not
+        // move AT ALL within the clamp - which is what left a permanent
+        // 60deg twist standing forever. The convergence check below is
+        // what caught it, so the assertion was the thing that was wrong.)
+        let small = 30.0_f32.to_radians();
+        let (leg, off) = step_leg_yaw(0.0, small, dt);
+        assert!(
+            leg < small * 0.5,
+            "one tick must not swing the legs most of the way, got {} deg",
+            leg.to_degrees()
+        );
+        assert!(
+            (off + leg - small).abs() < 1e-4,
+            "torso + legs must together land exactly on the aim: {} + {} vs {}",
+            off.to_degrees(),
+            leg.to_degrees(),
+            small.to_degrees()
+        );
+
+        // a big flick EXCEEDS the clamp, so the legs start catching up
+        let big = 140.0_f32.to_radians();
+        let (leg, off) = step_leg_yaw(0.0, big, dt);
+        assert!(leg > 0.0, "past the clamp the legs must turn, got {leg}");
+        assert!(
+            off.to_degrees() <= TORSO_AIM_LIMIT_DEG + 1e-3,
+            "the torso can never exceed its clamp, got {}",
+            off.to_degrees()
+        );
+
+        // and they converge: hold the aim and the legs arrive, with the
+        // torso returning to neutral
+        let (mut leg, mut off) = (0.0_f32, 0.0_f32);
+        for _ in 0..600 {
+            let (l, o) = step_leg_yaw(leg, big, dt);
+            leg = l;
+            off = o;
+        }
+        assert!(
+            (wrap_pi(big - leg)).abs() < 1e-3,
+            "the legs must finish facing the aim, off by {} deg",
+            wrap_pi(big - leg).to_degrees()
+        );
+        assert!(off.abs() < 1e-3, "and the torso unwinds to neutral");
+    }
+
+    /// Turning 350 deg left is really 10 deg right - without wrapping,
+    /// crossing the yaw seam sends the legs the long way around.
+    #[test]
+    fn leg_turn_takes_the_short_way_around_the_seam() {
+        let dt = 1.0 / 60.0;
+        let from = 3.0_f32; // just under +PI
+        let to = -3.0_f32; // just over -PI: 0.28 rad away the SHORT way
+        let (leg, _) = step_leg_yaw(from, to, dt);
+        // moving the short way means yaw INCREASES past PI (wrapping),
+        // never a long sweep back down through zero
+        let moved = wrap_pi(leg - from);
+        assert!(
+            moved > 0.0,
+            "must cross the seam forwards, not sweep the long way: moved {moved}"
+        );
+        assert!(
+            moved.abs() < 0.2,
+            "and must not overshoot the 0.28 rad gap in one 60fps tick"
+        );
     }
 
     /// The mouse mapping must come from ONE place. The settings label
