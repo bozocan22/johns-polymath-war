@@ -139,4 +139,25 @@ stated honestly, the same way mech hull-climbing got a design doc
 instead of a rushed build in Cycle 3; (3) keep this log updated as
 each piece lands.
 
+## 2026-08-01 — First two implementations off the confirmed-gap list
+
+**§5.4 running-throw bonus** (`baf50ca`): built, tested, pushed. Along
+the way the new test caught a real bug in THIS session's own earlier
+work - the spear had been mapped to the rifle-tier sprint-out gate
+(Section H), which HOLDS while speed is above 85% of sprint, making
+"release a throw while still at running speed" structurally
+unreachable. Exempted the spear (its own windup already pays the same
+cost the gate exists for). Fixed before commit, not after - the test
+did its job.
+
+**§4.3 minimap enemy spotting** (`5fbb3c7`): built, verified live
+(release build + baseline capture, exit 0, 0 panics - no sim-layer
+logic exists here to unit-test, this is render/HUD state). Reused the
+sim's own `los_clear` (made `pub(crate)`, was private) rather than
+writing a second visibility check that could drift from the real one.
+
+Both: build clean, tests/live-verify green, committed, pushed to
+`bozocan22/johns-kingdom-polymath` main. Two down, ~95 real findings
+left plus several multi-session architectural items (see BACKLOG.md).
+
 <!-- Thor appends every subsequent action below this line, in order -->

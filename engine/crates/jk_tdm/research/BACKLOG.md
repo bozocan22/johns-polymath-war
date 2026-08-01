@@ -46,6 +46,60 @@ interesting. Blocked items are never researched "in preparation."
 | 16 | Mech entry stage presentation — wire `mech_enter_stage_for` to visor flicker, per-stage servo audio, and the camera transition on HudBoot; capture it | High | Cycle 1's sim-side staging (#1) has nothing to render yet; this is the concrete remainder of #1, split out rather than left implicit | `mech_enter_stage_for` (sim.rs, Cycle 1), viewmodel/third-person rig |
 | 17 | Grenade rotational dynamics — real spin/angular momentum affecting bounce direction, not just cosmetic tumble | Low | Deliberately deferred in Cycle 2: real rotational dynamics in a fixed-timestep, replay-critical integrator is a much larger determinism-risk change than the tangential-friction win already banked, for a bounce-feel difference players are unlikely to distinguish | `grenade_tick`, would need a new angular-velocity field on `Grenade` |
 | 18 | Additional grenade surface materials — mud, sand, snow, ice, water | Blocked | None of these exist as a `CoverKind` or appear in any map today; researching coefficients now would go stale before any map could use them | Unblocker: any map content adding one of these surface types as real cover geometry |
+| 19 | §5.4 spear running-throw bonus | Done | Built 2026-08-01 (`baf50ca`) | — |
+| 20 | §4.3 minimap enemy spotting | Done | Built 2026-08-01 (`5fbb3c7`) | — |
+
+## Thor's audit (2026-08-01): 143 findings across all 9 briefs, full detail in `THOR_LOG.md`
+
+Six discover agents + independent re-verification found 97 double-confirmed
+gaps and 46 provisional ones (session-limit hit mid-verify; carrying the
+discover agent's own evidence rather than a fabricated disposition — see
+THOR_LOG.md for the exact mechanism). Two are done as of #19/#20 above.
+The rest split into two very different sizes:
+
+### Small, well-scoped, one-session-buildable (the majority of the 97)
+Individually real and individually small: missing HUD elements (crosshair
+settings, killfeed modifiers/border, scoreboard columns, death→spectate
+flow, resource/toast display), missing numeric tunings (bow sway ramp,
+various screen-intrusion profiles, spear FOV/speed changes), dead fields
+that were assigned but never read (`ElasticMove.return_efficiency`,
+counter-movement bonus not reaching jump), test-coverage gaps for
+mechanics that DO exist. These get implemented the same way #19/#20 did —
+picked off one at a time, built, tested, committed, pushed — as work
+continues.
+
+### Large, genuinely multi-session architectural rework (do not rush)
+- **20-segment mass-bearing body rig** (BRIEF_VIII_B_addendum B.1-B.6,
+  PROMPT_mech_rebuild Task2): the existing rig has ~14 transforms (3-seg
+  limbs, 1 torso). The brief wants a real pelvis→lumbar→thorax trunk,
+  clavicles, toe/forefoot segments, WITH mass fraction / CoM / radius-of-
+  gyration data driving spring stiffness. This is a rig rebuild, not a
+  bug fix — touches every posing system in main.rs.
+- **Mech visual + weapon-kit rebuild** (BRIEF_VIII_B_addendum D.1-D.7,
+  PROMPT_mech_rebuild Task5): "walking weapons platform" silhouette
+  (currently a scaled humanoid), gatling+autocannon as the CORE kit
+  (missile pod becomes optional, not vice versa), 20 named swappable
+  mesh parts (currently 33 generic plates), named part-by-part damage
+  states.
+- **Forge editor UI** (BRIEF_VII §7.2, BRIEF_VIII §8.2): a real visual
+  editor (category grid, turntable, randomize) — today Forge is 3 hotkey
+  save/load slots to a flat text file, no UI at all.
+- **26-piece armour + 4-class system + castle map** (BRIEF_IX §C, §A):
+  confirmed absent; each is its own subsystem with no existing code to
+  extend, and the castle map is content work (geometry), not code.
+- **Full character customization** (BRIEF_VIII §8.1): body/face sliders,
+  weapon cosmetic variants, mech cosmetics — currently 2 flat color
+  fields (hat, tunic) exist total.
+- **config/*.ron migration**: many findings cite "not in config/*.ron."
+  This repo's established, deliberate convention is hand-rolled
+  `key=value` text files (camera_tuning.txt, settings.txt) specifically
+  to avoid a serde/RON dependency for a handful of values — the SPIRIT
+  of "tunables aren't hardcoded" is already met. Treating every one of
+  these as a literal "add a .ron file" gap would mean introducing a new
+  dependency and file format across the codebase for its own sake; more
+  likely each should be evaluated case-by-case (does this specific
+  value actually need runtime-editability, or does the existing
+  external-text-file convention already satisfy the underlying need).
 
 *(further items appended as cycles complete, per Section 4's "what
 should exist that we have not discussed" requirement)*
