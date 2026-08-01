@@ -31,6 +31,52 @@ pub const BODY_HEIGHT: f32 = 1.78;
 pub const CROUCH_HEIGHT: f32 = 1.15;
 pub const MOVE_SPEED: f32 = 4.8;
 pub const SPRINT_SPEED: f32 = 6.6;
+
+// ---- §1.3 (BRIEF VIII): "full stops never hit instant zero" ---------
+// The doctrine's headline rule, and the single largest source of the
+// "floaty" read it names. Until now BOTH the player path and the bot
+// path wrote `vel` straight from input every tick: release the key and
+// velocity went to exactly zero in one 120 Hz tick. That is the named
+// anti-pattern "the wall stop", at its source.
+//
+// Velocity now APPROACHES its input target at a bounded rate. Two
+// rates, because a body starts harder than it stops:
+//   - accelerating toward a target at least as fast as current
+//   - decelerating toward a slower one (releasing input, or slowing)
+//
+// The counter-strafe falls out of this for free rather than being
+// special-cased: releasing input gives target speed 0 (DECEL, the slow
+// path), but pressing the OPPOSITE direction gives a target of equal
+// magnitude (ACCEL, the fast path). Tapping back therefore kills your
+// speed faster than letting go - the CS-family mechanic, emergent.
+// This also gives the existing MOVE_INACC_START/FULL accuracy ramp
+// something real to measure: "stopped" is now a state you travel to,
+// not a state you teleport into.
+pub const GROUND_ACCEL: f32 = 55.0; // m/s^2 - walk in ~0.09s, sprint in ~0.12s
+pub const GROUND_DECEL: f32 = 40.0; // m/s^2 - sprint to rest in ~0.17s, visible
+
+/// Step a planar velocity toward `target` under the two-rate model
+/// above. Pure and shared by the player and bot movement paths so they
+/// can never drift apart (bot/player parity has been a real, repeated
+/// defect class in this file - see the mech turn-rate comment).
+pub fn approach_velocity(cur: [f32; 2], target: [f32; 2], dt: f32) -> [f32; 2] {
+    let dv = [target[0] - cur[0], target[1] - cur[1]];
+    let dv_mag = (dv[0] * dv[0] + dv[1] * dv[1]).sqrt();
+    if dv_mag <= 1e-6 {
+        return target;
+    }
+    let cur_mag = (cur[0] * cur[0] + cur[1] * cur[1]).sqrt();
+    let tgt_mag = (target[0] * target[0] + target[1] * target[1]).sqrt();
+    let rate = if tgt_mag >= cur_mag { GROUND_ACCEL } else { GROUND_DECEL };
+    let step = rate * dt;
+    if dv_mag <= step {
+        return target; // close enough to land exactly on it this tick
+    }
+    [
+        cur[0] + dv[0] / dv_mag * step,
+        cur[1] + dv[1] / dv_mag * step,
+    ]
+}
 /// Brief IX-C "Armour Customization": -0.15 m/s per kg of equipped
 /// armour/weapon weight over a class's budget - the brief's exact rule,
 /// worked example included ("+4 kg over budget, -0.60 m/s"). Pure and
@@ -3685,7 +3731,13 @@ impl TdmSim {
                     fz * fwd + lz * DRAW_SIDE_MULT,
                 ];
             }
-            self.fighters[p].vel = vel;
+            // §1.3: `vel` above is the input TARGET, not the result -
+            // the body accelerates toward it and decelerates out of it.
+            // Impulses that set velocity directly (the dodge burst at
+            // the roll block, the power-stride burst) still write
+            // `f.vel` themselves AFTER this and are deliberately
+            // unaffected: an impulse is not a steering input.
+            self.fighters[p].vel = approach_velocity(self.fighters[p].vel, vel, DT);
             // §11: a mech TURNS at a capped rate — facing a new threat is
             // a visible, punishable commitment (the armor follows the
             // body, the pilot's view stays free)
@@ -7062,7 +7114,11 @@ impl TdmSim {
             };
             vel = [vel[0] * m, vel[1] * m];
         }
-        fm.vel = vel;
+        // §1.3: the SAME two-rate approach the player pays. A bot that
+        // could stop dead while the human slides would out-peek the
+        // human for free - exactly the parity defect the mech turn-rate
+        // comment below was written about.
+        fm.vel = approach_velocity(fm.vel, vel, DT);
         // §11: a mech TURNS at a capped rate - facing a new threat is a
         // visible, punishable commitment. The player's path enforces
         // this; the bot path snapped instantly to any new facing, so a
@@ -10781,6 +10837,72 @@ mod tests {
         assert!(impact_angle_to_surface_deg(shallow, [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
     }
 
+    /// §1.3 (BRIEF VIII), the doctrine's headline rule: "Full stops
+    /// never hit instant zero." Before this, BOTH the player and bot
+    /// paths wrote `vel` straight from input - release the key and
+    /// velocity was exactly 0.0 one tick later. That is the named
+    /// anti-pattern "the wall stop" at its source.
+    #[test]
+    fn a_full_stop_is_never_instant_and_counter_strafing_beats_releasing() {
+        let planar = |f: &Fighter| (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+        let run_then = |release: bool| -> (f32, usize) {
+            let mut s = range(0xACCE1);
+            // get to a real sprint first
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    sprint: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            let moving = planar(&s.fighters[0]);
+            assert!(moving > SPRINT_SPEED * 0.8, "must actually be sprinting: {moving}");
+            // either let go, or press straight back against it
+            let cmd = if release {
+                PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() }
+            } else {
+                PlayerCmd { move_z: -1.0, aim: [0.0, 0.0, 1.0], ..Default::default() }
+            };
+            let mut ticks = 0usize;
+            // one tick immediately after the input change
+            s.step(cmd);
+            let after_one_tick = planar(&s.fighters[0]);
+            ticks += 1;
+            while planar(&s.fighters[0]) > 0.05 && ticks < SIM_HZ as usize {
+                s.step(cmd);
+                ticks += 1;
+            }
+            (after_one_tick, ticks)
+        };
+
+        let (speed_after_one_tick, release_ticks) = run_then(true);
+        // THE RULE: one tick after letting go you are still moving
+        assert!(
+            speed_after_one_tick > 1.0,
+            "a full stop must not be instant - one tick after release the body \
+             was still doing {speed_after_one_tick} m/s (pre-change this was 0.0)"
+        );
+        assert!(
+            release_ticks > 8,
+            "coming to rest should take real time, took {release_ticks} ticks"
+        );
+
+        // counter-strafing must BEAT releasing, and must fall out of the
+        // two-rate model rather than being special-cased anywhere
+        let (_, counter_ticks) = run_then(false);
+        assert!(
+            counter_ticks < release_ticks,
+            "pressing back must kill speed faster than letting go: \
+             counter {counter_ticks} vs release {release_ticks} ticks"
+        );
+
+        // the pure function's own contract: it lands exactly on target
+        // rather than overshooting and oscillating around it
+        let landed = approach_velocity([0.001, 0.0], [0.0, 0.0], DT);
+        assert_eq!(landed, [0.0, 0.0], "a sub-step remainder must land exactly on target");
+    }
+
     /// §4.5 (BRIEF VIII): assist tracking - previously entirely
     /// unbuilt (`KillEvent` had no assist field at all; `kills`/`deaths`
     /// existed on Fighter but nothing tracked "who else hit them
@@ -10902,13 +11024,24 @@ mod tests {
     /// with >=2 steps of momentum gets velocity x1.15."
     #[test]
     fn a_running_start_gives_the_spear_throw_its_1_15x_bonus() {
+        // NOTE: the sprint duration here is deliberately longer than
+        // RUNNING_THROW_MIN_S. Since §1.3's acceleration model landed,
+        // reaching the 70%-of-sprint threshold itself takes real time
+        // (~0.08s at GROUND_ACCEL), and only time spent ABOVE that
+        // threshold accumulates toward the bonus. So the throw now
+        // requires a genuine approach RUN, not an instant one - which
+        // is closer to the brief's stated intent ("exactly as an
+        // approach run rewards a real thrower over a standing throw")
+        // than the old instant-to-top-speed behaviour was. The
+        // assertion below is unchanged; only the run-up is honest now.
+        let sprint_ticks = ((RUNNING_THROW_MIN_S + 0.3) * SIM_HZ as f32) as usize;
         let throw_speed = |run_first: bool| -> f32 {
             let mut s = range(0x5EA2);
             s.fighters[0].inventory[0] = GunKind::Spear;
             s.fighters[0].gun = GunKind::Spear;
             s.fighters[0].ammo = 1;
             if run_first {
-                for _ in 0..((RUNNING_THROW_MIN_S * SIM_HZ as f32) as usize + 4) {
+                for _ in 0..sprint_ticks {
                     s.step(PlayerCmd {
                         move_z: 1.0,
                         sprint: true,
