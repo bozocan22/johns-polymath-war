@@ -48,6 +48,7 @@ interesting. Blocked items are never researched "in preparation."
 | 18 | Additional grenade surface materials — mud, sand, snow, ice, water | Blocked | None of these exist as a `CoverKind` or appear in any map today; researching coefficients now would go stale before any map could use them | Unblocker: any map content adding one of these surface types as real cover geometry |
 | 19 | §5.4 spear running-throw bonus | Done | Built 2026-08-01 (`baf50ca`) | — |
 | 20 | §4.3 minimap enemy spotting | Done | Built 2026-08-01 (`5fbb3c7`) | — |
+| 21 | §4.1 bow full-draw hold sway | Done | Built 2026-08-01 (`054a283`) | — |
 
 ## Thor's audit (2026-08-01): 143 findings across all 9 briefs, full detail in `THOR_LOG.md`
 

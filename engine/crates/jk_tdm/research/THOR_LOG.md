@@ -160,4 +160,24 @@ Both: build clean, tests/live-verify green, committed, pushed to
 `bozocan22/johns-kingdom-polymath` main. Two down, ~95 real findings
 left plus several multi-session architectural items (see BACKLOG.md).
 
+**§4.1 bow full-draw sway** (`054a283`): built and tested. One
+finding along the way, logged for anyone picking up work later rather
+than silently skipped: `ElasticMove.return_efficiency` (an earlier
+audit item) turned out NOT to be a gap - the struct's own doc comment
+already says "SPEC FIXTURE, NOT A LIVE PATH," written by an earlier
+pass of this session that deliberately graduated the REAL mechanics
+(`chain_segment_scale`, `landing_rebound_vy`, `counter_movement_bonus`)
+out into their own production functions instead of routing everything
+through the shared struct. Thor's audit workflow flagged it as
+"MISSING" without reading that comment closely enough; re-verifying by
+hand caught it before wasting a cycle "fixing" something already
+correctly documented as intentional. Recorded here so the same finding
+doesn't get re-attempted from BACKLOG.md later without this context.
+
+Three real features shipped this pass: running-throw bonus, minimap
+enemy spotting, bow sway. 141/141 tests green throughout, each commit
+independently verified (build + test, two of the three also live
+smoke-tested since they touch render/HUD code with no sim-side unit
+coverage of their own).
+
 <!-- Thor appends every subsequent action below this line, in order -->
