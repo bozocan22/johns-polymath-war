@@ -8763,10 +8763,17 @@ fn hud_system(
         let rows: Vec<_> = simr.kill_feed.iter().rev().take(5).collect();
         for (ev, _) in rows.into_iter().rev() {
             let me = ev.killer == simr.player || ev.victim == simr.player;
+            // §4.5: "Killer [+Assist] [glyph] Victim" - the assist tag
+            // only appears when there was one, never an empty bracket
+            let assist_tag = match ev.assist {
+                Some(a) => format!(" +{}", simr.fighters[a].name),
+                None => String::new(),
+            };
             s += &format!(
-                "{}{} {}> {}\n",
+                "{}{}{} {}> {}\n",
                 if me { "| " } else { "" },
                 simr.fighters[ev.killer].name,
+                assist_tag,
                 feed_glyphs(ev.headshot),
                 simr.fighters[ev.victim].name,
             );

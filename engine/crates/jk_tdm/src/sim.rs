@@ -1443,7 +1443,14 @@ pub struct Fighter {
     pub protect_t: f32,
     pub kills: u32,
     pub deaths: u32,
+    pub assists: u32,
     pub hits_dealt: u32,
+    /// §4.5 (BRIEF VIII): assist tracking. The most recent OTHER
+    /// fighter to damage this one, with the sim time it happened - not
+    /// a full history, just the single latest distinct attacker, which
+    /// is what "who else hit them" needs. Read (and cleared) at death;
+    /// anything older than ASSIST_WINDOW_S doesn't count.
+    pub last_hit_by: Option<(usize, f32)>,
     /// §3: >0 → a walk-over pickup was refused because the reserve is at
     /// cap; the HUD surfaces "AMMO FULL" (the missing feedback that hid
     /// the pickup bug).
@@ -1567,7 +1574,17 @@ pub struct KillEvent {
     pub killer: usize,
     pub victim: usize,
     pub headshot: bool,
+    /// §4.5 (BRIEF VIII): the most recent OTHER fighter who damaged the
+    /// victim within ASSIST_WINDOW_S of the kill. `None` if the killer
+    /// landed every recent hit alone, or nobody else hit them recently
+    /// enough to count.
+    pub assist: Option<usize>,
 }
+
+/// §4.5: how recent a non-killing hit has to be to still count as an
+/// assist - long enough to credit real teamwork, short enough that a
+/// hit from ten seconds ago doesn't ride in on someone else's kill.
+pub const ASSIST_WINDOW_S: f32 = 6.0;
 
 #[derive(Clone, Debug)]
 pub struct HitEvent {
@@ -2914,7 +2931,9 @@ impl TdmSim {
                     protect_t: SPAWN_PROTECT_S,
                     kills: 0,
                     deaths: 0,
+                    assists: 0,
                     hits_dealt: 0,
+                    last_hit_by: None,
                     ammo_full_t: 0.0,
                     grenades: GRENADE_LOADOUT,
                     throw_sel: 0,
@@ -3325,6 +3344,7 @@ impl TdmSim {
                     f.fire_cd = 0.0;
                     f.bloom = 0.0;
                     f.sprint_gate_t = 0.0; // died sprinting != spawn disarmed
+                    f.last_hit_by = None; // a new life owes no assist to the old one's attackers
                     f.running_momentum_t = 0.0;
                     // A bot's fire gate is `los_time > reaction_s`, and
                     // `bot_act` is skipped entirely while dead - so
@@ -5288,6 +5308,7 @@ impl TdmSim {
         // §6.1: set armor applies AFTER the zone multiplier, with a floor
         let base_dmg = gun(self.fighters[i].gun).damage;
         dmg = self.apply_armor(j, dmg, base_dmg, zone, Some(from));
+        let assist_candidate = self.record_hit_get_assist(i, j);
         self.fighters[j].health -= dmg;
         self.fighters[i].hits_dealt += 1;
         let fatal = self.fighters[j].health <= 0.0;
@@ -5317,11 +5338,20 @@ impl TdmSim {
                     self.finish(self.fighters[i].team);
                 }
             }
+            // an assist only counts from the KILLER's own team - a
+            // teammate of the victim who accidentally clipped them
+            // earlier must never be credited toward an enemy's kill
+            let assist_candidate =
+                assist_candidate.filter(|&a| self.fighters[a].team == self.fighters[i].team);
+            if let Some(a) = assist_candidate {
+                self.fighters[a].assists += 1;
+            }
             self.kill_feed.push((
                 KillEvent {
                     killer: i,
                     victim: j,
                     headshot: zone == HitZone::Head,
+                    assist: assist_candidate,
                 },
                 5.0,
             ));
@@ -5628,6 +5658,7 @@ impl TdmSim {
             }
             // §6.1 flats + floor (projectiles are flat-torso damage)
             d = self.apply_armor(j, d, dmg * zone_mult, HitZone::Torso, Some(from_dir));
+            let assist_candidate = self.record_hit_get_assist(i, j);
             self.fighters[j].health -= d;
             self.fighters[i].hits_dealt += 1;
             let fatal = self.fighters[j].health <= 0.0;
@@ -5661,11 +5692,17 @@ impl TdmSim {
                         self.finish(self.fighters[i].team);
                     }
                 }
+                let assist_candidate =
+                    assist_candidate.filter(|&a| self.fighters[a].team == self.fighters[i].team);
+                if let Some(a) = assist_candidate {
+                    self.fighters[a].assists += 1;
+                }
                 self.kill_feed.push((
                     KillEvent {
                         killer: i,
                         victim: j,
                         headshot: false,
+                        assist: assist_candidate,
                     },
                     5.0,
                 ));
@@ -6475,6 +6512,41 @@ impl TdmSim {
         self.apply_armor_tagged(j, dmg, base, zone, from, false, false)
     }
 
+    /// §4.5 (BRIEF VIII): call once per hit, BEFORE checking whether
+    /// this particular hit was fatal. Returns the assist candidate for
+    /// THIS hit if it turns out to be the killing blow (the previous
+    /// distinct attacker, if recent enough) - then records `attacker`
+    /// as the new `last_hit_by` for next time. Order matters: reading
+    /// old state before overwriting it is what stops the killer's own
+    /// hit from ever being read back as its own assist. Self-damage
+    /// (a molotov pool or frag catching its own thrower) never claims
+    /// the slot - a fighter cannot get assist credit on their own
+    /// death, and self-damage must not erase a real prior attacker's
+    /// claim to it.
+    fn record_hit_get_assist(&mut self, attacker: usize, victim: usize) -> Option<usize> {
+        if attacker == victim {
+            let f = &self.fighters[victim];
+            return f.last_hit_by.and_then(|(who, t)| {
+                if self.t - t <= ASSIST_WINDOW_S {
+                    Some(who)
+                } else {
+                    None
+                }
+            });
+        }
+        let now = self.t;
+        let f = &mut self.fighters[victim];
+        let assist = f.last_hit_by.and_then(|(who, t)| {
+            if who != attacker && now - t <= ASSIST_WINDOW_S {
+                Some(who)
+            } else {
+                None
+            }
+        });
+        f.last_hit_by = Some((attacker, now));
+        assist
+    }
+
     /// §11: the full damage pipeline with the mech's angle-based model.
     /// A mech classifies by the angle between the shot and its BODY
     /// facing — front 85% cut, side 70%, rear nothing; explosives bypass
@@ -6630,6 +6702,7 @@ impl TdmSim {
         // §11: blasts carry their direction — the mech's arc model reads
         // the blast position; fire and explosives use their bypass rules
         d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire);
+        let assist_candidate = self.record_hit_get_assist(src, victim);
         self.fighters[victim].health -= d;
         let fatal = self.fighters[victim].health <= 0.0;
         // the BLAST origin, not the source fighter's current position:
@@ -6672,11 +6745,17 @@ impl TdmSim {
                     }
                 }
             }
+            let assist_candidate =
+                assist_candidate.filter(|&a| self.fighters[a].team == self.fighters[src].team);
+            if let Some(a) = assist_candidate {
+                self.fighters[a].assists += 1;
+            }
             self.kill_feed.push((
                 KillEvent {
                     killer: src,
                     victim,
                     headshot: false,
+                    assist: assist_candidate,
                 },
                 5.0,
             ));
@@ -10700,6 +10779,57 @@ mod tests {
         let shallow = normalize([1.0, -0.2, 0.0]); // ~11deg - well below 30
         assert!(impact_angle_to_surface_deg(steep, [0.0, 1.0, 0.0]) >= SPEAR_STICK_ANGLE_DEG);
         assert!(impact_angle_to_surface_deg(shallow, [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
+    }
+
+    /// §4.5 (BRIEF VIII): assist tracking - previously entirely
+    /// unbuilt (`KillEvent` had no assist field at all; `kills`/`deaths`
+    /// existed on Fighter but nothing tracked "who else hit them
+    /// recently"). Covers the real case (a teammate's assist credited),
+    /// the two things that must NEVER be credited (self-assist, an
+    /// enemy's earlier hit "assisting" the very kill that avenges it),
+    /// and the recency window.
+    #[test]
+    fn assist_credits_a_teammate_within_the_window_never_the_enemy_or_self() {
+        let mut s = TdmSim::new(cfg(0xA5515, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        // 0,1 = Blue (teammates); 2,3 = Red
+        s.fighters[2].health = 50.0;
+        s.apply_plain_damage(0, 2, 20.0, [0.0, 1.0, 0.0], false, false);
+        assert!(s.fighters[2].alive(), "the first hit must not be fatal - it's the setup");
+        s.apply_plain_damage(1, 2, 40.0, [0.0, 1.0, 0.0], false, false);
+        assert!(!s.fighters[2].alive(), "the second hit finishes it");
+        assert_eq!(s.fighters[0].assists, 1, "fighter 0's earlier hit must be credited");
+        let (ev, _) = s.kill_feed.last().unwrap();
+        assert_eq!(ev.killer, 1);
+        assert_eq!(ev.assist, Some(0), "the KillEvent itself must carry the assist");
+
+        // self-damage must never claim assist credit on your OWN death
+        s.fighters[3].health = 50.0;
+        s.fighters[3].respawn_t = 0.0;
+        s.apply_plain_damage(3, 3, 20.0, [0.0, 1.0, 0.0], false, false); // self-damage
+        s.apply_plain_damage(0, 3, 40.0, [0.0, 1.0, 0.0], false, false);
+        assert_eq!(
+            s.kill_feed.last().unwrap().0.assist,
+            None,
+            "a fighter must never get assist credit on their own death"
+        );
+
+        // recency window: an old hit does not count
+        s.fighters[2].health = 50.0;
+        s.fighters[2].respawn_t = 0.0;
+        s.apply_plain_damage(0, 2, 20.0, [0.0, 1.0, 0.0], false, false);
+        s.t += ASSIST_WINDOW_S + 1.0;
+        s.apply_plain_damage(1, 2, 40.0, [0.0, 1.0, 0.0], false, false);
+        assert_eq!(
+            s.kill_feed.last().unwrap().0.assist,
+            None,
+            "a hit older than the assist window must not count"
+        );
     }
 
     /// §4.1 (BRIEF VII): full-draw hold sway - previously entirely
