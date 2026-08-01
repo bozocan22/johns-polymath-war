@@ -2002,6 +2002,55 @@ const MINIGUN_CHECK_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(4.9) },
 ];
 
+// Task 0 before-clip (c): every traversal move that exists - jump,
+// dodge roll (W held so it launches forward), and the air-flip (dodge
+// while airborne). Third person so the whole body reads.
+const TRAVERSAL_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.10)), ..beat(0.2) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(0.3) },
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(0.8) },
+    CapBeat { snap: Some("01-jump-apex"), ..beat(1.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(1.1) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(1.8) },
+    CapBeat { snap: Some("02-roll-mid"), ..beat(2.05) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(2.2) },
+    // airborne flip: jump, then dodge mid-air
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(3.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(3.35) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(3.45) },
+    CapBeat { snap: Some("03-air-flip"), ..beat(3.6) },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyQ), CapKey::K(KeyCode::KeyW)],
+        snap: Some("04-landing-recovery"),
+        ..beat(4.1)
+    },
+    CapBeat { end: true, ..beat(4.6) },
+];
+
+// Task 0 before-clip (e): one lap of the map's elevation story - four
+// compass looks from the stage point, then two sprint legs with the
+// camera held on the horizon so plateaus/stairs/towers cross frame.
+const MAP_LAP_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.05)), snap: Some("01-north"), ..beat(0.6) },
+    CapBeat { look: Some((1.5708, 0.05)), snap: Some("02-east"), ..beat(1.2) },
+    CapBeat { look: Some((3.1416, 0.05)), snap: Some("03-south"), ..beat(1.8) },
+    CapBeat { look: Some((4.7124, 0.05)), snap: Some("04-west"), ..beat(2.4) },
+    CapBeat {
+        look: Some((0.7854, 0.02)),
+        press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
+        ..beat(2.8)
+    },
+    CapBeat { snap: Some("05-sprint-leg-1"), ..beat(4.2) },
+    CapBeat { look: Some((2.3562, 0.02)), ..beat(4.4) },
+    CapBeat { snap: Some("06-sprint-leg-2"), ..beat(5.8) },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
+        snap: Some("07-lap-end"),
+        ..beat(6.2)
+    },
+    CapBeat { end: true, ..beat(6.7) },
+];
+
 fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
         "baseline" => BASELINE_BEATS,
@@ -2009,6 +2058,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "bow_draw" => BOW_DRAW_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
+        "traversal" => TRAVERSAL_BEATS,
+        "map_lap" => MAP_LAP_BEATS,
         _ => &[],
     }
 }
@@ -2016,13 +2067,15 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 6] = [
+const CAPTURE_SCRIPTS: [&str; 8] = [
     "baseline",
     "idle_life",
     "bow_draw",
     "mech_scale",
     "minigun_check",
     "menus",
+    "traversal",
+    "map_lap",
 ];
 
 fn init_capture_mode(mut cap: ResMut<CaptureMode>) {
@@ -2110,6 +2163,15 @@ fn capture_quick_deploy(
         f.pos = stage;
         f.yaw = 0.0;
     }
+    // Task 0 before-clips: both need a clear stage so the moves and the
+    // lap read on camera instead of clipping into whatever cover the
+    // default spawn abuts.
+    if matches!(cap.script.as_deref(), Some("traversal") | Some("map_lap")) {
+        let stage = capture_stage_pos(&game.sim);
+        let f = &mut game.sim.fighters[0];
+        f.pos = stage;
+        f.yaw = 0.0;
+    }
 }
 
 /// A spot on the CURRENT map that is provably outside every cover block,
@@ -2152,7 +2214,7 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 1] = ["minigun_check"];
+const CAPTURE_KEEP_ALIVE: [&str; 3] = ["minigun_check", "traversal", "map_lap"];
 
 fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     let Some(name) = cap.script.as_deref() else { return };
