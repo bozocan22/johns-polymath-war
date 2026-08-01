@@ -1392,6 +1392,13 @@ pub struct Fighter {
     pub ammo: u32,
     pub reserve: u32,
     pub reload_t: f32,
+    /// §3.4 (BRIEF VIII): sprint-out - the weapon is LOWERED at sprint
+    /// and takes a per-class beat to ready after leaving it (SMG 0.15s /
+    /// rifle 0.20s / heavy 0.30s). Counts down once planar speed drops
+    /// below the sprint-carry threshold; firing is blocked while > 0.
+    /// The COD/CSGO skill lever the brief names: sprinting around a
+    /// corner cannot ALSO mean instantly shooting whoever is there.
+    pub sprint_gate_t: f32,
     pub fire_cd: f32,
     pub bloom: f32,
     pub respawn_t: f32,
@@ -2302,6 +2309,30 @@ pub const MINIGUN_HEAT_DECAY: f32 = 16.5;
 pub const MINIGUN_SPREAD_COLD: f32 = 0.021;
 pub const MINIGUN_SPREAD_HOT: f32 = 0.061;
 
+/// §3.4 (BRIEF VIII): sprint-carry threshold and per-class sprint-out
+/// times - the delay between leaving a sprint and being able to fire.
+/// Class mapping: light/one-handed 0.15, rifles 0.20, heavy 0.30.
+/// (The minigun keeps its own spin-up as its readiness cost; projectile
+/// draws - bow/spear - already pay windup+stability, so their sprint-out
+/// uses the rifle beat rather than stacking a second heavy tax.)
+pub const SPRINT_CARRY_FRAC: f32 = 0.85;
+pub fn sprint_out_s(kind: GunKind) -> f32 {
+    match kind {
+        GunKind::Glock | GunKind::Deagle | GunKind::Mp5 | GunKind::Fists => 0.15,
+        GunKind::M4 | GunKind::Ak47 | GunKind::Bow | GunKind::Spear => 0.20,
+        GunKind::Shotgun | GunKind::M249 | GunKind::Awm => 0.30,
+        // spin-up IS the minigun's ready cost - no double tax
+        GunKind::Minigun => 0.0,
+    }
+}
+
+/// §3.4: the empty reload (bolt/charge cycle on top of the mag swap) is
+/// SLOWER than a tactical reload with a round still chambered. The ammo
+/// math already kept the chambered round; the TIME cost of running dry
+/// did not exist - tactical and empty took identical seconds, deleting
+/// the count-your-shots skill the split exists to reward.
+pub const RELOAD_EMPTY_MULT: f32 = 1.35;
+
 /// §5.1 (Brief VI): a gun's base cone BEFORE movement/bloom. For the
 /// minigun this WIDENS with heat instead of blooming - 1.2 deg cold to
 /// 3.5 deg at full heat - which is that weapon's entire cost model.
@@ -2702,6 +2733,7 @@ impl TdmSim {
                     ammo: gun(g0).mag,
                     reserve: gun(g0).reserve,
                     reload_t: 0.0,
+                    sprint_gate_t: 0.0,
                     fire_cd: 0.0,
                     bloom: 0.0,
                     respawn_t: 0.0,
@@ -2855,6 +2887,18 @@ impl TdmSim {
         for i in 0..self.fighters.len() {
             let f = &mut self.fighters[i];
             f.fire_cd = (f.fire_cd - DT).max(0.0);
+            // §3.4: sprint-out. While moving at sprint-carry pace the
+            // weapon is lowered and the gate is HELD at the class value;
+            // once speed drops it counts down, and only then can the gun
+            // fire. Applies to every fighter - bots corner-sprint too.
+            {
+                let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+                if sp > SPRINT_CARRY_FRAC * SPRINT_SPEED {
+                    f.sprint_gate_t = sprint_out_s(f.gun);
+                } else {
+                    f.sprint_gate_t = (f.sprint_gate_t - DT).max(0.0);
+                }
+            }
             f.protect_t = (f.protect_t - DT).max(0.0);
             f.switch_t = (f.switch_t - DT).max(0.0);
             // §6.2: the mech transition timer covers BOTH directions.
@@ -3095,6 +3139,7 @@ impl TdmSim {
                     f.switch_t = 0.0;
                     f.fire_cd = 0.0;
                     f.bloom = 0.0;
+                    f.sprint_gate_t = 0.0; // died sprinting != spawn disarmed
                     // A bot's fire gate is `los_time > reaction_s`, and
                     // `bot_act` is skipped entirely while dead - so
                     // los_time froze at whatever it held the instant the
@@ -4399,7 +4444,15 @@ impl TdmSim {
         }
         let spec = gun(f.gun);
         if f.reload_t <= 0.0 && f.ammo < spec.mag && f.reserve > 0 {
-            f.reload_t = spec.reload_s;
+            // §3.4: running the gun DRY costs extra - the empty reload
+            // adds the bolt/charge cycle a tactical reload skips. The
+            // ammo math always kept the chambered round; now the CLOCK
+            // rewards counting your shots too.
+            f.reload_t = if f.ammo == 0 {
+                spec.reload_s * RELOAD_EMPTY_MULT
+            } else {
+                spec.reload_s
+            };
         }
     }
 
@@ -4612,6 +4665,7 @@ impl TdmSim {
                 || f.flip_t > 0.0
                 || f.flip_used
                 || f.reload_t > 0.0
+                || f.sprint_gate_t > 0.0 // §3.4: the bow lowers at a sprint too
                 || f.ammo == 0
         };
         if blocked {
@@ -4686,6 +4740,9 @@ impl TdmSim {
                 || f.knife_phase > 0.0 // §5: the blade owns both hands too
                 || f.flip_t > 0.0 // §4.2: a flip is PURE mobility
                 || f.flip_used // ...and the gun returns on landing recovery
+                // §3.4: the weapon is still coming up out of the sprint
+                // carry - the sprint-out beat is the whole point
+                || f.sprint_gate_t > 0.0
                 // §6.2: the chassis is still sealing up. Scoped to
                 // ACTUALLY being in a chassis: the timer is mech state,
                 // but this gate is not, so a pilot who dismounts (or is
@@ -7279,6 +7336,79 @@ mod tests {
         assert!(
             mech_speed <= cap,
             "a bot mech must obey its armor pace: {mech_speed} > {cap}"
+        );
+    }
+
+    /// §3.4 (BRIEF VIII): sprint-out. Corner-sprinting cannot also mean
+    /// instantly shooting whoever is there - the weapon takes its class
+    /// beat to come up. Never built until this pass; the brief's own
+    /// audit-table probe would have caught it.
+    #[test]
+    fn sprint_out_gates_fire_by_weapon_class() {
+        let mut s = range(94);
+        s.fighters[0].ammo = 30;
+        // sprint at full speed for a second - the gate must be held
+        for _ in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd {
+                move_z: 1.0,
+                sprint: true,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+        }
+        assert!(
+            s.fighters[0].sprint_gate_t > 0.0,
+            "sprinting must hold the gate up"
+        );
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "cannot fire at a dead sprint"
+        );
+        // stop: the M4 needs its 0.20s beat, then fires
+        let rifle_beats = (sprint_out_s(GunKind::M4) * SIM_HZ as f32) as usize;
+        for _ in 0..(rifle_beats / 2) {
+            s.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
+        }
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "halfway through the sprint-out the gun is still coming up"
+        );
+        for _ in 0..(rifle_beats / 2 + 4) {
+            s.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
+        }
+        s.fighters[0].protect_t = 0.0;
+        assert!(
+            s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "gate expired - the rifle fires"
+        );
+        // and the class split is real: heavy waits longer than SMG
+        assert!(sprint_out_s(GunKind::Awm) > sprint_out_s(GunKind::Mp5));
+        assert!(
+            sprint_out_s(GunKind::Minigun) == 0.0,
+            "the minigun's spin-up IS its ready cost - no double tax"
+        );
+    }
+
+    /// §3.4: running dry costs TIME, not just the ammo math. A tactical
+    /// reload (round chambered) beats an empty one by the bolt cycle.
+    #[test]
+    fn an_empty_reload_takes_longer_than_a_tactical_one() {
+        let mut s = range(95);
+        // tactical: 10 rounds left
+        s.fighters[0].ammo = 10;
+        s.fighters[0].reserve = 60;
+        s.try_reload(0);
+        let tactical = s.fighters[0].reload_t;
+        // empty: dry mag
+        let mut s2 = range(96);
+        s2.fighters[0].ammo = 0;
+        s2.fighters[0].reserve = 60;
+        s2.try_reload(0);
+        let empty = s2.fighters[0].reload_t;
+        assert!(tactical > 0.0 && empty > 0.0, "both reloads must start");
+        assert!(
+            (empty - tactical * RELOAD_EMPTY_MULT).abs() < 1e-4,
+            "empty must cost exactly the multiplier: {empty} vs {tactical} * {RELOAD_EMPTY_MULT}"
         );
     }
 
