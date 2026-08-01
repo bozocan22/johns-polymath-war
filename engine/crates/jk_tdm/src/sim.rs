@@ -172,6 +172,16 @@ pub fn missile_g(is_spear: bool) -> f32 {
 /// Hip-thrown spear (no ADS settle) flies at min charge — the full 26 m/s
 /// needs the cocked, settled throw.
 pub const SPEAR_V0_MIN: f32 = 11.0;
+// ---- §5.4 (BRIEF VIII): the running-throw bonus --------------------------
+// "A throw initiated at >=70% run speed with >=2 steps of momentum gets
+// velocity x1.15." The speed gate is exact per the brief; "2 steps of
+// momentum" is interpreted as a SUSTAINED run, not a tap - 0.65s is
+// roughly two full strides at a real running cadence (~170-180
+// steps/min), the shortest window that can't be faked by a single
+// input pulse.
+pub const RUNNING_THROW_SPEED_FRAC: f32 = 0.70;
+pub const RUNNING_THROW_MIN_S: f32 = 0.65;
+pub const RUNNING_THROW_MULT: f32 = 1.15;
 // ---- respawn checkpoints (v6) --------------------------------------------
 pub const CHECKPOINT_RADIUS: f32 = 3.0;
 pub const CHECKPOINT_CAP_S: f32 = 4.0;
@@ -1419,6 +1429,14 @@ pub struct Fighter {
     /// The COD/CSGO skill lever the brief names: sprinting around a
     /// corner cannot ALSO mean instantly shooting whoever is there.
     pub sprint_gate_t: f32,
+    /// §5.4 (BRIEF VIII): continuous time spent at/above the
+    /// running-throw speed threshold - resets the instant speed drops
+    /// below it. Feeds the spear's running-throw bonus: a throw
+    /// released with real approach momentum behind it launches faster,
+    /// exactly like a real thrower's run-up pays off over a standing
+    /// throw. A tap of forward input can't fake this - it has to be
+    /// sustained.
+    pub running_momentum_t: f32,
     pub fire_cd: f32,
     pub bloom: f32,
     pub respawn_t: f32,
@@ -2434,10 +2452,19 @@ pub const SPRINT_CARRY_FRAC: f32 = 0.85;
 pub fn sprint_out_s(kind: GunKind) -> f32 {
     match kind {
         GunKind::Glock | GunKind::Deagle | GunKind::Mp5 | GunKind::Fists => 0.15,
-        GunKind::M4 | GunKind::Ak47 | GunKind::Bow | GunKind::Spear => 0.20,
+        GunKind::M4 | GunKind::Ak47 | GunKind::Bow => 0.20,
         GunKind::Shotgun | GunKind::M249 | GunKind::Awm => 0.30,
         // spin-up IS the minigun's ready cost - no double tax
         GunKind::Minigun => 0.0,
+        // §5.4: the spear's OWN windup already pays the "can't
+        // insta-fire out of a sprint" cost the generic gate exists
+        // for - and the running-throw bonus explicitly REWARDS
+        // throwing while still at running speed. Stacking the sprint
+        // gate on top would make that condition unreachable: the gate
+        // holds at any speed above the 85% carry threshold, but the
+        // bonus wants exactly a throw released AT that speed. Found
+        // by the running-throw bonus's own test failing against this.
+        GunKind::Spear => 0.0,
     }
 }
 
@@ -2852,6 +2879,7 @@ impl TdmSim {
                     reserve: gun(g0).reserve,
                     reload_t: 0.0,
                     sprint_gate_t: 0.0,
+                    running_momentum_t: 0.0,
                     fire_cd: 0.0,
                     bloom: 0.0,
                     respawn_t: 0.0,
@@ -3015,6 +3043,14 @@ impl TdmSim {
                     f.sprint_gate_t = sprint_out_s(f.gun);
                 } else {
                     f.sprint_gate_t = (f.sprint_gate_t - DT).max(0.0);
+                }
+                // §5.4: the spear's running-throw bonus needs "approach
+                // run", not a tap - counts continuous time at/above the
+                // run threshold, resets the instant speed drops below it
+                if sp >= RUNNING_THROW_SPEED_FRAC * SPRINT_SPEED {
+                    f.running_momentum_t += DT;
+                } else {
+                    f.running_momentum_t = 0.0;
                 }
             }
             f.protect_t = (f.protect_t - DT).max(0.0);
@@ -3261,6 +3297,7 @@ impl TdmSim {
                     f.fire_cd = 0.0;
                     f.bloom = 0.0;
                     f.sprint_gate_t = 0.0; // died sprinting != spawn disarmed
+                    f.running_momentum_t = 0.0;
                     // A bot's fire gate is `los_time > reaction_s`, and
                     // `bot_act` is skipped entirely while dead - so
                     // los_time froze at whatever it held the instant the
@@ -4986,6 +5023,18 @@ impl TdmSim {
             // commit to the full throw — they have no hip/ADS split.
             let v0 = if self.fighters[i].gun == GunKind::Spear && !ads && i == self.player {
                 SPEAR_V0_MIN
+            } else {
+                v0
+            };
+            // §5.4: the bonus is decided at INITIATION (this instant,
+            // on the momentum the thrower already has) and baked into
+            // the release velocity carried through the windup - the
+            // brief's own wording is "a throw INITIATED at >=70% run
+            // speed... gets velocity x1.15", not a check at release.
+            let v0 = if self.fighters[i].gun == GunKind::Spear
+                && self.fighters[i].running_momentum_t >= RUNNING_THROW_MIN_S
+            {
+                v0 * RUNNING_THROW_MULT
             } else {
                 v0
             };
@@ -10614,6 +10663,58 @@ mod tests {
         let shallow = normalize([1.0, -0.2, 0.0]); // ~11deg - well below 30
         assert!(impact_angle_to_surface_deg(steep, [0.0, 1.0, 0.0]) >= SPEAR_STICK_ANGLE_DEG);
         assert!(impact_angle_to_surface_deg(shallow, [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
+    }
+
+    /// §5.4 (BRIEF VIII): the running-throw bonus - previously entirely
+    /// unbuilt (zero call sites for anything named "running" near the
+    /// spear before this test). "A throw initiated at >=70% run speed
+    /// with >=2 steps of momentum gets velocity x1.15."
+    #[test]
+    fn a_running_start_gives_the_spear_throw_its_1_15x_bonus() {
+        let throw_speed = |run_first: bool| -> f32 {
+            let mut s = range(0x5EA2);
+            s.fighters[0].inventory[0] = GunKind::Spear;
+            s.fighters[0].gun = GunKind::Spear;
+            s.fighters[0].ammo = 1;
+            if run_first {
+                for _ in 0..((RUNNING_THROW_MIN_S * SIM_HZ as f32) as usize + 4) {
+                    s.step(PlayerCmd {
+                        move_z: 1.0,
+                        sprint: true,
+                        aim: [0.0, 0.0, 1.0],
+                        ..Default::default()
+                    });
+                }
+            }
+            let ok = s.try_fire(0, [0.0, 0.0, 1.0], true);
+            assert!(ok, "the throw must actually start");
+            s.fighters[0].spear_v0
+        };
+        let standing = throw_speed(false);
+        let running = throw_speed(true);
+        assert!(
+            (running - standing * RUNNING_THROW_MULT).abs() < 1e-3,
+            "running release {running} must be exactly standing {standing} x {RUNNING_THROW_MULT}"
+        );
+
+        // a brief tap does NOT count as "2 steps of momentum" - it has
+        // to be sustained, per the brief's own distinction from a
+        // standing throw
+        let mut tap = range(0x5EA3);
+        tap.fighters[0].inventory[0] = GunKind::Spear;
+        tap.fighters[0].gun = GunKind::Spear;
+        tap.fighters[0].ammo = 1;
+        tap.step(PlayerCmd {
+            move_z: 1.0,
+            sprint: true,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(tap.try_fire(0, [0.0, 0.0, 1.0], true));
+        assert!(
+            (tap.fighters[0].spear_v0 - standing).abs() < 1e-3,
+            "a single tick of sprint input must not fake 2 steps of momentum"
+        );
     }
 
     #[test]
