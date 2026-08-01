@@ -1337,6 +1337,26 @@ pub struct Fighter {
     pub spin_t: f32,
     pub heat: f32,
     pub vent_t: f32,
+    /// §7.4 (BRIEF VIII): power-stride WIND-UP progress, 0..
+    /// POWER_STRIDE_WINDUP_S. Cancels if sprint is released or heat
+    /// caps out before it completes - the burst itself hasn't fired
+    /// yet, so nothing is owed.
+    pub stride_wind_t: f32,
+    /// §7.4: power-stride ACTIVE window remaining. >0 means the burst
+    /// is live - speed override, missile pod locked, turn capped. Once
+    /// triggered it's committed (an interrupted "sustained push" isn't
+    /// one), counting down on its own regardless of continued input.
+    pub stride_t: f32,
+    /// §7.4: power-stride's own 0..100 heat-style budget. The brief
+    /// says striding "costs heat (§7.8)" - deliberately kept SEPARATE
+    /// from the minigun's `heat`/`vent_t` rather than sharing the
+    /// field: those drive the minigun's forced-vent state machine
+    /// (barrel glow, vent audio, fire lockout) purely on `heat > 0`
+    /// gated by `gun == Minigun`, so a mech that strides then SWITCHES
+    /// to the minigun would walk into an instant, unearned vent lockout
+    /// if the two pools were one. Same 0-100 shape and cooldown rhythm,
+    /// zero cross-wiring.
+    pub stride_heat: f32,
     /// Trigger-held HOLD TIMER (seconds): refreshed by `try_fire`, drained
     /// by the timer loop. A short 0.07 s hold (not a per-tick bool) so a
     /// far bot thinking at the 15 Hz LOD still keeps its barrels climbing
@@ -2251,6 +2271,20 @@ pub const MECH_RED_SIDE: f32 = 0.70;
 /// commitment. The pilot's view is free; the armor follows the body.
 // §4.3 (Brief VI): 180°/s — a soldier circling close feels the lag
 pub const MECH_TURN_RATE: f32 = 3.1416; // rad/s
+
+// ---- §7.4 (BRIEF VIII): power stride --------------------------------
+// "The mech's answer to being outrun, without ever leaving the
+// ground." Held sprint winds the hull forward, then bursts to 110% of
+// soldier run speed for a BOUNDED window — not a second walk speed.
+// Shares the §7.8 heat pool with the minigun by the brief's own
+// cross-reference ("costs heat (§7.8)"): a mech running hot from its
+// gun cannot also stride, one budget for how hard the machine is
+// pushed, not two independent ones.
+pub const POWER_STRIDE_WINDUP_S: f32 = 0.35;
+pub const POWER_STRIDE_DURATION_S: f32 = 2.5;
+pub const POWER_STRIDE_SPEED_MULT: f32 = 1.10;
+pub const POWER_STRIDE_HEAT_PER_S: f32 = 100.0 / POWER_STRIDE_DURATION_S; // 40/s - a full burst spends the whole bar
+pub const POWER_STRIDE_TURN_RATE: f32 = MECH_TURN_RATE * 0.5; // 90 deg/s, half the normal pivot cap
 // ---- §10 (Brief III): base health regeneration ---------------------------
 // Every fighter, independent of armor. Deliberately slow: worst case from
 // one bullet to full is 24 s — it rewards disengaging, not trading. ANY
@@ -2705,6 +2739,9 @@ impl TdmSim {
                     heat: 0.0,
                     vent_t: 0.0,
                     spin_cmd: 0.0,
+                    stride_wind_t: 0.0,
+                    stride_t: 0.0,
+                    stride_heat: 0.0,
                     prev_primary: g0,
                     punch: [0.0; 2],
                     punch_vel: [0.0; 2],
@@ -3082,6 +3119,9 @@ impl TdmSim {
                     f.heat = 0.0;
                     f.vent_t = 0.0;
                     f.spin_cmd = 0.0;
+                    f.stride_wind_t = 0.0;
+                    f.stride_t = 0.0;
+                    f.stride_heat = 0.0;
                     f.punch = [0.0; 2];
                     f.punch_vel = [0.0; 2];
                     f.spray_i = 0.0;
@@ -3369,6 +3409,35 @@ impl TdmSim {
             // is the 85% walk; the side-step is the only burst
             let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
                 && self.fighters[p].hull > 0.0;
+            // §7.4 (BRIEF VIII): sprint on a mech now means something -
+            // it winds up power stride instead of being a pure no-op.
+            // Windup is cancellable (nothing's been paid yet); once the
+            // burst itself starts it's committed, ticking down on its
+            // own even if sprint is released mid-burst. The re-arm gate
+            // is a FULL cooldown to zero, not merely "under the cap" -
+            // a completed burst always maxes heat to exactly 100 (2.5s
+            // x 40/s), so gating on "< 100" let one tick of passive
+            // cooldown re-arm it almost immediately, which made the
+            // heat cost close to meaningless. Full cooldown (5s at the
+            // passive rate) is the real rest between bursts.
+            {
+                let f = &mut self.fighters[p];
+                if f.stride_t > 0.0 {
+                    f.stride_t = (f.stride_t - DT).max(0.0);
+                    f.stride_heat = (f.stride_heat + POWER_STRIDE_HEAT_PER_S * DT).min(100.0);
+                } else if in_mech && cmd.sprint && f.grounded && f.stride_heat <= 0.0 {
+                    f.stride_wind_t += DT;
+                    if f.stride_wind_t >= POWER_STRIDE_WINDUP_S {
+                        f.stride_wind_t = 0.0;
+                        f.stride_t = POWER_STRIDE_DURATION_S;
+                    }
+                } else {
+                    f.stride_wind_t = 0.0; // released early or ineligible - nothing owed
+                    // cool down whenever not actively striding, same
+                    // rhythm as the windup/burst cost
+                    f.stride_heat = (f.stride_heat - POWER_STRIDE_HEAT_PER_S * 0.5 * DT).max(0.0);
+                }
+            }
             let mut speed = if cmd.sprint && !drawn && !in_mech {
                 SPRINT_SPEED // sprinting at full draw is genuinely not possible
             } else {
@@ -3401,6 +3470,12 @@ impl TdmSim {
                 let f = &self.fighters[p];
                 let aspec = armor_spec(f.armor_set);
                 speed *= aspec.move_mult;
+                // §7.4: power stride OVERRIDES the walk pace outright -
+                // 110% of soldier run speed is the point, not 110% ON
+                // TOP of the 85% walk multiplier just applied above.
+                if f.stride_t > 0.0 {
+                    speed = MOVE_SPEED * POWER_STRIDE_SPEED_MULT;
+                }
                 if f.armor_set == ArmorSet::RobotSuit && f.armor <= 0.0 {
                     speed *= ROBOT_DRAINED_MOVE;
                 }
@@ -3452,7 +3527,10 @@ impl TdmSim {
             {
                 let f = &mut self.fighters[p];
                 let d = wrap_angle(cmd.yaw - f.yaw);
-                let step = (MECH_TURN_RATE * DT).min(d.abs());
+                // §7.4: the burst caps turning harder than the normal
+                // pivot rate - striding in a straight line is the deal
+                let rate = if f.stride_t > 0.0 { POWER_STRIDE_TURN_RATE } else { MECH_TURN_RATE };
+                let step = (rate * DT).min(d.abs());
                 f.yaw += d.signum() * step;
             } else {
                 self.fighters[p].yaw = cmd.yaw;
@@ -3580,7 +3658,9 @@ impl TdmSim {
                 let can_pod = in_mech
                     && self.fighters[p].pod_ammo > 0
                     && self.fighters[p].pod_cd <= 0.0
-                    && self.fighters[p].alive();
+                    && self.fighters[p].alive()
+                    // §7.4: power stride locks the missile pod while active
+                    && self.fighters[p].stride_t <= 0.0;
                 if cmd.pod_aim && can_pod {
                     let eye = self.muzzle_origin(p);
                     let d = normalize(cmd.aim);
@@ -7759,6 +7839,48 @@ mod tests {
         );
     }
 
+    /// BRIEF_VIII §3.6 test 4, "golden-file spray test": fixed seed,
+    /// 30-shot spray, replay reproduces a magazine bit-identically. The
+    /// spray table itself (`spray_entry`) was already pure/deterministic;
+    /// what had never been proven is that two IDENTICAL full-auto holds
+    /// through the real fire/tick path - fire_cd gating, spray_i advance,
+    /// punch decay between shots - land on the exact same punch angle
+    /// every time. This is the recoil system's own R11.
+    #[test]
+    fn a_thirty_shot_ak_spray_is_bit_identical_on_replay() {
+        let fire_once = |seed: u64| -> [f32; 2] {
+            let mut s = range(seed);
+            s.fighters[0].gun = GunKind::Ak47;
+            s.fighters[0].inventory[0] = GunKind::Ak47;
+            s.fighters[0].ammo = 40;
+            s.fighters[0].reserve = 0;
+            let mut shots = 0;
+            for _ in 0..(SIM_HZ as usize * 6) {
+                if shots < 30 && s.try_fire(0, [0.0, 0.0, 1.0], false) {
+                    shots += 1;
+                }
+                s.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
+            }
+            assert_eq!(shots, 30, "the full spray must complete inside the window");
+            s.fighters[0].punch
+        };
+        let a = fire_once(97);
+        let b = fire_once(97);
+        assert_eq!(
+            a.map(f32::to_bits),
+            b.map(f32::to_bits),
+            "identical seed + identical inputs must land the identical punch angle, bit for bit: {a:?} vs {b:?}"
+        );
+        // the spray PATTERN is fixed per weapon and must not depend on
+        // match seed - a different seed's world state must not perturb it
+        let c = fire_once(98);
+        assert_eq!(
+            a.map(f32::to_bits),
+            c.map(f32::to_bits),
+            "the spray pattern must not depend on the match seed"
+        );
+    }
+
     /// Task 11 `preview_matches_throw`, at the master brief's exact
     /// spec: 200 RANDOM throws, preview endpoint equals actual impact
     /// within tolerance. (The single-throw check inside the R11 test
@@ -9120,8 +9242,10 @@ mod tests {
     }
 
     /// §4.7 (Brief VI) — the anti-"specified twice, never shipped"
-    /// gate: the mech is REACHED (pad grant), at SCALE (1.15× ±2%),
-    /// GROUNDED (a 60 s seeded fuzz with jump/thruster inputs never
+    /// gate: the mech is REACHED (pad grant), at SCALE (1.7×, superseding
+    /// Brief VI's original 1.15× per the MISSION doc / VIII-B addendum —
+    /// see the inline comment below), GROUNDED (a 60 s seeded fuzz with
+    /// jump/thruster inputs never
     /// lifts it), DISMOUNTABLE (U), and KILLABLE (hull → pilot eject).
     #[test]
     fn mech_exists_at_scale_grounded_and_dismounts() {
@@ -9194,6 +9318,76 @@ mod tests {
         assert!(
             s.fighters[0].health <= MECH_EJECT_HP + 0.01,
             "pilot ejects at ≤{MECH_EJECT_HP} HP"
+        );
+    }
+
+    /// §7.4 (BRIEF VIII): power stride, previously entirely unbuilt -
+    /// zero call sites for anything named "stride" before this test.
+    /// Proves the whole cycle: sprint on a mech WINDS UP (no speed
+    /// change yet), then BURSTS to 110%, locks the missile pod for the
+    /// duration, caps turning at half the normal pivot rate, and costs
+    /// its own heat budget that must cool before it can fire again.
+    #[test]
+    fn power_stride_winds_up_bursts_locks_and_costs_heat() {
+        let mut s = range(0x5713);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.armor = POWER_MAX;
+            f.hull = MECH_HULL;
+            f.pod_ammo = 4;
+        }
+        let sprint_cmd = PlayerCmd { sprint: true, move_z: 1.0, aim: [0.0, 0.0, 1.0], ..Default::default() };
+        // mid-windup: no speed bonus paid yet
+        for _ in 0..((POWER_STRIDE_WINDUP_S * SIM_HZ as f32) as usize / 2) {
+            s.step(sprint_cmd);
+        }
+        assert!(s.fighters[0].stride_t <= 0.0, "the burst hasn't fired yet");
+        let mid_windup_speed = (s.fighters[0].vel[0].powi(2) + s.fighters[0].vel[1].powi(2)).sqrt();
+        let walk_speed = MOVE_SPEED * armor_spec(ArmorSet::RobotSuit).move_mult;
+        assert!(
+            mid_windup_speed <= walk_speed + 0.05,
+            "windup must not pay the burst speed early: {mid_windup_speed} vs walk {walk_speed}"
+        );
+        // finish the windup - the burst should now be live
+        for _ in 0..((POWER_STRIDE_WINDUP_S * SIM_HZ as f32) as usize) {
+            s.step(sprint_cmd);
+        }
+        assert!(s.fighters[0].stride_t > 0.0, "the windup must resolve into an active burst");
+        let burst_speed = (s.fighters[0].vel[0].powi(2) + s.fighters[0].vel[1].powi(2)).sqrt();
+        let want = MOVE_SPEED * POWER_STRIDE_SPEED_MULT;
+        assert!(
+            (burst_speed - want).abs() < 0.05,
+            "burst speed {burst_speed} vs the spec'd 110% ({want})"
+        );
+        assert!(burst_speed > walk_speed * 1.2, "the burst must clearly beat the 85% walk");
+        // missile pod is locked out for the whole burst
+        s.step(PlayerCmd { pod_aim: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+        assert_eq!(s.fighters[0].pod_lock_id, -1, "the pod cannot even begin locking mid-burst");
+        // committed: releasing sprint mid-burst does not cut it short
+        let remaining_before = s.fighters[0].stride_t;
+        s.step(PlayerCmd::default());
+        assert!(
+            s.fighters[0].stride_t < remaining_before && s.fighters[0].stride_t > 0.0,
+            "the burst counts down on its own once committed - releasing input doesn't cancel it"
+        );
+        // run the burst out and confirm heat was actually spent
+        for _ in 0..((POWER_STRIDE_DURATION_S * SIM_HZ as f32) as usize + 2) {
+            s.step(PlayerCmd::default());
+        }
+        assert!(s.fighters[0].stride_t <= 0.0, "the burst must end on its own");
+        assert!(
+            s.fighters[0].stride_heat > 90.0,
+            "a full burst should spend nearly the whole heat bar: {}",
+            s.fighters[0].stride_heat
+        );
+        // and it cannot restart instantly while hot
+        for _ in 0..((POWER_STRIDE_WINDUP_S * SIM_HZ as f32) as usize + 4) {
+            s.step(sprint_cmd);
+        }
+        assert!(
+            s.fighters[0].stride_t <= 0.0,
+            "overheated - a fresh windup must not be able to complete yet"
         );
     }
 
