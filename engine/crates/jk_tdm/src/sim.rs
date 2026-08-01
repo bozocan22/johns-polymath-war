@@ -2000,6 +2000,30 @@ fn surface_restitution(kind: CoverKind) -> f32 {
     }
 }
 
+/// R&D Cycle 2 (backlog #3): per-surface FRICTION, alongside the
+/// already-existing per-surface restitution above. [S-01, RoyMech
+/// tribology table]: metal-on-wood sliding friction runs 0.2-0.6 (dry,
+/// clean) against metal-on-masonry/rock in the 0.3-0.6 family
+/// (concrete+rock 0.3 sliding was the only steel-specific masonry row
+/// found; broader rock-family rows run higher but are rock-on-rock, not
+/// metal-on-rock) - real data with real overlap, not a crisp single
+/// answer, honestly not oversold into more precision than the source
+/// supports. Direction taken: worked masonry (this game's stone cover)
+/// is smoother than a rough-grain wood crate, so a bounce skids FURTHER
+/// across stone than off a crate - low end of the wood range for
+/// crates, low end of the masonry range for stone, keeping both
+/// comfortably inside the source's own bracket.
+fn surface_friction(kind: CoverKind) -> f32 {
+    match kind {
+        CoverKind::Stone => 0.30,
+        CoverKind::Crate => 0.45,
+        // moot in practice - Hedge/Tree stick on contact (zero bounce,
+        // velocity zeroed below) before tangential friction would ever
+        // apply, but a real number belongs here regardless of reachability
+        CoverKind::Hedge | CoverKind::Tree => 0.60,
+    }
+}
+
 /// Which cover object (if any) a bounce contact point actually landed
 /// on, to look up its material. An independent short scan rather than
 /// threading an index through `CoverGrid::ray_hit`'s return type (used
@@ -2075,6 +2099,11 @@ pub fn grenade_tick(
         // kind's own restitution unchanged - unaffected by this).
         let material = cover_kind_at(cover, cover_kind, contact);
         let base_restitution = material.map_or(spec.restitution, surface_restitution);
+        // R&D Cycle 2: friction is now ALSO per-material on a known
+        // cover object, same fallback rule as restitution above - a
+        // ground-plane hit with no cover object keeps the throw kind's
+        // own uniform friction, exactly as before this cycle.
+        let friction = material.map_or(spec.friction, surface_friction);
         let sticky = matches!(material, Some(CoverKind::Hedge) | Some(CoverKind::Tree));
         let vn = g.vel[0] * n[0] + g.vel[1] * n[1] + g.vel[2] * n[2];
         let vnv = [n[0] * vn, n[1] * vn, n[2] * vn];
@@ -2086,9 +2115,9 @@ pub fn grenade_tick(
             base_restitution
         };
         g.vel = [
-            vt[0] * (1.0 - spec.friction) - vnv[0] * rest_coef,
-            vt[1] * (1.0 - spec.friction) - vnv[1] * rest_coef,
-            vt[2] * (1.0 - spec.friction) - vnv[2] * rest_coef,
+            vt[0] * (1.0 - friction) - vnv[0] * rest_coef,
+            vt[1] * (1.0 - friction) - vnv[1] * rest_coef,
+            vt[2] * (1.0 - friction) - vnv[2] * rest_coef,
         ];
         g.pos = contact;
         if sticky {
@@ -10155,6 +10184,96 @@ mod tests {
         assert_eq!(surface_restitution(CoverKind::Crate), 0.50, "wood/metal analog");
         assert_eq!(surface_restitution(CoverKind::Hedge), 0.05, "organic: sticky");
         assert_eq!(surface_restitution(CoverKind::Tree), 0.05, "organic: sticky");
+    }
+
+    /// R&D Cycle 2 (backlog #3) [S-01, RoyMech tribology table]:
+    /// per-surface friction, extending the per-surface restitution
+    /// above the same way. Table values first, then the behavioral
+    /// proof that actually matters - a real bounce SKIDS FURTHER on
+    /// the lower-friction surface, under otherwise-identical impact
+    /// conditions.
+    #[test]
+    fn surface_friction_is_per_material_and_stone_skids_further_than_a_crate() {
+        assert_eq!(surface_friction(CoverKind::Stone), 0.30);
+        assert_eq!(surface_friction(CoverKind::Crate), 0.45);
+        assert!(
+            surface_friction(CoverKind::Stone) < surface_friction(CoverKind::Crate),
+            "worked masonry is smoother than a rough-grain wood crate"
+        );
+
+        // runs real ticks (gravity included) until the FIRST bounce
+        // registers, then reports the tangential speed right after it -
+        // robust to exactly how many ticks the approach takes, rather
+        // than assuming impact happens within one hand-picked tick
+        let bounce_once = |kind: CoverKind| -> f32 {
+            let cover = vec![Aabb { min: [-5.0, 0.0, -5.0], max: [5.0, 0.3, 5.0] }];
+            let cover_kind = vec![kind];
+            let grid = CoverGrid::build(&cover, 20.0);
+            let mut g = Grenade {
+                id: 1,
+                kind: ThrowKind::Frag,
+                pos: [0.0, 1.0, 0.0],
+                vel: [6.0, 0.0, 0.0], // mostly tangential; gravity brings it down
+                thrower: 0,
+                team: Team::Blue,
+                fuse_t: 5.0,
+                bounces: 0,
+                rest: false,
+            };
+            for _ in 0..300 {
+                grenade_tick(&mut g, &grid, &cover, &cover_kind);
+                if g.bounces > 0 {
+                    return (g.vel[0] * g.vel[0] + g.vel[2] * g.vel[2]).sqrt();
+                }
+            }
+            panic!("grenade never bounced within the safety window");
+        };
+        let on_stone = bounce_once(CoverKind::Stone);
+        let on_crate = bounce_once(CoverKind::Crate);
+        assert!(
+            on_stone > on_crate,
+            "identical impact must skid FURTHER on the lower-friction surface: \
+             stone {on_stone} vs crate {on_crate}"
+        );
+
+        // ground-plane hits (no cover object) are UNCHANGED by this
+        // cycle - they keep the throw kind's own uniform friction,
+        // exactly the same fallback rule restitution already had
+        let empty_cover: Vec<Aabb> = vec![];
+        let empty_kind: Vec<CoverKind> = vec![];
+        let grid = CoverGrid::build(&empty_cover, 20.0);
+        let mut g = Grenade {
+            id: 2,
+            kind: ThrowKind::Frag,
+            pos: [0.0, 1.0, 0.0],
+            vel: [6.0, 0.0, 0.0],
+            thrower: 0,
+            team: Team::Blue,
+            fuse_t: 5.0,
+            bounces: 0,
+            rest: false,
+        };
+        let mut ground_speed = 0.0;
+        let mut bounced = false;
+        for _ in 0..300 {
+            grenade_tick(&mut g, &grid, &empty_cover, &empty_kind);
+            if g.bounces > 0 {
+                ground_speed = (g.vel[0] * g.vel[0] + g.vel[2] * g.vel[2]).sqrt();
+                bounced = true;
+                break;
+            }
+        }
+        assert!(bounced, "the ground-plane grenade never bounced within the safety window");
+        // the flat normal here is [0,1,0], so the tangential vector at
+        // impact is exactly [6.0, 0, 0] no matter how long the fall
+        // took (gravity only ever touches the NORMAL component) - the
+        // post-bounce speed is therefore exact, not approximate
+        let expected = 6.0 * (1.0 - throw_spec(ThrowKind::Frag).friction);
+        assert!(
+            (ground_speed - expected).abs() < 1e-3,
+            "ground-plane bounce must still use the throw kind's own friction: \
+             got {ground_speed}, expected {expected}"
+        );
     }
 
     #[test]
