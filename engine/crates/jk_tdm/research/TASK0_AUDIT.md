@@ -26,7 +26,7 @@ tested).
 | Console / command system | — | ❌ none | — | — | never built; the image-import console is blocked upstream on there being no texture pipeline at all |
 | Runtime asset loading | audio only (`asset_server.load` of .wav) | 🟡 | audio play-paths verified | ✅ sound | zero image/texture loading anywhere — every material is procedural colour |
 | Capture harness (the evidence instrument) | main capture_* systems | ✅ | ✅ (snap-once verified 157→5; typo names exit 2; clear staging) | ✅ it IS the visibility mechanism | — |
-| Settings (sens/FOV/invert/swap/minimap) | main `GameSettings` | ✅ | ✅ | ✅ capture | NOT persisted to disk across runs — known, honest gap |
+| Settings (sens/FOV/invert/swap/minimap) | main `GameSettings`, `persist_settings`, `load_settings` | ✅ | ✅ (round-trip + clamp-on-garbage test) | ✅ capture | — (closed 2026-08-01, Section E: `config/settings.txt`, loaded at startup, rewritten on any change) |
 | Powered armour / mech | sim mech blocks, main `spawn_armor_rig` | ✅ (walker: committal enter/exit, plates, parity) | ✅ | ✅ captures | flight: deliberately deleted (Brief VI §4.3); Iron-Man-style suit is research-only per the master brief's own rule |
 
 ## Before-clips (Task 0 §3)
