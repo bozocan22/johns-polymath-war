@@ -307,3 +307,61 @@ Not gaps, confirmed intentional and correctly documented: MECH_SCALE 1.7
 (addendum §A option A3), ElasticMove as a spec fixture, the five deferred
 killfeed glyphs, the always-transparent low-HP vignette, and the khaki/olive
 mech palette (D.2's correction is already in).
+
+---
+
+## 2026-08-01 — Thor's #1 architectural finding, acted on same session
+
+Thor's live verification (above) ranked **"sim-side acceleration model"**
+as the single highest-leverage AND highest-risk item across all four
+systems, with the exact evidence: `sim.rs:3688` assigning velocity raw
+from input. That is now **built and shipped** (`a1fb256`).
+
+What landed: `approach_velocity()` — one pure, shared function, called
+by BOTH the player path and the bot path so they cannot drift (Thor has
+flagged bot/player parity as a repeated defect class in this file; the
+mech turn-rate comment is the previous instance). Two rates,
+`GROUND_ACCEL` 55 and `GROUND_DECEL` 40 m/s².
+
+**The counter-strafe emerged rather than being special-cased.**
+Releasing input → target speed 0 → DECEL (slow). Pressing the opposite
+direction → target of equal magnitude → ACCEL (fast). So tapping back
+beats letting go, which is the CS-family mechanic, and it falls out of
+the two-rate model with no branch for it. The test asserts *that
+relationship* rather than either constant, so it survives retuning.
+
+**Thor's own risk assessment was correct and worth recording.** Thor
+called this "touches every movement consumer, every bot, and every
+replay-determinism test." In practice one test broke — the
+running-throw bonus — and it broke for exactly the predicted reason:
+reaching the 70%-of-sprint threshold now takes real time, so a run-up
+sized for an instant-acceleration world no longer qualifies. The
+assertion was correct and unchanged; only the setup was stale. Fixed
+the run-up and documented why. **Thor's risk call was accurate, and
+the blast radius was smaller than feared — worth knowing for the next
+architectural item, so future estimates aren't over-cautious.**
+
+## 2026-08-01 — Thor logs its OWN tooling failure (process, not code)
+
+The research workflow dispatched for the 20-segment rig **crashed on a
+bug in the orchestration script I wrote**: `const research = parallel([...])`
+with no `await`, so `research` was a Promise and `research.filter(...)`
+threw. Four agents had been spawned; one (the rig audit) completed, the
+rest were abandoned mid-flight. ~397k subagent tokens spent on a run
+that returned nothing usable.
+
+Recorded here deliberately, because Thor's remit is *checking work*, and
+the work includes Thor's own instrumentation:
+- **The failure was silent until the very end.** The script ran the
+  audit agent successfully, then died at the synthesis step. A crash
+  *after* real work completes is the expensive kind.
+- **Recovery worked as designed.** Fixing the one missing `await` and
+  resuming with `resumeFromRunId` replays completed agents from cache
+  rather than re-running them.
+- **Lesson for future workflow scripts:** every `parallel()` and
+  `pipeline()` result must be awaited before it is treated as an array.
+  This is now the second orchestration-layer defect this session (the
+  first: session-limit failures being silently bucketed as "disputed").
+  **Both were in the harness, not the game.** The pattern worth naming:
+  *the instrument fails more quietly than the thing it measures.*
+
