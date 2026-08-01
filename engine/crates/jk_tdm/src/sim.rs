@@ -1669,6 +1669,34 @@ pub fn bow_power_fraction(held_s: f32) -> Option<f32> {
     Some(BOW_POWER_MIN + (1.0 - BOW_POWER_MIN) * t)
 }
 
+// ---- §4.1: full-draw hold sway --------------------------------------
+// "Full-draw hold: steady 4s; then rotational aim sway ramps +/-0.4deg
+// -> +/-1.2deg over the next 4s... forced letdown at 10s total.
+// Crouching halves sway." A real archer's hold degrades with time; the
+// bow rewards a snappy release over a held stare, exactly like the
+// running-throw bonus rewards committing rather than waiting.
+pub const BOW_SWAY_HOLD_S: f32 = 4.0; // steady window before sway starts
+pub const BOW_SWAY_RAMP_S: f32 = 4.0; // 4s..8s: sway grows over this span
+pub const BOW_SWAY_MIN_DEG: f32 = 0.4;
+pub const BOW_SWAY_MAX_DEG: f32 = 1.2;
+
+/// Current sway MAGNITUDE (the +/- half-angle) for a hold of `held_s`
+/// seconds; 0 before the steady window ends. The actual perturbation
+/// applied to a shot is a random draw within [-this, +this], using the
+/// sim's own seeded stream (see the fire path) so it stays replay-exact.
+pub fn bow_sway_deg(held_s: f32, crouched: bool) -> f32 {
+    if held_s <= BOW_SWAY_HOLD_S {
+        return 0.0;
+    }
+    let t = ((held_s - BOW_SWAY_HOLD_S) / BOW_SWAY_RAMP_S).clamp(0.0, 1.0);
+    let deg = BOW_SWAY_MIN_DEG + (BOW_SWAY_MAX_DEG - BOW_SWAY_MIN_DEG) * t;
+    if crouched {
+        deg * 0.5
+    } else {
+        deg
+    }
+}
+
 // ---------------------------------------------------------------- pickups
 
 /// §3: ammo class of a recoverable projectile lying on the ground.
@@ -4897,7 +4925,12 @@ impl TdmSim {
             self.rng.range(-spread, spread),
             self.rng.range(-spread, spread),
         );
-        let d = perturb(self.fighters[i].bow_aim, ex, ey);
+        // §4.1: full-draw hold sway - layered ON TOP of the normal
+        // accuracy cone, not instead of it. Same seeded stream as
+        // every other perturbation here, so it stays replay-exact.
+        let sway = bow_sway_deg(held_s, self.fighters[i].crouch).to_radians();
+        let (sx, sy) = (self.rng.range(-sway, sway), self.rng.range(-sway, sway));
+        let d = perturb(self.fighters[i].bow_aim, ex + sx, ey + sy);
         let o = self.muzzle_origin(i);
         let spec = gun(GunKind::Bow);
         {
@@ -10667,6 +10700,70 @@ mod tests {
         let shallow = normalize([1.0, -0.2, 0.0]); // ~11deg - well below 30
         assert!(impact_angle_to_surface_deg(steep, [0.0, 1.0, 0.0]) >= SPEAR_STICK_ANGLE_DEG);
         assert!(impact_angle_to_surface_deg(shallow, [0.0, 1.0, 0.0]) < SPEAR_STICK_ANGLE_DEG);
+    }
+
+    /// §4.1 (BRIEF VII): full-draw hold sway - previously entirely
+    /// unbuilt. "Full-draw hold: steady 4s; then rotational aim sway
+    /// ramps +/-0.4deg -> +/-1.2deg over the next 4s... Crouching
+    /// halves sway."
+    #[test]
+    fn bow_sway_ramps_after_the_steady_window_and_crouch_halves_it() {
+        assert_eq!(bow_sway_deg(0.0, false), 0.0, "no sway at the start of the hold");
+        assert_eq!(bow_sway_deg(2.0, false), 0.0, "still steady mid-way through the 4s window");
+        assert_eq!(bow_sway_deg(4.0, false), 0.0, "sway hasn't started AT the 4s boundary");
+        let start = bow_sway_deg(4.01, false);
+        assert!(
+            (start - BOW_SWAY_MIN_DEG).abs() < 0.01,
+            "sway begins at the min (0.4deg), not zero: got {start}"
+        );
+        let mid = bow_sway_deg(6.0, false);
+        assert!(
+            mid > start && mid < BOW_SWAY_MAX_DEG,
+            "sway must be strictly ramping mid-way: {start} < {mid} < {}",
+            BOW_SWAY_MAX_DEG
+        );
+        let full = bow_sway_deg(8.0, false);
+        assert!(
+            (full - BOW_SWAY_MAX_DEG).abs() < 0.01,
+            "sway caps at 1.2deg by the 8s mark: got {full}"
+        );
+        assert_eq!(
+            bow_sway_deg(9.5, false),
+            full,
+            "sway does not keep growing past 8s (forced letdown is what ends the hold, at 10s)"
+        );
+        // crouch halves it, at every point in the ramp
+        assert!((bow_sway_deg(6.0, true) - mid * 0.5).abs() < 1e-4);
+        assert!((bow_sway_deg(8.0, true) - full * 0.5).abs() < 1e-4);
+
+        // integration: a bow shot released after a long hold scatters
+        // MORE than one released quickly, over real repeated draws -
+        // wired through try_fire's actual RNG stream, not just the
+        // pure function in isolation
+        let deviation = |held_ticks: usize| -> f32 {
+            let mut total = 0.0_f32;
+            for seed in 0..40u64 {
+                let mut s = range(0x50E7 + seed);
+                s.fighters[0].inventory[0] = GunKind::Bow;
+                s.fighters[0].gun = GunKind::Bow;
+                s.fighters[0].ammo = 1;
+                for _ in 0..held_ticks {
+                    s.step_bow_draw(0, [0.0, 0.0, 1.0], true);
+                }
+                s.step_bow_draw(0, [0.0, 0.0, 1.0], false);
+                if let Some(a) = s.missiles.last() {
+                    let lateral = (a.vel[0] * a.vel[0] + a.vel[1] * a.vel[1]).sqrt();
+                    total += lateral;
+                }
+            }
+            total / 40.0
+        };
+        let quick = deviation((0.3 * SIM_HZ as f32) as usize); // well inside the steady window
+        let long_hold = deviation((7.0 * SIM_HZ as f32) as usize); // deep in the sway ramp
+        assert!(
+            long_hold > quick,
+            "a long hold must scatter more on average than a quick release: {long_hold} vs {quick}"
+        );
     }
 
     /// §5.4 (BRIEF VIII): the running-throw bonus - previously entirely
