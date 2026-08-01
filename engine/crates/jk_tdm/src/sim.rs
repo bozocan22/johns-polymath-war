@@ -2256,6 +2256,58 @@ pub const MECH_EJECT_HP: f32 = 25.0;
 // instant - the chassis needs real seconds to seal up or power down.
 pub const MECH_ENTER_S: f32 = 1.6;
 pub const MECH_EXIT_S: f32 = 1.2;
+
+// ---- R&D Cycle 1: mech entry sequence (backlog #1) -----------------------
+// [S-01b]: the human-factors literature on staged, must-not-skip
+// sequences under time pressure argues for a Do-List pattern (the
+// system executes every stage on a fixed timeline, no player action
+// mid-sequence) over an interactive challenge-response one - which
+// matches §7.6's existing "committed, no cancel" rule and gives it a
+// real citation instead of just flavor text. Eight named stages divide
+// MECH_ENTER_S evenly; this is presentation SEQUENCING only - it reads
+// `mech_transition_t`, never writes gameplay-relevant state, so it
+// cannot desync a replay even though it's exposed from the sim layer
+// (the sim layer is simply the only place `mech_transition_t` lives).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MechEnterStage {
+    CockpitOpen,
+    ClimbIn,
+    Harness,
+    PowerUp,
+    ServoSync,
+    GyroCalibration,
+    WeaponDiagnostics,
+    HudBoot,
+}
+pub const MECH_ENTER_STAGES: [MechEnterStage; 8] = [
+    MechEnterStage::CockpitOpen,
+    MechEnterStage::ClimbIn,
+    MechEnterStage::Harness,
+    MechEnterStage::PowerUp,
+    MechEnterStage::ServoSync,
+    MechEnterStage::GyroCalibration,
+    MechEnterStage::WeaponDiagnostics,
+    MechEnterStage::HudBoot,
+];
+
+/// Pure: which named stage is active `elapsed_s` into the entry window.
+/// Clamped at both ends so a caller need not pre-validate its input.
+pub fn mech_enter_stage(elapsed_s: f32) -> MechEnterStage {
+    let frac = (elapsed_s / MECH_ENTER_S).clamp(0.0, 0.999_999);
+    let idx = (frac * MECH_ENTER_STAGES.len() as f32) as usize;
+    MECH_ENTER_STAGES[idx.min(MECH_ENTER_STAGES.len() - 1)]
+}
+
+/// The active stage for a fighter currently mid-entry, or `None` if
+/// they aren't (not a mech, not transitioning, or exiting rather than
+/// entering - `mech_exiting` reuses the same timer for the power-DOWN
+/// countdown, which has no stage list of its own).
+pub fn mech_enter_stage_for(f: &Fighter) -> Option<MechEnterStage> {
+    if f.armor_set != ArmorSet::RobotSuit || f.mech_transition_t <= 0.0 || f.mech_exiting {
+        return None;
+    }
+    Some(mech_enter_stage(MECH_ENTER_S - f.mech_transition_t))
+}
 // §6.3: armor drops in three stages as hull falls - the exposed
 // under-frame at each stage takes MORE damage, rewarding the strip.
 pub const MECH_PLATE_70_PCT: f32 = 0.70;
@@ -9388,6 +9440,80 @@ mod tests {
         assert!(
             s.fighters[0].stride_t <= 0.0,
             "overheated - a fresh windup must not be able to complete yet"
+        );
+    }
+
+    /// R&D Cycle 1 (backlog #1): the mech entry sequence. Proves the
+    /// staging is monotonic and gapless - every stage visited exactly
+    /// once, in the documented order, as elapsed time sweeps the whole
+    /// window - and that the helper correctly reports "not entering"
+    /// outside the window (before boarding, after entry completes,
+    /// and during an EXIT, which reuses the same timer field for a
+    /// countdown that has no stage list of its own).
+    #[test]
+    fn mech_entry_stages_are_monotonic_and_gapless() {
+        // pure function: sweep finely and confirm every stage appears,
+        // in order, with no stage skipped and no backward jump
+        let mut seen = Vec::new();
+        let mut steps = 0;
+        let mut t = 0.0_f32;
+        while t < MECH_ENTER_S {
+            let stage = mech_enter_stage(t);
+            if seen.last() != Some(&stage) {
+                seen.push(stage);
+            }
+            t += MECH_ENTER_S / 4000.0; // far finer than 8 stages over 1.6s
+            steps += 1;
+        }
+        assert_eq!(
+            seen, MECH_ENTER_STAGES,
+            "every stage must appear exactly once, in order, with none skipped"
+        );
+        assert!(steps > 100, "sanity: the sweep actually ran");
+        // boundary behavior: clamps rather than panicking or wrapping
+        assert_eq!(mech_enter_stage(-1.0), MechEnterStage::CockpitOpen);
+        assert_eq!(mech_enter_stage(MECH_ENTER_S * 10.0), MechEnterStage::HudBoot);
+
+        // integration: a REAL entry through step() visits CockpitOpen
+        // first and HudBoot last, on the real per-tick countdown
+        let mut s = range(0x6E7);
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_transition_t = MECH_ENTER_S;
+        assert_eq!(
+            mech_enter_stage_for(&s.fighters[0]),
+            Some(MechEnterStage::CockpitOpen),
+            "the instant boarding starts, the first stage is active"
+        );
+        for _ in 0..((MECH_ENTER_S * SIM_HZ as f32) as usize - 2) {
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(
+            mech_enter_stage_for(&s.fighters[0]),
+            Some(MechEnterStage::HudBoot),
+            "just before the window closes, the last stage is active"
+        );
+        for _ in 0..4 {
+            s.step(PlayerCmd::default());
+        }
+        assert_eq!(
+            mech_enter_stage_for(&s.fighters[0]),
+            None,
+            "once sealed, there is no active entry stage"
+        );
+
+        // not-entering cases: never in the mech, and mid-EXIT (same
+        // timer field, different direction - must not report a stage)
+        let mut idle = range(0x6E8);
+        assert_eq!(mech_enter_stage_for(&idle.fighters[0]), None, "not a mech at all");
+        idle.fighters[0].armor_set = ArmorSet::RobotSuit;
+        idle.fighters[0].hull = MECH_HULL;
+        idle.fighters[0].mech_transition_t = MECH_EXIT_S;
+        idle.fighters[0].mech_exiting = true;
+        assert_eq!(
+            mech_enter_stage_for(&idle.fighters[0]),
+            None,
+            "exiting reuses the timer field but has no entry stage list"
         );
     }
 
