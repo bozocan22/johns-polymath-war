@@ -6650,7 +6650,11 @@ impl TdmSim {
         }
     }
 
-    fn los_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+    /// §4.3 (BRIEF VIII): pub(crate) so the minimap's enemy-spotting
+    /// system (main.rs) can reuse the SAME line-of-sight query every
+    /// other visibility-gated system in the sim already uses, rather
+    /// than a second, divergent implementation.
+    pub(crate) fn los_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         if len < 1e-3 {

@@ -1706,6 +1706,39 @@ struct MinimapRoot;
 #[derive(Component)]
 struct MinimapDot(usize);
 
+/// §4.3 (BRIEF VIII): "spotted enemies = red dots ghost-fading to last
+/// known." Index into `SpottedEnemies.slots`, same fixed-slot pattern
+/// as `MinimapDot` for teammates - pre-spawned, hidden until an enemy
+/// occupies the slot.
+#[derive(Component)]
+struct MinimapEnemyDot(usize);
+
+/// One tracked enemy's last-seen minimap state. `fade` is 1.0 while
+/// currently in LOS, decays toward 0 once LOS breaks - the dot stays
+/// pinned at `pos` (the LAST known position, not the enemy's live
+/// position) while fading, which is the "ghosting" the brief names.
+/// At fade<=0 the slot is free for a different enemy to claim.
+#[derive(Clone, Copy, Default)]
+struct SpotSlot {
+    fighter: Option<usize>,
+    pos: Vec2,
+    fade: f32,
+}
+
+/// §4.3: client-side-only presentational state - what the LOCAL
+/// player currently sees on their own minimap. Never read by sim.rs,
+/// never affects a hit or an outcome, so it has no business being
+/// replay-authoritative; it is derived fresh each frame from a real
+/// `los_clear` query against sim state, same as any other visibility
+/// effect in this file.
+#[derive(Resource, Default)]
+struct SpottedEnemies {
+    slots: [SpotSlot; MINIMAP_ENEMY_SLOTS],
+}
+const MINIMAP_ENEMY_SLOTS: usize = 8;
+/// How long a lost-LOS dot keeps fading before the slot frees up.
+const MINIMAP_GHOST_FADE_S: f32 = 3.0;
+
 #[derive(Component)]
 struct MinimapCp(usize);
 
@@ -4275,6 +4308,7 @@ fn setup(
     // settings survive restarts now - loaded from config/settings.txt,
     // clamped defaults on any missing/malformed file
     commands.insert_resource(load_settings());
+    commands.insert_resource(SpottedEnemies::default());
 
     // ---- sounds ---------------------------------------------------------
     commands.insert_resource(Sfx {
@@ -5211,6 +5245,23 @@ fn setup(
                     BackgroundColor(Color::srgb(0.3, 0.6, 1.0)),
                     Visibility::Hidden,
                     MinimapDot(i),
+                ));
+            }
+            // §4.3: spotted enemies - red dots, round (not square like
+            // teammates/self) so a glance tells friend from foe by
+            // shape alone, not just color
+            for i in 0..MINIMAP_ENEMY_SLOTS {
+                p.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Px(7.0),
+                        height: Val::Px(7.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 0.25, 0.2, 1.0)),
+                    BorderRadius::all(Val::Px(3.5)),
+                    Visibility::Hidden,
+                    MinimapEnemyDot(i),
                 ));
             }
             // objectives: checkpoints + the hill
@@ -8147,12 +8198,15 @@ fn minimap_system(
     game: Res<Game>,
     state: Res<State<GameState>>,
     mut settings: ResMut<GameSettings>,
+    mut spotted: ResMut<SpottedEnemies>,
+    time: Res<Time>,
     mut qs: ParamSet<(
         Query<&mut Visibility, With<MinimapRoot>>,
         Query<(&MinimapDot, &mut Node, &mut Visibility)>,
         Query<(&MinimapCp, &mut Node, &mut BorderColor, &mut Visibility)>,
         Query<(&mut Node, &mut Visibility), With<MinimapHill>>,
         Query<(&mut Node, &mut Transform), With<MinimapPlayer>>,
+        Query<(&MinimapEnemyDot, &mut Node, &mut BackgroundColor, &mut Visibility)>,
     )>,
 ) {
     // the M hotkey only means "minimap" during actual play - not while
@@ -8205,6 +8259,53 @@ fn minimap_system(
                 *v = Visibility::Inherited;
             }
             None => *v = Visibility::Hidden,
+        }
+    }
+    // §4.3: spotted enemies - a real LOS query (the same `los_clear`
+    // every other visibility-gated system uses), ghost-fading to last
+    // known position once sight is lost. Purely a client-visible
+    // effect - never read by sim.rs, so real delta-time decay is fine
+    // here even though the sim itself is fixed-tick.
+    {
+        let dt = time.delta_secs();
+        let me = &simr.fighters[simr.player];
+        let eye = [me.pos[0], me.pos[1] + EYE_REL.min(me.height() - 0.12), me.pos[2]];
+        for slot in spotted.slots.iter_mut() {
+            if slot.fighter.is_some() {
+                slot.fade = (slot.fade - dt / MINIMAP_GHOST_FADE_S).max(0.0);
+                if slot.fade <= 0.0 {
+                    slot.fighter = None;
+                }
+            }
+        }
+        for (i, f) in simr.fighters.iter().enumerate() {
+            if i == simr.player || f.team == p_team || !f.alive() {
+                continue;
+            }
+            let chest = [f.pos[0], f.pos[1] + f.height() * 0.55, f.pos[2]];
+            if !simr.los_clear(eye, chest) {
+                continue; // not currently visible - existing slots just decay above
+            }
+            if let Some(slot) = spotted.slots.iter_mut().find(|s| s.fighter == Some(i)) {
+                slot.pos = Vec2::new(f.pos[0], f.pos[2]);
+                slot.fade = 1.0;
+            } else if let Some(slot) = spotted.slots.iter_mut().find(|s| s.fighter.is_none()) {
+                slot.fighter = Some(i);
+                slot.pos = Vec2::new(f.pos[0], f.pos[2]);
+                slot.fade = 1.0;
+            }
+        }
+    }
+    for (dot, mut node, mut bg, mut v) in &mut qs.p5() {
+        let slot = spotted.slots[dot.0];
+        if slot.fighter.is_some() && slot.fade > 0.0 {
+            let (u, w) = to_map(slot.pos.x, slot.pos.y); // .y holds world Z
+            node.left = Val::Px(u);
+            node.top = Val::Px(w);
+            *bg = BackgroundColor(Color::srgba(1.0, 0.25, 0.2, slot.fade));
+            *v = Visibility::Inherited;
+        } else {
+            *v = Visibility::Hidden;
         }
     }
     // objectives: forward-spawn rings, colored by owner
