@@ -17,3 +17,11 @@
   recorded as a validated design position.
 
 ## Quota: 1/12 counted (P: 0/3, V: 0/3). HONESTLY SHORT.
+
+## Added 2026-08-01 (Section F fetch batch)
+
+| ID | Tier | Type | Title | Author / Studio | Year | URL | Accessed | Status | What it gave us |
+|---|---|---|---|---|---|---|---|---|---|
+| S-04 | P | engine docs | Motion Warping in Unreal Engine | Epic Games | current | https://dev.epicgames.com/documentation/en-us/unreal-engine/motion-warping-in-unreal-engine | 2026-08-01 | READ | Mechanisms: named Warp Targets; notify WINDOWS (start/end handles inside the montage define WHEN warping applies); root-motion modifiers (uniform Scale vs Skew Warp to land the animation end on the target). Numbers: Warp Rotation Time Multiplier (0.5 halves rotation completion time). Constraints: root motion required; target name must match. The alignment model for our mantle/vault: play the authored move, warp the root inside a declared window so the hands land on the ACTUAL ledge instead of snapping - the answer to "the wall stop". |
+
+Quota now: 2/12 counted (P: 1/3, V: 0/3).

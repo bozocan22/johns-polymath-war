@@ -216,6 +216,70 @@ fn camera_tuning_path() -> std::path::PathBuf {
     std::path::PathBuf::from("config/camera_tuning.txt")
 }
 
+// ---- settings persistence -------------------------------------------------
+// The settings screen's five values were session-only: change your
+// sensitivity, quit, and it was gone - the audit table called this out
+// as an honest gap. Same hand-rolled `key = value` convention as
+// camera_tuning and the Forge (no serde for five values), same rule:
+// a missing/malformed file or key can never stop the game starting.
+
+fn settings_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("config/settings.txt")
+}
+
+fn settings_to_text(s: &GameSettings) -> String {
+    format!(
+        "# jk_tdm player settings - rewritten on every change\n\
+         swap_mouse = {}\nminimap = {}\nsens_idx = {}\nfov_idx = {}\ninvert_y = {}\n",
+        s.swap_mouse as u8, s.minimap as u8, s.sens_idx, s.fov_idx, s.invert_y as u8
+    )
+}
+
+/// Pure parse, directly testable. Indices from disk are CLAMPED to their
+/// choice lists - a hand-edited or stale file must not index out of
+/// bounds (the persistence sibling of the Forge's own bounds rule).
+fn parse_settings(text: &str) -> GameSettings {
+    let mut s = GameSettings::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let Ok(v) = val.trim().parse::<i64>() else {
+            continue;
+        };
+        match key.trim() {
+            "swap_mouse" => s.swap_mouse = v != 0,
+            "minimap" => s.minimap = v != 0,
+            "sens_idx" => s.sens_idx = (v.max(0) as usize).min(SENS_CHOICES.len() - 1),
+            "fov_idx" => s.fov_idx = (v.max(0) as usize).min(FOV_CHOICES.len() - 1),
+            "invert_y" => s.invert_y = v != 0,
+            _ => {}
+        }
+    }
+    s
+}
+
+fn load_settings() -> GameSettings {
+    match std::fs::read_to_string(settings_path()) {
+        Ok(text) => parse_settings(&text),
+        Err(_) => GameSettings::default(),
+    }
+}
+
+/// Save on change (the resource is only mutated by the settings screen
+/// and the M minimap hotkey, so `is_changed` fires rarely). Write
+/// failure is non-fatal: settings still work for the session.
+fn persist_settings(settings: Res<GameSettings>) {
+    if settings.is_changed() && !settings.is_added() {
+        let _ = std::fs::create_dir_all("config");
+        let _ = std::fs::write(settings_path(), settings_to_text(&settings));
+    }
+}
+
 fn load_camera_tuning() -> CameraTuning {
     match std::fs::read_to_string(camera_tuning_path()) {
         Ok(text) => parse_camera_tuning(&text),
@@ -2630,6 +2694,9 @@ fn main() {
         .add_systems(OnEnter(GameState::Settings), open_settings)
         .add_systems(OnExit(GameState::Settings), close_settings)
         .add_systems(Update, settings_buttons.run_if(in_state(GameState::Settings)))
+        // state-agnostic: the M minimap hotkey mutates settings during
+        // Playing too, and that change must survive a restart as well
+        .add_systems(Update, persist_settings)
         .add_systems(OnEnter(GameState::Manual), open_manual)
         .add_systems(OnExit(GameState::Manual), close_manual)
         // §1.2 (Brief III): discoverability - the controls screen, the
@@ -4205,7 +4272,9 @@ fn setup(
         pending_cycle_throw: false,
     };
     commands.insert_resource(Selected::default());
-    commands.insert_resource(GameSettings::default());
+    // settings survive restarts now - loaded from config/settings.txt,
+    // clamped defaults on any missing/malformed file
+    commands.insert_resource(load_settings());
 
     // ---- sounds ---------------------------------------------------------
     commands.insert_resource(Sfx {
@@ -11075,6 +11144,43 @@ mod forge_tests {
             label.contains("LEFT CLICK fire"),
             "the default label must advertise LEFT as fire, got {label:?}"
         );
+    }
+
+    /// Settings persistence: set -> serialize -> parse -> identical, and
+    /// a hostile/stale file can never index out of bounds or crash. The
+    /// audit table named "not persisted" as an honest gap; this is the
+    /// gap closing WITH its round-trip proof, not just an fs::write.
+    #[test]
+    fn settings_round_trip_and_hostile_files_are_safe() {
+        // round-trip every non-default value
+        let mut s = GameSettings::default();
+        s.swap_mouse = true;
+        s.minimap = false;
+        s.sens_idx = SENS_CHOICES.len() - 1;
+        s.fov_idx = 0;
+        s.invert_y = true;
+        let back = parse_settings(&settings_to_text(&s));
+        assert_eq!(back.swap_mouse, s.swap_mouse);
+        assert_eq!(back.minimap, s.minimap);
+        assert_eq!(back.sens_idx, s.sens_idx);
+        assert_eq!(back.fov_idx, s.fov_idx);
+        assert_eq!(back.invert_y, s.invert_y);
+
+        // hostile: out-of-range indices clamp instead of panicking later
+        let evil = "sens_idx = 999\nfov_idx = -5\nswap_mouse = 7\n";
+        let p = parse_settings(evil);
+        assert_eq!(p.sens_idx, SENS_CHOICES.len() - 1, "oversize index clamps to last");
+        assert_eq!(p.fov_idx, 0, "negative index clamps to first");
+        assert!(p.swap_mouse, "any nonzero reads as true");
+        // and the clamped values actually index safely
+        let _ = p.sens_mult();
+        let _ = p.fov_deg();
+
+        // garbage lines are ignored, defaults survive
+        let junk = "!!!\nsens_idx = banana\n= 3\nfov_idx\n";
+        let j = parse_settings(junk);
+        assert_eq!(j.sens_idx, GameSettings::default().sens_idx);
+        assert_eq!(j.fov_idx, GameSettings::default().fov_idx);
     }
 
     /// Settings must be real: every choice list has to be non-empty,

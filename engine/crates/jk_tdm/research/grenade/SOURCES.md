@@ -25,3 +25,11 @@
 - S-02's netcode prediction mechanisms are NOT applicable yet - this
   build is local-only, no client/server split exists. Recorded so the
   names exist when netplay does.
+
+## Added 2026-08-01 (Section F fetch batch)
+
+| ID | Tier | Type | Title | Author / Studio | Year | URL | Accessed | Status | What it gave us |
+|---|---|---|---|---|---|---|---|---|---|
+| S-03 | P | canonical article | Fix Your Timestep! | Glenn Fiedler, Gaffer On Games | 2004/rev | https://gafferongames.com/post/fix_your_timestep/ | 2026-08-01 | READ | Mechanisms: fixed dt, variable dt, semi-fixed, "free the physics" (accumulator decoupling), interpolation with alpha = accumulator/dt. Numbers: example dt 1/60 s and 0.01 s; accumulator clamp 0.25 s. Failure modes: spiral of death; determinism broken by remainder-step float imprecision; temporal-aliasing stutter. Recommendation: accumulator + interpolation. DIRECTLY VALIDATES this codebase: jk_tdm's input loop is an accumulator clamped at 0.25 s with a step cap, and the R11 tests prove the determinism this pattern buys. |
+
+Quota now: 3/12 counted (P: 2/3, V: 0/3).

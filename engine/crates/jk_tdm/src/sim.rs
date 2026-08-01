@@ -7629,6 +7629,76 @@ mod tests {
         );
     }
 
+    /// Task 11 `preview_matches_throw`, at the master brief's exact
+    /// spec: 200 RANDOM throws, preview endpoint equals actual impact
+    /// within tolerance. (The single-throw check inside the R11 test
+    /// below predates this; the brief demands the random sweep - varied
+    /// directions, speeds, spawn heights and fuses, including throws
+    /// that bounce off cover before resting, since the preview and the
+    /// flight share the bounce code too.)
+    #[test]
+    fn preview_matches_throw_for_200_random_throws() {
+        let mut s = TdmSim::new(cfg(93, 1, Mode::Tdm, MapKind::Arena));
+        // deterministic pseudo-random throw parameters - NOT the sim's
+        // own RNG (touching that would desync the flights we compare)
+        let mut x = 0x2545F4914F6CDD1D_u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 40) as f32 / 16777216.0 // 0..1
+        };
+        for k in 0..200u32 {
+            let o = [next() * 20.0 - 10.0, 1.2 + next() * 0.6, next() * 20.0 - 10.0];
+            let v = [
+                next() * 16.0 - 8.0,
+                2.0 + next() * 8.0,
+                next() * 16.0 - 8.0,
+            ];
+            let fuse = 1.2 + next() * 2.0;
+            // the preview's claimed endpoint...
+            let (_, end, _) = s.predict_grenade(ThrowKind::Frag, o, v, fuse, 8.0);
+            // ...and the actual flight, stepped by the live tick
+            s.grenades_air.clear();
+            s.grenades_air.push(Grenade {
+                id: 50_000 + k,
+                kind: ThrowKind::Frag,
+                pos: o,
+                vel: v,
+                thrower: 0,
+                team: Team::Blue,
+                fuse_t: fuse,
+                bounces: 0,
+                rest: false,
+            });
+            let mut impact = o;
+            for _ in 0..(8.0 / DT) as usize {
+                let done = {
+                    let TdmSim { grenades_air, grid, cover, cover_kind, .. } = &mut s;
+                    let g = &mut grenades_air[0];
+                    matches!(
+                        grenade_tick(g, grid, cover, cover_kind),
+                        GrenadeTick::Boom | GrenadeTick::Rest
+                    )
+                };
+                impact = s.grenades_air[0].pos;
+                if done {
+                    break;
+                }
+            }
+            let d = ((end[0] - impact[0]).powi(2)
+                + (end[1] - impact[1]).powi(2)
+                + (end[2] - impact[2]).powi(2))
+            .sqrt();
+            assert!(
+                d < 1e-3,
+                "throw {k}: preview {end:?} vs flight {impact:?} - {d} m apart \
+                 (o={o:?} v={v:?} fuse={fuse})"
+            );
+        }
+        s.grenades_air.clear();
+    }
+
     /// R11: grenade physics lives in the SIM layer, which is seeded and
     /// fixed-timestep, so the SAME seed and the SAME throw must produce a
     /// bit-identical impact point - not "close", identical. 1000 throws.
