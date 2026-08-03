@@ -1396,6 +1396,28 @@ pub struct Fighter {
     /// instant, unearned lockout on the gun in his hands.
     pub gatling_heat: f32,
     pub gatling_vent_t: f32,
+    /// §C: the gatling's own cycle clock. Its own field, not `fire_cd`,
+    /// for the reason stated one field down and violated by the first
+    /// cut: `fire_cd` is the PILOT'S carried-gun clock, so a gatling
+    /// that set it left the dismounting pilot throttled by a gun bolted
+    /// to a chassis he just climbed out of.
+    pub gatling_cd: f32,
+    /// §C: the gatling's TRIGGER-HELD hold timer — the same shape and
+    /// the same 70 ms as the minigun's `spin_cmd`, and set at the top of
+    /// `try_fire_gatling` BEFORE every early return for the same reason:
+    /// it must mean "the trigger is down", not "a round left the mount".
+    ///
+    /// The first cut gated the heat decay on `fire_cd <= 0.0` instead,
+    /// reasoning that the cycle clock running IS the trigger being down.
+    /// It is not. `fire_cd <= 0.0` is true for exactly ONE tick per fire
+    /// cycle, so the mount still shed `GATLING_HEAT_DECAY * DT` of heat
+    /// every cycle — 88.9% suppression, not the minigun's 100%. That
+    /// residual is LINEAR IN DT, which made the time to a forced vent
+    /// tick-rate dependent: 11.18 s at 60 Hz, 9.08 s at 120 Hz, 8.22 s
+    /// at 240 Hz. A hold timer suppresses the decay outright, so what is
+    /// left moving with the tick rate is only the quantisation of the
+    /// fire period itself.
+    pub gatling_trigger_t: f32,
     /// §C: the autocannon's slow cycle clock. Its own field, not
     /// `fire_cd`, so the two mounts cannot silently share a cooldown.
     pub autocannon_cd: f32,
@@ -2423,7 +2445,19 @@ pub const GATLING_HEAT_PER_SHOT: f32 = 0.9;
 pub const GATLING_HEAT_DECAY: f32 = 9.5;
 /// Longer than the minigun's forced 3.0 s, for the same reason.
 pub const GATLING_VENT_FORCED_S: f32 = 3.5;
+/// The REQUESTED period. What the mount actually cycles at is this value
+/// rounded UP to a whole tick — `gatling_cd` is decremented by `DT` and
+/// the gate opens at `<= 0`, so the real period is
+/// `ceil(0.07 / DT) * DT` = **0.075 s at the 120 Hz sim floor, i.e. 800
+/// RPM**, not the 857 the constant reads as. Worth knowing before anyone
+/// tunes this against a published RPM figure: at 60 Hz it quantises to
+/// 0.0833 s (720 RPM) and at 240 Hz to 0.0708 s (847 RPM).
 pub const GATLING_FIRE_PERIOD: f32 = 0.07; // same ROF class as the minigun's 0.06
+/// Trigger-intent hold window for the hull mount — deliberately the same
+/// 70 ms as `MINIGUN_SPIN_HOLD_S`, because it is the same mechanism: the
+/// heat decay is suppressed while the trigger is DOWN, and the timer is
+/// what carries that intent across the ticks between rounds.
+pub const GATLING_TRIGGER_HOLD_S: f32 = 0.07;
 pub const GATLING_DAMAGE: f32 = 9.0; // near the minigun's 8.0 - high ROF, low per-round
 pub const GATLING_SPREAD_COLD: f32 = 0.018;
 pub const GATLING_SPREAD_HOT: f32 = 0.052;
@@ -3026,6 +3060,8 @@ impl TdmSim {
                     mech_weapon: MechWeapon::Gatling,
                     gatling_heat: 0.0,
                     gatling_vent_t: 0.0,
+                    gatling_cd: 0.0,
+                    gatling_trigger_t: 0.0,
                     autocannon_cd: 0.0,
                     knife_phase: 0.0,
                     knife_committed: false,
@@ -3300,22 +3336,21 @@ impl TdmSim {
             // happens to be carrying has nothing to do with the guns
             // bolted to the chassis.
             //
-            // The heat decay is gated on `fire_cd <= 0.0` for the same
-            // reason the minigun's is gated on its trigger hold-timer:
-            // a barrel group under fire does not cool. `fire_cd` IS the
-            // gatling's cycle clock (`try_fire_gatling` both reads and
-            // sets it), so "cycle clock still running" is exactly
-            // "trigger is down" here. Ungated, the 9.5/s decay would eat
-            // most of the 12.9/s ramp and stretch the run to a forced
-            // vent from ~8 s to ~30 s - the design says the hull gun
-            // sustains about TWICE the minigun's 4 s, not eight times.
+            // The heat decay is gated on the TRIGGER-HOLD timer, exactly
+            // as the minigun's is: a barrel group under fire does not
+            // cool. Ungated, the 9.5/s decay eats most of the 12/s ramp
+            // and stretches the run to a forced vent from ~8 s to ~40 s
+            // - the design says the hull gun sustains about TWICE the
+            // minigun's ~4.4 s, not nine times.
+            f.gatling_cd = (f.gatling_cd - DT).max(0.0);
+            f.gatling_trigger_t = (f.gatling_trigger_t - DT).max(0.0);
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
                 if f.gatling_vent_t <= 0.0 {
                     f.gatling_vent_t = 0.0;
                     f.gatling_heat = 0.0; // a vent always clears the mount
                 }
-            } else if f.fire_cd <= 0.0 {
+            } else if f.gatling_trigger_t <= 0.0 {
                 f.gatling_heat = (f.gatling_heat - GATLING_HEAT_DECAY * DT).max(0.0);
             }
             f.autocannon_cd = (f.autocannon_cd - DT).max(0.0);
@@ -3451,6 +3486,8 @@ impl TdmSim {
                     f.mech_weapon = MechWeapon::Gatling;
                     f.gatling_heat = 0.0;
                     f.gatling_vent_t = 0.0;
+                    f.gatling_cd = 0.0;
+                    f.gatling_trigger_t = 0.0;
                     f.autocannon_cd = 0.0;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
@@ -3609,6 +3646,8 @@ impl TdmSim {
                             f.mech_weapon = MechWeapon::Gatling;
                             f.gatling_heat = 0.0;
                             f.gatling_vent_t = 0.0;
+                            f.gatling_cd = 0.0;
+                            f.gatling_trigger_t = 0.0;
                             f.autocannon_cd = 0.0;
                             // §5.3 (Brief VI): 4 tubes per chassis —
                             // resupply is a fresh chassis, not a pickup
@@ -5523,12 +5562,24 @@ impl TdmSim {
     ///
     /// Returns true iff a round left the mount.
     pub fn try_fire_gatling(&mut self, i: usize, aim: [f32; 3]) -> bool {
+        // A HELD trigger keeps the barrel group hot every tick it is
+        // held — including the ticks inside `gatling_cd` between rounds,
+        // and including the ticks of a forced vent. This must precede
+        // every early return, exactly as the minigun's `spin_cmd` does,
+        // or the heat suppression stutters between shots and the mount
+        // cools a little every cycle. See `gatling_trigger_t`.
+        {
+            let f = &mut self.fighters[i];
+            if f.in_mech() && f.mech_weapon == MechWeapon::Gatling && f.alive() {
+                f.gatling_trigger_t = GATLING_TRIGGER_HOLD_S;
+            }
+        }
         {
             let f = &self.fighters[i];
             if !f.in_mech()
                 || f.mech_weapon != MechWeapon::Gatling
                 || !f.alive()
-                || f.fire_cd > 0.0
+                || f.gatling_cd > 0.0
                 || f.gatling_vent_t > 0.0
                 // §6.2: the chassis is still sealing up (or powering
                 // down) — the mounts are not live yet
@@ -5546,12 +5597,17 @@ impl TdmSim {
                 + (GATLING_SPREAD_HOT - GATLING_SPREAD_COLD)
                     * (f.gatling_heat / 100.0).clamp(0.0, 1.0)
         };
-        let t_now = self.t;
         {
             let f = &mut self.fighters[i];
-            f.fire_cd = GATLING_FIRE_PERIOD;
+            f.gatling_cd = GATLING_FIRE_PERIOD;
             f.protect_t = 0.0; // opening fire drops spawn protection
-            f.last_shot_at = t_now;
+            // NOTE: deliberately does NOT write `last_shot_at`. That
+            // field has exactly one consumer - the carried gun's
+            // `spray_i` decay gate - and the mount refires every 0.075 s,
+            // faster than ANY gun's decay threshold. Writing it froze the
+            // pilot's spray index for as long as the hull gun was firing,
+            // so he dismounted into a fully-bloomed recoil pattern he
+            // never fired a round to earn.
             f.gatling_heat += GATLING_HEAT_PER_SHOT;
             if f.gatling_heat >= 100.0 {
                 f.gatling_heat = 100.0;
@@ -5590,12 +5646,12 @@ impl TdmSim {
             }
         }
         let o = self.muzzle_origin(i);
-        let t_now = self.t;
         {
             let f = &mut self.fighters[i];
             f.autocannon_cd = AUTOCANNON_CYCLE_S;
             f.protect_t = 0.0;
-            f.last_shot_at = t_now;
+            // NOTE: no `last_shot_at` write here either — same reason as
+            // the gatling's. A hull mount has no spray table to hold.
             // §A.5's damp, consumed exactly as it was designed to be:
             // ONE unbraced constant, the braced value derived from it.
             // A second `AUTOCANNON_BRACED_KICK` constant would be a
@@ -10006,6 +10062,8 @@ mod tests {
         f.gatling_heat = 0.0;
         f.gatling_vent_t = 0.0;
         f.autocannon_cd = 0.0;
+        f.gatling_cd = 0.0;
+        f.gatling_trigger_t = 0.0;
         f.fire_cd = 0.0;
         f.protect_t = 0.0;
         s
@@ -10024,7 +10082,7 @@ mod tests {
         let gatling_heat = {
             let mut s = mech_range(0xC0A7, MechWeapon::Gatling);
             for _ in 0..N {
-                s.fighters[0].fire_cd = 0.0;
+                s.fighters[0].gatling_cd = 0.0;
                 assert!(
                     s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
                     "a cold hull gatling must keep firing"
@@ -10071,7 +10129,7 @@ mod tests {
         let mut s = mech_range(0xC0A9, MechWeapon::Gatling);
         s.fighters[0].gun = GunKind::Minigun;
         for _ in 0..N {
-            s.fighters[0].fire_cd = 0.0;
+            s.fighters[0].gatling_cd = 0.0;
             s.try_fire_gatling(0, [0.0, 0.0, -1.0]);
         }
         assert_eq!(
@@ -10079,17 +10137,307 @@ mod tests {
             "the hull mount wrote into the MINIGUN's heat pool - a pilot \
              carrying a minigun would inherit a vent lockout he never earned"
         );
+        // NOTE: the TIME TO A FORCED VENT used to be asserted here by
+        // rebuilding `heat_per_shot / fire_period` from the constants and
+        // comparing the two quotients. That is arithmetic, not a
+        // measurement - it stepped nothing, it could not see the heat
+        // DECAY at all, and it evaluated to 7.78 s when the mount really
+        // ran 9.08 s. Being the only mention of time-to-vent in the
+        // suite, it was also why ungating the decay and deleting the
+        // forced vent outright both survived the whole suite. It now
+        // lives in `gatling_sustains_about_twice_the_minigun_before_a_\
+        // forced_vent`, which holds the trigger and watches the clock.
+    }
 
-        // The same relationship expressed as TIME TO A FORCED VENT: the
-        // ramp rate is heat-per-round over the fire period, and the hull
-        // gun is meant to run roughly twice as long before it cooks off.
-        let gat_s = 100.0 / (GATLING_HEAT_PER_SHOT / GATLING_FIRE_PERIOD);
-        let mini_s = 100.0 / (MINIGUN_HEAT_PER_SHOT / gun(GunKind::Minigun).fire_period);
+    /// §C.3: the gatling's identity is a NUMBER — how many seconds of
+    /// held trigger it buys before the mount cooks off — and nothing in
+    /// this suite measured it. What stood in its place rebuilt
+    /// `heat_per_shot / fire_period` from four constants, stepped
+    /// nothing, and labelled the quotient "time to a forced vent". It
+    /// could not see the heat DECAY, and it could not see the forced
+    /// vent, so THREE separate mutations survived the entire suite:
+    /// ungating the decay (9 s → 40 s of sustain), deleting the
+    /// forced-vent latch outright, and — because `gatling_vent_t` was
+    /// never set non-zero anywhere in the suite — the vent lockout with
+    /// it.
+    ///
+    /// This one holds the trigger through `step` and watches the clock,
+    /// against the SAME measurement taken off the man-portable minigun,
+    /// so the assertion is the design sentence ("about twice the
+    /// minigun") and not a magic number that has to be re-tuned every
+    /// time either weapon moves.
+    #[test]
+    fn gatling_sustains_about_twice_the_minigun_before_a_forced_vent() {
+        // Generous: the real numbers are ~8.4 s and ~4.4 s. A run that
+        // reaches this cap has no working heat ceiling at all.
+        const CAP_S: f32 = 25.0;
+        let cap = (CAP_S / DT) as usize;
+        let hold = PlayerCmd {
+            aim: [0.0, 0.0, -1.0], // away from the bot: nothing to intercept
+            shoot: true,
+            ..Default::default()
+        };
+
+        // ---- the hull gatling, trigger down from a cold mount ---------
+        let mut gat = mech_range(0xC0A1, MechWeapon::Gatling);
+        gat.fighters[1].gun = GunKind::Fists; // nothing shoots back
+        let mut gat_s = f32::INFINITY;
+        for n in 1..=cap {
+            // the chassis is not what is under test here
+            gat.fighters[0].hull = MECH_HULL;
+            gat.fighters[1].health = MAX_HEALTH;
+            gat.fighters[1].pos = [0.0, 0.0, 5.0];
+            gat.step(hold);
+            if gat.fighters[0].gatling_vent_t > 0.0 {
+                gat_s = n as f32 * DT;
+                break;
+            }
+        }
+        assert!(
+            gat_s.is_finite(),
+            "{CAP_S}s of held trigger never forced a vent - the hull \
+             gatling has no heat ceiling, so its cone/heat tradeoff costs \
+             the pilot nothing and the trigger is free forever"
+        );
+
+        // ---- the man-portable minigun, same held trigger --------------
+        // Barrels pre-spun so what is compared is BARREL time to cook-off
+        // on both sides, not the minigun's 0.4 s spin-up.
+        let mut mini = range(0xC0A2);
+        {
+            let f = &mut mini.fighters[0];
+            f.gun = GunKind::Minigun;
+            f.inventory[0] = GunKind::Minigun;
+            f.active = 0;
+            f.ammo = 400;
+            f.reserve = 0;
+            f.spin_t = MINIGUN_SPINUP_S;
+            f.protect_t = 0.0;
+        }
+        mini.fighters[1].gun = GunKind::Fists;
+        let mut mini_s = f32::INFINITY;
+        for n in 1..=cap {
+            mini.fighters[1].health = MAX_HEALTH;
+            mini.fighters[1].pos = [0.0, 0.0, 5.0];
+            mini.step(hold);
+            if mini.fighters[0].vent_t > 0.0 {
+                mini_s = n as f32 * DT;
+                break;
+            }
+        }
+        assert!(
+            mini_s.is_finite(),
+            "the minigun never vented either - the comparison this test \
+             makes is meaningless until it does"
+        );
+
+        // Measured on the shipped build: 8.333 s vs 4.417 s (×1.887) at
+        // the 120 Hz floor; 9.267 s vs 4.433 s (×2.090) at 60 Hz;
+        // 7.867 s vs 4.133 s (×1.903) at 240 Hz. What still moves with
+        // the tick rate is the ceil-quantisation of the fire period
+        // itself, which the minigun shares - hence a RATIO band.
         assert!(
             gat_s > mini_s * 1.5,
-            "hull gatling cooks off after {gat_s}s of fire vs the minigun's \
-             {mini_s}s - that is not a sustain weapon"
+            "the hull gatling ran {gat_s}s of held trigger before it cooked \
+             off against the minigun's {mini_s}s - a SUSTAIN weapon has to \
+             buy meaningfully more trigger time than the scream it replaces"
         );
+        assert!(
+            gat_s < mini_s * 3.0,
+            "the hull gatling ran {gat_s}s against the minigun's {mini_s}s - \
+             that is not 'about twice', that is a different weapon class. \
+             The heat ceiling has stopped costing the pilot anything"
+        );
+
+        // ---- and the latch is not decoration --------------------------
+        // It locks the mount out, and only the full vent clears it - with
+        // the heat, so the pilot comes back to cold barrels.
+        assert_eq!(
+            gat.fighters[0].gatling_heat, 100.0,
+            "a forced vent latches at a FULL heat pool"
+        );
+        assert!(
+            !gat.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "a venting mount fired anyway - the forced vent costs nothing"
+        );
+        for _ in 0..((GATLING_VENT_FORCED_S / DT) as usize + 2) {
+            gat.fighters[0].hull = MECH_HULL;
+            gat.step(PlayerCmd::default()); // trigger RELEASED
+        }
+        assert_eq!(
+            gat.fighters[0].gatling_vent_t, 0.0,
+            "the forced vent never ended - the pilot is locked out forever"
+        );
+        assert_eq!(
+            gat.fighters[0].gatling_heat, 0.0,
+            "a vent always clears the mount - the pilot paid {GATLING_VENT_FORCED_S}s \
+             for cold barrels and did not get them"
+        );
+        assert!(
+            gat.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "a fully vented mount must fire again"
+        );
+    }
+
+    /// §C.4b: the hull mounts belong to the HULL, and must not touch ONE
+    /// field of the pilot's carried-gun state. Two real bugs lived here,
+    /// and the file already stated the rule that both broke — the
+    /// autocannon carries its own `autocannon_cd` precisely "so the two
+    /// mounts cannot silently share a cooldown", while the gatling was
+    /// writing the pilot's:
+    ///
+    /// 1. `fire_cd = GATLING_FIRE_PERIOD` — the CARRIED gun's cycle
+    ///    clock. A pilot who dismounted mid-burst found the rifle in his
+    ///    hands throttled by a gun bolted to the chassis he just left.
+    /// 2. `last_shot_at = t` — whose only consumer is the carried gun's
+    ///    `spray_i` decay gate. The mount refires every 0.075 s, faster
+    ///    than ANY gun's `fire_period * 1.1` threshold, so the pilot's
+    ///    spray index could not decay at all while the hull gun fired.
+    ///    He dismounted into a fully-bloomed recoil pattern he had not
+    ///    fired a single round to earn.
+    #[test]
+    fn firing_the_hull_mounts_leaves_the_pilots_carried_gun_untouched() {
+        let carried_state_after = |w: MechWeapon| -> (f32, f32) {
+            let mut s = mech_range(0xC0B7, w);
+            {
+                let f = &mut s.fighters[0];
+                f.gun = GunKind::Ak47;
+                f.inventory[0] = GunKind::Ak47;
+                f.active = 0;
+                f.ammo = 30;
+                // walked in off a burst: the pattern is deep in the table
+                f.spray_i = 5.0;
+                f.fire_cd = 0.0;
+                f.last_shot_at = -100.0;
+            }
+            s.fighters[1].gun = GunKind::Fists;
+            let hold = PlayerCmd {
+                aim: [0.0, 0.0, -1.0],
+                shoot: true,
+                ..Default::default()
+            };
+            // 3 s of held hull trigger; `spray_i` needs 2.5 s to unwind
+            for _ in 0..(3 * SIM_HZ as usize) {
+                s.fighters[0].hull = MECH_HULL;
+                s.fighters[1].health = MAX_HEALTH;
+                s.fighters[1].pos = [0.0, 0.0, 5.0];
+                s.step(hold);
+            }
+            // the mount really did fire (otherwise this proves nothing)
+            assert!(
+                s.fighters[0].gatling_heat > 0.0 || w == MechWeapon::Autocannon,
+                "the gatling never fired a round during the hold"
+            );
+            let f = &s.fighters[0];
+            (f.fire_cd, f.spray_i)
+        };
+
+        for w in [MechWeapon::Gatling, MechWeapon::Autocannon] {
+            let (fire_cd, spray_i) = carried_state_after(w);
+            assert_eq!(
+                fire_cd, 0.0,
+                "{w:?}: the hull mount left {fire_cd}s on the PILOT's \
+                 `fire_cd` - a dismounting pilot is throttled by a gun \
+                 bolted to a chassis he is no longer inside"
+            );
+            assert_eq!(
+                spray_i, 0.0,
+                "{w:?}: the pilot's spray index is still at {spray_i} after \
+                 3s of not firing his own gun - the hull mount is holding \
+                 `last_shot_at` down, so he dismounts into a bloomed recoil \
+                 pattern he never fired a round to earn"
+            );
+        }
+
+        // the behavioural half of (1): the carried gun is READY the
+        // instant the pilot wants it, on the very tick the mount fired.
+        let mut s = mech_range(0xC0B8, MechWeapon::Gatling);
+        {
+            let f = &mut s.fighters[0];
+            f.gun = GunKind::Ak47;
+            f.inventory[0] = GunKind::Ak47;
+            f.active = 0;
+            f.ammo = 30;
+            f.fire_cd = 0.0;
+        }
+        assert!(
+            s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "the hull gatling must fire"
+        );
+        assert!(
+            s.try_fire(0, [0.0, 0.0, -1.0], false),
+            "the pilot's carried rifle was locked out by the hull gatling's \
+             round - the two triggers share a cooldown they must not share"
+        );
+    }
+
+    /// §8.2/§C: a mech is the loudest thing on an Extraction map, and the
+    /// horde director runs entirely on noise radii. A silent mount is a
+    /// real defect — free suppression with no consequence — and until
+    /// now deleting BOTH `emit_noise` calls passed the whole suite.
+    #[test]
+    fn hull_mounts_are_heard_by_the_horde() {
+        // (near heard, near's new target, far heard)
+        let heard = |w: MechWeapon| -> (bool, [f32; 2], bool) {
+            let mut s = TdmSim::new(cfg(0xC0F5, 1, Mode::Extraction, MapKind::Arena));
+            {
+                let f = &mut s.fighters[0];
+                f.pos = [2.0, 0.0, -3.0]; // an off-origin muzzle to point at
+                f.armor_set = ArmorSet::RobotSuit;
+                f.hull = MECH_HULL;
+                f.health = MAX_HEALTH;
+                f.mech_transition_t = 0.0;
+                f.mech_weapon = w;
+                f.gatling_heat = 0.0;
+                f.gatling_vent_t = 0.0;
+                f.gatling_cd = 0.0;
+                f.autocannon_cd = 0.0;
+                f.protect_t = 0.0;
+            }
+            s.zombies.clear();
+            // both placed off the -z fire axis so no ROUND can reach
+            // them: what alerts them can only be the noise
+            for (id, x) in [(101_u32, 6.0_f32), (102, 400.0)] {
+                s.zombies.push(Zombie {
+                    id,
+                    kind: ZKind::Shambler,
+                    pos: [x, 0.0, -3.0],
+                    hp: zspec(ZKind::Shambler).hp,
+                    atk_cd: 0.0,
+                    scream_t: 0.0,
+                    head_hits: 0,
+                    target: [-999.0, -999.0],
+                    alerted: false,
+                });
+            }
+            let fired = match w {
+                MechWeapon::Gatling => s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+                MechWeapon::Autocannon => s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+            };
+            assert!(fired, "{w:?} must fire");
+            let z = |id: u32| s.zombies.iter().find(|z| z.id == id).expect("zombie alive");
+            (z(101).alerted, z(101).target, z(102).alerted)
+        };
+
+        for w in [MechWeapon::Gatling, MechWeapon::Autocannon] {
+            let (near, target, far) = heard(w);
+            assert!(
+                near,
+                "{w:?}: a zombie 4 m from the muzzle did not hear the mount. \
+                 A mech can suppress an Extraction map in total silence"
+            );
+            assert!(
+                (target[0] - 2.0).abs() < 1e-4 && (target[1] + 3.0).abs() < 1e-4,
+                "{w:?}: the horde heard something but is walking to {target:?} \
+                 instead of the muzzle at [2.0, -3.0]"
+            );
+            assert!(
+                !far,
+                "{w:?}: a zombie 398 m away heard it - the noise radius is \
+                 not a radius, so nothing about WHICH weapon you fire in \
+                 Extraction matters"
+            );
+        }
     }
 
     /// §C.3: the cone OPENS as the mount cooks — the cost that makes
@@ -10104,7 +10452,7 @@ mod tests {
             let mut worst = 0.0_f32;
             for _ in 0..300 {
                 let f = &mut s.fighters[0];
-                f.fire_cd = 0.0;
+                f.gatling_cd = 0.0;
                 f.gatling_heat = heat;
                 f.gatling_vent_t = 0.0;
                 s.tracers.clear();
