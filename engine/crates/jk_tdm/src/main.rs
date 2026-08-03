@@ -3040,8 +3040,35 @@ const CASING_CAP: usize = 96;
 /// §5.1 (Brief VI): casings persist ≥ 10 s.
 const CASING_TTL_S: f32 = 10.0;
 
-/// Detect fresh shots by each fighter's fire_cd jumping UP, and eject a
-/// casing from beside the action. Bows, spears, and fists leave none.
+/// The cycle clock for whatever weapon this fighter is ACTUALLY firing.
+///
+/// Client FX — casing ejection, muzzle flash, shot audio, scope flinch —
+/// all detect a fresh shot by watching a cooldown JUMP UP. That worked
+/// while every weapon in the game shared `fire_cd`.
+///
+/// §C gave the hull mounts their own clocks (`gatling_cd`,
+/// `autocannon_cd`) — correctly, because a mount sharing `fire_cd` was
+/// throttling the pilot's carried gun on dismount. But it also meant
+/// the mounts stopped feeding every FX site, so a firing hull gatling
+/// went silent and flashless. This is the one function that keeps them
+/// wired, so the FX follow the weapon that actually fired instead of a
+/// field that happens to be named `fire_cd`.
+///
+/// One shared helper rather than the same `if in_mech` at five call
+/// sites: five copies of a rule drift, one cannot.
+fn shot_clock(f: &Fighter) -> f32 {
+    if f.in_mech() {
+        match f.mech_weapon {
+            sim::MechWeapon::Gatling => f.gatling_cd,
+            sim::MechWeapon::Autocannon => f.autocannon_cd,
+        }
+    } else {
+        f.fire_cd
+    }
+}
+
+/// Detect fresh shots by each fighter's shot clock jumping UP, and eject
+/// a casing from beside the action. Bows, spears, and fists leave none.
 fn spawn_casings(
     mut commands: Commands,
     game: Res<Game>,
@@ -3053,8 +3080,9 @@ fn spawn_casings(
     prev_cd.resize(simr.fighters.len(), 0.0);
     let mut budget = CASING_CAP.saturating_sub(live.iter().count());
     for (i, f) in simr.fighters.iter().enumerate() {
-        let fresh = f.fire_cd > prev_cd[i] + 1e-6;
-        prev_cd[i] = f.fire_cd;
+        let clock = shot_clock(f);
+        let fresh = clock > prev_cd[i] + 1e-6;
+        prev_cd[i] = clock;
         if !fresh || budget == 0 {
             continue;
         }
@@ -5915,7 +5943,10 @@ fn input_and_step(
         knife_hold: keys.pressed(KeyCode::KeyF),
     };
 
-    let prev_fire_cd = game.sim.fighters[game.sim.player].fire_cd;
+    // §C: the player's shot clock, whichever weapon they are actually
+    // firing - a mech pilot's shots run on the hull mount's own cycle,
+    // not `fire_cd`. See `shot_clock`.
+    let prev_fire_cd = shot_clock(&game.sim.fighters[game.sim.player]);
     game.accum += time.delta_secs().min(0.25);
     let mut steps = 0;
     while game.accum >= DT && steps < 8 {
@@ -5948,15 +5979,28 @@ fn input_and_step(
     // the same tick a reload completes). Leaning braces the shoulder:
     // the CAMERA kick honors the same ×0.8 the sim's bloom gets.
     let p = &game.sim.fighters[game.sim.player];
-    if p.alive() && p.fire_cd > prev_fire_cd {
-        let spec = gun(p.gun);
+    if p.alive() && shot_clock(p) > prev_fire_cd {
+        // §C: a hull mount's kick comes from its OWN identity, not from
+        // whatever rifle the pilot happens to be carrying. Reading
+        // `gun(p.gun).kick` inside a mech was the same class of mistake
+        // as `apply_hit` re-reading the held gun's damage - the pilot's
+        // inventory silently driving a hull weapon's feel.
+        let kick = if p.in_mech() {
+            match p.mech_weapon {
+                // the gatling's mass eats its own recoil; heat is its cost
+                sim::MechWeapon::Gatling => 0.0016,
+                // the autocannon is the reason the brace stance exists
+                sim::MechWeapon::Autocannon => 0.0180,
+            }
+        } else {
+            gun(p.gun).kick
+        };
         let brace = if p.lean.abs() > 0.1 {
             LEAN_RECOIL_MULT
         } else {
             1.0
         };
-        cam.pitch =
-            (cam.pitch - (spec.kick * 6.0 + p.bloom * 1.5) * brace).clamp(-0.7, 0.8);
+        cam.pitch = (cam.pitch - (kick * 6.0 + p.bloom * 1.5) * brace).clamp(-0.7, 0.8);
         cam.recoil = (cam.recoil + 0.6).min(1.0);
     }
 
@@ -11202,6 +11246,85 @@ mod hand_craft_tests {
 #[cfg(test)]
 mod camera_v2_tests {
     use super::*;
+
+    /// §C regression guard: client FX must follow the weapon that
+    /// ACTUALLY fired.
+    ///
+    /// Every shot effect in this file — casings, muzzle flash, shot
+    /// audio, camera kick — detects a fresh shot by a cooldown jumping
+    /// UP. That worked while every weapon shared `fire_cd`. When the
+    /// hull mounts got their own clocks (correctly: sharing `fire_cd`
+    /// was throttling the pilot's carried gun on dismount) they silently
+    /// stopped feeding those sites, and a firing hull gatling went
+    /// flashless and silent.
+    ///
+    /// This pins the fix so a future clock change cannot un-wire it
+    /// again without a red test.
+    #[test]
+    fn shot_clock_follows_the_weapon_that_actually_fired() {
+        // ..Default::default() rather than listing every field: this
+        // struct has grown twice already, and a test that only cares
+        // about two fields should not break when a third is added.
+        let mut s = sim::TdmSim::new(sim::MatchConfig {
+            seed: 0xFEED,
+            per_team: 1,
+            ..Default::default()
+        });
+
+        // On foot, the carried gun's clock is the shot clock.
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = sim::ArmorSet::None;
+            f.fire_cd = 0.11;
+            f.gatling_cd = 0.0;
+            f.autocannon_cd = 0.0;
+        }
+        assert_eq!(
+            shot_clock(&s.fighters[0]),
+            0.11,
+            "an infantry fighter's shots run on fire_cd"
+        );
+
+        // In a mech the HULL MOUNT's clock is the shot clock - and
+        // crucially it must NOT read fire_cd, or the FX fire on the
+        // pilot's carried gun instead of the weapon that shot.
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = sim::ArmorSet::RobotSuit;
+            f.hull = sim::MECH_HULL;
+            f.fire_cd = 0.11; // the carried rifle, NOT firing
+            f.mech_weapon = sim::MechWeapon::Gatling;
+            f.gatling_cd = 0.07;
+            f.autocannon_cd = 0.0;
+        }
+        assert_eq!(
+            shot_clock(&s.fighters[0]),
+            0.07,
+            "a piloted gatling's shots must run on gatling_cd, not the \
+             carried gun's fire_cd"
+        );
+
+        // ...and switching mounts follows the selection.
+        s.fighters[0].mech_weapon = sim::MechWeapon::Autocannon;
+        s.fighters[0].autocannon_cd = 1.35;
+        assert_eq!(
+            shot_clock(&s.fighters[0]),
+            1.35,
+            "selecting the autocannon must move the shot clock with it"
+        );
+
+        // The regression this guards: with the mount idle, the shot
+        // clock must be ZERO even though the carried gun is hot. If this
+        // ever reads 0.11 again, every mech FX site is firing off the
+        // pilot's rifle.
+        s.fighters[0].autocannon_cd = 0.0;
+        assert_eq!(
+            shot_clock(&s.fighters[0]),
+            0.0,
+            "an idle hull mount must read idle - a hot carried gun must \
+             not make the mech look like it is shooting"
+        );
+    }
 
     /// §B.1: `visor_ready` must distinguish "fully entered" from "never
     /// boarded" — the two cases `mech_enter_stage_for` collapses into
