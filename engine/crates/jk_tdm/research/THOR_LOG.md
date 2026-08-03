@@ -671,3 +671,217 @@ missed — the riskiest part of the commit is the part that was checked
 most carefully. Everything wrong here is in the *wording* of certainty
 ("exactly", "bit-for-bit", "invariant") and in one test that guards a
 lemma while carrying the name of the theorem.
+
+---
+
+## 2026-08-03 — Verification pass 2 on rig Step 1: Friday's fix of the 7 defects (commit `1e774e1`)
+
+Scope: `engine/crates/jk_tdm/src/main.rs` + `handback/AUDIT.md` only.
+`SPEC_20_SEGMENT_RIG.md` deliberately NOT read — Toto/Friday were editing
+it concurrently, and analysing a shifting file produces shifting findings.
+
+**Suite confirmed by running it, not by reading a claim:**
+`cargo test --release -p jk_tdm` -> **148 passed; 0 failed; 2 ignored**.
+One test binary only (`--bin jk_tdm`); there is no second target hiding
+tests. The 2 ignored are `sim.rs:9214 autoplay_report` and
+`sim.rs:9387 diag_bailey`, on-demand diagnostics unrelated to the rig.
+`main.rs` verified byte-identical to `1e774e1` (`git diff 1e774e1 --` empty)
+even though HEAD has since moved to `0288ff0` — other agents committed
+research files, not source, so this verdict is against the commit named.
+
+### Every mutation reproduced. All eight rows: exact match.
+
+I applied each mutation to the real file, ran the real suite, and reverted.
+
+| # | Mutation | Friday claimed | **Thor measured** |
+|---|---|---|---|
+| M1 | drop `+ tip_onset` (main.rs:583) | 3 FAIL | **3 FAIL** — `carries_past`, `is_invariant`, `matches_its_hand_computed_curve` |
+| M2 | same, on PRE-change code (`787f6ff`) | old invariance test ok | **ok** — the old test passed |
+| M3 | forearm idx 5 `0.094`->`0.100` (main.rs:432) | 2 FAIL | **2 FAIL** — `geometric_root`, `hits_every_measured_javelin_anchor` |
+| M4 | same, on PRE-change code | 145/145 passed | **145 passed; 0 failed** |
+| M5 | drop `.min(1.0)` (main.rs:498) | 1 FAIL | **1 FAIL** — `head_lag_chase_pins_the_measured_tip_onset` |
+| M6 | tip onset `0.130`->`0.125` | 3 FAIL | **3 FAIL** |
+| M7 | hardcode `/ 2.611` for `/ tip_peak` | 1 FAIL | **1 FAIL** — `is_invariant` |
+| M8 | hand idx 6 `0.114`->`0.115` (one ms) | 1 FAIL | **1 FAIL** — `geometric_root` |
+
+Zero discrepancies. Friday's falsifiability table is **accurate as
+written** — the first such table this session that survived reproduction
+without a correction. The headline result is M3 vs M4: a 6 ms move of a
+derived arm onset was **completely invisible** to the pre-change suite
+and is now caught by two independent tests. That is a real gain.
+
+Every mutation reverted via `git checkout --`; revert verified empty
+after each one; final `git status` shows main.rs clean.
+
+### The declared hole is REAL — and behaviourally inert. Friday's argument reaches the right answer for the wrong reason.
+
+Constructed the two-sided mutation Friday described:
+`spear_followthrough_yaw`'s `const TIP: usize = 7` -> `6` (main.rs:564)
+**and** the test's `variants[0]` -> index 6 (main.rs:11831).
+
+- One-sided (wrapper only): **1 FAIL** — the `to_bits()` assertion at
+  main.rs:11843 fires. Friday's claim holds.
+- Two-sided: **148 passed, 0 failed.** Escapes completely, as declared.
+
+But Friday justified the escape being acceptable with the wrong argument
+("bit-equality catches the realistic single-sided case"). The actual
+reason it does not matter is stronger and Friday did not state it: **the
+TIP index is not observable.** The whole point of the invariance proof is
+that the output does not depend on `(onset, peak)` — so a wrapper reading
+index 6 produces the same curve, which is exactly why the golden test also
+stayed green. There is no behavioural regression available through that
+mutation. Friday declared a hole that cannot leak.
+
+The mutation class that *can* leak is structural, and it is closed:
+`spear_followthrough_matches_its_hand_computed_curve` (main.rs:11878-11897)
+reads **no table at all** — it calls the wrapper and compares to literals.
+It is therefore immune to any edit of the invariance test's variant list.
+M1 confirms it fires on the AUDIT bug. That independence, not the
+bit-equality assertion, is what makes D6's fix sound.
+
+### What Friday's table omits: the pre-change suite was NOT blind to the AUDIT.md #1 bug.
+
+Friday's M2 row is correctly scoped ("old invariance test: ok") and is
+true. But run the whole pre-change suite under that mutation and it is
+**144 passed; 1 failed** — `spear_followthrough_carries_past_the_release_then_settles`
+catches it, because with the onset dropped the curve's peak is exactly
+`SPEAR_RELEASE_YAW` and the assertion demands `peak > SPEAR_RELEASE_YAW`.
+
+This matters because main.rs:11871-11874 calls the drop "the bug in
+AUDIT.md #1, and it is what the old test could not see", and
+main.rs:11803-11806 calls D6 "the worst of the seven". Both sentences are
+literally true of *that test*. A reader will still come away believing
+the bug could have shipped again unnoticed. It could not have. **D6 took
+detection of the AUDIT bug from one test to three — a real hardening, not
+a rescue from zero.** Friday should have said so; it is the kind of
+deflation that makes the rest of the report more credible, not less.
+
+### Friday's three volunteered uncertainties: two are overstated, one is right.
+
+Measured independently in a standalone f32 harness mirroring the consts.
+
+**(a) `exp()` bit-stability — OVERSTATED. Not a genuine portability
+hazard.** Friday called it "the most fragile thing it added". Measured:
+
+- Worst `|f32 - pinned|` across the 7 golden rows is **5.96e-8** at
+  t=0.06, i.e. **16.8x** headroom — not the 5.5e-8 / "~18x" the comment
+  at main.rs:11869 states. Friday's own margin is slightly generous;
+  the doc figure should read 5.96e-8 and 16.8x.
+- Three of the seven rows (t=0.00, 0.03, 0.05) sit at or before `HOLD_S`,
+  so `decay = exp(-0.0) = 1.0` **exactly** in every conforming libm.
+  They have *zero* exp exposure. Friday's framing implies all seven are
+  at risk.
+- For the four rows that do call `exp`, I computed how far `expf` would
+  have to be wrong to break the 1e-6 tolerance: **39, 37, 146 and 9399
+  ulp** respectively. The binding constraint is ~37 ulp. glibc's `expf`
+  is correctly rounded (<=0.5 ulp); musl and UCRT are within ~1 ulp. A
+  toolchain would need a **catastrophically** broken `expf` to move this
+  test. The test does not require bit-stability; it requires ~37 ulp,
+  which is two orders of magnitude of slack on the axis that actually
+  varies. Verdict: real mechanism, negligible risk, wrong risk ranking.
+
+**(b) the 1.6x geometric-root margin — OVERSTATED, and misframed.**
+Measured: index 5 lands 3.161e-4 from the table against 5e-4 (**1.58x**);
+index 6 is 2.511e-5 (**19.9x**). Friday's numbers are right. The framing
+is not. A margin is only a *risk* if the quantity varies — and this one
+cannot. `the_arm_onsets_reproduce_an_independently_solved_geometric_root`
+(main.rs:11746-11796) is pure f64 add/mul/div/compare: a 200-step
+bisection over IEEE-754 doubles, **no transcendental, no libm call, no
+platform-dependent operation anywhere in it.** It is bit-deterministic on
+every conforming target. The 1.58x is not a stability margin; it is the
+distance of the true 0.0943161 from the 0.0945 rounding boundary — a fact
+about the anthropometric data, not about the test.
+
+And the tightness is a **virtue**: it is precisely what makes M3 and M8
+fail. Loosening that tolerance would delete the only test that catches a
+1 ms move of index 6 (see D9 below). Leave it.
+
+**(c) 7 numbers to retune — correct engineering. But Friday missed the
+failure mode that actually threatens it.** Pinning a feel curve is the
+right response to a bug (AUDIT.md #1) that was a *silent behavioural
+inversion* — property-only tests are what let it ship, and 7 numbers is
+cheap insurance. Agreed.
+
+The unnamed risk: main.rs:11866-11868 says the golden values "were
+computed in f64 outside the crate ... a table of results, not a
+re-derivation." **Nothing enforces that.** The next person to retune will
+most cheaply regenerate GOLDEN by printing the code's own f32 output — at
+which point the test silently degenerates into a change-detector that
+pins whatever the code does, bug included. That is the same class of
+defect as the D6 test it replaced. A comment is the only guard. Note the
+inconsistency: the geometric-root test solved exactly this problem
+correctly, by deriving its reference *inside* the test from independent
+inputs; the golden test carries literals. Both choices are defensible for
+their subject matter, but the golden test's guard is the weaker one and
+Friday listed the wrong worry (a) as its most fragile property. **(c)'s
+real hazard, not (a)'s, is where this will break.**
+
+### Two defects Friday did not flag
+
+**D8 (minor, doc) — main.rs:552-554 compares a drive-term residual to a
+yaw tolerance.** It says the 1.788e-7 residual "is 1.8e-8 rad of yaw once
+scaled by `OVERSHOOT_RAD` ... but only ~5.6x below the 1e-6 tolerance the
+invariance test uses." Mismatched units: 5.6x is `1e-6 / 1.788e-7`, i.e.
+the *drive* residual measured against a tolerance applied to *yaw*. The
+sentence itself supplies the correct conversion one clause earlier and
+then does not use it. Measured end-to-end worst divergence across the six
+variants is **2.98e-8 rad -> 34x** headroom, which matches main.rs:11821's
+"33x inside the tolerance" — so the file states both 5.6x and 33x for the
+same margin, six thousand lines apart. The error is conservative (it
+argues *against* tightening, which is the right advice), so nothing is
+operationally wrong. But this is a doc block whose entire purpose is
+numerical precision, in a section written specifically to correct a
+previous imprecision.
+
+Verified: 12,000 samples on the 10 us grid, **8,290** with non-zero
+residual, worst **1.788139e-7 at release_t = 0.09359**, and **exactly 0**
+after saturation. Friday's counts are all correct.
+
+**D9 (minor, comment) — main.rs:11718-11719 overstates what the new
+per-hop assertion guards.** Its message reads "indices 5 and 6 are the
+interpolated ones", implying both are covered. Measured:
+
+- idx 5 `0.094`->`0.100`: per-hop assertion **fires** (main.rs:11716,
+  hops `[0.030, 0.030, 0.014, 0.016]` — monotonicity broken).
+- idx 6 `0.114`->`0.115`: hops become `[0.030, 0.024, 0.021, 0.015]`,
+  still strictly decreasing — the per-hop assertion **passes**. Only
+  `geometric_root` catches it.
+
+Coverage is not lost (D3's test catches both, which is why M8 still
+fails), but the D5 replacement guards index 5 and not index 6 at the
+table's 1 ms resolution, and its own failure message says otherwise. This
+is a much milder version of the sin D5 was raised to fix — an assertion
+whose text claims more scope than it has.
+
+### Production call sites re-verified (a test that guards dead code is not coverage)
+
+- `sync_fighters` registered as a real Bevy system at main.rs:2779.
+- `chain_lag_chase` main.rs:6510 -> `chain_lag_rx` -> `head_rx`
+  main.rs:6512 -> `Quat::from_rotation_x` on the neck at main.rs:6569.
+- `torso_coil_yaw` main.rs:6361 -> `spear_yaw` -> torso transform at
+  main.rs:6490; its final branch is `spear_followthrough_yaw`
+  (main.rs:609). Both chains reach a `Transform`. Live.
+
+### Verdict
+
+D1, D2, D5, D6, D7 fixes are **real and falsifiable**, proved by mutation
+rather than by inspection. Friday's falsifiability table reproduced 8/8
+with zero corrections, and its numeric claims (8,290 / 1.788e-7 / 2.98e-8
+/ 3.16e-4 / 1.6x / <=8e-8) all verified to the digit. That is the best
+evidence quality any agent has handed me this session.
+
+What Friday got wrong is smaller than usual and all of one kind — **risk
+ranking, not fact**: it flagged (a) and (b), which measurement shows are
+near-zero risks, and did not flag (c)'s regeneration hazard, D8, or D9,
+which are where this will actually erode. And it declared a "remaining
+hole" (the two-sided mutation) that is real as a mutation-testing fact
+but cannot produce a behavioural defect, while under-reporting that the
+pre-change suite already caught the AUDIT bug by another route.
+
+**Net: the fixes are sound. Friday's self-assessment is honest and
+slightly miscalibrated — it was hardest on the parts that hold up best.**
+Nothing here blocks Step 2. Recommended follow-ups, all minor: correct
+main.rs:11869 to 5.96e-8/16.8x, reconcile the 5.6x-vs-33x contradiction
+(D8), and fix the per-hop assertion's message (D9).
+
+All mutations reverted; `git status` clean for `engine/crates/jk_tdm/src/main.rs`.
