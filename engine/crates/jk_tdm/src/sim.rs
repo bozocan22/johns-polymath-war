@@ -10856,9 +10856,20 @@ mod tests {
     }
 
     /// Steps a pinned engagement and returns the damage the BOT dealt to
-    /// the player over it. The player is healed and un-protected every
-    /// tick so the duel never ends, and both bodies are pinned so what is
-    /// under test is the trigger, not the footwork.
+    /// the player over it. Both bodies are pinned so what is under test
+    /// is the trigger, not the footwork.
+    ///
+    /// The victim is made IMMORTAL rather than merely healed, and that
+    /// distinction is load-bearing enough to spell out: one autocannon
+    /// round is 145 against a 100 HP man, so healing alone still lets the
+    /// kill register — `respawn_t` latches for `RESPAWN_S`, the corpse
+    /// stops being a visible enemy, and the bot spends 3 of every ~4.4
+    /// seconds with nothing to shoot at. Every "continuous engagement"
+    /// assertion below would then be measuring a stuttering one, and the
+    /// long tests would ride on whether a given seed's first round
+    /// happened to miss. Worse, a kill can latch `round_over_t`, after
+    /// which `step` early-returns and, 7 s later, REPLACES the sim
+    /// wholesale — so the score and round state are rolled back too.
     fn bot_engagement(s: &mut TdmSim, secs: f32) -> f32 {
         let ppos = s.fighters[0].pos;
         let pyaw = s.fighters[0].yaw;
@@ -10870,6 +10881,8 @@ mod tests {
                 let p = &mut s.fighters[0];
                 dealt += (MAX_HEALTH - p.health).max(0.0);
                 p.health = MAX_HEALTH;
+                p.respawn_t = 0.0; // back on his feet the same tick
+                p.deaths = 0;
                 p.pos = ppos;
                 p.yaw = pyaw;
                 p.vel = [0.0, 0.0];
@@ -10880,7 +10893,13 @@ mod tests {
                 b.pos = bpos;
                 b.vel = [0.0, 0.0];
                 b.protect_t = 0.0;
+                b.kills = 0;
             }
+            // the round must never end under a test that runs for 30 s
+            s.score = [0.0, 0.0];
+            s.round_over_t = None;
+            s.winner = None;
+            s.overtime = false;
         }
         dealt
     }
@@ -11132,8 +11151,14 @@ mod tests {
         let mut s = bot_mech(0xD11, 30.0, GunKind::Ak47, 0, 0);
         bot_engagement(&mut s, 2.0);
         assert!(s.fighters[1].mech_brace, "precondition: it is planted");
+        // stepped RAW, deliberately not through `bot_engagement` - that
+        // rig resurrects the victim every tick, which is exactly what
+        // must NOT happen here
         s.fighters[0].respawn_t = 5.0; // no visible threat any more
-        bot_engagement(&mut s, 0.5);
+        for _ in 0..(SIM_HZ as usize / 2) {
+            s.step(PlayerCmd::default());
+            s.fighters[0].respawn_t = 5.0;
+        }
         assert!(
             !s.fighters[1].mech_brace,
             "the bot held the plant with nothing to shoot at"
@@ -11177,9 +11202,12 @@ mod tests {
                     p.pos = [0.0, 0.0, 0.0];
                     p.vel = [0.0, 0.0];
                     p.health = MAX_HEALTH;
+                    p.respawn_t = 0.0; // immortal, see `bot_engagement`
                     p.hull = if hardened { MECH_HULL } else { p.hull };
                     p.protect_t = 0.0;
                 }
+                s.round_over_t = None;
+                s.score = [0.0, 0.0];
                 let now = s.fighters[1].pos;
                 path += ((now[0] - last[0]).powi(2) + (now[2] - last[2]).powi(2)).sqrt();
                 last = now;
