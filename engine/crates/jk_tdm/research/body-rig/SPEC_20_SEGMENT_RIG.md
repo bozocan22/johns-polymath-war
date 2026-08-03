@@ -329,12 +329,34 @@ remaining 35 ms split I_MPT : I_UPT = 0.001661015 : 0.001893083 = 0.46736 : 0.53
 **(b) Arm window `UpperArm(0.070) → Tip(0.130)`, three hops — geometric compression.** Distal segments are not gated by their own mass (the hand is 1/7 of the forearm's inertia; inertia weighting would give it a 5 ms hop and the forearm 39 ms, which contradicts the measured trend). They are gated by the sequencing strategy, and the literature gives us that trend directly: 40 → 30 ms, ratio 0.75. Extrapolate geometrically with ratio `q` from the measured 30 ms base, solved to land **exactly** on the measured 130 ms release anchor:
 
 ```
-30q + 30q² + 30q³ = 60   ⇒   q + q² + q³ = 2   ⇒   q = 0.8107
-  UpperArm → Forearm = 30 × 0.8107   = 24.32 ms
-  Forearm  → Hand    = 30 × 0.65723  = 19.72 ms
-  Hand     → Tip     = 30 × 0.53282  = 15.99 ms      Σ = 60.03 ms
-⇒ Forearm = 0.0943   Hand = 0.1140   Tip = 0.1300  ✓ hits the measured anchor
+30q + 30q² + 30q³ = 60   ⇒   q + q² + q³ = 2   ⇒   q = 0.81053571
+  UpperArm → Forearm = 30 × 0.81053571 = 24.3161 ms
+  Forearm  → Hand    = 30 × 0.65696814 = 19.7090 ms
+  Hand     → Tip     = 30 × 0.53249614 = 15.9749 ms   Σ = 60.0000 ms
+⇒ Forearm = 0.094316  Hand = 0.114025  Tip = 0.130000  ✓ hits the measured anchor
 ```
+
+> **CORRECTION (Thor, 2026-08-03 — defect D3).** This block previously
+> printed **`q = 0.8107`** and then, three lines later, **`Σ = 60.03 ms`**
+> — contradicting its own claim that the hops sum "exactly" to 60. Both
+> were wrong in the same direction. `0.8107` is not the root:
+> `0.8107 + 0.8107² + 0.8107³ = 2.00075449`, so the three arm hops summed
+> to **60.0226 ms** and the tip landed at **130.0226 ms**, not 130. The
+> true root is **0.8105357138** (verified by bisection to f64 precision),
+> which does sum to 60.0000 and does land on 130.
+>
+> **NO SHIPPED CONSTANT CHANGES.** The true root gives 0.0943161 /
+> 0.1140251 / 0.130, which round to the nearest millisecond as
+> **0.094 / 0.114 / 0.130** — byte-identical to what already ships. The
+> defect was in the derivation's stated precision, not in its output.
+> The wrong root was never detectable at the table's 1 ms resolution,
+> which is precisely why nothing caught it for a commit.
+>
+> `the_arm_onsets_reproduce_an_independently_solved_geometric_root`
+> (main.rs) now solves this root **by bisection inside the test**, from
+> `JAVELIN_ANCHOR_S` alone, and checks indices 5 and 6 against it. Nothing
+> in the suite previously constrained those two indices at all: a 6 ms
+> move of the forearm passed 145/145.
 
 ### 3.4 The replacement constants
 
@@ -395,7 +417,26 @@ const CHAIN_SEGMENTS: [Option<SegmentId>; 8] = [
 | 6 | hand | 0.110 | **0.114** | +4 ms |
 | 7 | tip | 0.125 | **0.130** | +5 ms |
 
-The by-feel author was within 15 ms everywhere and exact on the thorax. **This de-risks Step 1 substantially** — the two production consumers move by ≤5 ms (a 4% change in the head-lag time constant and in the follow-through sample point).
+The by-feel author was within 15 ms everywhere. **This de-risks Step 1 substantially** — the two production consumers move by ≤5 ms (a 4% change in the head-lag time constant and in the follow-through sample point).
+
+> **CORRECTION (Thor, 2026-08-03 — defect D4).** This paragraph used to
+> end "…and **exact on the thorax**", and the delta table's `Δ = 0` on
+> index 2 was being read as independent corroboration that the derivation
+> is sound. **It is circular and must not be cited as evidence.**
+>
+> Index 2 is not derived from the thorax's inertia at all. §3.3(a) spends
+> the trunk budget as `35 ms` split by inertia into the *first two* hops
+> and then floors the third; index 2 is therefore forced to be
+> `clavicle − floor = 0.040 − 0.005 = 0.035` for **any** inertia split
+> whatsoever. The agreement measures the **5 ms floor**, which was chosen
+> by us, not the data. A 4 ms floor would put index 2 at 0.036 and a 6 ms
+> floor at 0.034, and neither would say anything about whether the de Leva
+> weighting is right. The only genuinely independent check in this section
+> is the Serrien & Baeyens band below.
+>
+> What *is* still true and still de-risking: both production consumers
+> move by ≤5 ms, and that is verified in code rather than argued
+> (`the_arm_onsets_reproduce_…`, `head_lag_chase_pins_the_measured_tip_onset`).
 
 **Independent corroboration (Serrien & Baeyens 2018, *J Hum Kinet* 63:9-21 — random-effects meta-analysis, 14 articles, ~20 samples of experienced handball players, with 95% CIs):** measured pelvis→trunk peak-velocity gaps are **24 ms** (standing throw with run-up, I² = 0%), **38 ms** (jump throw), **61 ms** (penalty throw). Our derived pelvis→thorax span is **35 ms** — inside that band and, correctly, nearer the run-up value than the planted penalty throw, since a javelin delivery is a run-up throw.
 
@@ -490,6 +531,15 @@ const BODY_MASS_KG: f32 = 78.0;
 
 Swap `CHAIN_ONSET_OFFSETS` / `CHAIN_PEAK_SCALE`, add `JAVELIN_ANCHOR_S` and `CHAIN_SEGMENTS` (§3.4). Refactor `spear_followthrough_yaw` so the peak scale is a parameter, purely so the inertness test can run.
 
+> **STATUS (2026-08-03).** The refactor above was **skipped** when Step 1
+> shipped, and the invariance test was written as a retyped copy of
+> `spear_followthrough_yaw`'s body instead — so it never called the
+> function and could not fail when the function broke (defect D6; the
+> same hole let AUDIT.md bug #1 ship once already). Now done:
+> `chain_scale_from(onset, peak, elapsed, ramp)` and
+> `spear_followthrough_yaw_from(release_t, tip_onset, tip_peak)` are the
+> parameterised cores, with the index-taking versions as thin wrappers.
+
 **COSMETIC.** Two consumers move ≤5 ms.
 
 **Tests:**
@@ -499,11 +549,34 @@ Swap `CHAIN_ONSET_OFFSETS` / `CHAIN_PEAK_SCALE`, add `JAVELIN_ANCHOR_S` and `CHA
 | `chain_onsets_are_strictly_increasing_with_a_five_ms_floor` | `for i in 1..8: OFFSETS[i] - OFFSETS[i-1] >= 0.005` |
 | `chain_gaps_compress_distally_between_the_measured_anchors` | `40 > 30 > 24.3 > 19.7 > 16.0` ms — **assert at anchor granularity, not per index**; per-index gaps (16,19,5,30,24,20,16) are correctly non-monotone because of the 5 ms clavicle floor |
 | `peak_scale_pelvis_to_thorax_matches_measured_ratio` | `(PEAK[2]/PEAK[0] - 1.43).abs() < 0.05` |
-| `peak_scale_is_inert_in_the_follow_through` | sweep `release_t ∈ 0..0.6`: `spear_followthrough_yaw_with_peak(t, 2.611) == spear_followthrough_yaw_with_peak(t, 5.222)` **bit-identically** — proves index 7 cancels |
+| `spear_followthrough_is_invariant_to_the_chain_tables` | sweep `release_t ∈ 0..0.6` × six substituted `(tip_onset, tip_peak)` rows through the **real** `spear_followthrough_yaw_from` — see the correction below on `==` |
+| `the_arm_onsets_reproduce_an_independently_solved_geometric_root` | §3.3(b)'s root solved by bisection **inside the test** from `JAVELIN_ANCHOR_S`; indices 5 and 6 within 5e-4 (the table's 1 ms rounding). The only thing that constrains the interpolated arm indices at all |
+| `spear_followthrough_matches_its_hand_computed_curve` | 7 golden points computed in f64 outside the crate; makes the invariance claim non-vacuous |
+| `head_lag_chase_pins_the_measured_tip_onset` | first tick, 15- and 30-tick gap fractions, and the `.min(1.0)` clamp, all against numbers hand-computed from the literal `0.130` |
 | existing `kinetic_chain_peaks_fire_in_strict_proximal_to_distal_order` | **unchanged, must still pass** |
 | existing `kinetic_chain_segment_is_silent_before_its_own_onset` | **unchanged, must still pass** |
-| existing `the_head_trails_a_sprint_start_then_settles` | **unchanged, must still pass** (reads `OFFSETS[7]` symbolically) |
+| existing `the_head_trails_a_sprint_start_then_settles` | **unchanged, must still pass** (reads `OFFSETS[7]` symbolically — which is also why it pins **nothing**; see D7) |
 | existing `spear_followthrough_carries_past_the_release_then_settles` | **unchanged, must still pass** |
+
+> **CORRECTION (2026-08-03 — defect D2/D6).** The row above originally
+> demanded the two peak variants agree **bit-identically**. *That
+> assertion is false and must not be reinstated.* In f32 both
+> `(t + onset) − onset` and `peak * x / peak` round, so the cancellation
+> is exact only in exact arithmetic. **Measured** on a 10 µs grid: the
+> drive term's worst residual is **1.788e-7** at `release_t` = 0.0936,
+> carried by **8,290** samples — all of them while the ramp is still
+> climbing (8,290 of the 12,000 below `RAMP_S`, 69%), and **exactly zero**
+> after the clamp saturates, since `peak · 1.0 / peak` is exact. Quote the
+> count, not a percentage of a sweep: the same 8,290 is 20.7% of a 0..0.4 s
+> sweep and 13.8% of a 0..0.6 s one. Worst end-to-end divergence between
+> substituted table rows is **2.98e-8 rad**. Behaviourally invisible
+> (1.8e-8 rad of yaw), but only ~5.6× inside the 1e-6 tolerance the test
+> uses — so do not tighten that tolerance toward 1e-7 either. The
+> invariance is real; its precision is finite, and now stated.
+>
+> Bit-equality *is* asserted, correctly, between `spear_followthrough_yaw(t)`
+> and `spear_followthrough_yaw_from(t, OFFSETS[7], PEAK[7])` — same inputs,
+> same arithmetic, no licence to differ.
 
 **Revert:** restore two array literals.
 

@@ -365,3 +365,309 @@ the work includes Thor's own instrumentation:
   **Both were in the harness, not the game.** The pattern worth naming:
   *the instrument fails more quietly than the thing it measures.*
 
+
+## 2026-08-03 — Verification pass on "Rig Step 1: the kinetic chain, from measurement instead of by feel" (787f6ff)
+
+**What shipped.** `CHAIN_ONSET_OFFSETS` (main.rs:422-423) went from the
+by-feel `[0.000, 0.020, 0.035, 0.055, 0.065, 0.090, 0.110, 0.125]` to a
+measurement-derived `[0.000, 0.016, 0.035, 0.040, 0.070, 0.094, 0.114,
+0.130]`; `CHAIN_PEAK_SCALE` (main.rs:441-442) likewise; two new tests;
+new `JAVELIN_ANCHOR_S` (main.rs:427-428). **The commit's load-bearing
+claim:** "the entire blast radius of this commit is ONE production
+behaviour: `chain_lag_chase`'s head-lag time constant, 0.125 -> 0.130,
+a 4% change."
+
+Thor read the code rather than the commit message, enumerated every
+read of both tables across the crate, and compiled a standalone f32
+probe (40,001 samples) to test the cancellation empirically instead of
+trusting the algebra on paper.
+
+### 1. The blast-radius claim — **UPHELD.** No missed consumer.
+
+Every read of either table in the whole crate (grep over `engine/`;
+neither name appears in `sim.rs` or any other file):
+
+| site | function | classification |
+|---|---|---|
+| main.rs:445,446 | `chain_segment_scale` | production, but its ONLY production caller is main.rs:524 → invariant |
+| main.rs:457 | `chain_peak_tick` | **TEST-ONLY** — sole caller is main.rs:11536, despite compiling into the binary |
+| main.rs:467 | `chain_lag_chase` | **the one live behaviour** — main.rs:6451 → `ls.lean_lag` → `chain_lag_rx` (6452) → `head_rx` (6455) → neck rotation |
+| main.rs:523,524 | `spear_followthrough_yaw` | production via `torso_coil_yaw` main.rs:550 → invariant |
+| main.rs:11171, 11555, 11566-11574, 11579-11580, 11599-11601, 11615-11617 | tests | test-only |
+
+The cancellation was verified, not assumed. Over 40,001 samples of
+`release_t ∈ [0, 0.40]`: the `elapsed_s < onset` branch is taken **0
+times** (IEEE round-to-nearest is monotonic, so `fl(release_t + onset)
+≥ onset` for every `release_t ≥ 0`; and `release_t < 0` is already
+short-circuited at main.rs:520). `drive` is exactly `0.0` at
+`release_t = 0` and exactly `1.0` for `release_t ≥ RAMP_S` (the clamp
+makes it `peak * 1.0 / peak`, exact in IEEE).
+
+**Correction to the claim's wording.** The cancellation is exact in ℝ,
+**not in f32**. 8,290 of 40,001 samples (20.7%) leave a non-zero
+residual, worst **1.788e-7** in `drive`, at `release_t = 0.0936`. Cause:
+`(release_t + onset) - onset ≠ release_t` when the addition rounds
+(worst ≈ ulp(0.14)/2 ≈ 7.5e-9, amplified by `/0.12`), plus the
+`peak * x / peak` round-trip. Worst yaw consequence: **1.8e-8 rad** —
+utterly invisible, so the *behavioural* claim stands. But main.rs:508
+says the function "reduces **exactly** to `(release_t/RAMP_S).clamp(0,1)`"
+and that word is wrong. It should read "to within 2e-7". This matters
+because the new test's tolerance is `1e-6` (main.rs:11603) — only a
+**5.6x margin** over the measured worst case, and the residual is
+table-dependent. Anyone tightening that to 1e-7 gets a red suite.
+
+**A defect the commit shipped:** main.rs:462 still reads "*it arrives at
+a new acceleration lean ~one tip-onset (**0.125 s**) behind the pelvis*"
+— five lines above main.rs:467, which now reads 0.130. A commit whose
+own thesis is "*a reader must not infer a dependency that is not there*"
+(main.rs:512) changed the constant and left the doc quoting the old
+value. Direction, for the record: `dt / ONSET[7]` with a larger
+denominator is a **slower** chase — the head now lags ~4% longer.
+
+**Also unguarded:** `the_head_trails_a_sprint_start_then_settles`
+(main.rs:11165) derives `onset_ticks` from `CHAIN_ONSET_OFFSETS[7]`
+itself (main.rs:11171), so it self-adjusts and cannot detect this
+retune. The single real behaviour change in the commit is pinned by no
+test at all.
+
+### 2. The arithmetic — **mostly sound; the word "exactly" is false twice.**
+
+**Re-basing — EXACT, confirmed.** Campos 2004 Table 3 values −0.130 /
+−0.090 / −0.060 / 0.000, plus 0.130 → 0.000 / 0.040 / 0.070 / 0.130,
+which is `JAVELIN_ANCHOR_S` at main.rs:427-428 verbatim. The
+marker→segment mapping (hip→pelvis, shoulder→clavicle, elbow→upper arm,
+release→tip) is internally consistent with `CHAIN_SEGMENTS[7] = None`
+("the weapon, the chain's output").
+
+**Trunk split — CONFIRMED.** Recomputed in f64:
+`I_MPT = 0.1633·(0.468·0.2155)² = 0.001661011`,
+`I_UPT = 0.1496·(0.659·0.1707)² = 0.001893082`, shares
+`0.46735 / 0.53265`, so 35 ms → **16.357 / 18.643 ms**. Spec §3.3
+line 323-324 says 16.36 / 18.64. ✔
+
+**Geometric compression — the spec's `q` is WRONG in the 4th decimal.**
+`q = 0.8107` gives `q + q² + q³ = 2.00075449`, not 2. The actual root of
+`q + q² + q³ = 2` is **0.8105357**. So `30q + 30q² + 30q³ = 60.0226 ms`,
+not 60, and the geometric chain lands the tip at **130.023 ms**, not on
+the anchor. Spec §3.3 line 329/332 claims it is "solved to land
+**exactly** on the measured 130 ms release anchor" and line 336 asserts
+"Tip = 0.1300 ✔ hits the measured anchor" — while the spec's own line
+335 prints "Σ = **60.03** ms", contradicting itself two lines earlier.
+**Immaterial to what shipped**: recomputing with the true root gives
+94.316 / 114.025 / 130.000 ms, which rounds to the identical shipped
+`0.094 / 0.114 / 0.130`. But "exactly" is not true, and a spec that
+says "exactly" about a number its own line disproves is a spec that
+will be trusted somewhere it shouldn't be.
+
+**Shipped constants vs derivation — all match to 3 dp**, with two silent
+round-downs worth naming: lumbar derives to 0.016357 and ships 0.016
+(−0.36 ms); forearm derives to 0.09432 and ships 0.094 (−0.32 ms). Both
+are ~1/50th of the disclosed 20 ms precision ceiling (main.rs:418-421),
+so they are fine — but they are rounding, not derivation, and nothing
+says so.
+
+**The commit message overstates one corroboration.** "*The by-feel
+author was within 15 ms everywhere and **exact on the thorax**.*" The
+thorax (index 2 = 0.035) is **not independently derived** — it is
+`clavicle 0.040 − the 5 ms floor`, and that floor is an authored
+constant the spec itself calls "a monotonicity device, not a claim of
+5 ms accuracy" (SPEC §3.3 line 318, echoed at main.rs:420-421). A 4 ms
+or 6 ms floor yields 0.036 or 0.034. The by-feel value was not confirmed
+by data; it was matched by a chosen constant. Reads as independent
+corroboration in the commit message. It is not.
+
+### 3. The new tests — **one is genuine but mis-named; one contains a provably dead assertion.**
+
+**`spear_followthrough_is_invariant_to_the_chain_tables`
+(main.rs:11591-11609): NOT vacuous, but it does not test the thing its
+name claims.** `predicted_drive` (11597) is built from `RAMP_S` alone,
+independent of both tables, so the test genuinely fails if
+`chain_segment_scale` stops multiplying by `peak`, stops subtracting
+`onset`, or stops being linear. That part of the commit's claim holds.
+
+**But it never calls `spear_followthrough_yaw`.** Lines 11599-11601
+*retype* production line 524. The coupling between the tables and the
+production function is a **copied literal, not a call**. Every one of
+these production breakages leaves the test green:
+- main.rs:524 → `chain_segment_scale(TIP, release_t, RAMP_S)` (drop the
+  `+ onset`). **This is the exact bug this codebase has already shipped
+  once** — `handback/AUDIT.md:38`: "`chain_segment_scale` returned 0.0
+  for the first 0.125 s". The one regression with a track record here is
+  not covered.
+- dividing by `CHAIN_PEAK_SCALE[6]`, or dropping the division.
+- `const TIP` changing from 7.
+
+And the spec asked for better: SPEC line 491 — "*Refactor
+`spear_followthrough_yaw` so the peak scale is a parameter, **purely so
+the inertness test can run**.*" That refactor was skipped and the
+expression duplicated instead. The shipped test is weaker than the
+spec's own design, in precisely the way the spec was trying to prevent.
+
+Coverage is also thinner than "40 sample points" suggests: `RAMP_S =
+0.12` and the step is 0.01, so **11 of 40 points** are in the
+non-trivial ramp; 1 is the trivially-exact 0.0 and 28 are the
+trivially-exact clamped 1.0.
+
+**`the_kinetic_chain_still_hits_every_measured_javelin_anchor`
+(main.rs:11552-11585): the anchor loop and the interpolation-window
+asserts are genuine; the third assert is DEAD.**
+- 11554-11561 (anchors vs `JAVELIN_ANCHOR_S`): real tripwire. Two
+  separate consts (422-423 vs 427-428). Weak-ish — both are literals
+  five lines apart in one file — but it is not a constant against
+  itself. Commit's claim upheld.
+- 11565-11576 (indices 1,2,5,6 inside their brackets): real; those four
+  are not otherwise pinned.
+- **11579-11584 (`gap_arm < gap_trunk`) cannot fail.** `gap_trunk` and
+  `gap_arm` are computed only from indices 0, 3 and 4 — all three
+  already pinned to 0.000/0.040/0.070 within 1e-6 by the loop 20 lines
+  above. Given that loop passes, `0.030 < 0.040` is forced. The
+  assertion is unreachable as a failure and carries zero information.
+- Its stated meaning is also wrong at segment granularity: `gap_trunk`
+  spans **three** hops (pelvis→lumbar→thorax→clavicle), `gap_arm` spans
+  **one** (clavicle→upper_arm). Per hop that is 13.3 ms then 30 ms — the
+  chain **expands** there. The comment "the chain's gaps must NARROW
+  toward the tip, never widen" (11577-11578) is not what the shipped
+  table does per segment, and is not what the code measures.
+
+### 4. Regression check — **CONFIRMED, exactly as claimed.**
+
+`cargo test --release -p jk_tdm` →
+`test result: ok. 145 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out`.
+
+### 5. Step 2's no-op claim — **credible in its architecture, false in its "bit-exact" wording, and its test list has a hole where the real risk is.**
+
+Credible parts, verified against the real code:
+- SPEC §0.3's rotation form matches main.rs:6430-6436 **exactly**:
+  `Ry(0.045·sin·amp + spear_yaw + torso_aim) · Rx((torso_pitch + flinch
+  + 0.07·settle + relaxed_e·0.05).min(0.185)) · Rz(sway_r)`.
+- There is **exactly one** writer of the torso transform in the whole
+  crate (main.rs:6418). No second path to keep in sync.
+- The torso spawns at `(0, 0.63, 0)` under `root` (main.rs:3951-3954)
+  with ~13 direct `.set_parent(torso)` sites (3961-4216) plus
+  `armor_rig` (4212-4214), which carries the mech visor at local
+  `(0, 0.885, 0.115)` (main.rs:3575). Co-locating the three pivots does
+  leave every one of those locals valid. §0.2's central call holds.
+
+**Concrete risks, in priority order:**
+
+**R1 — "BIT-EXACT" is false, and I measured both ways it fails.**
+(a) *Translation.* SPEC line 547 puts `breath - crouch_drop` on the
+lumbar, so the composed Y becomes `hip_y + (breath - drop)`. Today
+main.rs:6424-6425 computes `hip_y - drop + breath`. f32 addition is not
+associative: 110 of 1000 realistic samples differ, worst **5.96e-8 m**.
+Not bit-exact **even at Step 2**.
+(b) *Rotation.* At Step 2 it *is* bit-exact, but only because
+`yaw_pelvis = yaw_thorax = 0` makes two quats the exact identity. The
+moment Step 3 splits the yaw, `Ry(a)·Ry(b)` vs `Ry(a+b)` differ in
+**1360/2000** samples, worst component **1.19e-7**. SPEC line 50's
+"bit-for-bit the legacy single-`torso` rotation whenever the yaw sum is
+preserved" is therefore false as stated — and the spec's own Step 2 test
+tolerance of 1e-6 (line 569) already concedes it. Land the claim as
+"no-op within 1e-6", never "bit-for-bit", or the first person who writes
+`assert_eq!` on a quaternion burns a day chasing nothing.
+
+**R2 — the death-branch instruction is itself a visible change, inside
+the step that claims to be a no-op.** Today the dead branch
+(main.rs:6063-6077) `continue`s **before any rig part is written**, so a
+corpse freezes with its last-alive torso rotation, mid-coil included.
+SPEC line 564 says to add `pelvis.rotation = IDENTITY` and
+`lumbar.rotation = IDENTITY` there. At Step 2 the lumbar carries the
+**entire** legacy torso yaw (SPEC line 557), so this zeroes the corpse's
+trunk yaw on the first dead frame — shoulders snap square on death. That
+is new on-screen behaviour and it is nowhere in Step 2's no-op proof.
+Also, the dead branch has **no `parts` access at all** today (only `tf`,
+`root_vis`, `life`), so this is not the two-line add it is described as.
+Either drop it from Step 2, or reset the thorax too and ship it as an
+intentional, captured change.
+
+**R3 — every line number in the spec is stale.** The spec was written
+against 38c8ecc; Step 1 (787f6ff) shifted everything below it. Verified
+against `git show 38c8ecc`:
+`CHAIN_ONSET_OFFSETS` spec:272 says 396, actual **422** (+26);
+`chain_lag_chase` spec:274 says 422, actual **466** (+44);
+`spear_followthrough_yaw` spec:275 says 467, actual **514** (+47);
+`leg[0].translation.y = hip_y` spec:528 says 6201, actual **6257** (+56);
+the `rig.torso` block spec:528 says 6362-6381, actual **6418-6437** (+56).
+An implementer applying Step 2 by line number edits the wrong lines.
+Re-anchor the spec by symbol before Step 2 starts.
+
+**R4 — three of the seven tests Step 2 lists as guard rails are blind to
+the change, and the four new ones test the maths rather than the
+plumbing.** `head_never_leaves_its_band_in_any_gait` (main.rs:10638)
+samples the pure `head_base_y`/`gait_pose`;
+`rig_joints_bridge_with_no_daylight` (main.rs:10587) asserts arithmetic
+on hard-coded literals (`let yoke_top = 0.625 + 0.07;`). Neither touches
+an entity, a parent link, or a composed transform — both pass whether or
+not Step 2 is wired correctly. Of the four new tests, three exercise the
+extracted pure `trunk_locals`. **The entire risk of Step 2 lives in the
+spawn wiring** — reparenting ~13 `.set_parent(torso)` sites
+(main.rs:3961-4216), `armor_rig` (4214), and both legs — **and not one
+listed test would catch a missed or wrong reparent.** The no-op proof
+covers the algebra; the failure mode is the plumbing. Add at least one
+test (or a headless capture) that composes real `GlobalTransform`s for
+head, `weapon_root`, `armor_rig` and `leg[0]`.
+
+**R5 — the pitch clamp is inside the rotation expression and the spec's
+sweep never reaches it.** main.rs:6434 applies `.min(0.185)` inline;
+`trunk_locals` takes `pitch` pre-clamped, so the clamp must move to the
+call site by hand. SPEC line 569 sweeps `pitch ∈ 0..0.185` — it stops
+exactly at the cap and never exercises it, so dropping or
+mis-transcribing `.min(0.185)` passes every listed test and silently
+breaks the §0.2 head band that `gait_pose` exists to protect. The inputs
+do exceed the cap: `torso_pitch_base` is **1.0** while rolling
+(main.rs:6218) and **0.90** crouched (main.rs:924), plus `flinch` up to
+~0.09 (main.rs:6399-6416). Sweep past the cap.
+
+**R6 — legs under the pelvis: the spec anticipates the yaw but not the
+swing axis.** Step 3b (SPEC line 651) correctly flags that legs-as-
+pelvis-children means `PELVIS_LEAD_FRAC` twists the feet, and asserts
+"`leg[0]` composed world yaw shifts by **exactly** `sep · 0.15`". But
+leg[0]'s rotation is `Quat::from_axis_angle(swing_axis, thigh)`
+(main.rs:6262), where `swing_axis` is a movement-frame vector built at
+main.rs:6190 — an **off-axis** rotation. Composed with a pelvis `Ry(a)`
+the result is not decomposable as a yaw shift; the swing *plane* rotates
+with the pelvis. That assertion is not well-defined as written. Harmless
+at Step 2 (pelvis = identity), which is exactly why it should be
+redesigned now while it is cheap.
+
+**R7 (minor) — SPEC line 572's mech-visor margin is wrong.** The
+pass/fail is right: `(0.63 + 0.885 − 0.014)/1.78 = 0.84326 ≥ 0.82`, and
+`MECH_SCALE` cancels out of the fraction. But the stated "margin 9.4 cm
+at mech scale" is not: it is `(0.84326 − 0.82)·1.78·1.7 = 0.0704 m` =
+**7.0 cm** (`MECH_SCALE = 1.7`, sim.rs:2386; `BODY_HEIGHT = 1.78`,
+sim.rs:28). Comfortable pass, wrong number.
+
+**R8 (minor) — the F4 joint-debug overlay** (main.rs:8434-8442)
+enumerates `[rig.torso, rig.neck, rig.weapon_root]`. If `pelvis`/
+`lumbar` join `FighterRig`, add them here or the overlay silently stops
+showing the trunk chain it exists to show.
+
+### What the commit got WRONG (the short list)
+
+1. **main.rs:462 still says "0.125 s"** for the one constant this commit
+   changed to 0.130. Shipped doc defect, in the file the commit was
+   editing for documentation accuracy.
+2. **"reduces exactly" (main.rs:508) is false in f32.** 20.7% of samples
+   carry a residual, worst 1.788e-7. Behaviourally irrelevant; the word
+   is still wrong, and it sits 5.6x from the new test's own tolerance.
+3. **The spec's `q = 0.8107` is not the root of `q + q² + q³ = 2`**
+   (true root 0.8105357), so "solved to land **exactly** on the 130 ms
+   anchor" is false — it lands at 130.023 ms, as the spec's own "Σ =
+   60.03 ms" admits. Shipped table unaffected.
+4. **"exact on the thorax" is not corroboration.** Index 2 = 0.035 is
+   `0.040 − the 5 ms authored floor`, not a derived or measured value.
+5. **The dead assertion at main.rs:11579-11584** cannot fail, and its
+   comment describes a distal compression the table does not have per
+   hop (13.3 ms then 30 ms — it expands).
+6. **`spear_followthrough_is_invariant_to_the_chain_tables` never calls
+   `spear_followthrough_yaw`.** It duplicates line 524 instead. The
+   commit says it means "the argument that licensed this retune fails
+   loudly" — it does, but only for changes to `chain_segment_scale`, not
+   for changes to the function in its own name. The spec asked for the
+   refactor (line 491) that would have closed this; it was skipped.
+
+**Net:** the load-bearing claim (item 1) is TRUE and no consumer was
+missed — the riskiest part of the commit is the part that was checked
+most carefully. Everything wrong here is in the *wording* of certainty
+("exactly", "bit-for-bit", "invariant") and in one test that guards a
+lemma while carrying the name of the theorem.

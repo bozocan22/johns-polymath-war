@@ -408,8 +408,17 @@ fn landing_rebound_vy(impact_vy: f32) -> f32 {
 ///
 /// Indices 1,2 are inertia-weighted across the de Leva trunk
 /// subsegments; 5,6 are a geometric compression seeded by the measured
-/// 40->30 ms gap and solved to land exactly on the 130 ms anchor. Full
-/// arithmetic in research/body-rig/SPEC_20_SEGMENT_RIG.md §3.3.
+/// 40->30 ms gap, ratio q = 0.81053571 (the root of q + q^2 + q^3 = 2),
+/// which lands the arm's three hops on exactly 60 ms and the tip on the
+/// measured 130 ms anchor. The spec printed q = 0.8107 for one commit,
+/// which sums to 60.023 ms; the shipped values here are unaffected,
+/// because both roots round to the same milliseconds. Full arithmetic in
+/// research/body-rig/SPEC_20_SEGMENT_RIG.md §3.3, and re-solved from
+/// scratch by `the_arm_onsets_reproduce_an_independently_solved_geometric_root`.
+///
+/// Do NOT read index 2's agreement with the old by-feel table as
+/// corroboration of the trunk derivation - it is forced by the 5 ms floor
+/// (0.040 - 0.005), not by the inertia split, so it corroborates nothing.
 ///
 /// ONLY THE DIFFERENCES ARE LOAD-BEARING: `chain_peak_tick` adds a
 /// SHARED `ramp_s` to every entry, so the absolute zero is arbitrary
@@ -441,14 +450,29 @@ const JAVELIN_ANCHOR_S: [(usize, f32); 4] =
 const CHAIN_PEAK_SCALE: [f32; 8] =
     [1.000, 1.196, 1.430, 1.554, 1.679, 1.990, 2.300, 2.611];
 
-fn chain_segment_scale(segment_index: usize, elapsed_s: f32, ramp_s: f32) -> f32 {
-    let onset = CHAIN_ONSET_OFFSETS[segment_index];
-    let peak = CHAIN_PEAK_SCALE[segment_index];
+/// The chain activation curve for ONE segment, written against that
+/// segment's two table ROWS instead of its index. Production always goes
+/// through `chain_segment_scale`; lifting the two lookups into parameters
+/// is what lets a test substitute rows the consts do not contain and so
+/// assert table-invariance by *calling the real code* rather than by
+/// retyping it. (Spec §Step 1 asked for this refactor; it was skipped,
+/// and the test that should have caught the resulting hole was itself the
+/// retyped copy - see `spear_followthrough_is_invariant_to_the_chain_tables`.)
+fn chain_scale_from(onset: f32, peak: f32, elapsed_s: f32, ramp_s: f32) -> f32 {
     if elapsed_s < onset {
         0.0
     } else {
         peak * ((elapsed_s - onset) / ramp_s.max(1e-4)).clamp(0.0, 1.0)
     }
+}
+
+fn chain_segment_scale(segment_index: usize, elapsed_s: f32, ramp_s: f32) -> f32 {
+    chain_scale_from(
+        CHAIN_ONSET_OFFSETS[segment_index],
+        CHAIN_PEAK_SCALE[segment_index],
+        elapsed_s,
+        ramp_s,
+    )
 }
 
 /// Task 3.3 test support: the tick at which segment `i` reaches its peak,
@@ -458,11 +482,18 @@ fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
 }
 
 /// Task 3.3, sprint-start consumer: the HEAD is the chain's last segment,
-/// so it arrives at a new acceleration lean ~one tip-onset (0.125 s)
-/// behind the pelvis. This chases the pelvis lean with that time
-/// constant; the difference between the two is the head's transient
-/// counter-pitch - present only while the lean is CHANGING, zero at
-/// steady state, so a held sprint looks exactly as before.
+/// so it arrives at a new acceleration lean ~one TIP ONSET behind the
+/// pelvis. The time constant IS `CHAIN_ONSET_OFFSETS[7]` - read the value
+/// there, it is deliberately not restated here. (It was, as "0.125 s",
+/// and went stale five lines below the table that moved the tip to 0.130;
+/// a restated constant is a constant that will lie to the next reader.)
+///
+/// This chases the pelvis lean with that time constant; the difference
+/// between the two is the head's transient counter-pitch - present only
+/// while the lean is CHANGING, zero at steady state, so a held sprint
+/// looks exactly as before. `head_lag_chase_pins_the_measured_tip_onset`
+/// pins the resulting curve to hand-computed numbers, so a future edit to
+/// index 7 has to be deliberate.
 fn chain_lag_chase(lag: f32, target: f32, dt: f32) -> f32 {
     lag + (target - lag) * (dt / CHAIN_ONSET_OFFSETS[7]).min(1.0)
 }
@@ -501,27 +532,55 @@ const SPEAR_RELEASE_YAW: f32 = COIL_AWAY_RAD + COIL_SWING_RAD;
 /// onset - a hard snap to neutral exactly when the motion should be at
 /// its most alive.
 ///
-/// ALGEBRAIC NOTE (verified 2026-08-02, not assumed): passing
-/// `release_t + onset` means `chain_segment_scale` evaluates
-/// `elapsed - onset == release_t`, so the onset CANCELS; and dividing
-/// by `CHAIN_PEAK_SCALE[TIP]` cancels the peak the same function just
-/// multiplied in. This function therefore reduces exactly to
-/// `(release_t / RAMP_S).clamp(0,1)` and is INVARIANT to both tables.
-/// Written down because the sampling-from-onset reasoning above is
-/// still the right INTENT - it is what keeps the code correct if the
-/// scale ever stops cancelling - but a reader must not infer that
-/// retuning either table changes this curve. It does not.
+/// ALGEBRAIC NOTE (verified 2026-08-02, corrected 2026-08-03 after Thor
+/// measured it): passing `release_t + onset` means the chain curve
+/// evaluates `elapsed - onset == release_t`, so the onset CANCELS; and
+/// dividing by the tip's peak cancels the peak the same expression just
+/// multiplied in. The drive term therefore reduces to
+/// `(release_t / RAMP_S).clamp(0,1)`, and this curve is INVARIANT to both
+/// chain tables.
+///
+/// "Exactly" ONLY in exact arithmetic. In f32 it is not exact: both
+/// `(t + onset) - onset` and `peak * x / peak` round. Measured on a 10 us
+/// grid: **8,290** samples carry a non-zero residual in the drive term,
+/// worst case **1.788e-7** at `release_t` = 0.0936. Every one of them
+/// falls while the ramp is still climbing (`release_t` < `RAMP_S`) -
+/// 8,290 of the 12,000 samples there, 69% - and there are **exactly
+/// zero** once the clamp saturates, because `peak * 1.0 / peak` is
+/// exact. (Quote that count, not a percentage of a sweep: the same 8,290
+/// reads as 20.7% of a 0..0.4 s sweep and 13.8% of a 0..0.6 s one.)
+/// 1.788e-7 is 1.8e-8 rad of yaw once scaled by `OVERSHOOT_RAD`, i.e.
+/// behaviourally invisible, but only ~5.6x below the 1e-6 tolerance the
+/// invariance test uses. Do NOT tighten that tolerance toward 1e-7, and
+/// do NOT assert bit-equality across substituted tables: the spec's Step 1
+/// test table asked for `==` and that assertion is simply false here
+/// (measured worst end-to-end divergence between table variants: 2.98e-8
+/// rad). The invariance is real; its precision is finite. Written down
+/// because the sampling-from-onset reasoning above is still the right
+/// INTENT - it is what keeps the code correct if the scale ever stops
+/// cancelling - but a reader must not infer that retuning either table
+/// changes this curve. It does not.
 fn spear_followthrough_yaw(release_t: f32) -> f32 {
+    const TIP: usize = 7;
+    spear_followthrough_yaw_from(release_t, CHAIN_ONSET_OFFSETS[TIP], CHAIN_PEAK_SCALE[TIP])
+}
+
+/// `spear_followthrough_yaw` with the tip's two table rows lifted into
+/// parameters. Production only ever calls the wrapper above; this exists
+/// so the invariance claim can be tested by feeding the REAL function
+/// rows the consts do not contain, instead of by retyping its body into
+/// a test (which is how the missing `+ onset` shipped here once already -
+/// see handback/AUDIT.md, "bugs I introduced this session" #1).
+/// `tip_peak` must be non-zero.
+fn spear_followthrough_yaw_from(release_t: f32, tip_onset: f32, tip_peak: f32) -> f32 {
     const RAMP_S: f32 = 0.12;
     const OVERSHOOT_RAD: f32 = 0.10; // carried PAST the release, not back through it
     const HOLD_S: f32 = 0.05; // the carry-past runs before the settle starts
     const SETTLE_RATE: f32 = 6.0;
-    const TIP: usize = 7;
     if release_t < 0.0 {
         return 0.0; // nothing has been thrown or thrust yet
     }
-    let onset = CHAIN_ONSET_OFFSETS[TIP];
-    let drive = chain_segment_scale(TIP, release_t + onset, RAMP_S) / CHAIN_PEAK_SCALE[TIP];
+    let drive = chain_scale_from(tip_onset, tip_peak, release_t + tip_onset, RAMP_S) / tip_peak;
     let decay = (-SETTLE_RATE * (release_t - HOLD_S).max(0.0)).exp();
     (SPEAR_RELEASE_YAW + OVERSHOOT_RAD * drive) * decay
 }
@@ -11197,6 +11256,72 @@ mod forge_tests {
         }
     }
 
+    /// D7 (Thor, 2026-08-03): `the_head_trails_a_sprint_start_then_settles`
+    /// above derives its tick count FROM `CHAIN_ONSET_OFFSETS[7]`, so it
+    /// self-adjusts to whatever that constant says and passes for any
+    /// value of it. Nothing in the suite pinned the one behaviour BRIEF
+    /// VIII_B Step 1 actually changed: the head-lag time constant moved
+    /// 0.125 -> 0.130 s.
+    ///
+    /// This pins it. Every number below is HAND-COMPUTED from the literal
+    /// 0.130 - never read from the table - so if index 7 moves, this test
+    /// fails and the change has to be deliberate.
+    ///
+    ///   alpha        = dt / 0.130 = (1/120) / 0.130 = 0.064102564
+    ///   first tick   = lean * alpha
+    ///   gap after n  = lean * (1 - alpha)^n
+    ///
+    /// FALSIFIABILITY: set `CHAIN_ONSET_OFFSETS[7]` back to 0.125 and the
+    /// first tick becomes 0.00466667 (want 0.00448718, 1.8e-4 off = 180x
+    /// the tolerance) and the 15-tick gap fraction becomes 0.35526440
+    /// (want 0.37018930, 1.5e-2 off = 15000x). Delete the `.min(1.0)` and
+    /// the clamp case below overshoots to 0.1077 rad against a 0.07 target.
+    /// Measured f32-vs-f64 drift on the gap fractions is <= 8e-8, so the
+    /// 1e-6 tolerance has >= 12x headroom; it is a regression pin on an
+    /// exact arithmetic identity, NOT a claim of sub-millisecond accuracy
+    /// (the source data is 50 fps - see the table's precision-ceiling note).
+    #[test]
+    fn head_lag_chase_pins_the_measured_tip_onset() {
+        let dt = 1.0 / 120.0;
+        let lean = 0.07_f32;
+
+        // one tick from rest closes exactly alpha of the gap
+        let first = chain_lag_chase(0.0, lean, dt);
+        assert!(
+            (first - 0.004_487_179_5).abs() < 1e-6,
+            "one tick at 120 Hz must close dt/0.130 of the lean: want 0.0044871795, got {first}"
+        );
+
+        // and the gap decays geometrically at (1 - alpha) per tick
+        let mut lag = 0.0_f32;
+        for n in 1..=30 {
+            lag = chain_lag_chase(lag, lean, dt);
+            let gap_frac = (lean - lag) / lean;
+            match n {
+                // 15 ticks = 0.125 s, ~one time constant: (1-alpha)^15
+                15 => assert!(
+                    (gap_frac - 0.370_189_30).abs() < 1e-6,
+                    "after 15 ticks the head must still hold 37.019% of the gap \
+                     ((1 - (1/120)/0.130)^15); got {gap_frac}"
+                ),
+                // two time constants: the same number squared
+                30 => assert!(
+                    (gap_frac - 0.137_040_12).abs() < 1e-6,
+                    "after 30 ticks: want 0.13704012, got {gap_frac}"
+                ),
+                _ => {}
+            }
+        }
+
+        // a frame longer than the whole time constant must ARRIVE, not
+        // overshoot - this is what `.min(1.0)` is for
+        let big = chain_lag_chase(0.0, lean, 0.2);
+        assert!(
+            (big - lean).abs() < 1e-6,
+            "a dt past the time constant must land ON the target, not sail through it: got {big}"
+        );
+    }
+
     /// §5.2: the turn-in-place. Brief VII v2 shipped `torso_aim_offset`
     /// built and tested with ZERO production call sites - the clamp
     /// existed but nothing ever separated the legs from the aim, so
@@ -11574,36 +11699,199 @@ mod elastic_load_tests {
                 && CHAIN_ONSET_OFFSETS[6] < CHAIN_ONSET_OFFSETS[7],
             "arm interpolation escaped the upper-arm..tip window"
         );
-        // the measured distal compression: the chain's gaps must
-        // NARROW toward the tip, never widen
-        let gap_trunk = CHAIN_ONSET_OFFSETS[3] - CHAIN_ONSET_OFFSETS[0]; // 40ms measured
-        let gap_arm = CHAIN_ONSET_OFFSETS[4] - CHAIN_ONSET_OFFSETS[3]; // 30ms measured
-        assert!(
-            gap_arm < gap_trunk,
-            "the chain must compress distally: {gap_trunk} then {gap_arm}"
-        );
+        // D5 (Thor, 2026-08-03): what stood here compared
+        // OFFSETS[3]-OFFSETS[0] against OFFSETS[4]-OFFSETS[3] and called
+        // it "distal compression". It was UNFALSIFIABLE - all three
+        // indices are measured anchors already pinned to 1e-6 by the loop
+        // twenty lines above, so no edit could ever fail it - and its
+        // comment was backwards: 0->3 spans THREE hops and 3->4 spans
+        // ONE, so per hop that is 13.3 ms then 30.0 ms. Across that
+        // boundary the chain EXPANDS, not compresses, because the 5 ms
+        // clavicle floor squeezes the trunk hops. Real distal compression
+        // is a claim about the ARM window, and it is the only place where
+        // an INTERPOLATED index (5, 6) can make it fail.
+        let hop = |a: usize, b: usize| CHAIN_ONSET_OFFSETS[b] - CHAIN_ONSET_OFFSETS[a];
+        let arm_hops = [hop(3, 4), hop(4, 5), hop(5, 6), hop(6, 7)];
+        for w in arm_hops.windows(2) {
+            assert!(
+                w[1] < w[0],
+                "the ARM window must compress hop by hop, got {arm_hops:?} - \
+                 indices 5 and 6 are the interpolated ones"
+            );
+        }
+        // The honest version of the trunk-vs-arm statement, recorded as a
+        // FACT and deliberately NOT asserted: 0->3 is 40 ms over three
+        // hops (13.3 ms each), 3->4 is 30 ms over one, so leaving the
+        // trunk the chain steps UP. It is not asserted because indices
+        // 0, 3 and 4 are all measured anchors already pinned to 1e-6 by
+        // the loop at the top of this test - an assertion over them
+        // cannot fail, and an assertion that cannot fail is worse than a
+        // comment, because it looks like coverage. That is what was here.
     }
 
-    /// The follow-through curve is INVARIANT to both chain tables -
-    /// the onset and the peak both cancel algebraically (see the
-    /// function's own note). Asserted rather than trusted, because the
-    /// whole "Step 1 is zero visual risk" argument rests on it.
+    /// D3 (Thor, 2026-08-03): the spec's §3.3 arm derivation printed
+    /// `q = 0.8107` for `q + q^2 + q^3 = 2`. That is wrong - the root is
+    /// 0.81053571; 0.8107 sums to 2.0007545, so the three arm hops come to
+    /// 60.023 ms and the tip lands at 130.023 ms, not "exactly" 130. The
+    /// SHIPPED TABLE IS UNAFFECTED (the true root still rounds to
+    /// 0.094/0.114/0.130), which is why no constant moved - but the spec
+    /// said "exactly" while its own printed sum said 60.03, and nothing in
+    /// the suite would have noticed either way.
+    ///
+    /// So: solve the root HERE, by bisection, from the MEASURED anchors
+    /// only. Nothing in this test reads the spec's q, and nothing reads
+    /// indices 5 or 6 except to check them. That makes it an independent
+    /// source of truth for the two interpolated arm indices, which the
+    /// anchor loop above cannot touch.
+    #[test]
+    fn the_arm_onsets_reproduce_an_independently_solved_geometric_root() {
+        let anchor = |i: usize| {
+            JAVELIN_ANCHOR_S.iter().find(|(k, _)| *k == i).expect("measured anchor").1 as f64
+        };
+        // seed and span come from the measurement, not from the table
+        let base = anchor(4) - anchor(3); // 30 ms, the last MEASURED gap
+        let span = anchor(7) - anchor(4); // 60 ms of arm left to fill
+        let target = span / base; // == 2.0
+        // solve base*(q + q^2 + q^3) == span for q
+        let (mut lo, mut hi) = (0.0_f64, 1.5_f64);
+        for _ in 0..200 {
+            let m = 0.5 * (lo + hi);
+            if m + m * m + m * m * m < target {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        let q = 0.5 * (lo + hi);
+        // The exact root of q + q^2 + q^3 = 2 is 0.8105357138. This
+        // bisection cannot reach it: it solves for `target`, and `target`
+        // is built from f32 consts - `0.130f32` is really 0.129999995231,
+        // so `target` is 1.9999998 rather than 2, which walks the root
+        // back by ~5e-8. That is a fact about reading the anchors instead
+        // of hardcoding them, and reading them is the entire point. 1e-6
+        // absorbs it and is still 164x tighter than the spec's 0.8107.
+        assert!(
+            (q - 0.810_535_713_8).abs() < 1e-6,
+            "the geometric root is 0.8105357138, not {q} (the spec said 0.8107, \
+             which sums to 2.0007545 and puts the tip at 130.023 ms)"
+        );
+        // the shipped table is these hops accumulated and rounded to the
+        // nearest MILLISECOND - so 5e-4 is the exact rounding claim, not a
+        // slack tolerance. Index 5's margin is the tight one: it lands
+        // 3.16e-4 from 0.094, i.e. 1.6x inside the half-millisecond.
+        let want = [anchor(4) + base * q, anchor(4) + base * (q + q * q), anchor(7)];
+        for (i, w) in [(5usize, want[0]), (6, want[1]), (7, want[2])] {
+            let got = CHAIN_ONSET_OFFSETS[i] as f64;
+            assert!(
+                (got - w).abs() < 5e-4,
+                "index {i}: the geometric compression puts it at {w:.7}s, which \
+                 rounds to {:.3}s; the table says {got}s",
+                (w * 1000.0).round() / 1000.0
+            );
+        }
+        // this test CANNOT tell 0.8107 from 0.81053571 at the table's 1 ms
+        // resolution - both round to the same three values. That is D3's
+        // point, and the reason no constant changed. What it CAN catch is
+        // any 1 ms move of index 5 or 6.
+    }
+
+    /// D6 (Thor, 2026-08-03) - the worst of the seven. What stood here
+    /// NEVER CALLED `spear_followthrough_yaw`. It retyped that function's
+    /// internal drive expression and then asserted the retyped copy
+    /// equalled the algebra, so it was guarding a LEMMA under the name of
+    /// the THEOREM: delete the `+ onset` from the real function and this
+    /// test stayed GREEN. That is not hypothetical - it is the exact bug
+    /// already shipped once in this file (handback/AUDIT.md, "bugs I
+    /// introduced this session" #1: the follow-through went silent for a
+    /// whole tip-onset and then swung the wrong way).
+    ///
+    /// Now it calls the real function. `spear_followthrough_yaw_from`
+    /// takes the tip's two table rows as parameters, so the test can feed
+    /// rows the consts do not contain - which is what makes "invariant to
+    /// the tables" a statement the code can actually violate.
+    ///
+    /// FALSIFIABILITY: drop `+ tip_onset` and the (0.0, 1.0) variant
+    /// diverges from the (0.500, 5.222) variant by ~0.39 rad at small
+    /// `release_t`. Drop `/ tip_peak` and the peak variants diverge by
+    /// ~0.3 rad. Both are ~5 orders over the tolerance.
+    ///
+    /// NOT BIT-IDENTICAL. The spec's Step 1 test table specified `==`;
+    /// that is false in f32, because `(t + onset) - onset` and
+    /// `peak * x / peak` each round. Measured worst divergence across
+    /// these six variants over 0..0.6 s is 2.98e-8 rad - real, tiny, and
+    /// 33x inside the tolerance below.
+    ///
+    /// Invariance alone is vacuous (a function returning 0.0 is invariant
+    /// to everything). `spear_followthrough_matches_its_hand_computed_curve`
+    /// is the other half: it pins the curve itself to numbers derived
+    /// outside this file.
     #[test]
     fn spear_followthrough_is_invariant_to_the_chain_tables() {
-        // reproduce the reduced form the algebra predicts
-        const RAMP_S: f32 = 0.12;
-        for step in 0..40 {
-            let release_t = step as f32 * 0.01;
-            let predicted_drive = (release_t / RAMP_S).clamp(0.0, 1.0);
-            // rebuild what the function computes, from the tables
-            let onset = CHAIN_ONSET_OFFSETS[7];
-            let actual_drive =
-                chain_segment_scale(7, release_t + onset, RAMP_S) / CHAIN_PEAK_SCALE[7];
+        let variants: [(f32, f32); 6] = [
+            (CHAIN_ONSET_OFFSETS[7], CHAIN_PEAK_SCALE[7]), // shipped
+            (0.125, CHAIN_PEAK_SCALE[7]),                  // the pre-BRIEF_VIII_B onset
+            (0.0, 1.0),                                    // no chain offset at all
+            (0.500, 5.222),                                // ~4x onset, 2x peak
+            (0.001, 0.25),                                 // a peak BELOW 1.0
+            (0.250, 100.0),                                // absurd peak
+        ];
+        for step in 0..=600 {
+            let release_t = step as f32 * 0.001;
+            let base = spear_followthrough_yaw_from(release_t, variants[0].0, variants[0].1);
+            // the shipped wrapper must BE the shipped-table variant, bit
+            // for bit - same inputs, same arithmetic, no excuse to differ
+            assert_eq!(
+                spear_followthrough_yaw(release_t).to_bits(),
+                base.to_bits(),
+                "at release_t={release_t}: the public wrapper is not the \
+                 parameterised function at the shipped table rows"
+            );
+            for (onset, peak) in &variants[1..] {
+                let got = spear_followthrough_yaw_from(release_t, *onset, *peak);
+                assert!(
+                    (got - base).abs() < 1e-6,
+                    "at release_t={release_t} with (onset {onset}, peak {peak}): \
+                     the tables did NOT cancel (shipped {base}, substituted {got}) \
+                     - the zero-risk argument for retuning the chain no longer holds"
+                );
+            }
+        }
+    }
+
+    /// The independent half of D6's fix, and the reason the invariance
+    /// test above is not vacuous.
+    ///
+    /// `RAMP_S`, `OVERSHOOT_RAD`, `HOLD_S` and `SETTLE_RATE` are function-
+    /// local consts, so this test CANNOT reference them - it has to carry
+    /// numbers. These were computed in f64 outside the crate from
+    /// `(0.35 + 0.10*min(t/0.12, 1)) * exp(-6*max(t - 0.05, 0))`; they are
+    /// a table of results, not a re-derivation, which is the whole point.
+    /// Worst observed f32-vs-f64 gap is 5.5e-8, so 1e-6 leaves ~18x.
+    ///
+    /// FALSIFIABILITY: drop `+ tip_onset` from `spear_followthrough_yaw_from`
+    /// and t=0.03 returns 0.350 instead of 0.375 (the drive is silent until
+    /// t >= 0.130) - 2.5e-2 off, 25000x the tolerance. That single mutation
+    /// is the bug in AUDIT.md #1, and it is what the old test could not see.
+    /// Any retune of the four local consts, or of `SPEAR_RELEASE_YAW`,
+    /// also fails here - deliberately. Retuning the feel means updating
+    /// this table, and that is the point of pinning it.
+    #[test]
+    fn spear_followthrough_matches_its_hand_computed_curve() {
+        // (release_t, expected yaw in rad)
+        const GOLDEN: [(f32, f32); 7] = [
+            (0.00, 0.350_000_0), // starts exactly on the release yaw
+            (0.03, 0.375_000_0), // drive 0.25, no decay yet
+            (0.05, 0.391_666_7), // drive 5/12, last frame before the settle
+            (0.06, 0.376_705_8), // drive 0.50, decay exp(-0.06)
+            (0.12, 0.295_671_1), // drive saturated, decay exp(-0.42)
+            (0.30, 0.100_408_6), // decay exp(-1.5)
+            (1.00, 0.001_505_7), // decay exp(-5.7)
+        ];
+        for (t, want) in GOLDEN {
+            let got = spear_followthrough_yaw(t);
             assert!(
-                (predicted_drive - actual_drive).abs() < 1e-6,
-                "at release_t={release_t}: the tables did NOT cancel \
-                 (predicted {predicted_drive}, got {actual_drive}) - the \
-                 zero-risk argument for retuning the chain no longer holds"
+                (got - want).abs() < 1e-6,
+                "follow-through at release_t={t}: hand-computed {want}, got {got}"
             );
         }
     }
