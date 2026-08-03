@@ -11225,6 +11225,51 @@ mod tests {
         );
     }
 
+    /// §D.5: a chassis is armour and firepower — it is NOT marksmanship.
+    ///
+    /// This test exists because a mutation survived the rest of the suite:
+    /// skipping the two `rng.range` aim draws on the mech branch (the
+    /// obvious "the hull mount doesn't need the bot's wobble" tidy-up)
+    /// changed nothing any test could see. It is two defects at once.
+    /// The visible one is balance — every bot mech becomes a perfect
+    /// shot at every difficulty. The invisible one is worse: those draws
+    /// come off the sim's single seeded stream, so skipping them
+    /// RE-ORDERS that stream for every scenario containing a bot mech,
+    /// and the replay guarantee is exactly "the same seed makes the same
+    /// draws in the same order". Nothing else in the suite covers it,
+    /// because no existing determinism test ever puts a bot in a mech.
+    ///
+    /// Asserted as a spread between difficulties rather than an absolute
+    /// hit count: the ratio survives retuning `aim_sigma`, an absolute
+    /// number would not. Measured 27 (Easy) against 62 (Hard).
+    #[test]
+    fn a_chassis_does_not_make_a_bot_a_better_shot() {
+        // 15 m: inside the gatling's band (so this measures the mount
+        // that actually fires a lot of rounds) and inside EASY's 22 m
+        // engage range, so both tiers really do shoot.
+        assert!(15.0 < MECH_BOT_AUTOCANNON_RANGE_M);
+        assert!(15.0 < bot_params(Difficulty::Easy).engage_range);
+        let hits = |d: Difficulty| -> u32 {
+            let mut s = bot_mech(0xD14, 15.0, GunKind::Ak47, 0, 0);
+            s.cfg.difficulty = d;
+            bot_engagement(&mut s, 6.0);
+            s.fighters[1].hits_dealt
+        };
+        let easy = hits(Difficulty::Easy);
+        let hard = hits(Difficulty::Hard);
+        assert!(
+            easy > 0 && hard > 0,
+            "both tiers have to actually shoot: easy {easy}, hard {hard}"
+        );
+        assert!(
+            hard > easy * 3 / 2,
+            "a bot mech landed {easy} rounds on Easy and {hard} on Hard - \
+             the chassis is shooting straighter than the brain driving \
+             it, which means the bot's aim draws are being skipped for \
+             the hull mounts"
+        );
+    }
+
     /// §4.7 (Brief VI) — the anti-"specified twice, never shipped"
     /// gate: the mech is REACHED (pad grant), at SCALE (1.7×, superseding
     /// Brief VI's original 1.15× per the MISSION doc / VIII-B addendum —
