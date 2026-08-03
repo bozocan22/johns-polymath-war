@@ -120,6 +120,22 @@ Two rules follow:
   mutation-testing must revert surgically, because it does not know what
   else is in the tree.
 
+**7b. The same rule, one level in: `git checkout` reverts to HEAD, not
+to "before my mutation."** Learned the hard way on 2026-08-03, doing it
+to myself. I mutation-tested a determinism test that was still
+UNCOMMITTED, then reverted the mutation with
+`git checkout -- sim.rs` — which correctly restored HEAD and deleted the
+test along with the mutation. Recovered only because a file copy had
+been taken first.
+
+Mutation-testing your own uncommitted work has exactly two safe shapes:
+- **commit first**, then `git checkout --` reverts the mutation only; or
+- **revert from a file copy** (`cp file /tmp/backup` before, `cp` back
+  after) and never let git near it.
+
+Choose one deliberately. The failure is silent — a green suite after the
+revert looks identical whether your test survived or vanished.
+
 ---
 
 ## Standing rules all three inherit
