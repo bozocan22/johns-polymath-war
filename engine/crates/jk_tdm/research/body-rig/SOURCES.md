@@ -24,7 +24,9 @@ project's fabrication incident. **A tool's summary is not the source.**
 | BR-09 | P | Klein Breteler, M. (1996) internal dissection report, Leiden (the work behind Klein Breteler, Spoor & van der Helm (1999) *J Biomech* 32:1191-1197). Shipped inside `Leiden.zip` of BR-06. | (as BR-06) | 2026-08-03 | **UNREACHABLE.** 95-page PDF, **zero-length text layer on every page** — a pure scan. No OCR in this environment (same blocker as the NASA scan in `mech-entry/`). | Nothing. |
 | BR-10 | S | Nikolova, G. & Toshev, Y. "Comparison of two approaches for calculation of the geometric characteristics..." *Acta Bioeng Biomech*. 16-segment geometric model. | https://actabio.pwr.edu.pl/d/.../1.pdf | 2026-08-03 | **READ** (6 pp) | Corroborates the estimation-method landscape: the named geometric-modelling lineage is **Hanavan (1964) / Jensen / Hatze (1980) / Yeadon (1990)**. Its own foot is a **single frustum of a cone**; it has **no shoulder segment**. |
 | BR-11 | X | Web-search summaries of Winter Table 4.1's shoulder row; of Hatze (1980)'s segment list; of Dumas et al. (2007)'s segment list; of Chandler et al. (1975)'s 14 segments. | various | 2026-08-03 | **SNIPPET-ONLY — DOES NOT COUNT.** Two summaries of the *same* Winter row disagreed with each other (one said mass = 0.0324, the other said "mass = 0.712", which is self-evidently the CoM column). | Used **only** as negative-space navigation. **No number from BR-11 is carried into the spec.** |
-| BR-12 | P | Hatze, H. (1980) "A mathematical model for the computational determination of parameter values of anthropomorphic segments." *J Biomech* 13:833-843. **17 segments — the only whole-body BSP model that contains explicit left/right shoulder segments.** | doi:10.1016/0021-9290(80)90171-2 | 2026-08-03 | **PAYWALLED** (Elsevier; no OA mirror, no institutional repository copy, no author page found). | Nothing directly. Named below as the best-available estimation method for GAP 1 precisely *because* it is the one model that segments the shoulder. **This is the single highest-value unread source in this ledger.** |
+| BR-12 | P | Hatze, H. (1980) "A mathematical model for the computational determination of parameter values of anthropomorphic segments." *J Biomech* 13:833-843. **17 segments — the only whole-body BSP model that contains explicit left/right shoulder segments.** | doi:10.1016/0021-9290(80)90171-2 | 2026-08-03 (retried **2026-08-03, second pass**) | **PAYWALLED — now confirmed to a much higher standard.** Three independent OA aggregators agree, queried directly by API: **Unpaywall** `is_oa: false`, `oa_status: "closed"`, **0 `oa_locations`**; **OpenAlex** `oa_status: "closed"`, `any_repository_has_fulltext: false`, only two locations, both non-OA (the Elsevier DOI and the PubMed record); **Semantic Scholar** `isOpenAccess: false`, `openAccessPdf.status: "CLOSED"`, empty URL. Unpaywall indexes essentially every institutional repository worldwide, so "no repository copy anywhere" is now **evidenced, not merely unfound**. | Nothing from the paper itself. **But see BR-13 — and see the re-scoping note in GAP 1 §4: this source was over-valued in the first pass and reading it would NOT produce a clavicle number.** |
+| **BR-13** | **S** | **Wang, J. & Robertson, W., `wspr/hatze-biomech` — "A Matlab implementation of Hatze's 1980 anthropometric body segment parameter model". Apache-2.0. Transcribed from Hatze (1979) CSIR Tech. Report TWISK 79 (the fuller precursor to BR-12) and from Hatze's original FORTRAN.** | https://github.com/wspr/hatze-biomech · http://wspr.io/hatze-biomech/ | 2026-08-03 | **READ** — `segment_shoulder.m` in full (327 lines, raw file on disk), plus `person_generate.m` density block, `hatze_meas.txt`, `README.markdown`. **Tier S: a third-party reimplementation, not Hatze's text** — same evidential class as BR-07. Its own README: *"Many other calculations, however are still incomplete or, worse, incorrect"* (Sept 2013). | **The closest anyone in this project has got to Hatze.** Gives (a) the *structure* of Hatze's shoulder segment, (b) his shoulder density, (c) the decisive negative: **Hatze's model cannot emit a clavicle mass fraction.** Full extraction in GAP 1 §4. |
+| BR-14 | S | Zatsiorsky, V.M. (2002) *Kinetics of Human Motion*, Human Kinetics. ISBN 0-88011-676-5. The fuller book-length treatment behind BR-01's dataset. | (book) | 2026-08-03 | **UNREACHABLE.** Commercial 2002 Human Kinetics title. Search returns only booksellers (AbeBooks, Amazon), Goodreads, ResearchGate "Request PDF" stubs, and a Google Books *about* page with no preview; the Google Books API returns no volume record with any viewability. No legitimate open copy exists. | Nothing. Flagged in the first pass as "the one remaining place a clavicle row could plausibly hide" — **still unchecked, but see GAP 1 §4: the structural argument now makes a hidden clavicle row very unlikely.** |
 
 ---
 
@@ -273,6 +275,94 @@ Our rig's `Clavicle` segment is functionally the whole girdle (it parents
 `UpperArm`), so `0.0115` is its DSEM analogue and `0.0021` is the bone-only
 lower bound. **The spec's assumed 0.0050 sits inside that bracket.**
 
+### 4. Hatze 1980 re-scoped: it is a METHOD, not a TABLE — reading it would not give us a number (BR-13)
+
+**This corrects my own first-pass framing.** The first pass called BR-12 "the
+single highest-value unread source in this ledger" and said reading it "would
+convert the clavicle row from ASSUMED to DERIVED-by-named-method." **The first
+claim is now false and the second was always only half-true.** The paper is still
+PAYWALLED (BR-12, now confirmed against three OA aggregators), but a public
+Apache-2.0 reimplementation of its shoulder segment exists and I read it (BR-13).
+
+**What `segment_shoulder.m` actually computes.** Shoulder mass is a closed-form
+integral over *one specific measured subject's* dimensions:
+
+```
+mass = γ₁·v1 + γ₂·v2 − γ₁·v_s − γ_T·v_T
+```
+
+where `v1` (lateral parabolic wedge) and `v2` (medial parabolic wedge) are built
+from **four shoulder measurements** — `d` neck-to-arm distance, `b` = AP depth/2,
+`b1` = arm depth/2, `z_h` = top-of-shoulder-to-bottom-of-neck (`hatze_meas.txt`
+gives one subject's set as `145 182 086 025` mm) — plus trunk length `l_t` and
+four thorax semi-axes `at1, at4, at5, bt1, bt4`.
+
+⇒ **Hatze's model has no population table of segment fractions at all.** It is a
+per-subject geometric-solid method requiring **242 anthropometric measurements**,
+emitting **kilograms for one measured human**. Our rig consumes `mass_frac` of
+body mass scaled to `H = 1.78`. **The two are not the same kind of object.** To
+get a clavicle number out of Hatze you would have to measure a specific person
+242 ways — which is not a literature-access problem and reading the PDF does not
+solve it. **The clavicle can never become DERIVED-by-Hatze from a reading.**
+
+**And Hatze has no clavicle either.** His 17 segments, from `person_generate.m`
+verbatim: Abdominal-thoracic · Head-neck · **Left shoulder** · Left arm · Left
+forearm · Left hand · **Right shoulder** · Right arm · Right forearm · Right hand
+· Abdominal-pelvic · L/R thigh · L/R leg · L/R foot. A grep for
+`clavicle|clavicula|scapula|acromio|sternoclav` across every Hatze file returns
+**zero hits.**
+
+**What Hatze's "shoulder" IS — and it corroborates our modelling choice.** The
+geometry subtracts a sphere of radius `b1/2` (`v_s = 2π(b1/2)³/3` — the humeral
+head) and a thorax cutout volume `v_T` carried at its own density
+`shoulder_cutout`. So Hatze's shoulder runs **from the thorax surface out to the
+glenohumeral joint, includes all soft tissue (deltoid), and carves the thorax out
+of itself.** That is the *functional shoulder girdle*, not the clavicle bone —
+and it is **carved out of the trunk, not added to it**, exactly as spec §2.2 does
+(`UPT 0.1596 → 0.1496`). The one whole-body model that segments the shoulder
+defines that segment the way we do, and assembles it the way we do. **This
+validates the decision to let `0.0050` sit nearer DSEM's girdle figure (0.0115)
+than its bone-only figure (0.0021).**
+
+**The one Hatze number this project has ever obtained.** `person_generate.m`:
+
+```
+person.density.shoulder_lateral = @(i_m) 1030+20*i_m;
+person.density.shoulder_medial  = @(i_m) 1030+20*i_m;
+person.density.shoulder_cutout  = @(i_m) 1030+20*i_m;
+```
+
+⇒ **shoulder density 1030 / 1050 kg/m³** by Hatze's sex index `i_m`. *(Polarity
+INFERRED, labelled as such: male = the denser 1050, from the sign convention of
+every other density function in the file — e.g. `thoracic_wall 1080+60·i_m` — and
+from Hatze's documented male/female differentiation. The code does not state it
+in the lines I read.)* Compare **Winter's shoulder density 1.04 g/cm³ = 1040**
+(BR-02). **Hatze and Winter agree on shoulder density to within 1 %.** Small, but
+it is the first independent corroboration of *any* Winter shoulder cell this
+project has achieved. **Precision ceiling: SECONDARY-TRANSCRIPTION** — read from
+third-party code, not from Hatze's text, in a repo that says its calculations may
+be "incorrect". Do not ship a number that depends on it.
+
+### 5. The negative result is now closed, not merely unfinished
+
+**No body-segment-parameter model in existence — measured or geometric — has a
+clavicle segment.** The complete roll-call:
+
+| Source | Shoulder girdle? | Clavicle? |
+|---|---|---|
+| de Leva 1996 (BR-01) | no | no — word absent |
+| Winter T4.1 (BR-02) | one row | mass cell blank, all three `rg` cells em-dashes |
+| Veeger/van der Helm cadavers (BR-06) | inside "Trunk" | **no** — and its inertias are regressions |
+| DSEM `l1091` (BR-07) | yes | yes, **self-declared "roughly estimated"; fails its own sanity check (implies a 45 mm clavicle)** |
+| Nikolova & Toshev (BR-10) | no | no |
+| Chandler 1975 / Dumas 2007 (BR-11, navigational) | no | no |
+| **Hatze 1980 (BR-12/BR-13)** | **yes — a soft-tissue shoulder *cap*** | **no** |
+
+**GAP 1 is answered, and the answer is a well-evidenced NO.** The remaining
+unread sources (BR-12's text, BR-14 Zatsiorsky) are no longer high-value: the
+structural argument above predicts neither contains a clavicle row, and BR-12
+provably cannot contain a transferable fraction whatever it says.
+
 ---
 
 ## CONTRADICTIONS, recorded as contradictions (R7)
@@ -301,6 +391,42 @@ independently gets **1.50e-5**. §2.2 is **10× too large**. The conclusion is
 unaffected and in fact strengthened: the clavicle is *more* negligible than
 claimed.
 
+**CORRECTION-3b — the ratio to the thorax, as a NUMBER (2026-08-03).** This
+ledger previously ended its clavicle verdict with "*~1.5e-5·M, four orders below
+the thorax*". **That was wrong.** Recomputed here from the spec's own §3.3 inputs
+(`H = 1.78`), both sides from scratch:
+
+```
+I_UPT  (thorax, twist axis) = 0.1496 × (0.659 × 0.0980 × 1.78)² = 1.976945e-3 · M
+I_clav (clavicle, same axis)= 0.0050 × (0.2887 × 0.109 × 1.78)² = 1.568760e-5 · M
+
+I_UPT / I_clavicle = 1.976945e-3 / 1.5688e-5 = 126.0        log10 = 2.100
+```
+
+**The clavicle's twist inertia is 126× below the thorax's — 2.1 orders, not
+four.** "Four orders" would require `I_clav = 1.98e-7·M`, i.e. **79× smaller than
+it actually is**. (Sagittal cross-check, since §2.1's thorax `rg` is 0.716 not
+0.659: `I_tho_sag = 0.1496 × (0.716 × 0.174440)² = 2.3337e-3·M`, ratio **148.8**,
+log10 = 2.17. Still ~2.2 orders. The answer does not depend on which axis you
+compare.)
+
+**Provenance — caught by cross-agent review, not by me.** Friday found this while
+correcting the *same class of error* in `SPEC_20_SEGMENT_RIG.md` §2.2, which said
+"three orders". Note that the spec's claim was wrong **both before and after** its
+own 10× fix (CONTRADICTION-3 above): under the old `1.4e-4` the ratio would have
+been **14.1** (1.15 orders); under the corrected `1.57e-5` it is **126.0** (2.10
+orders). Neither is three. Friday correctly declined to edit this ledger — out of
+its file scope — and flagged it instead. **Toto verified the arithmetic
+independently before writing this entry**; the recomputation agrees with 126.0 to
+5 significant figures (126.0196 vs the spec's 126.0164, the difference being the
+spec's rounding of `I_clav` to 5 s.f.).
+
+**Standing lesson — state ratios as numbers.** The identical error survived in
+**three separate places** (spec §2.2's "three orders", this ledger's "four
+orders", and the pre-fix `1.4e-4` that made both unfalsifiable) for exactly one
+reason: *an order-of-magnitude adjective cannot be checked by inspection, and a
+number can.* Whenever this ledger compares two quantities, write the ratio.
+
 ---
 
 ## VERDICTS FOR THE IMPLEMENTER
@@ -318,18 +444,29 @@ one dataset that should have contained it (BR-06) demonstrably does not.
 | `len_frac` | **0.109 H** — keep, but fix CONTRADICTION-2 | Drillis & Contini half-biacromial minus sternoclavicular offset. | **DERIVED** |
 | longitudinal `rg` floor 0.10 | keep | Non-singularity device. | **ASSUMED** |
 
-**Best available estimation method, named:** **Hatze (1980), BR-12** — the only
-whole-body BSP model containing explicit left/right shoulder segments, built from
-subdivided geometric solids with per-solid densities. Failing access to it, the
-standard fallback is **geometric-solid modelling in the Hanavan (1964) /
-Yeadon (1990) lineage** — which is exactly what `rg_frac = 1/√12` already is. Our
-method is the correct one; only the label is wrong.
+**Best available estimation method, named:** **Hatze (1980), BR-12/BR-13** — the
+only whole-body BSP model containing explicit left/right shoulder segments, built
+from subdivided geometric solids with per-solid densities. This is the same
+family as **Hanavan (1964) / Yeadon (1990)**, and `rg_frac = 1/√12` is already a
+member of it. Our method is the correct one; only the label was wrong.
+
+**FINAL LABEL FOR THE CLAVICLE ROW: `ASSUMED (geometric-solid model, Hanavan /
+Yeadon / Hatze lineage)` — and this is now a terminal state, not a placeholder
+awaiting a source.** Per GAP 1 §4, Hatze cannot be read into a `mass_frac`: it is
+a 242-measurement per-subject method with no population table, so *no reachable
+document can upgrade this row to DERIVED*. Upgrading it would require **running a
+geometric-solid model on our own reference body (H = 1.78) and publishing the
+solids** — an engineering task, not a research one. **Do not leave this row
+flagged as "pending literature". The literature is exhausted.**
 
 **Precision ceiling:** there is none, because there is no measurement. Treat the
 clavicle row as a **structural placeholder chosen for the right order of
 magnitude**, bounded by DSEM's [0.0021, 0.0115]. Per CONTRADICTION-3 the
-clavicle's inertia is ~1.5e-5·M, four orders below the thorax. **Never build a
-feature whose feel depends on the clavicle's mass.**
+clavicle's inertia is **1.5688e-5·M**, and per CORRECTION-3b it is **126× below
+the thorax's 1.976945e-3·M** — 2.1 orders, *not* four (the earlier "four orders"
+in this line was an unchecked adjective; see CORRECTION-3b). **126× is still
+decisive for the only consumer — spring stiffness — so the verdict is unchanged.
+Never build a feature whose feel depends on the clavicle's mass.**
 
 ### TOE / FOREFOOT — **KEEP the derived split. It is now independently corroborated.**
 

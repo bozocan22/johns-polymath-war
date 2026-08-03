@@ -1380,6 +1380,9 @@ pub struct Fighter {
     pub mech_plates_dropped: u8,
     /// Folk Shieldwall Brace held: planted, shielded, slow.
     pub brace: bool,
+    /// §A: Mech Brace held - wide stance, near-stationary, damped recoil.
+    /// Deliberately a separate field from `brace`: see the constants.
+    pub mech_brace: bool,
     /// §5 knife swing clock — 0 idle; counts up through wind → active →
     /// recovery. `knife_committed` = the held lunge variant.
     pub knife_phase: f32,
@@ -2349,6 +2352,23 @@ pub const BRACE_REDUCTION: f32 = 0.82;
 pub const BRACE_STACK_BONUS: f32 = 0.08;
 pub const BRACE_STACK_CAP: u32 = 3;
 pub const BRACE_SPEED_MULT: f32 = 0.25;
+
+// ---- §A: Mech Brace ------------------------------------------------
+// Widen the stance / drop the centre of mass to enlarge the ZMP support
+// polygon (Vukobratovic & Borovac). A NEW, mech-scoped set - deliberately
+// NOT a reuse of the Folk brace constants above.
+//
+// WHY A SEPARATE FIELD AND SEPARATE CONSTANTS. `Fighter::brace` drives
+// two things. Its damage reduction IS armor_set-gated to Folk, so reuse
+// would have been harmless there. But the movement penalty at the two
+// sites below is NOT gated on armor_set - so setting `brace` on a mech
+// would silently apply the INFANTRY 0.25x, and any later rebalance of
+// BRACE_SPEED_MULT would move mech pacing as an invisible side effect.
+// The two are calibrated for completely different mass and HP scales
+// (MECH_HULL 1000.0 vs infantry HP two orders of magnitude smaller).
+pub const MECH_BRACE_STANCE_DROP: f32 = 0.12; // fraction of height() the hull sinks
+pub const MECH_BRACE_SPEED_MULT: f32 = 0.12; // below infantry's 0.25 - braced is near-planted
+pub const MECH_BRACE_RECOIL_DAMP: f32 = 0.30; // fraction of unbraced kick retained
 /// Robot power core: capacity, recharge (grounded, 5 s after ability use),
 /// repulsor cost/cooldown, EMP/explosive drain. (The THRUST_* trio lived
 /// here from Brief IV's flight model - §4.3 deleted mech flight, and the
@@ -2930,6 +2950,7 @@ impl TdmSim {
                     mech_exiting: false,
                     mech_plates_dropped: 0,
                     brace: false,
+                    mech_brace: false,
                     knife_phase: 0.0,
                     knife_committed: false,
                     knife_struck: false,
@@ -3322,6 +3343,7 @@ impl TdmSim {
                     f.mech_exiting = false;
                     f.mech_plates_dropped = 0;
                     f.brace = false;
+                    f.mech_brace = false;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
                     f.knife_struck = false;
@@ -3693,6 +3715,12 @@ impl TdmSim {
                 }
                 if f.brace {
                     speed *= BRACE_SPEED_MULT;
+                }
+                // §A.4: the mech's OWN brace multiplier. Deliberately a
+                // separate branch, not an `else if` and not a reuse of
+                // the infantry constant above - see MECH_BRACE_* .
+                if f.mech_brace {
+                    speed *= MECH_BRACE_SPEED_MULT;
                 }
                 if f.flip_recover_t > 0.0 {
                     speed *= FLIP_RECOVER_SPEED; // §4: 0.18 s landing tax
@@ -4138,6 +4166,14 @@ impl TdmSim {
                 }
                 ArmorSet::RobotSuit => {
                     self.fighters[p].brace = false;
+                    // §A.3: the crouch key is DEAD INPUT in a mech -
+                    // `set_crouch` refuses it outright (`want && !in_mech()`).
+                    // Repurpose it rather than add a binding: the intent
+                    // ("lower my stance") now means "widen the mech's
+                    // stance". Same key, different meaning while piloting.
+                    self.fighters[p].mech_brace = cmd.crouch
+                        && self.fighters[p].grounded
+                        && self.fighters[p].hull > 0.0;
                     if cmd.ability
                         && self.fighters[p].ability_cd <= 0.0
                         && self.fighters[p].armor >= REPULSOR_COST
@@ -4198,6 +4234,9 @@ impl TdmSim {
                 }
                 _ => {
                     self.fighters[p].brace = false;
+                    // covers dismounting mid-brace: a pilot who steps
+                    // out must not carry the hull's stance onto foot
+                    self.fighters[p].mech_brace = false;
                 }
             }
             // ---- §5 the knife: tap = quick slash, hold = committed
@@ -5097,8 +5136,19 @@ impl TdmSim {
                 // §5.2 (Brief VI): the scoped shot kicks 25 where the
                 // no-scope kicks 78 (Valve's AWP table ratio)
                 let scoped_scale = if spec.scoped && ads { 25.0 / 78.0 } else { 1.0 };
+                // §A.5: bracing's MECHANICAL payoff - not just a movement
+                // debuff. A planted hull eats recoil. Written generically
+                // here (not as an autocannon special case) so §C's
+                // autocannon gets braced-vs-unbraced kick for free by
+                // multiplying the same constant at its own call site.
+                let brace_scale = if f.armor_set == ArmorSet::RobotSuit && f.mech_brace {
+                    MECH_BRACE_RECOIL_DAMP
+                } else {
+                    1.0
+                };
                 let mag = (m0 + (m1 - m0) * SPRAY_LERP)
                     * scoped_scale
+                    * brace_scale
                     * if i0 < 4 {
                         0.75 + i0 as f32 * (0.25 / 3.0)
                     } else {
@@ -7102,6 +7152,14 @@ impl TdmSim {
             }
             if fm.brace {
                 vel = [vel[0] * BRACE_SPEED_MULT, vel[1] * BRACE_SPEED_MULT];
+            }
+            // §A.4 parity: bots pay the same mech-brace tax. Bots never
+            // SET mech_brace yet (that is bot-AI work, deliberately not
+            // guessed at here) - but the mechanism must exist on both
+            // paths from the start, because player/bot divergence is
+            // this file's most-repeated defect class.
+            if fm.mech_brace {
+                vel = [vel[0] * MECH_BRACE_SPEED_MULT, vel[1] * MECH_BRACE_SPEED_MULT];
             }
         }
         // §7: bots pay the same MASS tax the player does — the minigun's
@@ -9540,6 +9598,99 @@ mod tests {
             s.fighters[0].spray_i < 4.0,
             "idle must decay the spray index: {}",
             s.fighters[0].spray_i
+        );
+    }
+
+    /// §A.7: the mech brace stance. Four properties, each independently
+    /// falsifiable - the third is a deliberate regression guard against
+    /// the danger the constants' own doc block warns about (silently
+    /// reusing the INFANTRY brace multiplier for a mech).
+    #[test]
+    fn mech_brace_is_gated_slowed_and_damped_by_its_own_constants() {
+        // (1) DENIED to non-mechs: the RobotSuit match arm never runs
+        let mut s = range(0xB4CE);
+        s.fighters[0].armor_set = ArmorSet::Folk;
+        for _ in 0..4 {
+            s.step(PlayerCmd { crouch: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+        }
+        assert!(
+            !s.fighters[0].mech_brace,
+            "a Folk fighter must never acquire mech_brace - wrong match arm"
+        );
+
+        // (2) REQUIRES GROUNDED: an airborne mech cannot plant a stance
+        let mut s = range(0xB4CF);
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].grounded = false;
+        s.step(PlayerCmd { crouch: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+        assert!(
+            !s.fighters[0].mech_brace,
+            "mid-air is not a stance - mech_brace must require grounded"
+        );
+
+        // (3) SLOWED BY ITS OWN CONSTANT, not the infantry one. This is
+        // the regression guard: if someone ever "simplifies" this by
+        // reusing `brace`, the measured multiplier becomes 0.25 and the
+        // second assertion below fires.
+        let planar = |f: &Fighter| (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+        let braced_speed = {
+            let mut s = range(0xB4D0);
+            s.fighters[0].armor_set = ArmorSet::RobotSuit;
+            s.fighters[0].hull = MECH_HULL;
+            // long enough for the §1.3 accel model to reach steady state
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    crouch: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            planar(&s.fighters[0])
+        };
+        let want = MOVE_SPEED
+            * armor_spec(ArmorSet::RobotSuit).move_mult
+            * MECH_BRACE_SPEED_MULT;
+        assert!(
+            (braced_speed - want).abs() < 0.05,
+            "braced mech should walk at {want}, measured {braced_speed}"
+        );
+        let infantry_would_be =
+            MOVE_SPEED * armor_spec(ArmorSet::RobotSuit).move_mult * BRACE_SPEED_MULT;
+        assert!(
+            (braced_speed - infantry_would_be).abs() > 0.05,
+            "measured {braced_speed} matches the INFANTRY brace multiplier \
+             ({infantry_would_be}) - the mech is reusing BRACE_SPEED_MULT, \
+             which is exactly what MECH_BRACE_SPEED_MULT exists to prevent"
+        );
+
+        // (4) DAMPS RECOIL by exactly the damp constant. Both are plain
+        // constants, so the ratio is exact - a typo'd damp or a flipped
+        // inequality moves it immediately.
+        let kick_after_one_shot = |braced: bool| -> f32 {
+            let mut s = range(0xB4D1);
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = ArmorSet::RobotSuit;
+                f.hull = MECH_HULL;
+                f.mech_brace = braced;
+                f.gun = GunKind::Ak47;
+                f.inventory[0] = GunKind::Ak47;
+                f.ammo = 30;
+                f.protect_t = 0.0;
+            }
+            assert!(s.try_fire(0, [0.0, 0.0, 1.0], false), "the shot must land");
+            let f = &s.fighters[0];
+            (f.punch_vel[0] * f.punch_vel[0] + f.punch_vel[1] * f.punch_vel[1]).sqrt()
+        };
+        let unbraced = kick_after_one_shot(false);
+        let braced = kick_after_one_shot(true);
+        assert!(unbraced > 0.0, "the unbraced shot must actually kick");
+        assert!(
+            (braced - unbraced * MECH_BRACE_RECOIL_DAMP).abs() < 1e-4,
+            "braced kick {braced} should be exactly {MECH_BRACE_RECOIL_DAMP} x \
+             unbraced {unbraced}"
         );
     }
 
