@@ -5480,7 +5480,9 @@ impl TdmSim {
             }
             match victim {
                 Some((j, _, hit_y)) => {
-                    self.apply_hit(i, j, hit_y, end);
+                    // the PASSED damage, never a re-read of the held gun:
+                    // the hull mounts have no gun in anyone's hands
+                    self.apply_hit_dmg(i, j, hit_y, end, damage);
                 }
                 None => {
                     if end_t < 199.0 {
@@ -5647,7 +5649,25 @@ impl TdmSim {
         }
     }
 
+    /// A hitscan hit from the shooter's CURRENTLY HELD gun. Thin wrapper
+    /// over `apply_hit_dmg` so the 20-odd call sites that mean exactly
+    /// that keep reading as they did.
     fn apply_hit(&mut self, i: usize, j: usize, hit_y: f32, at: [f32; 3]) {
+        let base = gun(self.fighters[i].gun).damage;
+        self.apply_hit_dmg(i, j, hit_y, at, base);
+    }
+
+    /// §C: the same resolution with the per-torso damage passed IN.
+    ///
+    /// This parameter is load-bearing, not a tidy-up: `apply_hit` used
+    /// to re-derive the damage from `gun(shooter.gun)` at the bottom of
+    /// the chain, which silently made every shot cost whatever the
+    /// shooter was HOLDING. A hull mount has no `GunKind` and no gun in
+    /// anyone's hands, so routing it through the old signature would
+    /// have made the autocannon deal the pilot's rifle damage to
+    /// fighters while correctly dealing 145 to zombies - a split the
+    /// zombie path would have hidden for a long time.
+    fn apply_hit_dmg(&mut self, i: usize, j: usize, hit_y: f32, at: [f32; 3], base_dmg: f32) {
         // a body that already dropped this tick takes no further hits —
         // otherwise a shotgun's later pellets score the same kill twice
         if !self.fighters[j].alive() {
@@ -5676,8 +5696,7 @@ impl TdmSim {
         // the angle model (+ visor ×2, inside apply_armor) replaces them.
         let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
             && self.fighters[j].hull > 0.0;
-        let mut dmg = gun(self.fighters[i].gun).damage
-            * if in_mech { 1.0 } else { zone.mult() };
+        let mut dmg = base_dmg * if in_mech { 1.0 } else { zone.mult() };
         let from = {
             let f = &self.fighters[i];
             [f.pos[0], f.pos[1] + EYE_REL, f.pos[2]]
@@ -5689,7 +5708,6 @@ impl TdmSim {
             shielded = true;
         }
         // §6.1: set armor applies AFTER the zone multiplier, with a floor
-        let base_dmg = gun(self.fighters[i].gun).damage;
         dmg = self.apply_armor(j, dmg, base_dmg, zone, Some(from));
         let assist_candidate = self.record_hit_get_assist(i, j);
         self.fighters[j].health -= dmg;
@@ -10249,6 +10267,69 @@ mod tests {
         assert!(
             !s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
             "the mounts went live before the chassis finished sealing"
+        );
+    }
+
+    /// §C.4: the mounts resolve hits on the SAME path a rifle does, and
+    /// they carry their OWN damage down it.
+    ///
+    /// This is the test that caught the real defect in the first cut:
+    /// `apply_hit` re-derived damage from `gun(shooter.gun)` at the
+    /// bottom of the chain, so both hull mounts dealt whatever the pilot
+    /// happened to be carrying to FIGHTERS while correctly dealing their
+    /// own numbers to zombies. Asserting the two mounts' hull-damage
+    /// RATIO (rather than either absolute number) means the angle
+    /// multiplier, armour floor and every other shared stage cancel out,
+    /// so what is left under test is exactly "did the right damage reach
+    /// the shared resolver".
+    #[test]
+    fn hull_mounts_carry_their_own_damage_down_the_shared_hit_path() {
+        // one round into a target mech, from an identical setup
+        let hull_lost = |w: MechWeapon, held: GunKind| -> f32 {
+            let mut s = mech_range(0xC0F1, w);
+            s.fighters[0].gun = held; // the pilot's CARRIED gun: irrelevant
+            s.fighters[0].pos = [0.0, 0.0, -5.0];
+            {
+                let t = &mut s.fighters[1];
+                t.pos = [0.0, 0.0, 5.0];
+                t.armor_set = ArmorSet::RobotSuit;
+                t.hull = MECH_HULL;
+                t.armor = 0.0;
+                t.protect_t = 0.0;
+                t.yaw = 0.0; // facing away: one fixed angle multiplier
+            }
+            // aim flat at the target's lower body - well clear of the
+            // ×2 visor band, so spread cannot flip the multiplier
+            let aim = [0.0, (0.9 - EYE_REL) / 10.0, 1.0];
+            let fired = match w {
+                MechWeapon::Gatling => s.try_fire_gatling(0, aim),
+                MechWeapon::Autocannon => s.try_fire_autocannon(0, aim),
+            };
+            assert!(fired, "the mount must fire");
+            assert_eq!(s.fighters[0].hits_dealt, 1, "the round must connect");
+            MECH_HULL - s.fighters[1].hull
+        };
+        // deliberately hold DIFFERENT infantry guns: if the old
+        // `gun(shooter.gun)` re-read is ever restored, these two diverge
+        // by the held weapons instead of by the mounts.
+        let gat = hull_lost(MechWeapon::Gatling, GunKind::Ak47);
+        let auto = hull_lost(MechWeapon::Autocannon, GunKind::Ak47);
+        assert!(gat > 0.0 && auto > 0.0, "both mounts must chip the hull");
+        let want = AUTOCANNON_DAMAGE / GATLING_DAMAGE;
+        let got = auto / gat;
+        assert!(
+            (got - want).abs() < 1e-3,
+            "autocannon:gatling hull damage came out {got}:1, should be \
+             exactly {want}:1 - the mounts are not carrying their own \
+             damage into apply_hit"
+        );
+        // and the held gun genuinely does not matter
+        let gat_other = hull_lost(MechWeapon::Gatling, GunKind::Deagle);
+        assert!(
+            (gat_other - gat).abs() < 1e-3,
+            "swapping the pilot's carried gun moved the hull gatling's \
+             damage from {gat} to {gat_other} - apply_hit is reading the \
+             held weapon again"
         );
     }
 

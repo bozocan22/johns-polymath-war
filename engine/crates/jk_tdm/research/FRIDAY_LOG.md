@@ -578,3 +578,142 @@ this goes red, and does the cheapest thing they can do leave it honest?*
   I left it alone — every revert in this session was a targeted
   `git checkout -- engine/crates/jk_tdm/src/main.rs`, never a bare
   `git stash`.
+
+---
+
+## 2026-08-03 — Mech plan §C: the hull gatling + autocannon (`sim.rs` only)
+
+**Baseline at session start: 149 passed, 0 failed, 2 ignored.**
+**End: 160 passed, 0 failed, 2 ignored.** The delta is +6 from me
+(`sim::tests` 91 → 97, verified by name) and +5 that appeared in
+`main.rs`'s test modules from another agent working the same tree
+concurrently. Every revert in this session was a targeted
+`git checkout -- engine/crates/jk_tdm/src/sim.rs`; never a bare
+`git stash`, and `main.rs` was never opened for writing.
+
+### What shipped
+
+- `MechWeapon { Gatling, Autocannon }` — a dedicated enum, **not** two
+  new `GunKind` variants. `GunKind` is the spine of the *infantry* weapon
+  pipeline (`gun()->GunSpec`, `ALL_WEAPONS`/`N_WEAPONS` and the
+  `vm.weapons[N_WEAPONS]` viewmodel array, `weapon_slot`, `reload_pose`,
+  the loadout screen's `PRIMARIES`/`GunClass` tables, the punch-slot map)
+  and every one of those sites encodes *carryable, swappable,
+  loadout-selectable*. The hull mounts are structural: always both
+  present once the chassis seals, never picked up, never reloaded, never
+  in a loadout, no hand pose. Adding them to `GunKind` would have meant
+  answering ~8 exhaustive matches with lies.
+- Four `Fighter` fields (`mech_weapon`, `gatling_heat`, `gatling_vent_t`,
+  `autocannon_cd`), reset at the death/respawn site alongside
+  `mech_brace`, at the `RobotArmor` pickup (a *fresh* chassis must not
+  inherit a vent lockout the last one earned), and initialised in the
+  constructor.
+- Constants per plan. **No `AUTOCANNON_BRACED_KICK`** — the braced value
+  is derived at the call site as
+  `AUTOCANNON_UNBRACED_KICK * MECH_BRACE_RECOIL_DAMP`, consuming §A's
+  damp exactly as §A said it was built to be consumed.
+- `try_fire_gatling` / `try_fire_autocannon` as **siblings** of
+  `try_fire`, not branches inside it. `try_fire`'s gate list is
+  `armed()`/`gun`/`ammo`/`reload_t`/`switch_t`/`shield_up`/`knife_phase`/
+  `flip_t`/`sprint_gate_t` — the state of a *pair of hands*. None of it
+  describes a gun bolted to a chassis and triggered from a sealed
+  cockpit.
+- Input: in a chassis the trigger drives the hull mount, and 1/2 pick
+  which one — the same key-repurposing §A did with crouch. The infantry
+  slot path is now gated on `!in_mech()`; without that half, a number key
+  kept switching the pilot's carried gun invisibly underneath the mech
+  and burning a `SWITCH_S` he could neither see nor use.
+
+### The extraction — behaviour-preserving, and it exposed a real defect
+
+The plan was right that there was no helper: the per-pellet hitscan loop
+was inline in `try_fire`. It is now
+`hitscan_burst(i, o, aim, spread, damage, pellets)`, lifted verbatim,
+with damage/pellets/spread as parameters instead of `GunSpec` reads —
+which is precisely what lets a weapon that *has no `GunSpec`* use it. The
+punch deflection came out the same way as `punched_aim`. **Zero changes
+to any existing test; all 149 pre-existing tests stayed green.** RNG
+order (two draws per pellet, x then y) is preserved exactly, which is
+what the determinism/replay tests were checking.
+
+Then the extraction paid for itself immediately. Writing the sixth test I
+found that `apply_hit` **re-derived the damage from
+`gun(self.fighters[i].gun).damage`** at the bottom of the chain. So my
+first cut had both hull mounts dealing their correct damage to *zombies*
+(which take the passed value) and the **pilot's carried rifle damage** to
+*fighters*. The autocannon's 145 would simply never have reached a mech
+hull. Fixed by splitting `apply_hit_dmg(..., base_dmg)` out with
+`apply_hit` as a thin wrapper passing `gun(held).damage` — so all 20-odd
+existing call sites keep their meaning and read unchanged.
+
+That defect is the whole argument for the extraction, in miniature: the
+duplicate path would have looked correct at the call site and been wrong
+two functions down, and the zombie path would have hidden it for months.
+
+### Mutation proofs — 6 tests, 6 mutations, each reverted
+
+| # | Test | Mutation applied to `sim.rs` | Result |
+|---|---|---|---|
+| 1 | `gatling_heat_ramps_slower_than_minigun_in_absolute_terms` | `f.gatling_heat += GATLING_HEAT_PER_SHOT` became `+= MINIGUN_HEAT_PER_SHOT` | **FAILED. 157 passed; 1 failed** |
+| 2 | `gatling_spread_widens_with_heat` | replaced the cold-to-hot lerp with a flat `GATLING_SPREAD_COLD` | **FAILED. 157 passed; 1 failed** |
+| 3 | `autocannon_kick_is_damped_exactly_by_mech_brace_recoil_damp` | `let kick = if f.mech_brace {damp} else {full}` became `let kick = AUTOCANNON_UNBRACED_KICK` | **FAILED. 157 passed; 1 failed** |
+| 4 | `autocannon_and_gatling_are_mutually_exclusive_by_mech_weapon` | deleted the `f.mech_weapon != MechWeapon::Gatling` clause from the gatling's gate | **FAILED. 157 passed; 1 failed** |
+| 5 | `mech_weapons_refuse_to_fire_for_non_mech_fighters` | `!f.in_mech()` became `false` in **both** fire functions | **FAILED. 157 passed; 1 failed** |
+| 6 | `hull_mounts_carry_their_own_damage_down_the_shared_hit_path` | `apply_hit_dmg(i, j, hit_y, end, damage)` became `apply_hit(i, j, hit_y, end)` — i.e. restore the original defect | **FAILED. 159 passed; 1 failed** |
+
+Every mutation was reverted with
+`git checkout -- engine/crates/jk_tdm/src/sim.rs` (1-5, against the
+already-committed implementation) or an exact reverse edit (6), and the
+suite was re-confirmed green afterwards.
+
+Test 6 asserts the autocannon:gatling hull-damage **ratio**, not either
+absolute number — the angle multiplier, armour floor and every other
+shared stage cancel, so what is left under test is exactly "did the right
+damage reach the shared resolver". It also fires each mount while the
+pilot holds a *different* infantry gun, so a restored `gun(shooter.gun)`
+re-read diverges by the held weapons rather than by the mounts.
+
+### What I am least sure about
+
+1. **The gatling heat decay is gated on `fire_cd <= 0.0`, which the plan
+   did not ask for, and it is the judgement call I would most want
+   reviewed.** The plan said "add the decay alongside the existing
+   minigun `f.heat` decay". Taken literally as *unconditional* per-tick
+   decay, `GATLING_HEAT_DECAY` (9.5/s) eats most of the ramp
+   (0.9 per 0.07 s = 12.9/s), stretching time-to-forced-vent from ~7.8 s
+   to ~30 s and destroying the "sustains about twice the minigun's 4 s"
+   intent by a factor of four. So I gated it, mirroring how the minigun
+   gates *its* decay on the trigger hold-timer: a barrel group under fire
+   does not cool. But the minigun uses a dedicated `spin_cmd` hold timer,
+   and I am leaning on `fire_cd` — which is *shared with the pilot's
+   carried gun*. Two consequences I accept but flag: (a) a pilot who just
+   fired his rifle briefly stops the hull mount cooling, and (b) the
+   ~9.4 s real sustain depends on the tick granularity of `fire_cd`
+   (4 ticks hot, 1 tick cool per 0.07 s cycle at 60 Hz), so changing
+   `SIM_HZ` or `GATLING_FIRE_PERIOD` moves it. A dedicated
+   `gatling_trigger_t` hold timer would be the clean fix; the plan fixed
+   the field list at four, so I did not add a fifth without asking.
+2. **Nothing tests the sustain duration end-to-end.** Test 1 pins the
+   per-shot ramp behaviourally and the time-to-vent *relationship*
+   arithmetically, but there is no test that steps the sim with the
+   trigger held and measures when `gatling_vent_t` actually latches.
+   That is exactly the number item 1 makes fragile, and it is the gap I
+   would close first.
+3. **I did not wire the BOT fire path.** §C.5 named the `cmd.fire` site
+   and I did that one. Bot-piloted mechs (`sim.rs`, the bot `try_fire`
+   call) still fire their carried infantry gun, so an AI mech does not
+   use its hull mounts at all. Deliberate — changing it moves bot damage
+   output and would ripple into the seeded determinism tests — but it
+   means the feature is player-only right now, and someone should decide
+   whether that is the intended shipping state.
+4. **The mounts emit `gun_noise_m(GunKind::Minigun)` in Extraction
+   mode.** Not in the plan. I added it because a silent mech is a real
+   defect against the horde director, but it is the one place §C touches
+   `GunKind` at all. It is a radius *lookup*, not an entry into the
+   pipeline, and the alternative (a dedicated constant) was more surface
+   than the plan authorised. Untested.
+5. **The autocannon deliberately does not touch the spray table.** The
+   deterministic per-weapon spray patterns are `GunKind`-indexed infantry
+   state; a single-shot hull cannon has no pattern to walk. It adds one
+   honest `punch_vel[0]` kick. If the design intended the autocannon to
+   participate in spray recovery, that is not implemented.
