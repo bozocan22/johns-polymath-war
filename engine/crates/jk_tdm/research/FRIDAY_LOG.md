@@ -928,3 +928,223 @@ re-confirmed at 165/0/2 after the final revert.
    remain permanently disarmed after 150 rounds inside a full-hull
    chassis. That is real, it is Thor's finding, and it is now *safe* to
    fix — the `fire_cd` sharing that made it dangerous to land is gone.
+
+---
+
+## §D — the bot fire path reaches the hull mounts
+
+**Suite: 166 passed / 0 failed / 2 ignored → 171 / 0 / 2.** Five new
+tests. Ten mutations applied, run, recorded and reverted with a targeted
+`git checkout -- engine/crates/jk_tdm/src/sim.rs`; the working tree was
+asserted clean after every single revert.
+
+This closes the item I deferred at the bottom of my last entry.
+
+### D1 — what was actually wrong
+
+Thor's measurement, over 2 s: `hits_dealt=4`, `ammo=26/30`, carried
+`Ak47`, `gatling_heat=0`. A bot in a 1000-hull chassis was pulling the
+trigger on the rifle its **pilot** happened to be carrying. It reloaded
+every 30 rounds, and at 150 rounds — one mag plus a standard reserve —
+it was **permanently disarmed inside a full-health chassis** for the
+rest of the match. Bots do reach mechs: the pickup loop runs for every
+fighter, not just the player.
+
+`bot_act` now routes through `in_mech()` exactly as the player path
+does, and the fire gate's `ammo > 0` becomes `ammo > 0 || in_mech` — a
+gun bolted to a hull has no magazine to gate on.
+
+### D2 — the mount-selection rule, and why it is this one
+
+> **Autocannon** against another chassis, or past
+> `MECH_BOT_AUTOCANNON_RANGE_M`. **Gatling** otherwise.
+
+The range is **derived, not tuned**:
+`MECH_BOT_AUTOCANNON_RANGE_M = BODY_RADIUS / GATLING_SPREAD_COLD`
+≈ **18.9 m**. `GATLING_SPREAD_COLD` is the per-axis offset
+`hitscan_burst` applies to the aim ray, so at range `d` a *cold* gatling
+scatters over a half-width of `GATLING_SPREAD_COLD * d`; a man is
+`BODY_RADIUS` wide to each side. Past that quotient even a cold mount is
+putting most of its rounds beside the target — and every miss still
+walks the barrels toward a 3.5 s forced vent. That is precisely where
+one 145-damage round through a 3× tighter cone is the honest trade. I
+picked a derivation over a round number for the reason §C already wrote
+down at the `AUTOCANNON_BRACED_KICK` note: a second independently
+tunable number describing one relationship drifts.
+
+It lands inside **every** difficulty's engage range (Easy 22 / Normal 35
+/ Hard 50), so all three tiers really do use both mounts rather than one
+tier silently never reaching the switch. That was a check, not a
+coincidence, and it is asserted in the test.
+
+`hardened` carries **no range term on purpose**: 9 damage a round is not
+an answer to 1000 hull at *any* distance, and the 145 exists precisely
+to be that answer. To know it, `nearest_visible_threat` now returns
+whether the body it picked is a live chassis — the caller receives a
+bare position, and a position cannot be asked whether it has hull. No
+zombie is ever hardened.
+
+**The one place I went past "simple":** the switch has a
+one-chassis-width hysteresis band (`MECH_BOT_MOUNT_HYSTERESIS_M =
+MECH_RADIUS`, 0.58 m). A bare threshold over a dithering quantity is a
+defect, not a rule. The two mounts keep **independent** cooldown clocks
+(`gatling_cd` / `autocannon_cd` — §C made sure of that), so a bot
+chattering across the line fires **both**, and "hold station at exactly
+18.9 m" becomes the highest-DPS thing a bot mech can do. Four lines, and
+mutation-proven (M6).
+
+### D3 — bot bracing: the §A parity question, answered
+
+**Yes — and only for the autocannon.** §A wired the `mech_brace`
+movement tax onto both paths but left the flag unreachable from the bot
+side; that comment is now deleted rather than left to rot a third time.
+
+`MECH_BRACE_RECOIL_DAMP` has exactly **one** consumer in the file — the
+autocannon's kick. Bracing to fire the gatling would therefore buy a bot
+literally nothing while costing it 88% of its movement, so it does not.
+Bracing for the autocannon buys the *next* shot its picture back, and it
+is paid for in the same currency a human pays: a near-stationary chassis
+that is trivial to hit. Grounded-gated exactly as the player's is.
+
+Two failure modes I wired deliberately, both tested:
+
+- the stance **drops when the target is lost** (a braced mech walks at
+  12%; a bot that kept the plant after LOS broke would crawl the rest of
+  the match);
+- the write is **unconditional**, not inside `if in_mech`, so a pilot
+  whose hull is blown out from under him mid-brace does not carry the
+  chassis stance — and its 12% pace — onto foot. That is the §A defect
+  class (a mech mechanic leaking onto infantry) coming back through a
+  new door, and it is asserted from the bot path.
+
+### D4 — a flaw the probe found in my own test rig
+
+My first rig healed the victim every tick and called the result a
+continuous engagement. It was not. One autocannon round is **145**
+against a 100 HP man, so healing after the step still let the **kill**
+register: `respawn_t` latched for `RESPAWN_S` (3 s), the corpse stopped
+being a visible enemy, and the bot spent most of the window with nothing
+to shoot at. The 30 m brace assertion was passing **only because that
+seed's first round happened to miss** — a latent flake I would have
+shipped. Worse: a kill can latch `round_over_t`, after which `step`
+early-returns and, 7 s later, **replaces the sim wholesale** — and one
+of my tests runs for 30 s straight over that trapdoor.
+
+The rig now makes the victim genuinely immortal (`respawn_t` cleared,
+score and round state rolled back every tick). The "target lost" case
+steps **raw**, because that same rig would resurrect the very body the
+case needs gone.
+
+I found this by writing a throwaway probe, not by reasoning. It is the
+second time in two entries that a measurement contradicted something I
+believed about my own test.
+
+### D5 — a mutation that survived the whole suite
+
+Skipping the two `rng.range` aim draws on the mech branch — the obvious
+"a hull mount doesn't need the bot's wobble" tidy-up — **passed all 170
+tests untouched.** It is two defects at once:
+
+1. *Visible:* every bot mech becomes a perfect shot at every difficulty.
+2. *Invisible and worse:* those draws come off the sim's single seeded
+   stream, so skipping them **re-orders that stream** for every scenario
+   containing a bot mech. The replay guarantee is exactly "the same seed
+   makes the same draws in the same order."
+
+`a_chassis_does_not_make_a_bot_a_better_shot` closes it: 27 rounds
+landed on Easy against 62 on Hard, asserted as a spread rather than an
+absolute count so retuning `aim_sigma` cannot silently disarm it.
+
+### Determinism — status, explicitly
+
+**All 11 existing determinism / replay / golden tests are green**
+(`deterministic_battle`, `abilities_replay_identically`,
+`a_thirty_shot_ak_spray_is_bit_identical_on_replay`,
+`a_thousand_identical_throws_land_bit_identically`,
+`bow_draw_and_pierce_replay_identically`, `draw_power_golden_curve`,
+`dropped_ammo_is_recoverable_and_deterministic`,
+`minigun_heat_cycle_is_deterministic`,
+`spray_replays_exactly_climbs_and_recovers`,
+`throwables_are_deterministic`,
+`zombies_spawn_chase_headshot_and_replay`).
+
+The change touches no RNG. The two aim draws stay **unconditional and in
+their original position**, before the branch, precisely so the seeded
+sequence cannot shift — which is why the entire 166-test baseline passed
+unchanged on the first run. A bot-mech engagement was separately probed
+and replays bit-identically across two runs (`dealt`, `gatling_heat`,
+`autocannon_cd`, `punch_vel`, `hits_dealt`, `mech_weapon`, `mech_brace`,
+victim health and the next raw RNG draw, all compared by raw bits).
+
+But see item 1 below before reading that as coverage.
+
+### Mutation proofs — all ten applied, run, recorded, reverted
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| **M1** | bot always fires its CARRIED gun (the shipped behaviour) | D.1, D.2, D.3, D.5 | **FAILED. 167 passed; 4 failed** |
+| **M2** | restore the `ammo > 0` fire gate for a chassis | D.2, D.3, D.5 | **FAILED. 168 passed; 3 failed** |
+| **M3** | mount selection always picks the gatling | D.3, D.4 | **FAILED. 169 passed; 2 failed** |
+| **M4** | bots never set `mech_brace` (the §A status quo) | D.4 | **FAILED. 170 passed; 1 failed** |
+| **M5** | drop `hardened` — a range-only rule | D.3, D.4 | **FAILED. 169 passed; 2 failed** |
+| **M6** | delete the hysteresis band (a bare threshold) | D.3 | **FAILED. 170 passed; 1 failed** |
+| **M7** | brace for BOTH mounts, not just the autocannon | D.4 | **FAILED. 170 passed; 1 failed** |
+| **M8** | the plant survives losing the target | D.4 | **FAILED. 170 passed; 1 failed** |
+| **M9** | the bot pays no `mech_brace` movement tax | D.4 | **FAILED. 170 passed; 1 failed** |
+| **M10** | skip the aim RNG draws for a mech (re-orders the stream) | D.5 | **FAILED. 170 passed; 1 failed** |
+
+Every new test is individually proven: D.1 by M1; D.2 by M1–M2; D.3 by
+M1–M3, M5–M6; D.4 by M3–M5, M7–M9; D.5 by M1–M2, M10.
+
+### What I am least sure about
+
+1. **No existing determinism test ever puts a bot in a mech, and I can
+   prove it.** I probed `deterministic_battle` (seed 21, Arena, 5v5,
+   40 s): **0 bot-mech ticks** out of ~4,800 ticks × 9 bots. Zero
+   gatling heat, zero autocannon selections. That is *why* my change
+   could not perturb it — and it means the suite's replay guarantee does
+   **not** cover the path I just wrote. M10 surviving was the symptom.
+   D.5 now catches the specific stream re-ordering I could think of, but
+   **a full-match replay test with a bot mech in it does not exist and
+   should.** I did not add one because a same-code A/B replay test
+   cannot be honestly mutation-proven in a sim that is deterministic by
+   construction — but someone should decide whether that objection is
+   worth the gap. **This is the single thing I would most want checked.**
+2. **The horde gets the same rule, and I am not certain it should.** In
+   Extraction a zombie is never `hardened`, so a bot mech past 18.9 m
+   fires the *autocannon* at the horde — one 145-damage round every
+   1.35 s at a crowd, where the gatling is the obvious crowd answer. My
+   defence is that past 18.9 m the gatling cannot hit anything anyway
+   and zombies close fast, so the window is short. But the rule was
+   designed against fighters and I applied it to the horde without a
+   separate argument.
+3. **The hysteresis is the one place I exceeded the brief's "do not
+   overbuild".** I judged a bare threshold to be a genuine exploit
+   (straddling the line fires both mounts) rather than a cosmetic
+   nuisance, and it is four lines and mutation-proven. But it *is* scope
+   I added on my own judgement, and 0.58 m is a band I chose because it
+   is one chassis width, not because I measured the dither amplitude.
+4. **`MECH_BOT_MOUNT_HYSTERESIS_M` is asymmetric.** The band applies
+   only to the *down*-switch, so the rule still reads "autocannon past
+   R". A bot that has never held the autocannon switches up at exactly
+   R and back down at R − 0.58. That is deliberate and readable, but it
+   means the switch point genuinely differs by 0.58 m depending on
+   history — if anyone tunes against "the switch is at 18.9 m" they will
+   be off by up to a chassis width in one direction.
+5. **I did not touch the bot's carried-gun reload while piloting.** A
+   bot in a mech with an empty carried mag still calls `try_reload`
+   every tick, which can set `reload_t`, which sets `shield_up` inside
+   16 m — a sealed chassis raising a riot shield. That behaviour
+   predates me and is outside §D's scope, but it is now reachable in a
+   state that matters more than it used to.
+6. **`hits_dealt` is a shared counter and D.5 leans on it.** It is
+   incremented by the hull mounts *and* by anything else the bot lands.
+   In D.5 the carried gun is bone dry, so nothing else can move it — but
+   the assertion would silently weaken if that setup ever changed.
+7. **The §C client-side warning from my last entry still stands and is
+   now more visible.** The hull mounts drive `gatling_cd`/`autocannon_cd`
+   rather than `fire_cd`, so `main.rs`'s shot-detection sites do not see
+   them. Bot mechs now fire constantly, which means that missing muzzle
+   flash / casing / audio is about to be a lot more noticeable than it
+   was when only the player could trigger it. It is still a `main.rs`
+   edit I am not permitted to make.
