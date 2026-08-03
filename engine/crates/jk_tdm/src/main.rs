@@ -24,6 +24,7 @@
 //! mouse look - LEFT CLICK aim (zoom) - RIGHT CLICK / T fire - CTRL/C
 //! crouch - SHIFT sprint - R reload - TAB scoreboard - ESC menu
 
+mod branding;
 mod sim;
 
 use bevy::audio::Volume;
@@ -549,13 +550,32 @@ const SPEAR_RELEASE_YAW: f32 = COIL_AWAY_RAD + COIL_SWING_RAD;
 /// zero** once the clamp saturates, because `peak * 1.0 / peak` is
 /// exact. (Quote that count, not a percentage of a sweep: the same 8,290
 /// reads as 20.7% of a 0..0.4 s sweep and 13.8% of a 0..0.6 s one.)
-/// 1.788e-7 is 1.8e-8 rad of yaw once scaled by `OVERSHOOT_RAD`, i.e.
-/// behaviourally invisible, but only ~5.6x below the 1e-6 tolerance the
-/// invariance test uses. Do NOT tighten that tolerance toward 1e-7, and
-/// do NOT assert bit-equality across substituted tables: the spec's Step 1
-/// test table asked for `==` and that assertion is simply false here
-/// (measured worst end-to-end divergence between table variants: 2.98e-8
-/// rad). The invariance is real; its precision is finite. Written down
+///
+/// UNITS - the trap this block was written to correct, and then fell into
+/// itself (F2, Thor, 2026-08-03). **1.788e-7 is a residual in the DRIVE
+/// term**, which is dimensionless and runs 0..1. The invariance test's
+/// **1e-6 tolerance is applied to YAW**, in radians. Dividing one by the
+/// other produced the "~5.6x" this block used to quote, and that is not a
+/// margin of anything - it is two different quantities put over each
+/// other. Like for like:
+///
+/// - the drive residual expressed as yaw is `1.788e-7 * OVERSHOOT_RAD` =
+///   **1.79e-8 rad**, which alone would be 56x inside the tolerance;
+/// - but what the test actually measures is the END-TO-END divergence
+///   between table variants, and that is **2.98e-8 rad** (worst case,
+///   on the 1 ms grid the test itself sweeps, over 0..0.6 s) - larger
+///   than the drive residual alone, because the divide, the add and the
+///   decay multiply each round on top of it.
+///
+/// So the margin is **34x** (1e-6 / 2.98e-8), and that is the only figure
+/// this file should quote for it. It is grid-dependent: off the test's
+/// 1 ms grid it gets worse, reaching **5.96e-8 rad (17x)** on a 1 us
+/// grid. Do NOT tighten the tolerance toward 1e-7 - at 1e-7 that
+/// off-grid worst case leaves 1.7x, and the test becomes a coin flip the
+/// moment anyone refines the sweep. And do NOT assert bit-equality across
+/// substituted tables: the spec's Step 1 test table asked for `==` and
+/// that assertion is simply false here.
+/// The invariance is real; its precision is finite. Written down
 /// because the sampling-from-onset reasoning above is still the right
 /// INTENT - it is what keeps the code correct if the scale ever stops
 /// cancelling - but a reader must not infer that retuning either table
@@ -2743,6 +2763,10 @@ fn main() {
                     ..default()
                 }),
         )
+        // The key art / wordmark / emblem. Self-contained: owns its own
+        // splash state, systems and teardown, and skips itself entirely
+        // when JK_CAPTURE is set so it never lands in a scripted capture.
+        .add_plugins(branding::BrandingPlugin)
         .insert_resource(ClearColor(Color::srgb(0.58, 0.63, 0.72)))
         .init_resource::<CamCtl>()
         // R4: loaded once here, held fixed for the whole run - same
@@ -11710,13 +11734,41 @@ mod elastic_load_tests {
         // clavicle floor squeezes the trunk hops. Real distal compression
         // is a claim about the ARM window, and it is the only place where
         // an INTERPOLATED index (5, 6) can make it fail.
+        //
+        // F3 (Thor, 2026-08-03): the failure message used to end "indices
+        // 5 and 6 are the interpolated ones", which reads as a claim that
+        // this assertion CONSTRAINS them. It constrains them, but only
+        // coarsely, and the bounds are cheap to write down. Holding the
+        // other seven rows fixed and stepping one index a millisecond at
+        // a time, per-hop monotonicity survives across:
+        //
+        //     idx5 in [0.093 .. 0.098]   (shipped 0.094: -1 / +4 ms slack)
+        //     idx6 in [0.112 .. 0.117]   (shipped 0.114: -2 / +3 ms slack)
+        //
+        // So it fires on idx5 moved DOWN >=2 ms or UP >=5 ms, and on idx6
+        // moved DOWN >=3 ms or UP >=4 ms - and it does NOT fire on a 1 ms
+        // move of either. Thor measured exactly that: idx6 0.114 -> 0.115
+        // PASSES here. The 1 ms guard is
+        // `the_arm_onsets_reproduce_an_independently_solved_geometric_root`,
+        // which rejects 0.115 by 9.75e-4 against its 5e-4 gate.
+        //
+        // MESSAGE NARROWED, ASSERTION LEFT ALONE - deliberately. The only
+        // way to broaden this check to 1 ms resolution is to re-derive the
+        // geometric ratio right here, and that is the other test's entire
+        // job. A second copy of it would be redundancy wearing the costume
+        // of coverage, which is the same error class in a new place. What
+        // was false was the CLAIM, so the claim is what changed.
         let hop = |a: usize, b: usize| CHAIN_ONSET_OFFSETS[b] - CHAIN_ONSET_OFFSETS[a];
         let arm_hops = [hop(3, 4), hop(4, 5), hop(5, 6), hop(6, 7)];
         for w in arm_hops.windows(2) {
             assert!(
                 w[1] < w[0],
-                "the ARM window must compress hop by hop, got {arm_hops:?} - \
-                 indices 5 and 6 are the interpolated ones"
+                "the ARM window must compress hop by hop, got {arm_hops:?}. \
+                 This is a SHAPE check on the interpolated indices 5 and 6, \
+                 not a millisecond one: it only fires outside \
+                 idx5 in [0.093, 0.098] / idx6 in [0.112, 0.117]. A 1 ms \
+                 move of either passes HERE and is caught by \
+                 the_arm_onsets_reproduce_an_independently_solved_geometric_root"
             );
         }
         // The honest version of the trunk-vs-arm statement, recorded as a
@@ -11805,6 +11857,15 @@ mod elastic_load_tests {
     /// introduced this session" #1: the follow-through went silent for a
     /// whole tip-onset and then swung the wrong way).
     ///
+    /// SCOPE OF THAT CLAIM, stated precisely because the loose version of
+    /// it travelled (Thor, 2026-08-03): the sentence above is about THIS
+    /// test, not about the suite. On the pre-change tree that mutation
+    /// gave **144 passed, 1 failed** - `spear_followthrough_carries_past_
+    /// the_release_then_settles` did catch it. The rewrite took detection
+    /// from ONE test to THREE and moved it onto the function's own
+    /// contract; it did not rescue the bug from zero coverage, and nobody
+    /// should repeat it as though it had.
+    ///
     /// Now it calls the real function. `spear_followthrough_yaw_from`
     /// takes the tip's two table rows as parameters, so the test can feed
     /// rows the consts do not contain - which is what makes "invariant to
@@ -11819,7 +11880,13 @@ mod elastic_load_tests {
     /// that is false in f32, because `(t + onset) - onset` and
     /// `peak * x / peak` each round. Measured worst divergence across
     /// these six variants over 0..0.6 s is 2.98e-8 rad - real, tiny, and
-    /// 33x inside the tolerance below.
+    /// **34x** inside the tolerance below (1e-6 / 2.98e-8 = 33.6). That
+    /// is the margin for the 1 ms grid THIS test sweeps; refine the grid
+    /// and it drops - 5.96e-8, 17x, on a 1 us grid. Before touching the
+    /// tolerance or the step, read the UNITS paragraph in
+    /// `spear_followthrough_yaw`'s doc block: the "5.6x" that used to be
+    /// quoted for this same quantity was a drive-term residual divided by
+    /// a yaw tolerance, and it is gone.
     ///
     /// Invariance alone is vacuous (a function returning 0.0 is invariant
     /// to everything). `spear_followthrough_matches_its_hand_computed_curve`
@@ -11862,36 +11929,131 @@ mod elastic_load_tests {
     /// test above is not vacuous.
     ///
     /// `RAMP_S`, `OVERSHOOT_RAD`, `HOLD_S` and `SETTLE_RATE` are function-
-    /// local consts, so this test CANNOT reference them - it has to carry
-    /// numbers. These were computed in f64 outside the crate from
-    /// `(0.35 + 0.10*min(t/0.12, 1)) * exp(-6*max(t - 0.05, 0))`; they are
-    /// a table of results, not a re-derivation, which is the whole point.
-    /// Worst observed f32-vs-f64 gap is 5.5e-8, so 1e-6 leaves ~18x.
+    /// local consts, so this test CANNOT reference them. It therefore has
+    /// to carry the spec in some form, and the form matters enormously.
+    ///
+    /// **F1 (Thor, 2026-08-03) - THE HAZARD THIS STRUCTURE EXISTS TO
+    /// KILL.** What stood here was seven literal output values with a
+    /// comment saying they had been computed outside the crate. Nothing
+    /// ENFORCED that. The cheapest move available to the next maintainer
+    /// who breaks this curve is to run the code, paste its output over the
+    /// seven literals, and watch the test go green - at which point the
+    /// test has silently become a change-detector that pins the bug in
+    /// place. That is D6's defect class exactly: a test named after the
+    /// theorem that no longer tests it. A comment cannot prevent it,
+    /// because the comment is the thing being ignored.
+    ///
+    /// So the curve is now pinned by a TRIANGLE, and every side is checked:
+    ///
+    /// 1. `closed_form` - the spec as an expression, in f64, containing
+    ///    **no crate item whatsoever**: not `SPEAR_RELEASE_YAW`, not the
+    ///    chain tables, not the local consts. Literally
+    ///    `(0.35 + 0.10*min(t/0.12, 1)) * exp(-6*max(t - 0.05, 0))`.
+    /// 2. `ANCHORS` - seven f64 values at 15 decimal places, computed by
+    ///    evaluating that same expression outside this crate.
+    ///    Asserted against `closed_form` at **1e-12**.
+    /// 3. `spear_followthrough_yaw` - the real, shipped f32 function,
+    ///    swept against `closed_form` on a 1 ms grid over 0..1.2 s, and
+    ///    checked against `ANCHORS` directly, both at 1e-6.
+    ///
+    /// **Why regeneration-from-code now fails loudly.** The f32 function
+    /// and the f64 closed form agree only to ~4e-8. So anchors pasted from
+    /// this crate's own output miss the 1e-12 gate in step 2 by a factor
+    /// of **41,697** - measured, not estimated - and the failure message
+    /// says so by name. There is no table of numbers anywhere in this test
+    /// that can be regenerated from the code to silence a real failure:
+    /// break the function and step 3 fails; paste the broken output into
+    /// `ANCHORS` and step 2 fails as well. The only way through is to edit
+    /// `closed_form` itself, which is visibly editing the specification
+    /// rather than refreshing a table - the distinction the old shape
+    /// could not make. (The sibling
+    /// `the_arm_onsets_reproduce_an_independently_solved_geometric_root`
+    /// already worked this way, deriving its expectation in-test; this is
+    /// that pattern applied here, with the external anchors kept on top.)
+    ///
+    /// MEASURED MARGINS (F4, Thor, 2026-08-03 - this block previously said
+    /// "worst gap 5.5e-8, ~18x", and both figures were stale):
+    ///
+    /// - real f32 fn vs `closed_form`, 1 ms sweep 0..1.2 s: worst
+    ///   **6.00e-8 rad** at t = 0.115, so 1e-6 leaves **16.7x**.
+    /// - real f32 fn vs `ANCHORS` at the seven points: worst **4.17e-8**
+    ///   at t = 0.06, i.e. 24x. (Against the OLD 7-significant-digit f32
+    ///   literals it was 5.96e-8 / **16.8x** - Thor's figure, confirmed to
+    ///   the digit. Carrying the anchors at f64 precision recovers the
+    ///   rounding those literals threw away.)
     ///
     /// FALSIFIABILITY: drop `+ tip_onset` from `spear_followthrough_yaw_from`
     /// and t=0.03 returns 0.350 instead of 0.375 (the drive is silent until
     /// t >= 0.130) - 2.5e-2 off, 25000x the tolerance. That single mutation
-    /// is the bug in AUDIT.md #1, and it is what the old test could not see.
-    /// Any retune of the four local consts, or of `SPEAR_RELEASE_YAW`,
-    /// also fails here - deliberately. Retuning the feel means updating
-    /// this table, and that is the point of pinning it.
+    /// is the bug in AUDIT.md #1, and it is what the pre-D6 test could not
+    /// see. Any retune of the four local consts, or of `SPEAR_RELEASE_YAW`,
+    /// also fails here - deliberately. Retuning the feel means editing
+    /// `closed_form` AND recomputing `ANCHORS` from it outside the crate,
+    /// and having to do both, in that order, is the whole point.
     #[test]
     fn spear_followthrough_matches_its_hand_computed_curve() {
-        // (release_t, expected yaw in rad)
-        const GOLDEN: [(f32, f32); 7] = [
-            (0.00, 0.350_000_0), // starts exactly on the release yaw
-            (0.03, 0.375_000_0), // drive 0.25, no decay yet
-            (0.05, 0.391_666_7), // drive 5/12, last frame before the settle
-            (0.06, 0.376_705_8), // drive 0.50, decay exp(-0.06)
-            (0.12, 0.295_671_1), // drive saturated, decay exp(-0.42)
-            (0.30, 0.100_408_6), // decay exp(-1.5)
-            (1.00, 0.001_505_7), // decay exp(-5.7)
+        // ---- 1. the spec, as an expression. NOTHING from this crate. ----
+        // If you change a number in here you are changing the SPECIFICATION
+        // of the follow-through, not fixing a test. `ANCHORS` below will
+        // stop matching, and that is correct: recompute them from the new
+        // expression OUTSIDE this crate before you touch them.
+        fn closed_form(t: f64) -> f64 {
+            let drive = (t / 0.12_f64).clamp(0.0, 1.0); //      RAMP_S
+            let decay = (-6.0_f64 * (t - 0.05_f64).max(0.0)).exp(); // SETTLE_RATE, HOLD_S
+            (0.35_f64 + 0.10_f64 * drive) * decay //  release yaw, OVERSHOOT_RAD
+        }
+
+        // ---- 2. the external anchors. NOT REGENERABLE FROM THIS CRATE. ----
+        // f64, 15 decimal places, from the expression above. The shipped
+        // f32 function cannot produce these: at t=0.06 it returns
+        // 0.376705855131, which differs in the 8th decimal. If a diff ever
+        // shows this table moving to values like that, someone pasted the
+        // code's output in - the assert below is what catches it.
+        const ANCHORS: [(f64, f64); 7] = [
+            (0.00, 0.350_000_000_000_000), // starts exactly on the release yaw
+            (0.03, 0.375_000_000_000_000), // drive 0.25, no decay yet
+            (0.05, 0.391_666_666_666_667), // drive 5/12, last frame before the settle
+            (0.06, 0.376_705_813_433_699), // drive 0.50, decay exp(-0.06)
+            (0.12, 0.295_671_068_916_776), // drive saturated, decay exp(-0.42)
+            (0.30, 0.100_408_572_066_793), // decay exp(-1.5)
+            (1.00, 0.001_505_684_455_862), // decay exp(-5.7)
         ];
-        for (t, want) in GOLDEN {
-            let got = spear_followthrough_yaw(t);
+        for (t, want) in ANCHORS {
+            let derived = closed_form(t);
+            assert!(
+                (derived - want).abs() < 1e-12,
+                "anchor at release_t={t} is {want}, but the closed form gives \
+                 {derived} (gap {:.3e}). Either the closed form was edited \
+                 without recomputing the anchors, or the anchors were \
+                 REGENERATED FROM THIS CRATE'S OWN f32 OUTPUT - which is the \
+                 one thing they must never be, and which shows up as a gap \
+                 near 4e-8 rather than near 1e-16",
+                (derived - want).abs()
+            );
+        }
+
+        // ---- 3. the real, shipped function against the spec ----
+        // dense enough that no feature of the curve hides between samples:
+        // the ramp (0..0.12), the hold corner (0.05), the clamp corner
+        // (0.12) and the long decay tail all get swept.
+        for step in 0..=1200 {
+            let t = step as f32 * 0.001;
+            let got = spear_followthrough_yaw(t) as f64;
+            let want = closed_form(t as f64);
             assert!(
                 (got - want).abs() < 1e-6,
-                "follow-through at release_t={t}: hand-computed {want}, got {got}"
+                "follow-through at release_t={t}: the closed form says {want}, \
+                 the shipped function returns {got} (gap {:.3e})",
+                (got - want).abs()
+            );
+        }
+
+        // ---- and directly against the external anchors ----
+        for (t, want) in ANCHORS {
+            let got = spear_followthrough_yaw(t as f32) as f64;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "follow-through at release_t={t}: externally computed {want}, got {got}"
             );
         }
     }

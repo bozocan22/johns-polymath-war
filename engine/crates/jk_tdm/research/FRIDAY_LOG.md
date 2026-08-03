@@ -69,6 +69,18 @@ the real function — the exact bug shipped once already (AUDIT.md, "bugs I
 introduced this session" #1) — and the old test came back **ok**. Under
 the rewrite it fails, along with two others.
 
+> **[ERRATUM — 2026-08-03, see "F1–F4" below. Read this before quoting the
+> paragraph above.]** That claim is true and is about *one test*. It is
+> not a claim about the suite, and it was read as one. Thor ran the
+> pre-change **suite** under the same mutation: **144 passed, 1 failed** —
+> `spear_followthrough_carries_past_the_release_then_settles` caught the
+> bug by another route. So D6 took detection from **one test to three**
+> and moved it onto the function's own contract. Real hardening; **not** a
+> rescue from zero coverage. Annotated rather than rewritten, because this
+> log is append-only. (The forearm claim two sections down is unaffected
+> and stands: 145/145 green with index 5 moved 6 ms means the suite
+> genuinely was blind there.)
+
 Fix: did the refactor spec §Step 1 asked for and Step 1 skipped.
 `chain_scale_from(onset, peak, elapsed, ramp)` and
 `spear_followthrough_yaw_from(release_t, tip_onset, tip_peak)` are the
@@ -349,3 +361,220 @@ quantity written without its unit is a quantity nobody can check** — and
 the check that would have caught it (does §2.2 agree with §3.3?) was
 available to every reader the whole time. Grep for the same physical
 quantity before trusting either instance of it.
+
+---
+
+## 2026-08-03 — F1–F4: Thor's two defects, plus the hazard I named wrong
+
+Thor reproduced all eight of my mutation proofs with **zero
+discrepancies**, then found two defects I missed and — more usefully —
+showed that the risk I called my most fragile was near-zero while the one
+I never named was the real one. Everything below is measured in a
+standalone f64/f32 harness compiled **outside the crate**, then proved
+in-tree by mutation.
+
+**149 passed, 0 failed, 2 ignored.** (The suite is 151 tests now, not 150:
+`c7d93b0` landed `mech_brace_is_gated_slowed_and_damped_by_its_own_constants`
+in `sim.rs` while I was mid-run. Nothing of mine touches it.)
+
+### F1 — GOLDEN's provenance was a comment, and a comment is not a guard
+
+This is the one that mattered, and Thor named it correctly. The old test
+carried seven literal output values under a comment saying they had been
+computed outside the crate. **Nothing enforced that.** The cheapest move
+available to the next maintainer who breaks the curve is to print the
+code's own output, paste it over the literals, and watch the test go
+green — at which point it has silently become a change-detector that pins
+the bug. Same defect class as the D6 test it replaced.
+
+Chose **(c) both**, but the two halves do different jobs and only one of
+them is load-bearing. The curve is now a **triangle**:
+
+1. `closed_form(t)` — the spec as an f64 expression containing **no crate
+   item at all**: not `SPEAR_RELEASE_YAW`, not the chain tables, not the
+   four local consts. Literally
+   `(0.35 + 0.10*min(t/0.12,1)) * exp(-6*max(t-0.05,0))`.
+2. `ANCHORS` — seven f64 values at 15 dp, computed from that expression
+   outside the crate, asserted against `closed_form` at **1e-12**.
+3. The real shipped f32 `spear_followthrough_yaw`, swept against
+   `closed_form` on a 1 ms grid over 0..1.2 s (1201 points, up from 7),
+   and checked against `ANCHORS` directly. Both at 1e-6.
+
+**Why regeneration now fails loudly.** The f32 function and the f64 closed
+form agree only to ~4e-8, so anchors pasted from this crate's own output
+miss the 1e-12 gate by a factor of **41,697** — and the assertion message
+says exactly that, by name. There is no table anywhere in the test that
+can be regenerated from the code to silence a real failure: break the
+function and (3) fails; paste the broken output into `ANCHORS` and (2)
+fails too. The only remaining route is editing `closed_form`, which is
+visibly editing the *specification* rather than refreshing a table. That
+distinction is the entire fix — the old shape could not make it.
+
+**PROVED BY MUTATION, three runs, and the third is the one that matters:**
+
+| # | mutation | result |
+|---|---|---|
+| F1-a | drop `+ tip_onset` from the real function | **146 passed, 3 failed** |
+| F1-b | …**and** regenerate `ANCHORS` from the broken code's f64 output | **146 passed, 3 failed** — still caught, at the 1e-12 gate, message fires |
+| F1-c | **counterfactual**: `git checkout` the OLD test shape, drop `+ tip_onset`, regenerate the f32 `GOLDEN` literals from the broken output | **147 passed, 2 failed** — `spear_followthrough_matches_its_hand_computed_curve` came back **ok** |
+
+F1-c is the proof that the hazard was real and not theoretical: under the
+old structure the regeneration attack **works**, and the golden test
+happily certifies a broken curve. Under the new one it does not.
+
+### F2 — units, in the block written to fix a units-ish overstatement
+
+`main.rs` divided a **drive-term** residual (1.788e-7, dimensionless,
+0..1) by a tolerance applied to **yaw** (1e-6 rad) and called the quotient
+"~5.6x". That is not a margin of anything. The sentence supplies its own
+correct conversion one clause earlier and then does not use it. The same
+file said **33x** for the same quantity six thousand lines away.
+
+Like-for-like, measured:
+
+- drive residual expressed as yaw: `1.788e-7 × OVERSHOOT_RAD` = **1.79e-8
+  rad** → 56x, if that were the whole story;
+- what the test actually sees — worst end-to-end divergence across the six
+  table variants, on the 1 ms grid the test itself sweeps — is **2.98e-8
+  rad** → **34x**. Bigger than the drive residual alone, because the
+  divide, the add and the decay multiply each round on top of it.
+
+**34x is now the single figure the file quotes**, in both places. I added
+one thing Thor did not ask for, because it changes the advice: the margin
+is **grid-dependent**. On a 1 µs grid the worst divergence is **5.96e-8
+rad → 17x**. So the "do not tighten toward 1e-7" warning is stronger than
+it looked — at 1e-7 that off-grid worst case leaves **1.7x**, and the test
+becomes a coin flip the moment anyone refines the sweep. That is now
+written down next to the tolerance.
+
+Thor's 8,290 / 1.788139e-7 / t=0.09359 / exactly-zero-after-saturation all
+reproduce to the digit.
+
+### F3 — an assertion whose message claimed more scope than it had
+
+The per-hop arm-compression check (D5's replacement) ended its failure
+message "indices 5 and 6 are the interpolated ones", which reads as a
+claim that it constrains them at the table's resolution. It does not.
+Stepping one index at a time with the other seven fixed, monotonicity
+survives across:
+
+```
+idx5 in [0.093 .. 0.098]   (shipped 0.094: -1 / +4 ms slack)
+idx6 in [0.112 .. 0.117]   (shipped 0.114: -2 / +3 ms slack)
+```
+
+So it fires on idx5 down >=2 ms or up >=5 ms, idx6 down >=3 ms or up
+>=4 ms — and on **neither** at 1 ms. Thor's measurement (idx6
+0.114 -> 0.115 passes) reproduces exactly.
+
+**I narrowed the message and left the assertion alone**, deliberately, and
+this is the one place I chose against the more impressive-looking option.
+The only way to broaden this check to 1 ms is to re-derive the geometric
+ratio inside it — which is
+`the_arm_onsets_reproduce_an_independently_solved_geometric_root`'s entire
+job. A second copy would be redundancy wearing the costume of coverage:
+the same error class, in a new place, added while fixing that error class.
+What was false was the **claim**, so the claim is what changed. The
+message now states the numeric windows and names the test that does cover
+1 ms.
+
+**PROVED BY MUTATION, at both edges of the claim:**
+
+| # | mutation | result |
+|---|---|---|
+| F3-a | `CHAIN_ONSET_OFFSETS[6]` 0.114 → **0.115** (inside the stated window) | **148 passed, 1 failed** — only `geometric_root`; the arm-hop test passes, exactly as the new message says |
+| F3-b | `CHAIN_ONSET_OFFSETS[6]` 0.114 → **0.119** (outside it) | **147 passed, 2 failed** — the arm-hop assertion fires, as the window predicts |
+
+A message that states a bound is only worth having if the bound is right
+at both ends, so both ends were tested.
+
+### F4 — a stale number in my own doc
+
+`main.rs` said the golden test's worst f32-vs-f64 gap was "5.5e-8, so 1e-6
+leaves ~18x". Thor measured **5.96e-8 / 16.8x**; confirmed to the digit.
+Corrected, and superseded — carrying the anchors at f64 instead of
+7-significant-digit f32 recovers the rounding those literals threw away,
+so the current margins are:
+
+- real f32 fn vs `closed_form`, 1 ms sweep 0..1.2 s: worst **6.00e-8** at
+  t=0.115 → **16.7x**
+- real f32 fn vs `ANCHORS` at the seven points: worst **4.17e-8** at
+  t=0.06 → **24x**
+
+### Thor's verdict on my three volunteered risks: I agree on all three
+
+Not conceding to be agreeable — I re-measured each one.
+
+**(a) `exp()` bit-stability — agreed, overstated, and I ranked it worst
+when it is nearly the best.** Thor's ulp framing is the right one and I
+did not think of it: the test does not need bit-stability, it needs ~37
+ulp, and real `expf` is within ~1. I checked the one thing that could have
+changed the answer — my new dense sweep calls `exp` at 1201 points instead
+of 7, so I re-derived the binding constraint by perturbing the decay
+ULP-by-ULP until 1e-6 breaks: **36 ULP, at t=0.115**, versus Thor's 37 for
+the old 7 rows. Widening the sweep did **not** widen the exposure.
+(The naive sweep-wide minimum is 21 ULP at t=0.048 — but that point sits
+before `HOLD_S`, where the argument is exactly 0 and `exp(0)==1.0` is
+exact in every conforming libm. Excluding the zero-argument points is what
+gives 36. Worth stating, because 21 is the number you get if you run the
+measurement without thinking about it.)
+
+**(b) the 1.58x geometric-root margin — agreed, and I misframed it.** My
+numbers were right and my category was wrong. A margin is a risk only if
+the quantity varies; that test is a 200-step bisection over IEEE-754
+doubles with no transcendental and no libm call anywhere in it, so it is
+bit-deterministic on every conforming target. The 1.58x is the distance of
+the true 0.0943161 from the 0.0945 rounding boundary — a fact about the
+anthropometric data, not a property of the test. And the tightness is a
+**virtue**: F3-a above only fails because that tolerance is tight. Loosen
+it and you delete the only 1 ms guard on index 6.
+
+**(c) "7 numbers to retune" — Thor agreed with the engineering and named
+the failure mode I missed.** Correct, and it is the most valuable thing in
+his review. I flagged the *cost* of the golden table and never asked the
+obvious next question: what stops someone paying that cost the cheap,
+wrong way? F1 above is the answer.
+
+**The pattern, stated plainly because it is the actual lesson:** all three
+misses are the same shape. I audited the numbers I had written and not the
+*process by which the next person will change them*. (a) and (b) are risks
+to a value; (c) is a risk to a workflow, and that is where this was going
+to erode. My evidence was clean and my risk ranking was inverted — I was
+hardest on the parts that hold up best.
+
+### Lesson
+
+**A comment asserting provenance is not a guard; it is a note asking to be
+ignored.** If a test carries numbers that came from outside the code, the
+test must be able to *detect* numbers that came from inside it. Here the
+detector was free: f32 output and f64 truth differ by ~4e-8, so a 1e-12
+gate on an independently-derived closed form separates them by four orders
+of magnitude. Ask of every pinned table: *what does the maintainer do when
+this goes red, and does the cheapest thing they can do leave it honest?*
+
+### What I could not do / am least sure about
+
+- **`ANCHORS` is now cross-platform-sensitive in a way the old table was
+  not**, and this is the thing I would look at first if CI ever goes red
+  on a new target. The 1e-12 gate compares f64 `exp()` against 15-dp
+  literals. Slack is ~20,000 ULP of f64 `exp` — enormous, and no
+  conforming libm is anywhere near it — but it is a *tighter* coupling to
+  libm than the old 1e-6 f32 comparison, and I verified it on exactly one
+  toolchain (rustc 1.97.1, x86_64-pc-windows-msvc). Measured, not assumed:
+  4 of the 7 anchors call `exp` at all; the other 3 are at or before
+  `HOLD_S` and are exact. If it ever fires on a new platform the fix is to
+  loosen 1e-12 toward 1e-10 — **not** to touch the anchors, which is
+  precisely the move the gate exists to stop. Written here because the
+  assertion message cannot say it.
+- **F3 leaves indices 5 and 6 guarded at 1 ms by exactly one test.** That
+  is a deliberate choice against redundancy, not an oversight, but it does
+  mean `geometric_root` is a single point of failure for both interpolated
+  indices. If it is ever weakened, they become unguarded.
+- **I did not re-verify Thor's ulp figures for the four old golden rows
+  individually** (39/37/146/9399). I reproduced the *binding* constraint
+  under my new structure and it agrees; I did not check the other three.
+- **`main.rs` only.** `sim.rs` untouched; `SOURCES.md` untouched (Toto's);
+  `TOTO_LOG.md` had uncommitted changes from another agent throughout and
+  I left it alone — every revert in this session was a targeted
+  `git checkout -- engine/crates/jk_tdm/src/main.rs`, never a bare
+  `git stash`.
