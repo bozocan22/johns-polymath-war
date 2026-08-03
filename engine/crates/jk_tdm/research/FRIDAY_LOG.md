@@ -717,3 +717,214 @@ re-read diverges by the held weapons rather than by the mounts.
    state; a single-shot hull cannon has no pattern to walk. It adds one
    honest `punch_vel[0]` kick. If the design intended the autocannon to
    participate in spray recovery, that is not implemented.
+
+---
+
+## 2026-08-03 — Thor's §C review: the three surviving mutations, the heat gate rebuilt, two cross-talk bugs (`sim.rs` only)
+
+**Baseline at session start: 162 passed, 0 failed, 2 ignored.**
+**End: 165 passed, 0 failed, 2 ignored** (+3, all mine, all in
+`sim::tests`). Every mutation in this session was reverted with a
+targeted `git checkout -- engine/crates/jk_tdm/src/sim.rs`; never a bare
+`git stash`. `main.rs` was never opened for writing.
+
+### The headline: my §C shipped with an unfalsifiable core
+
+Thor measured three mutations that passed the entire suite:
+
+| Mutation | Before this session |
+|---|---|
+| ungate the gatling heat decay (sustain 9.08 s → 29.8 s) | **161/0, SURVIVED** |
+| silence both hull mounts against the horde | **161/0, SURVIVED** |
+| delete the ENTIRE forced-vent mechanism | **161/0, SURVIVED** |
+
+`gatling_vent_t` was never set non-zero anywhere in the suite. The
+gatling's whole identity — heat-limited sustain — could be deleted
+without a single test noticing.
+
+### F1 — the root cause was a self-referential test with a false comment
+
+`gatling_heat_ramps_slower_than_minigun_in_absolute_terms` closed with:
+
+```rust
+let gat_s  = 100.0 / (GATLING_HEAT_PER_SHOT / GATLING_FIRE_PERIOD);
+let mini_s = 100.0 / (MINIGUN_HEAT_PER_SHOT / gun(GunKind::Minigun).fire_period);
+assert!(gat_s > mini_s * 1.5, "...");
+```
+
+I labelled that "TIME TO A FORCED VENT". It is not a time to anything —
+it steps nothing, it cannot see the heat **decay**, it cannot see the
+**vent latch**, and it cannot see that the fire period is quantised to
+whole ticks. It evaluated to **7.78 s** against a real measured
+**9.08 s**. Worse, it was the **only** mention of time-to-vent in the
+suite, which is exactly why two of the three mutations above survived:
+the number they broke was never read out of the sim.
+
+That block is deleted (with a comment recording what stood there and why
+it was worthless). In its place, stepping the sim:
+
+`gatling_sustains_about_twice_the_minigun_before_a_forced_vent` holds
+the trigger through `step()` and records the tick `gatling_vent_t`
+latches, then takes the **same** measurement off the man-portable
+minigun and asserts the *ratio* band the design sentence states
+("about twice the minigun"), not a magic constant. It also asserts the
+latch does something: the mount is locked out while venting, the vent
+ends, and it ends with the pool at zero.
+
+### F2 — my instinct on the heat gate was right; my stated mechanism was wrong
+
+I wrote that gating decay on `fire_cd <= 0.0` "mirrors how the minigun
+gates its decay on the trigger hold-timer." It does not, and Thor
+measured the gap:
+
+- `spin_cmd` is set **before every early return** in `try_fire`, so
+  while the trigger is held it is *always* > 0 → the minigun's decay is
+  suppressed **100%**.
+- `fire_cd <= 0.0` is true for **exactly one tick per fire cycle**, so
+  the gatling still shed `GATLING_HEAT_DECAY * DT` every cycle —
+  0.0792 heat per shot, **88.9% suppression, not 100%**.
+
+That residual is **linear in DT**, so my gate made the gatling's whole
+identity tick-rate dependent: **11.18 s @ 60 Hz, 9.08 s @ 120 Hz,
+8.22 s @ 240 Hz — a 36% swing.** The shipped 9.08 s did hit the design
+intent (2.06× the minigun's 4.417 s), but by an accident that moves with
+`SIM_HZ`.
+
+Fixed as Thor recommended: a dedicated `gatling_trigger_t` hold timer,
+same 70 ms and same shape as `MINIGUN_SPIN_HOLD_S`, set at the top of
+`try_fire_gatling` **before** every early return. The decay now gates on
+it, and the cycle clock moved off `fire_cd` to its own `gatling_cd`.
+
+**Measured after the fix** (by temporarily setting `SIM_HZ` in
+`jk_core/src/timestep.rs`, running only this test, and reverting with
+`git checkout -- engine/crates/jk_core/src/timestep.rs`):
+
+| SIM_HZ | gatling sustain | minigun sustain | ratio |
+|---|---|---|---|
+| 60 | 9.267 s | 4.433 s | **×2.090** |
+| 120 | **8.333 s** | **4.417 s** | **×1.887** |
+| 240 | 7.867 s | 4.133 s | **×1.903** |
+
+**Correction to Thor's phrasing, which I want on the record: this is not
+"tick-rate stable".** It removes the *decay* term's DT dependence, which
+was the bug. What remains is the ceil-quantisation of the fire period
+itself — `ceil(0.07/DT)*DT` is 0.0833 s at 60 Hz, 0.075 s at 120 Hz,
+0.0708 s at 240 Hz — a **17.8% swing** in absolute sustain (down from
+36%). The minigun carries the same quantisation (4.13–4.43 s), which is
+precisely why the new test asserts a **ratio band** (1.5× to 3.0×): the
+ratio moves only 1.887–2.090 across all three rates, and the test passes
+at every one of them.
+
+### F3 — two cross-talk bugs, the second of which I did not disclose
+
+1. **`fire_cd`.** A gatling round set `f.fire_cd = 0.07` — the
+   **pilot's carried-gun** clock. A pilot who dismounted mid-burst found
+   the rifle in his hands throttled by a gun bolted to a chassis he had
+   just climbed out of. `sim.rs:1399-1401` *already states this rule* at
+   the declaration of `autocannon_cd` ("its own field, not `fire_cd`, so
+   the two mounts cannot silently share a cooldown"). The gatling was
+   the lone violator of a rule the file itself writes down. Fixed by
+   giving it `gatling_cd`.
+2. **`last_shot_at` — undisclosed by me, found by Thor.** Both mounts
+   wrote it. Its **only** consumer is the carried gun's `spray_i` decay
+   gate (`t - last_shot_at > gun(f.gun).fire_period * 1.1`). The mount
+   refires every **0.075 s**, faster than *every* gun's threshold (the
+   AK's is 0.1155 s), so **`spray_i` could not decay at all while the
+   hull gatling fired**. The pilot dismounted into a fully-bloomed
+   recoil pattern he had not fired one round to earn. Fixed by deleting
+   the write from **both** mounts — a hull mount has no spray table to
+   walk, which is the reason the autocannon already refuses to touch it.
+
+Both are pinned by
+`firing_the_hull_mounts_leaves_the_pilots_carried_gun_untouched`, and
+each was mutation-proven **separately**.
+
+### F4 — the horde noise is now falsifiable
+
+`hull_mounts_are_heard_by_the_horde` places one zombie 4 m from the
+muzzle and one 398 m away, fires each mount in Extraction, and asserts
+the near one is alerted **and re-targeted onto the muzzle position**
+while the far one is not. Both zombies sit off the fire axis, so the
+only thing that can alert them is the noise, not a round.
+
+### F5 — three corrections to my last entry
+
+1. I wrote that "all 20-odd existing `apply_hit` call sites read
+   unchanged." Accurate statement: they are **all inside `mod tests`**.
+   After the `apply_hit_dmg` split, **`apply_hit` has zero production
+   callers.** It survives as a test-facing wrapper. That is fine, but it
+   is not what "20-odd call sites" implies.
+2. I **under**-claimed the defect I found. `apply_hit` re-derived from
+   the held gun in **two** places — the zone multiplier (~5699) and the
+   armour floor (~5711) — and I described one. I fixed both.
+3. `GATLING_FIRE_PERIOD = 0.07` does **not** mean 857 RPM. `gatling_cd`
+   is decremented by `DT` and the gate opens at `<= 0`, so the real
+   period is `ceil(0.07/DT)*DT` = **0.075 s = 800 RPM** at the 120 Hz
+   floor (720 RPM at 60 Hz, 847 at 240 Hz). Now documented at the
+   constant, before someone tunes it against a published RPM figure.
+
+### Mutation proofs — every one applied, run, recorded, reverted
+
+| # | Mutation | Test that caught it | Result |
+|---|---|---|---|
+| **d** | ungate the heat decay (`else if f.gatling_trigger_t <= 0.0` → `else`) | `gatling_sustains_...` | **FAILED. 164 passed; 1 failed** |
+| **e** | silence both mounts vs the horde (both `emit_noise` calls removed) | `hull_mounts_are_heard_by_the_horde` | **FAILED. 164 passed; 1 failed** |
+| **f** | delete the ENTIRE forced-vent mechanism (latch + countdown + lockout gate) | `gatling_sustains_...` | **FAILED. 164 passed; 1 failed** |
+| **g** | restore cross-talk 1: the gatling writes the pilot's `fire_cd` again | `firing_the_hull_mounts_leaves_...` | **FAILED. 164 passed; 1 failed** |
+| **h** | restore cross-talk 2: the gatling writes `last_shot_at` again | `firing_the_hull_mounts_leaves_...` | **FAILED. 164 passed; 1 failed** |
+| **i** | the forced vent ends without clearing the heat pool | `gatling_sustains_...` | **FAILED. 164 passed; 1 failed** |
+
+**d, e and f are Thor's three survivors.** All three now fail. Suite
+re-confirmed at 165/0/2 after the final revert.
+
+### What I am least sure about
+
+1. **Moving the gatling off `fire_cd` has a client-side consequence I
+   cannot see from inside my file scope, and it is the thing I would
+   most want checked.** `main.rs` detects fresh shots by watching
+   `fire_cd` **jump up** — at least five such sites (casing ejection
+   ~3043-3057, scope flinch ~5818, muzzle/audio ~5947-5951, ~8801-8802,
+   ~8853-8855) plus view-model kick and HUD "in combat" reads at
+   ~6313/~6429/~8039/~8160. The hull gatling was accidentally feeding
+   all of them. After this change it no longer does, so **the hull
+   gatling may have lost its muzzle flash, casings and shot audio.** I
+   judged the change correct anyway — the autocannon has *always* been
+   invisible to those sites (it has used `autocannon_cd` since §C
+   landed), so this makes the two mounts consistent rather than creating
+   a new problem class, and `spec.fire_period - p.fire_cd` at ~8039 was
+   already computing garbage for a pilot (it mixes the mount's 0.07 with
+   the *carried* gun's period). But the hull mounts' FX now need to key
+   off `gatling_cd`/`autocannon_cd`, and that is a `main.rs` edit I am
+   not permitted to make. **Someone should dispatch it.** If mech
+   shooting looks silent in game, this is why.
+2. **The ratio band (1.5×–3.0×) is wide on purpose and the upper bound
+   is currently redundant.** On today's numbers the 25 s loop cap is what
+   catches the ungated-decay mutation (it runs ~40 s), not the `< 3.0×`
+   assert. I kept the upper bound so that raising the cap later cannot
+   silently disarm the test — but it has not itself been shown to be
+   load-bearing, and I would rather say so than imply six independent
+   guards.
+3. **The 60/120/240 Hz measurements required editing
+   `jk_core/src/timestep.rs`, which is outside the file scope I was
+   given.** I treated it as a measurement instrument (same class as a
+   mutation): change, run one test, revert immediately with a targeted
+   `git checkout`, verify `SIM_HZ` is back to 120 and `git status` is
+   clean. It was. But there was another agent in this tree and a broken
+   `DT` would have broken their build for the ~30 s it took; if that was
+   the wrong call, it was mine.
+4. **The minigun comparison pre-spins the barrels** (`spin_t =
+   MINIGUN_SPINUP_S`) so both sides measure *barrel* time to cook-off.
+   Including the minigun's 0.4 s spin-up would push it to ~4.8 s and the
+   ratio to ~1.74 — still inside the band, but it is a judgement call
+   about what "sustain" means and I made it inside the test setup. It
+   matches how Thor measured 4.417 s.
+5. **`gatling_trigger_t` is set even while the mount is venting.** That
+   mirrors `spin_cmd` exactly (which is also set before the vent check),
+   and it is harmless today because the vent branch takes priority over
+   the decay branch. But if anyone adds a second consumer of
+   `gatling_trigger_t` meaning "is firing", it will read true through a
+   3.5 s lockout during which nothing leaves the barrels.
+6. **I did not wire the bot fire path, per the dispatch.** Bot mechs
+   remain permanently disarmed after 150 rounds inside a full-hull
+   chassis. That is real, it is Thor's finding, and it is now *safe* to
+   fix — the `fire_cd` sharing that made it dangerous to land is gone.
