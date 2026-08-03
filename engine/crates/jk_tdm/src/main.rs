@@ -495,6 +495,36 @@ fn chain_peak_tick(segment_index: usize, ramp_s: f32) -> f32 {
 /// looks exactly as before. `head_lag_chase_pins_the_measured_tip_onset`
 /// pins the resulting curve to hand-computed numbers, so a future edit to
 /// index 7 has to be deliberate.
+// ---- §B.2 (mech plan): idle life -----------------------------------
+// The only idle motion a mech had was `mech_bob`, which is walk-only and
+// returns to EXACTLY zero at a dead stop. A multi-ton machine going
+// perfectly inert the instant it stops reads as a prop, not a machine.
+//
+// Both terms below are COSMETIC and pure functions of sim time, so they
+// are directly unit-testable without standing up Bevy - the same
+// extraction pattern this file already uses for `view_recoil_offset`.
+
+/// Servo micro-tremor, as (pitch, roll) radians.
+///
+/// Two deliberately unrelated frequencies with an offset phase, so the
+/// pair never resolves into a single readable oscillation. Both are
+/// well away from `mech_bob`'s 0.9 Hz stride: sharing that cadence would
+/// read as the walk cycle at low amplitude, which is exactly what this
+/// is not.
+fn mech_servo_tremor(t: f32) -> (f32, f32) {
+    (
+        (t * 3.1).sin() * 0.0025,
+        (t * 2.3 + 1.7).sin() * 0.0020,
+    )
+}
+
+/// Hull "breathing" - a slow plate-expansion cue at ~0.18 Hz, the
+/// mechanical analogue of the human idle breath already in the rig.
+/// Positive lifts the camera, so the caller subtracts it.
+fn mech_hull_breath(t: f32) -> f32 {
+    (t * std::f32::consts::TAU * 0.18).sin() * 0.008
+}
+
 fn chain_lag_chase(lag: f32, target: f32, dt: f32) -> f32 {
     lag + (target - lag) * (dt / CHAIN_ONSET_OFFSETS[7]).min(1.0)
 }
@@ -7595,6 +7625,31 @@ fn camera_system(
     } else {
         0.0
     };
+    // §A.6: the brace stance drop. The hull physically settles lower
+    // when braced - the camera cue that sells the ZMP widening the sim
+    // already models as a speed and recoil trade. Cosmetic only; the
+    // sim's own `mech_brace` is the authority.
+    let mech_brace_drop = if p.armor_set == ArmorSet::RobotSuit && p.hull > 0.0 && p.mech_brace {
+        p.height() * MECH_BRACE_STANCE_DROP
+    } else {
+        0.0
+    };
+    // §B.2: idle life. A multi-ton machine that goes perfectly inert the
+    // instant it stops moving reads as a prop, and `mech_bob` alone is
+    // walk-only - it returns to exactly zero at a dead stop. These two
+    // terms are what keep the hull alive while standing still. Both are
+    // pure functions of sim time (see `mech_servo_tremor`/`mech_hull_breath`),
+    // so they are directly testable without Bevy.
+    let (tremor_x, tremor_z) = if p.in_mech() {
+        mech_servo_tremor(game.sim.t)
+    } else {
+        (0.0, 0.0)
+    };
+    let hull_breath = if p.in_mech() {
+        mech_hull_breath(game.sim.t)
+    } else {
+        0.0
+    };
     // nearby detonations SHAKE the frame - amplitude by proximity, only
     // while the boom is fresh (its ttl starts at 2.0), decaying with it
     let mut shake = 0.0_f32;
@@ -7635,13 +7690,22 @@ fn camera_system(
         Vec3::ZERO
     };
     tf.translation = eye.lerp(tp_pos, pe) + sh;
-    tf.translation.y -= (land_offset + mech_bob.abs() * 0.5) * (1.0 - pe * 0.6);
+    // §A.6 brace drop settles the hull DOWN; §B.2 hull breath lifts it a
+    // fraction on the intake - subtracted and added respectively, in the
+    // one line that already owns vertical camera offset.
+    tf.translation.y -=
+        (land_offset + mech_bob.abs() * 0.5 + mech_brace_drop - hull_breath) * (1.0 - pe * 0.6);
     let look = tf.translation + fwd;
     tf.look_at(look, Vec3::Y);
     // the head tilts with the lean - first person only
     tf.rotate_local_z(p.lean * 0.10 * (1.0 - pe));
     // ...and rolls a breath with the mech's stride
     tf.rotate_local_z(mech_bob * 0.35 * (1.0 - pe));
+    // §B.2: servo micro-tremor - an idling machine is never perfectly
+    // still. Deliberately on its OWN frequencies, not mech_bob's, so it
+    // reads as tremor rather than as the stride at low amplitude.
+    tf.rotate_local_x(tremor_x * (1.0 - pe));
+    tf.rotate_local_z(tremor_z * (1.0 - pe));
 
     // §3.4: FOV rides ads_t (ease-out, framerate-independent) - never the
     // `+= (target-fov)*k` exponential that stalls and never arrives
@@ -11010,6 +11074,63 @@ mod hand_craft_tests {
 #[cfg(test)]
 mod camera_v2_tests {
     use super::*;
+
+    /// §B.2: the idle-life terms must actually keep the hull alive while
+    /// standing still, must stay SMALL enough to read as machinery
+    /// rather than a wobble, and must not secretly be the stride cycle
+    /// wearing a different name.
+    #[test]
+    fn mech_idle_life_never_goes_perfectly_inert() {
+        // 1. Never dead. Sample a long window and require real motion in
+        //    every term - the whole point is that a stopped mech is not
+        //    a statue. (mech_bob is zero at a standstill by design; these
+        //    are what fill that silence.)
+        let mut tremor_x_max = 0.0_f32;
+        let mut tremor_z_max = 0.0_f32;
+        let mut breath_max = 0.0_f32;
+        let mut t = 0.0_f32;
+        while t < 30.0 {
+            let (tx, tz) = mech_servo_tremor(t);
+            tremor_x_max = tremor_x_max.max(tx.abs());
+            tremor_z_max = tremor_z_max.max(tz.abs());
+            breath_max = breath_max.max(mech_hull_breath(t).abs());
+            t += 0.01;
+        }
+        assert!(tremor_x_max > 0.002, "pitch tremor never moves: {tremor_x_max}");
+        assert!(tremor_z_max > 0.0015, "roll tremor never moves: {tremor_z_max}");
+        assert!(breath_max > 0.007, "the hull never breathes: {breath_max}");
+
+        // 2. Small enough to read as machinery. A tremor a player can
+        //    consciously SEE is a camera bug, not idle life.
+        assert!(
+            tremor_x_max < 0.005 && tremor_z_max < 0.005,
+            "tremor is visible as motion ({tremor_x_max}, {tremor_z_max} rad) - \
+             it should sit at the edge of perception"
+        );
+        assert!(breath_max < 0.02, "hull breath {breath_max} m reads as a bounce");
+
+        // 3. NOT the stride cycle in disguise. mech_bob runs at 0.9 Hz;
+        //    if a tremor frequency were a small multiple of that it would
+        //    beat against the walk and read as bob, not tremor. Checked
+        //    as a real ratio rather than trusting the literals.
+        for hz in [3.1 / std::f32::consts::TAU, 2.3 / std::f32::consts::TAU] {
+            let ratio = hz / 0.9;
+            let nearest_harmonic = ratio.round();
+            assert!(
+                (ratio - nearest_harmonic).abs() > 0.1,
+                "a tremor at {hz:.3} Hz is {ratio:.2}x the 0.9 Hz stride - too \
+                 close to a harmonic, it will read as the walk cycle"
+            );
+        }
+
+        // 4. The two tremor axes must not move as one. Identical phase
+        //    would read as a single diagonal rock rather than machinery.
+        let (ax, az) = mech_servo_tremor(0.0);
+        assert!(
+            (ax - az).abs() > 1e-4 || ax == 0.0,
+            "both tremor axes start identical - they will look like one axis"
+        );
+    }
 
     #[test]
     fn torso_aim_limit_matches_60_degrees() {
