@@ -15,7 +15,9 @@
 //! rendering interpolates nothing yet (M3 will add state interpolation).
 
 use jk_core::timestep::DT;
-use jk_wall::{PlayerInput, Side, SquadCommand, WallSim, WallSimConfig};
+use jk_wall::{
+    PlayerInput, Side, SquadCommand, WallSim, WallSimConfig, LIVE_CLIENT_RETENTION_STEPS,
+};
 use macroquad::prelude::*;
 
 const CAM_DIST: f32 = 3.8;
@@ -86,6 +88,10 @@ fn shield_color(side: Side) -> Color {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut sim = WallSim::new(WallSimConfig::default());
+    // This client never stops stepping — cap history or it grows without
+    // bound for as long as the window is open.
+    sim.telemetry
+        .set_retention(Some(LIVE_CLIENT_RETENTION_STEPS));
     let mut player = sim.take_player(Side::A, 0, 4).expect("player slot");
     let mut cam = ClientCam {
         eye: vec3(0.0, CAM_HEIGHT, -8.0),

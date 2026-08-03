@@ -2,12 +2,46 @@
 //! These are slow-ish integration tests; run in release for comfort.
 
 use jk_core::timestep::SIM_HZ;
-use jk_wall::{Side, SquadCommand, WallSim, WallSimConfig};
+use jk_wall::{Side, SquadCommand, WallSim, WallSimConfig, LIVE_CLIENT_RETENTION_STEPS};
 
 fn run(sim: &mut WallSim, secs: usize) {
     for _ in 0..(secs * SIM_HZ as usize) {
         sim.step();
     }
+}
+
+/// `step()` must record through the retention policy, not straight into the
+/// backing `Vec`. Tested here rather than only on `Telemetry` because the
+/// unit tests exercise the mechanism while THIS exercises the wiring — and
+/// the wiring is the part that silently reverts if someone writes
+/// `telemetry.steps.push(..)` again.
+#[test]
+fn a_capped_sim_stops_growing_but_an_uncapped_one_keeps_everything() {
+    let secs = 30;
+    let ticks = secs * SIM_HZ as usize;
+
+    let mut capped = WallSim::new(WallSimConfig::default());
+    capped
+        .telemetry
+        .set_retention(Some(LIVE_CLIENT_RETENTION_STEPS));
+    run(&mut capped, secs);
+    assert!(
+        capped.telemetry.steps.len() <= LIVE_CLIENT_RETENTION_STEPS * 2,
+        "capped sim grew to {} steps after {ticks} ticks",
+        capped.telemetry.steps.len()
+    );
+    // and the tail is still live data the client can render
+    assert!(capped.telemetry.steps.last().is_some());
+
+    // The default must remain unbounded — the spike report reads the oldest
+    // entries to find the first casualty and the first breach.
+    let mut uncapped = WallSim::new(WallSimConfig::default());
+    run(&mut uncapped, secs);
+    assert_eq!(
+        uncapped.telemetry.steps.len(),
+        ticks,
+        "default retention must keep every step"
+    );
 }
 
 /// (1) Determinism: same seed → bit-identical trajectories.

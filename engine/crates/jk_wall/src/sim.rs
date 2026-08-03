@@ -1012,7 +1012,10 @@ impl WallSim {
 
         // ---- 5. cohesion + breach detection -----------------------------
         let metrics = self.collect_metrics(interface_force);
-        self.telemetry.steps.push(metrics);
+        // Through `push`, not `steps.push`: a host that steps forever caps
+        // history via `Telemetry::set_retention`, and a direct push would
+        // silently bypass that.
+        self.telemetry.push(metrics);
     }
 
     /// Current front line: per file, the most-forward active man; returns

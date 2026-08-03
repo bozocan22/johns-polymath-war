@@ -19,7 +19,9 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use jk_core::timestep::DT;
-use jk_wall::{PlayerInput, Side, SquadCommand, WallSim, WallSimConfig};
+use jk_wall::{
+    PlayerInput, Side, SquadCommand, WallSim, WallSimConfig, LIVE_CLIENT_RETENTION_STEPS,
+};
 
 const WAIST_Y: f32 = 0.98;
 
@@ -268,6 +270,10 @@ fn menu_buttons(
                         seed: 0xC0FFEE + *restarts,
                         ..Default::default()
                     });
+                    // This client never stops stepping — cap history or it
+                    // grows without bound for as long as the window is open.
+                    sim.telemetry
+                        .set_retention(Some(LIVE_CLIENT_RETENTION_STEPS));
                     let player = sim.take_player(Side::A, 0, 4).expect("player slot");
                     *game = Game {
                         sim,
@@ -436,6 +442,10 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let mut sim = WallSim::new(WallSimConfig::default());
+    // This client never stops stepping — cap history or it grows without
+    // bound for as long as the window is open.
+    sim.telemetry
+        .set_retention(Some(LIVE_CLIENT_RETENTION_STEPS));
     let player = sim.take_player(Side::A, 0, 4).expect("player slot");
 
     let scenes = CharacterScenes {
