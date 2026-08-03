@@ -1383,6 +1383,22 @@ pub struct Fighter {
     /// §A: Mech Brace held - wide stance, near-stationary, damped recoil.
     /// Deliberately a separate field from `brace`: see the constants.
     pub mech_brace: bool,
+    /// §C: which hull mount the trigger currently drives. Both mounts
+    /// are always present on a live chassis - this is a targeting mode,
+    /// not an inventory slot (see `MechWeapon`).
+    pub mech_weapon: MechWeapon,
+    /// §C: the hull gatling's own 0..100 heat pool and forced-vent lock.
+    /// Kept SEPARATE from the minigun's `heat`/`vent_t` for the same
+    /// reason `stride_heat` is: those two drive the MINIGUN's vent state
+    /// machine (barrel glow, vent audio, fire lockout) gated purely on
+    /// `gun == Minigun` - and a mech pilot may well be carrying the
+    /// minigun, in which case a hot hull mount would hand him an
+    /// instant, unearned lockout on the gun in his hands.
+    pub gatling_heat: f32,
+    pub gatling_vent_t: f32,
+    /// §C: the autocannon's slow cycle clock. Its own field, not
+    /// `fire_cd`, so the two mounts cannot silently share a cooldown.
+    pub autocannon_cd: f32,
     /// §5 knife swing clock — 0 idle; counts up through wind → active →
     /// recovery. `knife_committed` = the held lunge variant.
     pub knife_phase: f32,
@@ -2369,6 +2385,62 @@ pub const BRACE_SPEED_MULT: f32 = 0.25;
 pub const MECH_BRACE_STANCE_DROP: f32 = 0.12; // fraction of height() the hull sinks
 pub const MECH_BRACE_SPEED_MULT: f32 = 0.12; // below infantry's 0.25 - braced is near-planted
 pub const MECH_BRACE_RECOIL_DAMP: f32 = 0.30; // fraction of unbraced kick retained
+
+// ---- §C: the mech's hull-mounted weapons ----------------------------
+/// The chassis' two hull mounts - rigidly bolted, never held, always
+/// BOTH present the moment the suit is equipped. Selecting between them
+/// is a targeting-mode switch, not a pickup or a loadout choice.
+///
+/// WHY THIS IS NOT A `GunKind`. `GunKind` is the spine of the INFANTRY
+/// weapon pipeline: `gun(kind) -> GunSpec`, `ALL_WEAPONS`/`N_WEAPONS`
+/// and the `vm.weapons[N_WEAPONS]` viewmodel array, `weapon_slot`,
+/// `reload_pose`, the loadout screen's `PRIMARIES`/`GunClass` tables,
+/// and a per-weapon punch-slot mapping. Every one of those encodes
+/// "a carryable, swappable, loadout-selectable gun with a magazine and
+/// a pair of hands on it". These two are STRUCTURAL - never picked up,
+/// never swapped into a slot, never reloaded, never in a loadout, and
+/// there is no hand pose for them. Routing them through `GunKind` would
+/// mean answering ~8 exhaustive matches with semantics that do not
+/// apply, and every one of those answers would be a lie the next
+/// feature reads as truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MechWeapon {
+    #[default]
+    Gatling,
+    Autocannon,
+}
+/// Gatling: SUPPRESSION. Every number is set against the man-portable
+/// minigun, because that is the weapon a player will compare it to.
+/// Heat per round is BELOW the minigun's 1.5 and the fire period is a
+/// touch longer than its 0.06 - together those two make the hull gun
+/// sustain roughly twice as long before it cooks off, which is the
+/// whole identity: the minigun is a 4-second scream, this is the wall
+/// of fire you walk behind.
+pub const GATLING_HEAT_PER_SHOT: f32 = 0.9;
+/// Below MINIGUN_HEAT_DECAY (16.5): a sealed hull mount has no open
+/// barrel shroud to dump heat through, so it sheds it slower once the
+/// trigger comes off. The longer sustain is paid for with a longer wait.
+pub const GATLING_HEAT_DECAY: f32 = 9.5;
+/// Longer than the minigun's forced 3.0 s, for the same reason.
+pub const GATLING_VENT_FORCED_S: f32 = 3.5;
+pub const GATLING_FIRE_PERIOD: f32 = 0.07; // same ROF class as the minigun's 0.06
+pub const GATLING_DAMAGE: f32 = 9.0; // near the minigun's 8.0 - high ROF, low per-round
+pub const GATLING_SPREAD_COLD: f32 = 0.018;
+pub const GATLING_SPREAD_HOT: f32 = 0.052;
+/// Autocannon: PRECISION. ~7 unarmoured hits through MECH_HULL (1000),
+/// on a slow cycle and a tight cone - the deliberate opposite of the
+/// gatling's spray.
+pub const AUTOCANNON_DAMAGE: f32 = 145.0;
+pub const AUTOCANNON_CYCLE_S: f32 = 1.35;
+pub const AUTOCANNON_UNBRACED_KICK: f32 = 6.0;
+pub const AUTOCANNON_SPREAD: f32 = 0.006;
+// NOTE: there is deliberately NO `AUTOCANNON_BRACED_KICK`. The braced
+// value is derived at the call site as
+// `AUTOCANNON_UNBRACED_KICK * MECH_BRACE_RECOIL_DAMP`. Two independently
+// tunable numbers describing ONE relationship drift out of sync after a
+// single balance pass; §A built the damp mechanism generically for
+// exactly this consumer.
+
 /// Robot power core: capacity, recharge (grounded, 5 s after ability use),
 /// repulsor cost/cooldown, EMP/explosive drain. (The THRUST_* trio lived
 /// here from Brief IV's flight model - §4.3 deleted mech flight, and the
@@ -2951,6 +3023,10 @@ impl TdmSim {
                     mech_plates_dropped: 0,
                     brace: false,
                     mech_brace: false,
+                    mech_weapon: MechWeapon::Gatling,
+                    gatling_heat: 0.0,
+                    gatling_vent_t: 0.0,
+                    autocannon_cd: 0.0,
                     knife_phase: 0.0,
                     knife_committed: false,
                     knife_struck: false,
@@ -3219,6 +3295,30 @@ impl TdmSim {
                 f.spin_t = 0.0;
                 f.spin_cmd = 0.0;
             }
+            // §C: the hull mounts' own clocks. OUTSIDE the
+            // `gun == Minigun` block above on purpose - what the pilot
+            // happens to be carrying has nothing to do with the guns
+            // bolted to the chassis.
+            //
+            // The heat decay is gated on `fire_cd <= 0.0` for the same
+            // reason the minigun's is gated on its trigger hold-timer:
+            // a barrel group under fire does not cool. `fire_cd` IS the
+            // gatling's cycle clock (`try_fire_gatling` both reads and
+            // sets it), so "cycle clock still running" is exactly
+            // "trigger is down" here. Ungated, the 9.5/s decay would eat
+            // most of the 12.9/s ramp and stretch the run to a forced
+            // vent from ~8 s to ~30 s - the design says the hull gun
+            // sustains about TWICE the minigun's 4 s, not eight times.
+            if f.gatling_vent_t > 0.0 {
+                f.gatling_vent_t -= DT;
+                if f.gatling_vent_t <= 0.0 {
+                    f.gatling_vent_t = 0.0;
+                    f.gatling_heat = 0.0; // a vent always clears the mount
+                }
+            } else if f.fire_cd <= 0.0 {
+                f.gatling_heat = (f.gatling_heat - GATLING_HEAT_DECAY * DT).max(0.0);
+            }
+            f.autocannon_cd = (f.autocannon_cd - DT).max(0.0);
             // §3: the spear releases at the END of the windup, on the
             // tracked aim (the ammo was spent at the trigger)
             if f.spear_wind_t > 0.0 {
@@ -3344,6 +3444,14 @@ impl TdmSim {
                     f.mech_plates_dropped = 0;
                     f.brace = false;
                     f.mech_brace = false;
+                    // §C: the hull mounts die with the chassis. A fresh
+                    // life starts on the gatling with cold barrels -
+                    // leaving `gatling_vent_t` set would hand the next
+                    // chassis a lockout it never earned.
+                    f.mech_weapon = MechWeapon::Gatling;
+                    f.gatling_heat = 0.0;
+                    f.gatling_vent_t = 0.0;
+                    f.autocannon_cd = 0.0;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
                     f.knife_struck = false;
@@ -3494,6 +3602,14 @@ impl TdmSim {
                             // the movement code below).
                             f.mech_transition_t = MECH_ENTER_S;
                             f.mech_plates_dropped = 0;
+                            // §C: a FRESH chassis - cold mounts, gatling
+                            // selected. Without this a pilot who cooked
+                            // one hull off, dismounted and boarded a new
+                            // one would inherit the old vent lockout.
+                            f.mech_weapon = MechWeapon::Gatling;
+                            f.gatling_heat = 0.0;
+                            f.gatling_vent_t = 0.0;
+                            f.autocannon_cd = 0.0;
                             // §5.3 (Brief VI): 4 tubes per chassis —
                             // resupply is a fresh chassis, not a pickup
                             f.pod_ammo = POD_TUBES;
@@ -3626,8 +3742,24 @@ impl TdmSim {
             self.fighters[p].set_crouch(cmd.crouch);
             self.fighters[p].lean = cmd.lean.clamp(-1.0, 1.0);
             // slot select (number keys) + shield toggle (E)
+            // §C.5: the number keys mean something DIFFERENT while
+            // piloting - the same repurposing §A did with crouch. A
+            // sealed chassis has no inventory to swap into; 1 and 2
+            // pick which hull mount the trigger drives. Gating the
+            // infantry path on `!in_mech()` is the load-bearing half:
+            // without it a number key would keep silently switching the
+            // pilot's CARRIED gun underneath the mech, burning a
+            // SWITCH_S he can neither see nor use.
             if let Some(s) = cmd.slot {
-                self.switch_slot(p, s as usize);
+                if self.fighters[p].in_mech() {
+                    match s {
+                        0 => self.fighters[p].mech_weapon = MechWeapon::Gatling,
+                        1 => self.fighters[p].mech_weapon = MechWeapon::Autocannon,
+                        _ => {}
+                    }
+                } else {
+                    self.switch_slot(p, s as usize);
+                }
             }
             if cmd.shield {
                 let f = &mut self.fighters[p];
@@ -3989,7 +4121,21 @@ impl TdmSim {
             // §4.1 (Brief VII v2): the bow draws on HOLD-FIRE and looses
             // on RELEASE - it needs the call every tick (held or not) to
             // see the release edge, unlike try_fire's "only while held".
-            if self.fighters[p].gun == GunKind::Bow {
+            // §C.5: in a chassis the trigger drives the HULL MOUNT, not
+            // whatever the pilot is still carrying - checked FIRST so a
+            // pilot holding a bow does not draw it from inside the mech.
+            if self.fighters[p].in_mech() {
+                if cmd.shoot {
+                    match self.fighters[p].mech_weapon {
+                        MechWeapon::Gatling => {
+                            self.try_fire_gatling(p, cmd.aim);
+                        }
+                        MechWeapon::Autocannon => {
+                            self.try_fire_autocannon(p, cmd.aim);
+                        }
+                    }
+                }
+            } else if self.fighters[p].gun == GunKind::Bow {
                 self.step_bow_draw(p, cmd.aim, cmd.shoot);
             } else if cmd.shoot {
                 self.try_fire(p, cmd.aim, cmd.ads);
@@ -5224,17 +5370,43 @@ impl TdmSim {
         // the sim adds the remaining 55% — total ×2.0 vs the original
         // angles, ×1.1 drift vs the crosshair, the CS:GO arithmetic.
         // Bots aim from raw geometry, so they take the full ×2.0.
-        let aim = {
-            let f = &self.fighters[i];
-            let k = if i == self.player {
-                RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING)
-            } else {
-                RECOIL_SCALE
-            };
-            deflect(aim, f.punch[0] * k, f.punch[1] * k)
-        };
-        // ---- hitscan: one trace per pellet (shotguns fire a cone) ------
-        for _pellet in 0..spec.pellets.max(1) {
+        let aim = self.punched_aim(i, aim);
+        self.hitscan_burst(i, o, aim, spread, spec.damage, spec.pellets);
+        // §8.2: gunfire is NOISE — the whole horde director runs on it.
+        // This is what makes the bow and spear the correct tool here.
+        if self.mode == Mode::Extraction {
+            let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
+            let r = gun_noise_m(self.fighters[i].gun);
+            self.emit_noise(at, r);
+        }
+        true
+    }
+
+    /// The SHARED hitscan resolution: one trace per pellet, each rolling
+    /// its own spread, against cover → enemy fighters → the horde.
+    ///
+    /// Lifted VERBATIM out of `try_fire` (which is still its only
+    /// infantry caller) so the mech's hull mounts resolve hits on
+    /// exactly the path a rifle does. Damage, pellet count and spread
+    /// are parameters instead of `GunSpec` reads precisely because the
+    /// hull mounts have no `GunSpec` - that is the entire point of the
+    /// extraction. Two copies of this loop would diverge on the first
+    /// balance pass, and this file's single most repeated defect has
+    /// been a second copy of a rule quietly drifting from the first.
+    ///
+    /// `aim` must ARRIVE already deflected by the caller's recoil model.
+    /// The RNG is consumed exactly twice per pellet, x then y: replay
+    /// determinism depends on that count and that order.
+    fn hitscan_burst(
+        &mut self,
+        i: usize,
+        o: [f32; 3],
+        aim: [f32; 3],
+        spread: f32,
+        damage: f32,
+        pellets: u32,
+    ) {
+        for _pellet in 0..pellets.max(1) {
             let (ex, ey) = (
                 self.rng.range(-spread, spread),
                 self.rng.range(-spread, spread),
@@ -5302,7 +5474,7 @@ impl TdmSim {
                     };
                     let _ = kind;
                     self.fighters[i].hits_dealt += 1;
-                    self.damage_zombie(zi, spec.damage * mult, head);
+                    self.damage_zombie(zi, damage * mult, head);
                     continue;
                 }
             }
@@ -5323,12 +5495,121 @@ impl TdmSim {
                 }
             }
         }
-        // §8.2: gunfire is NOISE — the whole horde director runs on it.
-        // This is what makes the bow and spear the correct tool here.
+    }
+
+    /// §C: the aim ray a hull mount actually fires along. Same recoil
+    /// arithmetic `try_fire` uses (channel 1 of Brief VI §2) - shared so
+    /// the punch cannot mean one thing on foot and another in a chassis.
+    fn punched_aim(&self, i: usize, aim: [f32; 3]) -> [f32; 3] {
+        let f = &self.fighters[i];
+        let k = if i == self.player {
+            RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING)
+        } else {
+            RECOIL_SCALE
+        };
+        deflect(aim, f.punch[0] * k, f.punch[1] * k)
+    }
+
+    /// §C: the hull GATLING — suppression. A sibling of `try_fire`, not
+    /// a branch inside it, and the gate list is why: `try_fire` opens on
+    /// `armed()`/`gun`/`ammo`/`reload_t`/`switch_t`, then `shield_up`,
+    /// `knife_phase`, `flip_t`, `sprint_gate_t` — the state of a pair of
+    /// HANDS. None of it describes a gun bolted to a chassis that a
+    /// pilot triggers from inside a sealed cockpit. Folding these in as
+    /// branches would have meant answering every one of those gates for
+    /// a weapon they do not apply to.
+    ///
+    /// Returns true iff a round left the mount.
+    pub fn try_fire_gatling(&mut self, i: usize, aim: [f32; 3]) -> bool {
+        {
+            let f = &self.fighters[i];
+            if !f.in_mech()
+                || f.mech_weapon != MechWeapon::Gatling
+                || !f.alive()
+                || f.fire_cd > 0.0
+                || f.gatling_vent_t > 0.0
+                // §6.2: the chassis is still sealing up (or powering
+                // down) — the mounts are not live yet
+                || f.mech_transition_t > 0.0
+            {
+                return false;
+            }
+        }
+        let o = self.muzzle_origin(i);
+        // the cone opens as the barrels cook, exactly as the minigun's
+        // does — this is the cost that makes sustained fire a choice
+        let spread = {
+            let f = &self.fighters[i];
+            GATLING_SPREAD_COLD
+                + (GATLING_SPREAD_HOT - GATLING_SPREAD_COLD)
+                    * (f.gatling_heat / 100.0).clamp(0.0, 1.0)
+        };
+        let t_now = self.t;
+        {
+            let f = &mut self.fighters[i];
+            f.fire_cd = GATLING_FIRE_PERIOD;
+            f.protect_t = 0.0; // opening fire drops spawn protection
+            f.last_shot_at = t_now;
+            f.gatling_heat += GATLING_HEAT_PER_SHOT;
+            if f.gatling_heat >= 100.0 {
+                f.gatling_heat = 100.0;
+                f.gatling_vent_t = GATLING_VENT_FORCED_S;
+            }
+        }
+        let aim = self.punched_aim(i, aim);
+        self.hitscan_burst(i, o, aim, spread, GATLING_DAMAGE, 1);
         if self.mode == Mode::Extraction {
             let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
-            let r = gun_noise_m(self.fighters[i].gun);
-            self.emit_noise(at, r);
+            // a radius LOOKUP, not an entry into the GunKind pipeline:
+            // the hull gun is as loud as the minigun it echoes
+            self.emit_noise(at, gun_noise_m(GunKind::Minigun));
+        }
+        true
+    }
+
+    /// §C: the hull AUTOCANNON — precision. Slow cycle, tight cone, and
+    /// a kick big enough that firing it unbraced costs you the next
+    /// shot's picture. Deliberately does NOT touch the spray table: the
+    /// deterministic per-weapon spray patterns are a `GunKind`-indexed
+    /// infantry system, and a single-shot hull cannon has no pattern to
+    /// walk — it has one honest kick.
+    ///
+    /// Sibling of `try_fire` for the same reason as the gatling above.
+    pub fn try_fire_autocannon(&mut self, i: usize, aim: [f32; 3]) -> bool {
+        {
+            let f = &self.fighters[i];
+            if !f.in_mech()
+                || f.mech_weapon != MechWeapon::Autocannon
+                || !f.alive()
+                || f.autocannon_cd > 0.0
+                || f.mech_transition_t > 0.0
+            {
+                return false;
+            }
+        }
+        let o = self.muzzle_origin(i);
+        let t_now = self.t;
+        {
+            let f = &mut self.fighters[i];
+            f.autocannon_cd = AUTOCANNON_CYCLE_S;
+            f.protect_t = 0.0;
+            f.last_shot_at = t_now;
+            // §A.5's damp, consumed exactly as it was designed to be:
+            // ONE unbraced constant, the braced value derived from it.
+            // A second `AUTOCANNON_BRACED_KICK` constant would be a
+            // duplicate of this relationship free to drift away from it.
+            let kick = if f.mech_brace {
+                AUTOCANNON_UNBRACED_KICK * MECH_BRACE_RECOIL_DAMP
+            } else {
+                AUTOCANNON_UNBRACED_KICK
+            };
+            f.punch_vel[0] += kick; // pitch, up
+        }
+        let aim = self.punched_aim(i, aim);
+        self.hitscan_burst(i, o, aim, AUTOCANNON_SPREAD, AUTOCANNON_DAMAGE, 1);
+        if self.mode == Mode::Extraction {
+            let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
+            self.emit_noise(at, gun_noise_m(GunKind::Minigun));
         }
         true
     }
@@ -9691,6 +9972,283 @@ mod tests {
             (braced - unbraced * MECH_BRACE_RECOIL_DAMP).abs() < 1e-4,
             "braced kick {braced} should be exactly {MECH_BRACE_RECOIL_DAMP} x \
              unbraced {unbraced}"
+        );
+    }
+
+    // ---- §C: the hull-mounted gatling + autocannon --------------------
+
+    /// A live chassis on the range, mounts cold, both mounts ready.
+    fn mech_range(seed: u64, w: MechWeapon) -> TdmSim {
+        let mut s = range(seed);
+        let f = &mut s.fighters[0];
+        f.armor_set = ArmorSet::RobotSuit;
+        f.hull = MECH_HULL;
+        f.mech_transition_t = 0.0;
+        f.mech_weapon = w;
+        f.gatling_heat = 0.0;
+        f.gatling_vent_t = 0.0;
+        f.autocannon_cd = 0.0;
+        f.fire_cd = 0.0;
+        f.protect_t = 0.0;
+        s
+    }
+
+    /// §C.3: the gatling's identity is SUSTAIN. Its heat has to ramp
+    /// slower than the man-portable minigun's in absolute terms — not
+    /// merely "a constant named GATLING_HEAT_PER_SHOT exists". Both
+    /// halves are measured off the real fire paths, so wiring the
+    /// gatling to the minigun's heat constant (the obvious copy-paste
+    /// slip) fails here even though every constant still exists.
+    #[test]
+    fn gatling_heat_ramps_slower_than_minigun_in_absolute_terms() {
+        const N: usize = 40;
+
+        let gatling_heat = {
+            let mut s = mech_range(0xC0A7, MechWeapon::Gatling);
+            for _ in 0..N {
+                s.fighters[0].fire_cd = 0.0;
+                assert!(
+                    s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+                    "a cold hull gatling must keep firing"
+                );
+            }
+            s.fighters[0].gatling_heat
+        };
+        let minigun_heat = {
+            let mut s = range(0xC0A8);
+            {
+                let f = &mut s.fighters[0];
+                f.gun = GunKind::Minigun;
+                f.inventory[0] = GunKind::Minigun;
+                f.active = 0;
+                f.ammo = 400;
+                f.reserve = 0;
+                f.spin_t = MINIGUN_SPINUP_S;
+                f.protect_t = 0.0;
+            }
+            for _ in 0..N {
+                s.fighters[0].fire_cd = 0.0;
+                s.fighters[0].spin_t = MINIGUN_SPINUP_S;
+                assert!(
+                    s.try_fire(0, [0.0, 0.0, -1.0], false),
+                    "the spun-up minigun must keep firing"
+                );
+            }
+            s.fighters[0].heat
+        };
+        assert!(
+            gatling_heat > 0.0 && minigun_heat > 0.0,
+            "both weapons must actually accumulate heat \
+             (gatling {gatling_heat}, minigun {minigun_heat})"
+        );
+        assert!(
+            gatling_heat < minigun_heat,
+            "after {N} rounds the hull gatling is at {gatling_heat} heat and \
+             the minigun at {minigun_heat} - the hull gun is supposed to be \
+             the one that SUSTAINS"
+        );
+
+        // ...and the pools are genuinely separate: firing the hull mount
+        // must never load the minigun's vent state machine.
+        let mut s = mech_range(0xC0A9, MechWeapon::Gatling);
+        s.fighters[0].gun = GunKind::Minigun;
+        for _ in 0..N {
+            s.fighters[0].fire_cd = 0.0;
+            s.try_fire_gatling(0, [0.0, 0.0, -1.0]);
+        }
+        assert_eq!(
+            s.fighters[0].heat, 0.0,
+            "the hull mount wrote into the MINIGUN's heat pool - a pilot \
+             carrying a minigun would inherit a vent lockout he never earned"
+        );
+
+        // The same relationship expressed as TIME TO A FORCED VENT: the
+        // ramp rate is heat-per-round over the fire period, and the hull
+        // gun is meant to run roughly twice as long before it cooks off.
+        let gat_s = 100.0 / (GATLING_HEAT_PER_SHOT / GATLING_FIRE_PERIOD);
+        let mini_s = 100.0 / (MINIGUN_HEAT_PER_SHOT / gun(GunKind::Minigun).fire_period);
+        assert!(
+            gat_s > mini_s * 1.5,
+            "hull gatling cooks off after {gat_s}s of fire vs the minigun's \
+             {mini_s}s - that is not a sustain weapon"
+        );
+    }
+
+    /// §C.3: the cone OPENS as the mount cooks — the cost that makes
+    /// holding the trigger a decision. Measured off the tracers the
+    /// shots actually leave, not off the constants.
+    #[test]
+    fn gatling_spread_widens_with_heat() {
+        // widest angular deviation from the aim axis over many rounds
+        // fired at a pinned heat level
+        let worst_dev = |heat: f32| -> f32 {
+            let mut s = mech_range(0xC0B0, MechWeapon::Gatling);
+            let mut worst = 0.0_f32;
+            for _ in 0..300 {
+                let f = &mut s.fighters[0];
+                f.fire_cd = 0.0;
+                f.gatling_heat = heat;
+                f.gatling_vent_t = 0.0;
+                s.tracers.clear();
+                // fire AWAY from the pinned bot so nothing intercepts
+                assert!(s.try_fire_gatling(0, [0.0, 0.0, -1.0]));
+                let tr = s.tracers.last().expect("every round leaves a tracer");
+                let d = normalize([
+                    tr.to[0] - tr.from[0],
+                    tr.to[1] - tr.from[1],
+                    tr.to[2] - tr.from[2],
+                ]);
+                // tangent of the off-axis angle about the -z aim
+                let dev = (d[0] * d[0] + d[1] * d[1]).sqrt() / d[2].abs().max(1e-6);
+                worst = worst.max(dev);
+            }
+            worst
+        };
+        let cold = worst_dev(0.0);
+        let hot = worst_dev(100.0);
+        assert!(cold > 0.0, "even a cold mount must roll SOME spread");
+        assert!(
+            hot > cold * 2.0,
+            "a cooked mount scatters {hot} vs a cold {cold} - the heat/cone \
+             tradeoff is not wired to the heat at all"
+        );
+        // and each end lands in the band its constant defines (the two
+        // axes are rolled independently, so the radial bound is √2×)
+        assert!(
+            cold <= GATLING_SPREAD_COLD * 1.5,
+            "cold worst-case {cold} exceeds the cold constant's radial bound"
+        );
+        assert!(
+            hot <= GATLING_SPREAD_HOT * 1.5 && hot > GATLING_SPREAD_COLD,
+            "hot worst-case {hot} is not inside the hot constant's band"
+        );
+    }
+
+    /// §C.3/§A.5: the braced autocannon kick is DERIVED from the
+    /// unbraced one, so the ratio is exact. This test is the reason no
+    /// `AUTOCANNON_BRACED_KICK` constant exists — with two independent
+    /// numbers the assertion below would only ever pin whatever the
+    /// second one drifted to.
+    #[test]
+    fn autocannon_kick_is_damped_exactly_by_mech_brace_recoil_damp() {
+        let kick = |braced: bool| -> f32 {
+            let mut s = mech_range(0xC0C1, MechWeapon::Autocannon);
+            s.fighters[0].mech_brace = braced;
+            assert!(
+                s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+                "the autocannon must fire"
+            );
+            s.fighters[0].punch_vel[0]
+        };
+        let unbraced = kick(false);
+        let braced = kick(true);
+        assert!(
+            (unbraced - AUTOCANNON_UNBRACED_KICK).abs() < 1e-6,
+            "unbraced kick {unbraced} is not the unbraced constant"
+        );
+        assert!(
+            braced < unbraced,
+            "bracing must REDUCE the kick: braced {braced} vs {unbraced}"
+        );
+        assert!(
+            (braced - unbraced * MECH_BRACE_RECOIL_DAMP).abs() < 1e-6,
+            "braced kick {braced} must be exactly {MECH_BRACE_RECOIL_DAMP} x \
+             unbraced {unbraced} - a second, independently tunable braced \
+             constant is exactly what §C.3 forbids"
+        );
+    }
+
+    /// §C.4b/§C.5: one mount at a time. The targeting mode decides, and
+    /// the number keys set it — while leaving the pilot's carried
+    /// inventory alone, which is the half a naive wiring drops.
+    #[test]
+    fn autocannon_and_gatling_are_mutually_exclusive_by_mech_weapon() {
+        let mut s = mech_range(0xC0D1, MechWeapon::Gatling);
+        assert!(
+            !s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+            "the autocannon fired while the gatling was selected"
+        );
+        assert!(s.try_fire_gatling(0, [0.0, 0.0, -1.0]), "the gatling must fire");
+
+        let mut s = mech_range(0xC0D2, MechWeapon::Autocannon);
+        assert!(
+            !s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "the gatling fired while the autocannon was selected"
+        );
+        assert!(
+            s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+            "the autocannon must fire"
+        );
+
+        // the number keys are a TARGETING switch in a chassis
+        let mut s = mech_range(0xC0D3, MechWeapon::Gatling);
+        let carried = s.fighters[0].gun;
+        let slot = s.fighters[0].active;
+        s.step(PlayerCmd { slot: Some(1), aim: [0.0, 0.0, -1.0], ..Default::default() });
+        assert_eq!(
+            s.fighters[0].mech_weapon,
+            MechWeapon::Autocannon,
+            "key 2 must select the autocannon mount"
+        );
+        s.step(PlayerCmd { slot: Some(0), aim: [0.0, 0.0, -1.0], ..Default::default() });
+        assert_eq!(
+            s.fighters[0].mech_weapon,
+            MechWeapon::Gatling,
+            "key 1 must select the gatling mount"
+        );
+        assert_eq!(
+            (s.fighters[0].gun, s.fighters[0].active),
+            (carried, slot),
+            "the pilot's CARRIED inventory must not move while piloting - \
+             the infantry slot path is supposed to be gated on !in_mech()"
+        );
+    }
+
+    /// §C.4b: the hull mounts belong to the HULL. The gate that matters
+    /// is `in_mech()`: without it every infantryman on the map would be
+    /// able to trigger a 145-damage autocannon out of thin air — the
+    /// same defect class §A's brace test guards (an ungated mech
+    /// mechanic leaking onto foot soldiers).
+    #[test]
+    fn mech_weapons_refuse_to_fire_for_non_mech_fighters() {
+        for set in [ArmorSet::None, ArmorSet::Folk, ArmorSet::Pyro, ArmorSet::Recon] {
+            for w in [MechWeapon::Gatling, MechWeapon::Autocannon] {
+                let mut s = mech_range(0xC0E1, w);
+                {
+                    let f = &mut s.fighters[0];
+                    f.armor_set = set;
+                    f.hull = 0.0;
+                }
+                assert!(
+                    !s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+                    "{set:?} on foot fired the hull gatling"
+                );
+                assert!(
+                    !s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+                    "{set:?} on foot fired the hull autocannon"
+                );
+            }
+        }
+        // a WRECKED chassis is not a chassis either: hull 0 means the
+        // pilot has ejected, RobotSuit still sitting in armor_set
+        let mut s = mech_range(0xC0E2, MechWeapon::Gatling);
+        s.fighters[0].hull = 0.0;
+        assert!(
+            !s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "a dead hull still fired"
+        );
+        // and a live chassis that is still SEALING cannot fight (§6.2)
+        let mut s = mech_range(0xC0E3, MechWeapon::Gatling);
+        s.fighters[0].mech_transition_t = MECH_ENTER_S;
+        assert!(
+            !s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
+            "the mounts went live before the chassis finished sealing"
+        );
+        let mut s = mech_range(0xC0E4, MechWeapon::Autocannon);
+        s.fighters[0].mech_transition_t = MECH_ENTER_S;
+        assert!(
+            !s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+            "the mounts went live before the chassis finished sealing"
         );
     }
 
