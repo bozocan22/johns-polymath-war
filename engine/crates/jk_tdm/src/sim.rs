@@ -2475,6 +2475,33 @@ pub const AUTOCANNON_SPREAD: f32 = 0.006;
 // single balance pass; §A built the damp mechanism generically for
 // exactly this consumer.
 
+/// §D: the range at which a BOT mech stops spraying and starts aiming.
+///
+/// Derived, not tuned. `GATLING_SPREAD_COLD` is the per-axis offset
+/// `hitscan_burst` applies to the aim ray, so at range `d` a COLD gatling
+/// scatters its rounds over a half-width of `GATLING_SPREAD_COLD * d`. A
+/// man is `BODY_RADIUS` wide to each side. Past
+/// `BODY_RADIUS / GATLING_SPREAD_COLD` even a cold mount is putting most
+/// of its rounds beside the target — and every one of those misses still
+/// walks the barrels toward a 3.5 s forced vent. That is exactly where
+/// one 145-damage round through a 3× tighter cone becomes the honest
+/// trade, so the switch is placed there rather than at a round number.
+///
+/// ≈18.9 m today, which sits inside EVERY difficulty's engage range
+/// (Easy 22 / Normal 35 / Hard 50) — so all three tiers really do use
+/// both mounts instead of one tier silently never reaching the switch.
+pub const MECH_BOT_AUTOCANNON_RANGE_M: f32 = BODY_RADIUS / GATLING_SPREAD_COLD;
+
+/// Hysteresis band on the switch above. A bare threshold over a
+/// dithering quantity is a defect, not a rule: a bot holding station
+/// near the line would flip mounts tick to tick, and because the two
+/// mounts keep INDEPENDENT cooldown clocks (`gatling_cd` /
+/// `autocannon_cd`, deliberately never shared) it would then land BOTH —
+/// making "stand at exactly 18.9 m" the highest-DPS thing a bot mech can
+/// do. One chassis width is the band: committing to the other mount has
+/// to be worth more than a single step.
+pub const MECH_BOT_MOUNT_HYSTERESIS_M: f32 = MECH_RADIUS;
+
 /// Robot power core: capacity, recharge (grounded, 5 s after ability use),
 /// repulsor cost/cooldown, EMP/explosive drain. (The THRUST_* trio lived
 /// here from Brief IV's flight model - §4.3 deleted mech flight, and the
@@ -7306,7 +7333,8 @@ impl TdmSim {
         best.map(|(j, _)| j)
     }
 
-    /// What bot `i` should be shooting at, as (position, height).
+    /// What bot `i` should be shooting at, as (position, height,
+    /// hardened).
     ///
     /// Extraction is CO-OP: everyone is on one team, so
     /// `nearest_visible_enemy` - which only ever looks for an opposing
@@ -7316,12 +7344,21 @@ impl TdmSim {
     ///
     /// Enemy fighters still win ties at equal range: a player shooting at
     /// you is a worse problem than a zombie walking at you.
-    fn nearest_visible_threat(&self, i: usize) -> Option<([f32; 3], f32)> {
+    ///
+    /// §D: `hardened` means "this threat is itself a live chassis". It is
+    /// returned from HERE rather than re-derived by the caller because
+    /// this function is the only thing that knows WHICH body it picked -
+    /// the caller gets a bare position back, and a position cannot be
+    /// asked whether it has 1000 points of hull. A bot mech needs the
+    /// answer to choose a mount: 9 damage a round is not an answer to a
+    /// hull, 145 is. No zombie is ever hardened - the horde has no
+    /// plating, and a Brute is just a large soft target.
+    fn nearest_visible_threat(&self, i: usize) -> Option<([f32; 3], f32, bool)> {
         let f = &self.fighters[i];
         let eye = [f.pos[0], f.pos[1] + EYE_REL, f.pos[2]];
         if let Some(j) = self.nearest_visible_enemy(i) {
             let g = &self.fighters[j];
-            return Some((g.pos, g.height()));
+            return Some((g.pos, g.height(), g.in_mech()));
         }
         let mut best: Option<([f32; 3], f32)> = None;
         let mut best_d2 = f32::INFINITY;
@@ -7336,7 +7373,7 @@ impl TdmSim {
                 best = Some((z.pos, zh));
             }
         }
-        best
+        best.map(|(p, h)| (p, h, false))
     }
 
     fn bot_think(&mut self, i: usize) {
@@ -7413,7 +7450,7 @@ impl TdmSim {
         let yaw;
         let mut vel;
         match enemy {
-            Some((gpos, ghigh)) => {
+            Some((gpos, ghigh, hardened)) => {
                 self.fighters[i].los_time += DT;
                 // an empty mag reloads NOW, whatever the range — waiting
                 // until the enemy closes is how bots died mid-clack
@@ -7444,9 +7481,68 @@ impl TdmSim {
                     (px * strafe + dx / dist * closing) * MOVE_SPEED * 0.8,
                     (pz * strafe + dz / dist * closing) * MOVE_SPEED * 0.8,
                 ];
+                // §D: MOUNT SELECTION. A bot in a chassis was still
+                // pulling the trigger on the rifle its pilot happened to
+                // be carrying - 4 hits in 2 s, a reload every 30 rounds,
+                // and after 150 rounds a PERMANENTLY DISARMED bot inside
+                // a full 1000-hull chassis. A mech that cannot shoot is
+                // not a threat and not honestly absent; it is a pinata.
+                //
+                // The rule, deliberately kept to one line of intent:
+                // AUTOCANNON against a hull, or past the range where the
+                // gatling's cone stops covering a man
+                // (`MECH_BOT_AUTOCANNON_RANGE_M`, itself derived from
+                // that cone); GATLING otherwise. Suppression up close,
+                // precision far out and against armour - the two
+                // identities §C wrote into the constants, expressed as
+                // the only two facts a bot can cheaply know about its
+                // target. `hardened` has no range term ON PURPOSE: 9
+                // damage a round is not an answer to 1000 hull at ANY
+                // range, and the 145 exists precisely to be that answer.
+                let in_mech = self.fighters[i].in_mech();
+                let want_auto = if in_mech {
+                    // the band is applied only to the DOWN-switch, so the
+                    // rule still reads "autocannon past R" and the
+                    // hysteresis is visibly the exception, not the rule
+                    let drop_at = MECH_BOT_AUTOCANNON_RANGE_M - MECH_BOT_MOUNT_HYSTERESIS_M;
+                    let holding_auto = self.fighters[i].mech_weapon == MechWeapon::Autocannon;
+                    hardened
+                        || dist
+                            > if holding_auto {
+                                drop_at
+                            } else {
+                                MECH_BOT_AUTOCANNON_RANGE_M
+                            }
+                } else {
+                    false
+                };
+                if in_mech {
+                    self.fighters[i].mech_weapon = if want_auto {
+                        MechWeapon::Autocannon
+                    } else {
+                        MechWeapon::Gatling
+                    };
+                }
+                // §A parity, answered: a bot DOES brace, and only for the
+                // autocannon. `MECH_BRACE_RECOIL_DAMP` exists for exactly
+                // one consumer - the autocannon's kick - so bracing for
+                // the gatling would buy a bot nothing while costing it
+                // 88% of its movement. Bracing for the autocannon buys
+                // the shot after this one its picture back, and the plant
+                // is paid for in the same currency the human pays: a
+                // near-stationary chassis that is trivial to hit.
+                // Grounded-gated exactly as the player's is - a stance
+                // needs a floor. Written UNCONDITIONALLY (not only when
+                // `in_mech`) so a pilot whose hull is blown out from
+                // under him mid-brace does not keep the chassis stance,
+                // and its 12% pace, on foot for the rest of the match.
+                self.fighters[i].mech_brace =
+                    want_auto && in_mech && self.fighters[i].grounded;
                 if self.fighters[i].los_time > bp.reaction_s
                     && dist < bp.engage_range
-                    && ammo > 0
+                    // a hull mount has NO magazine - gating a chassis on
+                    // the pilot's carried rounds is the whole defect
+                    && (ammo > 0 || in_mech)
                 {
                     // fire from the REAL muzzle (crouch lowers it) at the
                     // target's REAL chest (crouched enemies are short) —
@@ -7455,18 +7551,38 @@ impl TdmSim {
                     let eye = self.muzzle_origin(i);
                     let tgt = [gpos[0], gpos[1] + ghigh * 0.55, gpos[2]];
                     let aim = [tgt[0] - eye[0], tgt[1] - eye[1], tgt[2] - eye[2]];
+                    // NOTE the RNG draws are UNCONDITIONAL on the branch
+                    // below and keep their original position: the bot
+                    // stream is shared with everything else in the tick,
+                    // so moving or skipping them would re-order the seeded
+                    // sequence for every scenario, not just mech ones.
                     let (e1, e2) = (
                         self.rng.range(-bp.aim_sigma, bp.aim_sigma),
                         self.rng.range(-bp.aim_sigma, bp.aim_sigma),
                     );
                     let aim = perturb(normalize(aim), e1, e2);
-                    self.try_fire(i, aim, false);
+                    if in_mech {
+                        match self.fighters[i].mech_weapon {
+                            MechWeapon::Gatling => {
+                                self.try_fire_gatling(i, aim);
+                            }
+                            MechWeapon::Autocannon => {
+                                self.try_fire_autocannon(i, aim);
+                            }
+                        }
+                    } else {
+                        self.try_fire(i, aim, false);
+                    }
                 }
             }
             None => {
                 self.fighters[i].los_time = 0.0;
                 self.fighters[i].crouch = false;
                 self.fighters[i].shield_up = false;
+                // nothing to shoot: the plant is dropped. A braced mech
+                // walks at 12% - a bot that kept the stance after its
+                // target broke LOS would crawl the rest of the match.
+                self.fighters[i].mech_brace = false;
                 if self.fighters[i].armed()
                     && ammo < gun(self.fighters[i].gun).mag / 3
                 {
@@ -7523,11 +7639,10 @@ impl TdmSim {
             if fm.brace {
                 vel = [vel[0] * BRACE_SPEED_MULT, vel[1] * BRACE_SPEED_MULT];
             }
-            // §A.4 parity: bots pay the same mech-brace tax. Bots never
-            // SET mech_brace yet (that is bot-AI work, deliberately not
-            // guessed at here) - but the mechanism must exist on both
-            // paths from the start, because player/bot divergence is
-            // this file's most-repeated defect class.
+            // §A.4 parity: bots pay the same mech-brace tax. §D now SETS
+            // mech_brace on the bot path too (autocannon engagements
+            // only, see `bot_act` above), so this tax is live on both
+            // sides rather than a mechanism waiting for a second caller.
             if fm.mech_brace {
                 vel = [vel[0] * MECH_BRACE_SPEED_MULT, vel[1] * MECH_BRACE_SPEED_MULT];
             }
@@ -10693,6 +10808,392 @@ mod tests {
             "swapping the pilot's carried gun moved the hull gatling's \
              damage from {gat} to {gat_other} - apply_hit is reading the \
              held weapon again"
+        );
+    }
+
+    // ---- §D: the BOT fire path through the hull mounts ----------------
+
+    /// §D rig: fighter 1 is a BOT (`bot_act` runs for every index except
+    /// `self.player`) sat in a live chassis `dist` metres up +z from the
+    /// player at the origin, already facing him so the capped mech turn
+    /// rate is not what the test is measuring.
+    ///
+    /// `held` is what the PILOT is carrying — the whole point of §D is
+    /// that it must stop mattering. `mag`/`res` set that gun's rounds.
+    fn bot_mech(seed: u64, dist: f32, held: GunKind, mag: u32, res: u32) -> TdmSim {
+        let mut s = range(seed);
+        {
+            let p = &mut s.fighters[0];
+            p.pos = [0.0, 0.0, 0.0];
+            p.protect_t = 0.0;
+        }
+        {
+            let b = &mut s.fighters[1];
+            b.pos = [0.0, 0.0, dist];
+            b.yaw = std::f32::consts::PI; // looking back down -z, at him
+            b.armor_set = ArmorSet::RobotSuit;
+            b.armor = POWER_MAX;
+            b.hull = MECH_HULL;
+            b.mech_transition_t = 0.0; // sealed, mounts live
+            b.mech_weapon = MechWeapon::Gatling; // a fresh chassis
+            b.gatling_heat = 0.0;
+            b.gatling_vent_t = 0.0;
+            b.gatling_cd = 0.0;
+            b.gatling_trigger_t = 0.0;
+            b.autocannon_cd = 0.0;
+            b.protect_t = 0.0;
+            b.gun = held;
+            b.inventory[0] = held;
+            b.active = 0;
+            b.ammo = mag;
+            b.reserve = res;
+            // the other two slots are EMPTY: `bot_act`'s dry-slot switch
+            // must not quietly hand the pilot a fresh gun and hide the
+            // "carried weapons run out, hull mounts do not" question
+            b.slot_ammo = [(mag, res), (0, 0), (0, 0)];
+        }
+        s
+    }
+
+    /// Steps a pinned engagement and returns the damage the BOT dealt to
+    /// the player over it. The player is healed and un-protected every
+    /// tick so the duel never ends, and both bodies are pinned so what is
+    /// under test is the trigger, not the footwork.
+    fn bot_engagement(s: &mut TdmSim, secs: f32) -> f32 {
+        let ppos = s.fighters[0].pos;
+        let pyaw = s.fighters[0].yaw;
+        let bpos = s.fighters[1].pos;
+        let mut dealt = 0.0;
+        for _ in 0..((secs * SIM_HZ as f32) as usize) {
+            s.step(PlayerCmd::default());
+            {
+                let p = &mut s.fighters[0];
+                dealt += (MAX_HEALTH - p.health).max(0.0);
+                p.health = MAX_HEALTH;
+                p.pos = ppos;
+                p.yaw = pyaw;
+                p.vel = [0.0, 0.0];
+                p.protect_t = 0.0;
+            }
+            {
+                let b = &mut s.fighters[1];
+                b.pos = bpos;
+                b.vel = [0.0, 0.0];
+                b.protect_t = 0.0;
+            }
+        }
+        dealt
+    }
+
+    /// §D.1: a bot in a chassis pulls the trigger on the HULL MOUNT.
+    ///
+    /// Thor measured the shipped behaviour: a bot mech fired its CARRIED
+    /// infantry rifle — `hits_dealt=4` over 2 s, `ammo=26/30`, carried
+    /// `Ak47`, `gatling_heat=0`. A 1000-hull chassis that shoots like a
+    /// man with a rifle, reloads like one, and runs out like one.
+    ///
+    /// The witness here is `gatling_heat`, deliberately: it is written by
+    /// exactly one function in the file (`try_fire_gatling`) and read by
+    /// the vent state machine, so it cannot be moved by anything the
+    /// carried gun does. `hits_dealt` alone would NOT do — the rifle
+    /// moves that too, which is precisely how the defect survived.
+    #[test]
+    fn a_bot_mech_fires_the_hull_mount_not_the_gun_in_its_hands() {
+        let mut s = bot_mech(0xD01, 10.0, GunKind::Ak47, 30, 120);
+        let dealt = bot_engagement(&mut s, 2.0);
+        let b = &s.fighters[1];
+        assert_eq!(
+            b.mech_weapon,
+            MechWeapon::Gatling,
+            "10 m is inside {MECH_BOT_AUTOCANNON_RANGE_M:.1} m - the \
+             suppression mount is the close-range pick"
+        );
+        assert!(
+            b.gatling_heat > 0.0,
+            "the hull gatling never turned over: heat {} after 2 s of a \
+             clear, in-range engagement",
+            b.gatling_heat
+        );
+        assert!(
+            dealt > 0.0,
+            "the mount span up but nothing reached the target"
+        );
+        // ...and the rifle in the pilot's hands was never touched. Four
+        // rounds is what Thor measured leaving it; zero is the fix.
+        assert_eq!(
+            (b.ammo, b.reserve),
+            (30, 120),
+            "the pilot's carried Ak47 spent rounds from inside a sealed \
+             cockpit"
+        );
+        assert_eq!(
+            b.fire_cd, 0.0,
+            "the carried gun's own fire clock moved - the bot is still \
+             going through try_fire"
+        );
+    }
+
+    /// §D.2: the chassis does not run out of ammunition, because a gun
+    /// bolted to a hull has no magazine to run out of.
+    ///
+    /// Thor's number: at 150 rounds the pilot's reserve is gone and the
+    /// bot is PERMANENTLY DISARMED inside a full-health 1000-hull
+    /// chassis — a harmless piñata for the rest of the match. Both
+    /// halves of that are tested: the state itself (a bone-dry pilot must
+    /// still fight), and the road to it (30 s of continuous engagement
+    /// must not cost the carried gun a single round).
+    #[test]
+    fn a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does() {
+        // (1) the END state Thor measured: nothing in the mag, nothing in
+        // reserve, nothing in any other slot. The chassis must not care.
+        let mut s = bot_mech(0xD02, 10.0, GunKind::Ak47, 0, 0);
+        let dealt = bot_engagement(&mut s, 2.0);
+        assert!(
+            dealt > 0.0 && s.fighters[1].gatling_heat > 0.0,
+            "a bot whose carried gun is bone dry is disarmed inside a \
+             full chassis: dealt {dealt}, heat {}",
+            s.fighters[1].gatling_heat
+        );
+
+        // (2) and it never REACHES that state. 150 rounds is 5 Ak47 mags;
+        // fired on the carried gun that is ~26 s of shooting and
+        // reloading, so 30 s of unbroken engagement is past the point
+        // where the shipped bot fell silent forever.
+        let mut s = bot_mech(0xD03, 10.0, GunKind::Ak47, 30, 120);
+        assert!(
+            30 + 120 >= 150,
+            "the setup must carry the 150 rounds this test is about"
+        );
+        let early = bot_engagement(&mut s, 27.0);
+        let late = bot_engagement(&mut s, 3.0);
+        assert!(early > 0.0, "the engagement never started");
+        assert!(
+            late > 0.0,
+            "after 30 s - long past the {} carried rounds - the mech had \
+             stopped dealing damage",
+            30 + 120
+        );
+        assert_eq!(
+            (s.fighters[1].ammo, s.fighters[1].reserve),
+            (30, 120),
+            "30 s of firing spent the pilot's carried ammunition"
+        );
+    }
+
+    /// §D.3: the MOUNT SELECTION rule, stated and enforced.
+    ///
+    /// Autocannon against a hull or past `MECH_BOT_AUTOCANNON_RANGE_M`;
+    /// gatling otherwise. The carried gun is left BONE DRY throughout, so
+    /// any damage at all in these scenarios can only have come off a hull
+    /// mount and the two mounts are told apart by `gatling_heat` (only
+    /// `try_fire_gatling` writes it) and by the exact size of the hole
+    /// the autocannon leaves.
+    #[test]
+    fn a_bot_mech_picks_the_autocannon_by_range_and_by_armour() {
+        // (a) CLOSE, soft target → suppression.
+        let mut s = bot_mech(0xD04, 8.0, GunKind::Ak47, 0, 0);
+        let dealt = bot_engagement(&mut s, 2.0);
+        assert_eq!(s.fighters[1].mech_weapon, MechWeapon::Gatling);
+        assert!(
+            s.fighters[1].gatling_heat > 0.0 && dealt > 0.0,
+            "close in, the bot should be spraying"
+        );
+
+        // (b) LONG, soft target → precision. 30 m is past the switch and
+        // still inside Normal's 35 m engage range.
+        assert!(
+            30.0 > MECH_BOT_AUTOCANNON_RANGE_M
+                && 30.0 < bot_params(Difficulty::Normal).engage_range,
+            "the long-range case has to be past the switch and inside the \
+             bot's engage range, or it proves nothing"
+        );
+        let mut s = bot_mech(0xD05, 30.0, GunKind::Ak47, 0, 0);
+        let dealt = bot_engagement(&mut s, 4.0);
+        assert_eq!(s.fighters[1].mech_weapon, MechWeapon::Autocannon);
+        assert_eq!(
+            s.fighters[1].gatling_heat, 0.0,
+            "the gatling turned over at 30 m - past the range where its \
+             cold cone still covers a man"
+        );
+        assert!(dealt > 0.0, "the autocannon never landed a round");
+
+        // (c) CLOSE, but the target is itself a chassis → precision
+        // anyway, and the hole is exactly AUTOCANNON_DAMAGE deep. The
+        // victim faces AWAY (yaw pi, attacker up +z), which is the mech
+        // armour model's rear arc: no angle cut, no visor multiplier, no
+        // proportional zones - so the number that lands on the hull is
+        // the mount's own, undiluted.
+        let mut s = bot_mech(0xD06, 8.0, GunKind::Ak47, 0, 0);
+        {
+            let p = &mut s.fighters[0];
+            p.armor_set = ArmorSet::RobotSuit;
+            p.armor = POWER_MAX;
+            p.hull = MECH_HULL;
+            p.mech_transition_t = 0.0;
+            p.mech_plates_dropped = 0;
+            p.yaw = std::f32::consts::PI;
+        }
+        let mut first_hole = None;
+        for _ in 0..(6 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            {
+                let p = &mut s.fighters[0];
+                p.pos = [0.0, 0.0, 0.0];
+                p.vel = [0.0, 0.0];
+                p.yaw = std::f32::consts::PI;
+                p.protect_t = 0.0;
+            }
+            {
+                let b = &mut s.fighters[1];
+                b.pos = [0.0, 0.0, 8.0];
+                b.vel = [0.0, 0.0];
+                b.protect_t = 0.0;
+            }
+            if s.fighters[0].hull < MECH_HULL {
+                first_hole = Some(MECH_HULL - s.fighters[0].hull);
+                break;
+            }
+        }
+        assert_eq!(
+            s.fighters[1].mech_weapon,
+            MechWeapon::Autocannon,
+            "an enemy CHASSIS at 8 m still got the spray gun - 9 damage a \
+             round is not an answer to 1000 hull at any range"
+        );
+        let hole = first_hole.expect("the bot mech never damaged the enemy chassis");
+        assert!(
+            (hole - AUTOCANNON_DAMAGE).abs() < 1e-2,
+            "the first hull hit took {hole}, not AUTOCANNON_DAMAGE \
+             ({AUTOCANNON_DAMAGE}) - that is a different weapon"
+        );
+        assert!(
+            (hole - GATLING_DAMAGE).abs() > 1.0,
+            "{hole} is the gatling's number, not the autocannon's"
+        );
+
+        // (d) the switch has a BAND. A bot holding station near the line
+        // must not flip mounts tick to tick: the two mounts keep separate
+        // cooldown clocks, so a flip-flopping bot fires BOTH and standing
+        // on the threshold becomes its highest-DPS option.
+        let inside_band = MECH_BOT_AUTOCANNON_RANGE_M - MECH_BOT_MOUNT_HYSTERESIS_M * 0.5;
+        let mut s = bot_mech(0xD07, inside_band, GunKind::Ak47, 0, 0);
+        s.fighters[1].mech_weapon = MechWeapon::Autocannon; // came from further out
+        bot_engagement(&mut s, 1.0);
+        assert_eq!(
+            s.fighters[1].mech_weapon,
+            MechWeapon::Autocannon,
+            "the bot dropped the autocannon {:.2} m inside the switch - \
+             that is under the {MECH_BOT_MOUNT_HYSTERESIS_M:.2} m band \
+             and it will chatter",
+            MECH_BOT_AUTOCANNON_RANGE_M - inside_band
+        );
+        // ...but the band is a band, not a latch: well inside it, the
+        // bot really does go back to the gatling.
+        let well_inside = MECH_BOT_AUTOCANNON_RANGE_M - MECH_BOT_MOUNT_HYSTERESIS_M - 2.0;
+        let mut s = bot_mech(0xD08, well_inside, GunKind::Ak47, 0, 0);
+        s.fighters[1].mech_weapon = MechWeapon::Autocannon;
+        bot_engagement(&mut s, 1.0);
+        assert_eq!(
+            s.fighters[1].mech_weapon,
+            MechWeapon::Gatling,
+            "the autocannon latched on - the hysteresis band has become a \
+             one-way door at {well_inside:.1} m"
+        );
+    }
+
+    /// §D.4 — the parity question §A left open, answered.
+    ///
+    /// §A wired the `mech_brace` movement tax onto BOTH paths but only
+    /// the player could ever set the flag. Now that bots fire hull
+    /// mounts, the answer is yes-but-narrowly: a bot plants for the
+    /// AUTOCANNON (whose recoil is the damp constant's only consumer)
+    /// and never for the gatling, because bracing to spray would buy
+    /// nothing and cost 88% of its movement.
+    #[test]
+    fn a_bot_mech_plants_itself_for_the_autocannon_and_only_for_it() {
+        // long range → autocannon → planted
+        let mut s = bot_mech(0xD09, 30.0, GunKind::Ak47, 0, 0);
+        bot_engagement(&mut s, 2.0);
+        assert!(
+            s.fighters[1].mech_brace,
+            "a bot committed to the autocannon never widened its stance - \
+             MECH_BRACE_RECOIL_DAMP still has no bot-side consumer"
+        );
+        // close range → gatling → mobile
+        let mut s = bot_mech(0xD10, 8.0, GunKind::Ak47, 0, 0);
+        bot_engagement(&mut s, 2.0);
+        assert!(
+            !s.fighters[1].mech_brace,
+            "the bot planted itself to fire the SPRAY gun - 88% of its \
+             movement for a recoil damp the gatling never reads"
+        );
+        // target lost → the stance drops. A braced mech walks at 12%; a
+        // bot that kept the plant after LOS broke would crawl the match.
+        let mut s = bot_mech(0xD11, 30.0, GunKind::Ak47, 0, 0);
+        bot_engagement(&mut s, 2.0);
+        assert!(s.fighters[1].mech_brace, "precondition: it is planted");
+        s.fighters[0].respawn_t = 5.0; // no visible threat any more
+        bot_engagement(&mut s, 0.5);
+        assert!(
+            !s.fighters[1].mech_brace,
+            "the bot held the plant with nothing to shoot at"
+        );
+        // §A's own guard, on the bot path this time: a fighter who is NOT
+        // in a chassis must never acquire the chassis stance, whatever
+        // range he is engaging at.
+        let mut s = bot_mech(0xD12, 30.0, GunKind::Ak47, 30, 120);
+        {
+            let b = &mut s.fighters[1];
+            b.armor_set = ArmorSet::None;
+            b.hull = 0.0;
+        }
+        bot_engagement(&mut s, 2.0);
+        assert!(
+            !s.fighters[1].mech_brace,
+            "an infantryman acquired mech_brace - the mech stance has \
+             leaked onto foot soldiers via the bot path"
+        );
+
+        // the plant is REAL, not a flag: same range, same seed, same
+        // strafe - only the target's armour differs, which is what picks
+        // the mount and therefore the stance. Path length, not net
+        // displacement: the strafe reverses, and a round trip would read
+        // as standing still.
+        let travel = |seed: u64, hardened: bool| -> f32 {
+            let mut s = bot_mech(seed, 8.0, GunKind::Ak47, 0, 0);
+            if hardened {
+                let p = &mut s.fighters[0];
+                p.armor_set = ArmorSet::RobotSuit;
+                p.armor = POWER_MAX;
+                p.hull = MECH_HULL;
+                p.mech_transition_t = 0.0;
+            }
+            let mut path = 0.0;
+            let mut last = s.fighters[1].pos;
+            for _ in 0..(3 * SIM_HZ as usize) {
+                s.step(PlayerCmd::default());
+                {
+                    let p = &mut s.fighters[0];
+                    p.pos = [0.0, 0.0, 0.0];
+                    p.vel = [0.0, 0.0];
+                    p.health = MAX_HEALTH;
+                    p.hull = if hardened { MECH_HULL } else { p.hull };
+                    p.protect_t = 0.0;
+                }
+                let now = s.fighters[1].pos;
+                path += ((now[0] - last[0]).powi(2) + (now[2] - last[2]).powi(2)).sqrt();
+                last = now;
+            }
+            path
+        };
+        let mobile = travel(0xD13, false);
+        let planted = travel(0xD13, true);
+        assert!(mobile > 1.0, "the unbraced control barely moved: {mobile}");
+        assert!(
+            planted < mobile * 0.5,
+            "the braced bot covered {planted:.2} m against the mobile \
+             one's {mobile:.2} m - MECH_BRACE_SPEED_MULT is \
+             {MECH_BRACE_SPEED_MULT}, so the plant is not being paid for"
         );
     }
 
