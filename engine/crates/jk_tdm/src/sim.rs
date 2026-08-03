@@ -2516,6 +2516,21 @@ pub const MECH_HULL: f32 = 1000.0;
 pub const MECH_VISOR_MULT: f32 = 2.0;
 pub const MECH_RADIUS: f32 = BODY_RADIUS * MECH_SCALE; // cannot fit doorways
 pub const MECH_EJECT_HP: f32 = 25.0;
+/// §B.3: the pilot's eye height inside the hull, as a fraction of full
+/// mech height. This formula was duplicated as a bare local in TEN
+/// places across the test module and existed nowhere as a constant, so
+/// nothing could depend on it without copying it an eleventh time.
+/// Promoted here before a camera started reading it too.
+pub const MECH_VISOR_Y_FRAC: f32 = 0.90;
+
+/// The pilot's eye position inside the hull.
+///
+/// Pure and shared, so the visor camera and the hit-zone tests can never
+/// disagree about where the pilot's head is - the same single-source
+/// discipline `approach_velocity` and `shot_clock` exist for.
+pub fn mech_visor_eye_y(pos_y: f32) -> f32 {
+    pos_y + BODY_HEIGHT * MECH_SCALE * MECH_VISOR_Y_FRAC
+}
 // §6.2 (Brief VII v2): boarding/leaving the mech is COMMITTED, not
 // instant - the chassis needs real seconds to seal up or power down.
 pub const MECH_ENTER_S: f32 = 1.6;

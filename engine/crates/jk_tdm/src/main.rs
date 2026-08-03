@@ -2665,6 +2665,13 @@ fn lobby_toast(
 #[derive(Component)]
 struct TechReadout;
 
+/// Menu branding spawned by `open_intro` as TOP-LEVEL entities (key art,
+/// wordmark, emblem). Marked so `close_intro` can tear them down: the
+/// intro screen has already shipped this exact bug once with the tech
+/// readout, which then sat in the corner through every match.
+#[derive(Component)]
+struct IntroUi;
+
 fn tech_readout(sel: Res<Selected>, mut q: Query<&mut Text, With<TechReadout>>) {
     let Ok(mut t) = q.get_single_mut() else {
         return;
@@ -7664,9 +7671,20 @@ fn camera_system(
     let screen_right = -right;
 
     // first-person eye - exact, no positional smoothing (aim never swims)
-    let eye_h = (p.height() - 0.16).max(0.55);
-    let eye = Vec3::new(p.pos[0], p.pos[1] + eye_h, p.pos[2])
-        + screen_right * (p.lean * LEAN_SHIFT);
+    //
+    // §B.3: a pilot sees from the VISOR, not from where their own head
+    // would be. The hull puts the eye at 90% of a 1.7x chassis - well
+    // above infantry eye height - which is the whole reason a mech
+    // feels like a different vehicle rather than a tall soldier.
+    // Lean shift is deliberately NOT applied in a mech: the pilot is
+    // strapped into a hull that does not peek.
+    let eye = if p.in_mech() {
+        Vec3::new(p.pos[0], sim::mech_visor_eye_y(p.pos[1]), p.pos[2])
+    } else {
+        let eye_h = (p.height() - 0.16).max(0.55);
+        Vec3::new(p.pos[0], p.pos[1] + eye_h, p.pos[2])
+            + screen_right * (p.lean * LEAN_SHIFT)
+    };
 
     // third person: over-the-RIGHT-shoulder boom off the head pivot;
     // ADS pulls in tight. The boom pitch is clamped so a near-vertical
@@ -9916,9 +9934,69 @@ fn open_intro(
     mut commands: Commands,
     mut cam: ResMut<CamCtl>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    brand: Option<Res<branding::BrandAssets>>,
 ) {
     release_cursor(&mut cam, &mut windows);
     cam.ads = false;
+    // The key art behind the menu. `Option<Res<..>>` so the menu still
+    // builds if branding is ever unplugged - and a missing PNG just
+    // draws nothing over the existing background, exactly as the splash
+    // degrades. Dimmed and pushed to the back so the mode buttons and
+    // the tech readout stay the things you actually read.
+    if let Some(brand) = brand.as_ref() {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            ImageNode {
+                image: brand.key_art.clone(),
+                color: Color::srgba(1.0, 1.0, 1.0, 0.45),
+                ..default()
+            },
+            GlobalZIndex(-10),
+            IntroUi,
+        ));
+        // The wordmark IS the title - no text heading competing with it.
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(7.0),
+                left: Val::Percent(24.0),
+                width: Val::Percent(52.0),
+                ..default()
+            },
+            ImageNode {
+                image: brand.wordmark.clone(),
+                color: Color::srgba(1.0, 1.0, 1.0, 0.96),
+                ..default()
+            },
+            GlobalZIndex(11),
+            IntroUi,
+        ));
+        // The mark, at its menu weight - the game signing the page it
+        // is asking you to choose from.
+        let place = branding::EmblemPlacement::MenuHeading;
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(14.0),
+                right: Val::Px(16.0),
+                width: Val::Px(place.size_px()),
+                height: Val::Px(place.size_px()),
+                ..default()
+            },
+            ImageNode {
+                image: brand.emblem.clone(),
+                color: Color::srgba(1.0, 1.0, 1.0, place.alpha()),
+                ..default()
+            },
+            GlobalZIndex(place.z()),
+            IntroUi,
+        ));
+    }
     // §14: the tech readout - real numbers, pulled from the live table
     commands.spawn((
         Text::new(""),
@@ -10279,8 +10357,18 @@ fn close_intro(
     // gameplay (visible in every committed mech capture).
     readout: Query<Entity, With<TechReadout>>,
     toast: Query<Entity, With<LobbyToast>>,
+    // The menu branding (key art, wordmark, emblem) is spawned top-level
+    // for the same reason and MUST be torn down here too - this is the
+    // exact bug the comment above records, and adding art to this screen
+    // is precisely how it would come back.
+    brand_ui: Query<Entity, With<IntroUi>>,
 ) {
-    for e in intro.iter().chain(readout.iter()).chain(toast.iter()) {
+    for e in intro
+        .iter()
+        .chain(readout.iter())
+        .chain(toast.iter())
+        .chain(brand_ui.iter())
+    {
         commands.entity(e).despawn_recursive();
     }
 }
