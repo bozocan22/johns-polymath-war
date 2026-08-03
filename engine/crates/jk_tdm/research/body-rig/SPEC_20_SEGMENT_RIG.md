@@ -57,7 +57,7 @@ which is **bit-for-bit the legacy single-`torso` rotation** whenever `y_pel + y_
 |---|---|
 | "`CHAIN_PEAK_SCALE` drives the spear follow-through" | **`CHAIN_PEAK_SCALE` is 100% inert in production.** `spear_followthrough_yaw` computes `chain_segment_scale(TIP,…) / CHAIN_PEAK_SCALE[TIP]`, and `chain_segment_scale` returns `peak * clamp(…)` — the division cancels the peak exactly. Index 7 is the only index read in production. **The peak table can be corrected with provably zero visual risk.** |
 | BRIEF §B.6 "proportion test: every segment length within ±5% of B.4" | **Do not ship this test.** The rig is deliberately stylised and would fail every row by 13–37% (§2.4). Ship the **intra-limb ratio** test instead, which passes at ±10%. |
-| BRIEF §B.3 foot split "hindfoot 0.011 / toe 0.0035" | **Inconsistent with de Leva's measured whole-foot CoM.** That split implies a foot CoM at 0.481 of foot length; de Leva measures 0.4415. §2.3 derives 0.01147/0.00223 which is consistent by construction. |
+| BRIEF §B.3 foot split "hindfoot 0.011 / toe 0.0035" | **Inconsistent with de Leva's measured whole-foot CoM, and now also with direct measurement.** That split puts the toe at `0.0035/0.0145 = 24.1%` of foot mass, implying a whole-foot CoM at 0.481 of foot length; de Leva measures 0.4415. It is also **67% heavier than the 14.4% Matsumoto et al. (2022) measured by CT** (§2.3). §2.3 derives 0.01147/0.00223 (16.3%), which is consistent with de Leva by construction and lands within 0.019 L of the CT-implied break. |
 
 ---
 
@@ -148,13 +148,38 @@ struct FighterRig {
 
 ## §2 — SEGMENT PARAMETERS (the data table)
 
-All rows are **de Leva 1996 Table 4, MALE column** unless marked **DERIVED**.
+All rows are **de Leva 1996 Table 4, MALE column** unless marked otherwise.
+
+**Label vocabulary — three states, not two.** The spec previously spelled the last two identically, which is how a guess got shipped wearing a derivation's label (defect D10).
+
+| Label | Means | Rows |
+|---|---|---|
+| *(unmarked)* | **MEASURED.** Read straight off a published table. | 14 of 20 |
+| **DERIVED** | Solved from a measurement by stated arithmetic. Falsifiable: change the measurement and the number moves. | `Foot{L,R}`, `Toe{L,R}` |
+| **ASSUMED** | No measurement exists anywhere to solve against. Chosen by a **named estimation method** for the right order of magnitude. | `Clavicle{L,R}` |
+
+`SegmentDef.measured` is a `bool` and therefore **cannot express this distinction** — it spells DERIVED and ASSUMED both as `false`. The narrative label lives in the doc comment; see Step 0. The `derived_rows_are_flagged_as_derived` set `{ClavicleL, ClavicleR, FootL, FootR, ToeL, ToeR}` is unchanged and still correct.
 
 **Convention change you must not get wrong:** de Leva reports trunk CoM as a percent of segment length **from the CRANIAL endpoint**. Our trunk bones' origins are at their **caudal (proximal-to-the-ground)** ends and point +Y up. Trunk `com_frac` below is therefore `1 − deLeva%`. Limb rows are already proximal-first and pass through unchanged. This inversion is the single most likely silent bug in the whole spec.
 
+### 2.0 STATURE CONVENTION — one stature, stated once (defect D9)
+
+**Two different statures appear in this document and they had been used interchangeably.** They are not interchangeable and the difference is 2.2%.
+
+| Symbol | Value | Its one and only role |
+|---|---|---|
+| de Leva's reference stature | **1.741 m** (174.1 cm) | The **divisor** that converted de Leva's published segment lengths in mm into the dimensionless `len_frac` column of §2.1. It appears nowhere else and is never multiplied back in. |
+| `H` = `BODY_HEIGHT` | **1.78 m** | **THE evaluation stature for this entire document.** Every metre-valued length, every inertia in kg·m², is `len_frac × 1.78`. |
+
+**Why 1.78 and not 1.741:** because 1.78 is what ships. `bsp::SegmentDef::inertia_proximal(BODY_MASS_KG, stature_m)` is called at `stature_m = BODY_HEIGHT = 1.78` (Step 6), and §2.4's proportion audit is already at 1.78. The fighter is 1.78 m tall; his inertia is the inertia of a 1.78 m body. de Leva's 1.741 m did its job the moment `len_frac` became dimensionless.
+
+**What this cost, stated honestly:** §3.3 and Step 3 were originally computed at **1.741 m** and are re-stated below at 1.78 m. Every absolute inertia rises by `(1.78/1.741)² = 1.0453`. **No shipped constant changes, and that is provable, not lucky:** every consumer of these numbers is a *ratio* of two inertias (the 35 ms trunk split; `TWIST_LUMBAR_SHARE`), and `I ∝ H²` for every segment alike, so `H²` cancels identically out of every ratio. The trunk split is `0.46767 : 0.53233` at either stature; `TWIST_LUMBAR_SHARE` is `0.548` at either stature. (Both recomputed at 1.741 m and 1.78 m; the shares agree to every printed digit.)
+
+**Rule from here on: never write a bare length.** Write `0.109 H` (a stature fraction) or `0.1940 m` (metres at H = 1.78). The clavicle bug that produced D8 and D9 was exactly a bare `0.109` in one place and a bare `0.1898` in another — the *same quantity*, silently in two unit systems, disagreeing by 2.2%.
+
 ### 2.1 The table
 
-`rg_frac` is the **sagittal** radius of gyration about the segment CoM (de Leva's `r`; `I = (M·m)·(l·r)²`). `len_frac` is length as a fraction of stature (derived by dividing de Leva's mm by his stated male stature 174.1 cm — de Leva does **not** publish length/height ratios).
+`rg_frac` is the **sagittal** radius of gyration about the segment CoM (de Leva's `r`; `I = (M·m)·(l·r)²`). `len_frac` is length as a **fraction of stature `H`** (derived by dividing de Leva's mm by his reference male stature **1.741 m** — de Leva does **not** publish length/height ratios). To get metres, multiply by `H = 1.78`, never by 1.741 (§2.0).
 
 | # | SegmentId | mass_frac | com_frac (from OUR origin) | rg_frac (sag) | len_frac (H) | Source |
 |---|---|---|---|---|---|---|
@@ -162,14 +187,14 @@ All rows are **de Leva 1996 Table 4, MALE column** unless marked **DERIVED**.
 | 2 | `Lumbar` | 0.1633 | **0.5498** (= 1 − 0.4502) | 0.482 | 0.1238 | de Leva MPT, XIPHION–OMPHALION |
 | 3 | `Thorax` | **0.1496** | **0.6801** | 0.716 | 0.0980 | de Leva UPT − 2 clavicles ⚠ |
 | 4 | `HeadNeck` | 0.0694 | **0.4998** | 0.303 | 0.1395 | de Leva Head, **VERTEX–CERVICALE** ⚠ |
-| 5,6 | `Clavicle{L,R}` | **0.0050** | 0.712 | **0.289** | **0.109** | **DERIVED** — see 2.2 |
+| 5,6 | `Clavicle{L,R}` | **0.0050** | 0.712 | **0.289** | **0.109 H** | **ASSUMED** — see 2.2 |
 | 7,8 | `UpperArm{L,R}` | 0.0271 | 0.5772 | 0.285 | 0.1618 | de Leva, SJC–EJC |
 | 9,10 | `Forearm{L,R}` | 0.0162 | 0.4574 | 0.276 | 0.1545 | de Leva, EJC–WJC |
 | 11,12 | `Hand{L,R}` | 0.0061 | 0.7900 | 0.628 | 0.0495 | de Leva, WJC–MET3 ⚠ |
 | 13,14 | `Thigh{L,R}` | 0.1416 | 0.4095 | 0.329 | 0.2425 | de Leva, HJC–KJC |
 | 15,16 | `Shank{L,R}` | 0.0433 | 0.4459 | 0.255 | 0.2493 | de Leva, KJC–LAT MALLEOLUS |
-| 17,18 | `Foot{L,R}` | **0.011467** | **0.500** | **0.289** | **0.1067** | **DERIVED** — see 2.3 |
-| 19,20 | `Toe{L,R}` | **0.002233** | **0.500** | **0.289** | **0.0415** | **DERIVED** — see 2.3 |
+| 17,18 | `Foot{L,R}` | **0.011467** | **0.500** | **0.289** | **0.1067 H** | **DERIVED** — see 2.3, **corroborated** |
+| 19,20 | `Toe{L,R}` | **0.002233** | **0.500** | **0.289** | **0.0415 H** | **DERIVED** — see 2.3, **corroborated** |
 
 **Mass closure, exact:**
 ```
@@ -180,34 +205,70 @@ full: 0.4940 + 0.0100 + 0.0542 + 0.0324 + 0.0122
 ```
 Closes to **1e-6**, better than the brief's ±0.001 gate.
 
-⚠ **Three definitional traps, all load-bearing:**
+⚠ **Three definitional traps here, all load-bearing — and a fourth in §2.3 (BR-04's CoM axis is joint-centre-referenced, ours is heel-referenced):**
 - **`HeadNeck` uses de Leva's ALTERNATIVE endpoint row (VERTEX–CERVICALE, L 242.9 mm, CoM 50.02%, r 30.3/31.5/26.1)**, not the primary VERTEX–MID-GONION row. The research states this explicitly: *"Use this variant if your neck joint sits at C7."* Our head pivot is the neck base. Mass `0.0694` still **excludes** neck soft tissue — de Leva leaves neck mass inside the trunk (he did not adjust masses at all). Winter's head+neck is 0.081; the 0.0116 difference is the neck and it lives in our `Thorax`, which is also where the neck cylinder shell hangs. Closure is unaffected. **Do not "fix" this by adding 0.0116 — it would double-count.**
 - **`Hand` uses de Leva's SHORT hand (WJC → 3rd metacarpale, L 86.2 mm, CoM 0.79).** The rig's hand is a mitten ball ending at the knuckle, so this is correct. The alternative WJC→3rd-dactylion row (L 187.9, CoM 0.3624) is a **different segment**; mixing them is the documented common error.
 - **`Foot` here is de Leva's heel→toe-tip definition, split.** Winter's foot (lateral malleolus → metatarsal-II head) **excludes the toes and uses a different axis**. The two are not interchangeable. Never take `com_frac` from one and `mass_frac` from the other.
 
-### 2.2 GAP: the clavicle — no measured data exists in any source
+### 2.2 GAP: the clavicle — no measured data exists in any source. **Label: ASSUMED, not DERIVED** (defect D10)
 
 **Stated plainly: there is no clavicle inertia data in de Leva, Winter, or Dempster.** de Leva contains no clavicle, scapula or shoulder girdle at all — the word does not appear in the paper. Winter has exactly one row, "Shoulder mass" (sternoclavicular joint → glenohumeral axis), and it is **crippled: mass_frac cell BLANK, all three radius-of-gyration cells em-dashes.** Only CoM 0.712/0.288 and density 1.04 are printed.
 
-**Derivation, marked DERIVED:**
+**And the search went two levels deeper than that, with a decisive negative result** (SOURCES.md BR-06, BR-07):
+
+- The primary dataset behind Veeger et al. (1991) — a paper *titled* "**Inertia** and muscle contraction parameters for musculoskeletal modelling of the **shoulder mechanism**", n = 7 cadavers, 14 shoulders dissected — **has no clavicle row and no scapula row in its inertia tables at all** (Head · Trunk · Head&Trunk · Total arm · Upper arm · Forearm · Forearm&hand · Hand). The girdle is inside "Trunk". Worse: its own methods state the inertias it *does* publish were **estimated from regression equations** (Clauser et al. 1969, Hinrichs 1985), not measured. It digitised clavicle and scapula *geometry* to a palpator SD of 0.96 mm and then took *inertia* from regressions for segments that contain no clavicle.
+- The Delft Shoulder & Elbow Model's own parameter file (`l1091_2024.dsp`) carries the header **`REM scapular mass and rotational inertia roughly estimated!!`** and gives the scapula a **literally isotropic** tensor (1e-3 / 1e-3 / 1e-3). It says so itself.
+
+**So the label was the defect, not the number.** `mass_frac 0.0050` was marked **DERIVED**, which asserts falsifiability — change a measurement and the number moves. There is no measurement to change. It is **ASSUMED**.
+
+**The number survives on a real bracket.** Back-solving DSEM's masses against a ≈75 kg cadaver (SOURCES.md BR-07) gives **clavicle alone ≈ 0.0021** of body mass and **scapula alone ≈ 0.0094**, so the functional shoulder girdle is **≈ 0.0115 per side**. Our `Clavicle` segment *is* the functional girdle — it parents `UpperArm`. **0.0050 sits inside [0.0021, 0.0115]** and is therefore the right order of magnitude, bounded on both sides. Changing it would force a re-carve of `Thorax` and a recompute of its CoM for zero evidential gain. **Keep 0.0050; call it ASSUMED.**
+
+**The estimation method has a name, and it is a legitimate one.** `0.2887 = 1/√12` is the uniform-rod value — i.e. **geometric-solid modelling in the Hanavan (1964) / Yeadon (1990) lineage**, the standard fallback when no cadaver or scan data exists for a segment. The single whole-body model that *does* segment the shoulder, **Hatze (1980)**, is paywalled and unread (SOURCES.md BR-12, the highest-value unread source in the ledger) — and it is built from subdivided geometric solids too. **The method was right. Only the label overstated it.**
+
+**Do NOT adopt DSEM's clavicle inertia as a replacement.** `r_transverse = √(2.63e-5 / 0.156) = 13.0 mm`; at the uniform-rod relation `r = 0.2887 L` that implies a clavicle **45 mm long**. Real adult clavicles are 140–160 mm. DSEM's clavicle inertia is ~9× too small and its own file says "All inertial data still needs checking".
+
+**Values, with the label each one actually earns:**
 
 | Quantity | Value | How |
 |---|---|---|
-| `com_frac` 0.712 | **published** | Winter Table 4.1 "Shoulder mass", proximal = sternoclavicular = our bone origin. The one real clavicle number that exists anywhere. |
-| `mass_frac` 0.0050 | **UNMEASURED** | Carried over from BRIEF §B.3's own figure. **Carved out of `Thorax` (UPT 0.1596 → 0.1496), not added**, so closure is exact by construction. |
-| `com_frac` correction to Thorax | 0.7001 → **0.6801** | Removing 2×0.005 sitting at the top of the UPT (fraction 1.0) shifts the residual CoM down: `(0.1596·0.7001 − 0.010·1.0)/0.1496 = 0.6801`. Computed, not fudged. |
-| `rg_frac` 0.289 | **GEOMETRIC MODEL** | Uniform slender rod about its own centroid: `1/√12 = 0.2887`. Longitudinal axis floored at **0.10** to keep the inertia tensor non-singular (a true rod has zero polar inertia). |
-| `len_frac` 0.109 H | **DERIVED** | Drillis & Contini half-shoulder-width 0.129 H minus ≈0.02 H for the sternoclavicular offset from the midline. |
+| `com_frac` 0.712 | **PUBLISHED (secondary)** | Winter Table 4.1 "Shoulder mass", proximal = sternoclavicular = our bone origin. The one real clavicle number that exists anywhere — itself a Dempster derivative, and see CONTRADICTION-1 in SOURCES.md (two web summaries of this same row disagree with our primary read and with each other; **both discarded, no number taken from them**). |
+| `mass_frac` 0.0050 | **ASSUMED** | No measured value exists in any reachable source. Carried over from BRIEF §B.3's own figure, and **retained because it sits inside the DSEM girdle bracket [0.0021, 0.0115]**. **Carved out of `Thorax` (UPT 0.1596 → 0.1496), not added**, so closure is exact by construction. |
+| `com_frac` correction to Thorax | 0.7001 → **0.6801** | **DERIVED.** Removing 2×0.005 sitting at the top of the UPT (fraction 1.0) shifts the residual CoM down: `(0.1596·0.7001 − 0.010·1.0)/0.1496 = 0.680053` → 0.6801. Computed, not fudged. |
+| `rg_frac` 0.289 | **ASSUMED (geometric model)** | Uniform slender rod about its own centroid: `1/√12 = 0.2887` — **geometric-solid modelling, Hanavan/Yeadon lineage**. Longitudinal axis floored at **0.10** to keep the inertia tensor non-singular (a true rod has zero polar inertia). |
+| `len_frac` **0.109 H** (= **0.1940 m** at H = 1.78) | **DERIVED** | Drillis & Contini half-shoulder-width 0.129 H minus ≈0.02 H for the sternoclavicular offset from the midline. **Always write the unit** — this is the exact quantity that generated D8 and D9. |
 
-**Sensitivity bound (why this is acceptable):** `I_clavicle ≈ 0.005 · (0.2887 · 0.109 · 1.78)² · M ≈ 1.4e-4·M` — **three orders of magnitude below the thorax**. The only consumer is spring stiffness (§5), where a ±50% error moves a segment whose total travel is ±7.7 cm. It is bounded further by `CLAV_YAW_MAX` (§4, Step 4).
+**Sensitivity bound (why this is acceptable) — CORRECTED, defect D8.**
 
-### 2.3 GAP: the toe/forefoot — derived from de Leva's measured foot CoM
+```
+len_clavicle          = 0.109 H = 0.109 × 1.78     = 0.19402 m
+0.2887 × 0.19402                                   = 0.05601357 m
+(0.05601357)²                                      = 3.13752e-3 m²
+I_clavicle ≈ 0.005 · 3.13752e-3 · M                = 1.57e-5 · M   kg·m²
+```
 
-**No source in the research treats the foot as anything but one rigid segment.**
+**This line previously read `≈ 1.4e-4·M`. That was 10× too large** — a straight arithmetic slip, and the document already disagreed with itself about it: §3.3 independently computes the same quantity as **1.50e-5** (the residual 1.57 vs 1.50 was the D9 unit confusion — 0.109 H at H = 1.78 gives 0.1940 m, at H = 1.741 it gives 0.1898 m; both sites now use H = 1.78, and both now read **1.57e-5·M**).
+
+**The conclusion is UNAFFECTED and in fact STRENGTHENED: the clavicle is *more* negligible than the spec claimed, not less.** It remains what justifies the 5 ms floor in §3.3(a).
+
+**But the order-of-magnitude phrasing was also wrong, in the other direction, and is now stated as computed.** Against the thorax's twist-axis inertia from §3.3 (`I_UPT = 1.977e-3·M` at H = 1.78):
+
+```
+I_UPT / I_clavicle = 1.976945e-3 / 1.5688e-5 = 126.0
+```
+
+**Two orders of magnitude below the thorax, not three** — and note the old 1.4e-4 figure would have made it **1.3 orders**, so "three orders" was never true under either number. (Sagittal-axis comparison, if you want it: thorax sagittal `I = 0.1496·(0.716 · 0.0980 H)² = 2.334e-3·M`, ratio **148.8** — still two orders.) **SOURCES.md's CONTRADICTION-3 note says "four orders below the thorax"; that is also wrong. The ratio is 126, i.e. ~2.1 orders.** Recorded here rather than edited there, because the ledger is Toto's file.
+
+Two orders is still decisive for the purpose. The only consumer is spring stiffness (§5, Step 6), where a ±50% error moves a segment whose total travel is ±7.7 cm, and it is bounded further by `CLAV_YAW_MAX` (§4, Step 4). **Never build a feature whose feel depends on the clavicle's mass.**
+
+### 2.3 GAP: the toe/forefoot — derived from de Leva's measured foot CoM, and now **CORROBORATED BY MEASUREMENT** (defect D11)
+
+**No whole-body BSP dataset treats the foot as anything but one rigid segment**, and the canonical kinetic multi-segment foot models (Dixon 2012, Bruening 2012, Saraswat 2014) determine segment inertia *arbitrarily* or by *assuming a cylinder* — that is the state of the art, in the words of the paper written to fix it.
+
+**That paper exists, and it was published after this section was first written.** Matsumoto et al. (2022), *Front Bioeng Biotechnol* 10:894731 (SOURCES.md BR-04) publishes CT-derived foot segment masses. **The derivation below stands unchanged and is now cross-checked against real measurement — see "Corroboration" after the validation block.**
 
 **A subtraction route was tried and is invalid — record the negative result:** Winter's toeless foot is 0.0145 of body mass, de Leva's foot-with-toes is 0.0137. The *toeless* foot is *heavier*. That proves the difference is a dataset offset (Dempster's elderly cadavers vs Zatsiorsky's young adults), not anatomy. **Do not derive toe mass by differencing the two published foot definitions.**
 
-**Derivation that works — solve the split from the measured whole-foot CoM.** Let `L` be foot length, `s = 0.72` the metatarsophalangeal break fraction from the heel (**ASSUMED — no source in the research payload gives it**), and each part uniform so its CoM is at its own midpoint (hindfoot 0.36 L, toe 0.86 L). de Leva measures the whole-foot CoM at **0.4415 L** from the heel.
+**Derivation that works — solve the split from the measured whole-foot CoM.** Let `L` be foot length, `s = 0.72` the metatarsophalangeal break fraction from the heel (**was ASSUMED with no source; now corroborated to 0.019 L — see below**), and each part uniform so its CoM is at its own midpoint (hindfoot 0.36 L, toe 0.86 L). de Leva measures the whole-foot CoM at **0.4415 L** from the heel.
 
 ```
 m_h·0.36 + m_t·0.86 = m_F·0.4415          and   m_h + m_t = m_F
@@ -227,9 +288,50 @@ m_t·d_t²   = 0.163 × (0.86 − 0.4415)²  = 0.163 × 0.1751423 = 0.0285482
 r_foot(model) = √0.0713376 = 0.2671     vs de Leva MEASURED 0.257  →  +3.9%
 ```
 
-**A two-part uniform-slab model reproduces the measured whole-foot inertia to within 4%.** That is a real check, and it ships as an assertion (§5, Step 0). The brief's 0.0035 toe mass fails the same check — it would put the whole-foot CoM at 0.481 instead of the measured 0.4415.
+**A two-part uniform-slab model reproduces the measured whole-foot inertia to within 4%.** That is a real check, and it ships as an assertion (§5, Step 0). The brief's 0.0035 toe mass fails the same check — it would put the whole-foot CoM at `0.36 + (0.0035/0.0145)/2 = 0.481` instead of the measured 0.4415.
 
-**Not derivable, art-directed and labelled as such:** the MTP break at 0.72 L, and toe plantarflexion ROM (`TOE_OFF_RAD = 0.45 rad`). Neither exists in any source consulted.
+#### Corroboration by independent measurement — Matsumoto et al. (2022), SOURCES.md BR-04
+
+CT-derived foot segment masses, as a percentage of whole-foot mass:
+
+| BR-04 segment | Relative mass | Maps to our rig |
+|---|---|---|
+| Phalanx | **14.4%** | our `Toe` (MTP → tip) |
+| Forefoot | 42.4% | our `Foot` |
+| Hindfoot | 43.2% | our `Foot` |
+
+⇒ measured **toe = 14.4%** of foot mass, foot = 85.6%.
+
+**Back-solve our own model against that measurement.** The §2.3 derivation collapses to a one-line relation — with each part uniform, the CoM closure `m_h·(s/2) + m_t·((1+s)/2) = 0.4415` and `m_h + m_t = 1` reduce to:
+
+```
+m_t = 2(0.4415) − s = 0.883 − s
+```
+
+- our assumed `s = 0.72`      ⇒ `m_t = 0.163`   ← the shipping value
+- BR-04's measured `m_t = 0.144` ⇒ **`s = 0.739`**
+
+**Two fully independent routes agree on the MTP break to 0.019 of foot length.** Route (a): an n = 100 gamma-ray whole-foot CoM (de Leva/Zatsiorsky) plus a geometric split assumption. Route (b): an n = 1 CT segmentation with anatomical section planes (FMH–VMH at the MTP). They share **no data, no subject, no measurement modality and no year**. 0.019 L on our rig's 0.22 m foot is **4.2 mm**; on de Leva's 0.1482 H foot at H = 1.78 (0.2638 m) it is **5.0 mm**. Toe mass agrees to **13.2% relative**.
+
+**Toe radius of gyration — an independent check on the assumed 0.2887.** BR-04's `Iyy` (the FMH–VMH axis, i.e. the plantarflexion axis the toe actually hinges about) with the phalanx's 0.131 kg gives `I = 1.43e-3 × 0.131^(5/3) = 4.832e-5 kg·m²`, so `r = √(4.832e-5/0.131) = 19.2 mm`. Against our toe length `0.0415 H = 73.9 mm`: **r/L = 0.260 vs our assumed 0.2887 → −9.9%.** ⚠ This conversion assumes BR-04's "arbitrary unit" tensor was computed in kg and m, which is the only dimensionally natural reading but is **not stated in the paper**. Treat 19.2 mm as strongly indicated, not published.
+
+**VERDICT: KEEP the shipped 0.163 / 0.011467 / 0.002233. Upgrade the confidence, not the numbers.**
+
+Be precise about *why*, because the obvious reason is not quite right: it is **not** that 0.163 reproduces de Leva's CoM and 0.144 would not. `m_t = 0.883 − s` is an identity, so the paired switch `(0.163, 0.72) → (0.144, 0.739)` reproduces the measured CoM exactly too — and in fact reconstructs de Leva's measured whole-foot `r` marginally *better* (**+3.4%** vs our **+3.9%**). The real reasons to stay put:
+
+1. **Table coherence.** 0.163 is anchored to the same n = 100 dataset as the other 18 rows. 0.144 would import a single CT scan into an otherwise de Leva-consistent table, and its `Foot`/`Toe` body-mass fractions (0.011727 / 0.001973) would then be a de Leva whole-foot mass split by a Matsumoto ratio — a hybrid.
+2. **The difference is below the noise floor of the thing it feeds.** BR-04 ran its own sensitivity analysis, scaling *all* foot masses and inertias by **0.5× and 1.5×** (chosen because segment-parameter SDs run about a quarter of the mean), and reports verbatim: *"The change in the inertial parameters had **virtually no effect** on the calculated joint moments."* A 13% disagreement is immaterial to anything this rig does.
+3. **`derived_foot_split_reproduces_de_leva_whole_foot` keeps passing untouched.** Switching requires changing *both* mass constants *and* `s` in the same commit. `m_t = 0.883 − s` is the invariant; break the pair and the test correctly fails.
+
+**⚠ DEFINITIONAL TRAP — the fourth one, and it is the dangerous kind: take BR-04's MASSES only. Do NOT take its CoMs.** BR-04's "Relative COM position" column (phalanx 43.6%, forefoot 41.9%, hindfoot 55.4%) is measured along a **joint-centre-referenced** axis: the hindfoot's proximal end is the **ankle joint centre**, between the malleoli, which sits *above and forward of* the heel. de Leva's 0.4415 and every `com_frac` in §2.1 are **heel-referenced**. The two cannot be combined into a heel-referenced whole-foot CoM without segment lengths BR-04 does not publish. Mixing them produces a number that looks right and is silently wrong — the same failure mode as the Winter/de Leva foot-definition trap already recorded in §2.1.
+
+**⚠ PRECISION CEILING on BR-04 — do not exceed it.**
+- **n = 1** for every relative value. One male participant, **age 42, 72 kg, 172 cm**. The 10-participant cohort supplied *body mass for scaling only*.
+- **Volumetric, not gravimetric.** Inertia was computed in CAD from the CT surface *assuming a homogeneous composition at 1.1 g/cm³*. Uniform density is assumed, not measured.
+- **No SD is published on the relative values.** The ±0.017 / ±0.051 / ±0.052 kg spreads on the absolute masses are **body-mass scaling across the cohort, not anatomical variation in the split**.
+- ⇒ **Quote at most 3 significant figures. Do NOT build per-fighter foot-mass variance on this.** Same rule, same reason, as the 20 ms javelin ceiling in §3.5.
+
+**Still not derivable, still art-directed, still labelled as such:** toe plantarflexion ROM (`TOE_OFF_RAD = 0.45 rad`). That is a range of motion, not an inertia; nothing in any source consulted gives it. **The MTP break at 0.72 L is no longer in this category** — it is DERIVED and independently corroborated to 0.019 L.
 
 ### 2.4 Rig proportions vs the literature — **the brief's ±5% test must not ship**
 
@@ -306,25 +408,34 @@ Chain span **130 ms**. Measured inter-anchor gaps: **40 ms → 30 ms**, i.e. the
 
 Four indices are unmeasured: `Lumbar(1)`, `Thorax(2)`, `Forearm(5)`, `Hand(6)`. Two different interpolation rules, each chosen for a stated physical reason.
 
-**(a) Trunk window `Pelvis(0.000) → Clavicle(0.040)`, three hops — inertia-weighted.** In the trunk the segments are massive and the delay to each is dominated by the inertia that must be accelerated. Longitudinal inertia from the table above, `I ∝ m·(r_long · L)²`:
+**(a) Trunk window `Pelvis(0.000) → Clavicle(0.040)`, three hops — inertia-weighted.** In the trunk the segments are massive and the delay to each is dominated by the inertia that must be accelerated. Inertia about the **twist axis** from the table above, `I ∝ m·(r · L)²`, per unit body mass `M`, **evaluated at `H = 1.78` (§2.0 — these three lines were previously computed at 1.741 m and are restated; see the invariance note below):**
 
 ```
-I_MPT (lumbar)  = 0.1633 × (0.468 × 0.2155)² = 0.001661015
-I_UPT (thorax,  = 0.1496 × (0.659 × 0.1707)² = 0.001893083
+L_lum  = 0.1238 H = 0.220364 m ;  L_tho = 0.0980 H = 0.174440 m ;  L_clav = 0.109 H = 0.194020 m
+
+I_MPT (lumbar)  = 0.1633 × (0.468 × 0.220364 m)² = 0.001736837   (was 0.001661015 at 1.741 m)
+I_UPT (thorax,  = 0.1496 × (0.659 × 0.174440 m)² = 0.001976945   (was 0.001893083 at 1.741 m)
        post-carve)
-I_clav          = 0.0050 × (0.2887 × 0.1898)² = 0.0000150   ← ~0.4% of the budget
+I_clav          = 0.0050 × (0.2887 × 0.194020 m)² = 0.000015688  (was 0.0000150 at 1.741 m)
+                                                                  ← 0.42% of the budget
 ```
 
-The clavicle hop lands at **0.17 ms** — physically right (it is nearly massless) but useless as an animation offset and it would make strict-ordering pass only on float noise. **Floor every hop at 5 ms**: above f32 noise, and below the finest sampling resolution in any source (handball 4 ms @ 250 Hz; this javelin study 20 ms @ 50 Hz), so it never claims precision the data does not have.
+**Which radius goes on which segment, and why the clavicle is not floored here.** Lumbar and thorax use their **longitudinal** radii (0.468, 0.659) because their own long axis *is* the twist axis (body +Y). The clavicle uses **0.2887, its transverse/sagittal radius, and that is correct** — a clavicle's long axis runs laterally, so body-Y twist is *transverse* to it. §2.2's `0.10` longitudinal floor applies to the clavicle's **own long axis**, which is **not** the axis it twists about here. This looked like a contradiction between §2.2 and §3.3 and is not one. (For completeness: if one wrongly applied the 0.10 floor, `I_clav` would be `1.88e-6` and the hop `0.02 ms` instead of `0.17 ms` — **still floored to 5 ms, so no shipped constant depends on getting this right**. It is recorded because a future reader will hit the same apparent contradiction.)
+
+**Stature invariance — why restating these at 1.78 m moves nothing.** `I ∝ H²` for every segment alike, so `H²` cancels out of every ratio, and **every consumer of these three numbers is a ratio**. The trunk split is `0.46736 : 0.53264` at 1.741 m and at 1.78 m; `TWIST_LUMBAR_SHARE` (Step 3) is `0.548` at both. Verified by recomputation at both statures.
+
+The clavicle hop lands at **0.17 ms** — physically right (it is nearly massless) but useless as an animation offset and it would make strict-ordering pass only on float noise. **Floor every hop at 5 ms**: above f32 noise, and below the finest sampling resolution in any source (handball 4 ms @ 250 Hz; this javelin study 20 ms @ 50 Hz), so it never claims precision the data does not have. **Defect D8 makes this argument stronger, not weaker** — §2.2's `I_clavicle` was overstated 10× and is really `1.57e-5·M`, 126× below the thorax, so the clavicle is *more* negligible than the floor's original justification claimed.
 
 ```
 clavicle hop = 5 ms (floor)
-remaining 35 ms split I_MPT : I_UPT = 0.001661015 : 0.001893083 = 0.46736 : 0.53264
-  Pelvis → Lumbar  = 35 × 0.46736 = 16.36 ms
-  Lumbar → Thorax  = 35 × 0.53264 = 18.64 ms
+remaining 35 ms split I_MPT : I_UPT = 0.001736837 : 0.001976945 = 0.46767 : 0.53233
+  Pelvis → Lumbar  = 35 × 0.46767 = 16.37 ms
+  Lumbar → Thorax  = 35 × 0.53233 = 18.63 ms
   Thorax → Clavicle=  5.00 ms
 ⇒ Lumbar = 0.0164   Thorax = 0.0350   Clavicle = 0.0400  ✓ hits the measured anchor
 ```
+
+(The split reads `0.46736 : 0.53264` if you use the rounded lengths `0.2155 / 0.1707 m` this block printed before, and `0.46767 : 0.53233` from the unrounded `len_frac × H`. Both give **16.4 / 18.6 ms** and both round to the shipped **0.016 / 0.035**. Stated so the two spellings are not read as a discrepancy.)
 
 **(b) Arm window `UpperArm(0.070) → Tip(0.130)`, three hops — geometric compression.** Distal segments are not gated by their own mass (the hand is 1/7 of the forearm's inertia; inertia weighting would give it a 5 ms hop and the forearm 39 ms, which contradicts the measured trend). They are gated by the sequencing strategy, and the literature gives us that trend directly: 40 → 30 ms, ratio 0.75. Extrapolate geometrically with ratio `q` from the measured 30 ms base, solved to land **exactly** on the measured 130 ms release anchor:
 
@@ -469,6 +580,18 @@ Add `mod bsp` inside `main.rs` (the crate is a single-file binary plus `sim`; do
 /// derivative (8 cadavers, ages 52-83, mean 59.6 kg) and Winter publishes
 /// NO radius of gyration for ANY trunk subsegment - which is exactly what
 /// a three-part trunk needs. See spec §0.1.
+///
+/// STATURE: de Leva's 174.1 cm above is his REFERENCE body, used here
+/// only as the divisor that made `len_frac` dimensionless. EVALUATE at
+/// BODY_HEIGHT = 1.78. Never mix the two - spec §2.0, defect D9.
+///
+/// Two rows are not from de Leva and one of them is not from anywhere:
+///   Foot/Toe - DERIVED from de Leva's measured whole-foot CoM
+///     (0.4415 L from the heel), corroborated by Matsumoto et al. (2022)
+///     Front Bioeng Biotechnol 10:894731, CT, n=1. Spec §2.3.
+///   Clavicle - ASSUMED. There is no measured clavicle inertia anywhere.
+///     Geometric-solid model, bracketed by the Delft Shoulder Model.
+///     Spec §2.2.
 mod bsp {
     use super::SegmentId;
 
@@ -485,10 +608,30 @@ mod bsp {
         /// sagittal radius of gyration about the segment CoM, as a
         /// fraction of segment length (de Leva's r; I = (M*m)*(l*r)^2)
         pub rg_frac: f32,
-        /// segment length as a fraction of STATURE
+        /// segment length as a fraction of STATURE. To get metres,
+        /// multiply by BODY_HEIGHT (1.78), NOT by de Leva's 174.1 cm
+        /// reference stature - that number's only job was to make this
+        /// column dimensionless in the first place. See spec 2.0.
         pub len_frac: f32,
-        /// false => this row is DERIVED, not measured. Clavicle and toe
-        /// have NO published inertia data in de Leva, Winter or Dempster.
+        /// false => this row is NOT read off a published table.
+        ///
+        /// WARNING: a bool cannot say which KIND of not-measured this is,
+        /// and the two are not equally trustworthy (spec 2.1):
+        ///   Foot{L,R}/Toe{L,R} are DERIVED - solved from de Leva's
+        ///     measured whole-foot CoM, and since 2022 independently
+        ///     corroborated by CT measurement (Matsumoto et al.,
+        ///     Front Bioeng Biotechnol 10:894731) to 0.019 of foot length
+        ///     on the MTP break and 10% on the toe radius of gyration.
+        ///   Clavicle{L,R} is ASSUMED - NO measured clavicle inertia
+        ///     exists in de Leva, Winter, Dempster, or even in the n=7
+        ///     cadaver dissection dataset behind Veeger et al. (1991)
+        ///     "Inertia ... of the shoulder mechanism", whose inertia
+        ///     tables have no clavicle row and no scapula row at all and
+        ///     whose own methods say they came from regressions. The
+        ///     values here are geometric-solid modelling in the
+        ///     Hanavan/Yeadon lineage, bracketed by the Delft Shoulder
+        ///     Model's [0.0021 bone-only, 0.0115 girdle] per side.
+        /// If this ever needs to be machine-readable, make it an enum.
         pub measured: bool,
     }
 
@@ -498,6 +641,11 @@ mod bsp {
         /// Moment of inertia about this segment's PROXIMAL joint, kg*m^2.
         /// Parallel-axis from de Leva's centroidal radius:
         ///   I_prox = m * L^2 * (rg^2 + com^2)
+        /// `stature_m` MUST be BODY_HEIGHT (1.78), never de Leva's 1.741 -
+        /// spec 2.0. Every RATIO out of this function is stature-invariant
+        /// (I scales as H^2 uniformly), so the choice only sets absolute
+        /// magnitudes - but mixing the two statures across call sites is
+        /// exactly the bug that produced spec defects D8 and D9.
         pub fn inertia_proximal(&self, body_mass_kg: f32, stature_m: f32) -> f32 {
             let m = body_mass_kg * self.mass_frac;
             let l = stature_m * self.len_frac;
@@ -520,7 +668,8 @@ const BODY_MASS_KG: f32 = 78.0;
 | `bsp_has_exactly_twenty_named_segments` | `SegmentId::ALL.len() == 20`; every `SEGMENTS[i].id == SegmentId::ALL[i]`; no duplicate ids |
 | `bsp_hierarchy_is_a_tree_rooted_at_pelvis` | every non-`Pelvis` has `Some(parent)`; `Pelvis.parent == None`; walking parents from any node reaches `Pelvis` in ≤6 hops (proves acyclic + connected) |
 | `derived_foot_split_reproduces_de_leva_whole_foot` | reassemble hindfoot+toe via parallel axis (§2.3): reconstructed `r_foot` within **5%** of de Leva's measured `0.257`, and reconstructed CoM within `1e-6` of `0.4415` |
-| `derived_rows_are_flagged_as_derived` | `{id : !measured}` is **exactly** `{ClavicleL, ClavicleR, FootL, FootR, ToeL, ToeR}` — stops a future edit silently promoting a guess to a measurement |
+| `derived_rows_are_flagged_as_derived` | `{id : !measured}` is **exactly** `{ClavicleL, ClavicleR, FootL, FootR, ToeL, ToeR}` — stops a future edit silently promoting a guess to a measurement. **The set is unchanged by defects D10/D11**: the clavicle's relabel DERIVED→ASSUMED and the toe's corroboration both live on the same side of the `bool` |
+| `the_foot_split_agrees_with_the_ct_measured_split` | back-solve the MTP break from the shipped toe mass via the identity `s = 0.883 − m_t/m_F` and assert `|s − 0.739| < 0.03` against Matsumoto's CT-implied value. Shipped `m_t/m_F = 0.163` gives `s = 0.720`, gap **0.019** — so the assertion has **0.011 of headroom upward and 0.049 downward** and is *not* comfortably satisfied, which is the point. **Falsifiable and genuinely independent**: the target comes from a different study, subject, modality and decade, and the assertion is the only thing in the suite that would catch a re-tune of the toe mass. Do NOT widen the tolerance to make room for a tuning change — a toe mass that fails this has left the corroborated bracket |
 | `intra_limb_length_ratios_match_the_literature` | §2.4 verbatim |
 
 **Revert:** delete the module.
@@ -671,11 +820,17 @@ const TWIST_SPINE_FRAC: f32 = 0.60;
 
 /// DERIVED: inverse-inertia compliance. For equal internal torque, the
 /// segment with the smaller longitudinal inertia twists more.
-///   I_MPT = 0.1633*(0.468*0.2155)^2 = 0.001661015  -> 1/I = 602.0
-///   I_UPT = 0.1496*(0.659*0.1707)^2 = 0.001893083  -> 1/I = 528.2
-///   lumbar share = 602.0 / (602.0 + 528.2) = 0.5326  ... using the
-///   post-carve UPT; with de Leva's raw UPT it is 0.548. Either lands the
-///   "mid trunk is the twist segment" read the brief asks for.
+/// Lengths are len_frac * H at H = BODY_HEIGHT = 1.78 m (spec 2.0); this
+/// block previously evaluated at de Leva's 1.741 m reference stature.
+///   I_MPT = 0.1633*(0.468*0.220364)^2 = 0.001736837  -> 1/I = 575.8
+///   I_UPT = 0.1496*(0.659*0.174440)^2 = 0.001976945  -> 1/I = 505.8
+///   lumbar share = 575.8 / (575.8 + 505.8) = 0.5323  ... using the
+///   post-carve UPT; with de Leva's raw UPT (0.1596 -> I = 0.002109094,
+///   1/I = 474.1) it is 0.5484. Either lands the "mid trunk is the twist
+///   segment" read the brief asks for.
+/// STATURE-INVARIANT: I scales as H^2 for every segment alike, so H^2
+/// cancels out of this ratio. 0.548 is the same at 1.741 m and at 1.78 m.
+/// Only the absolute 1/I magnitudes above moved (by 1/1.0453).
 const TWIST_LUMBAR_SHARE: f32 = 0.548;
 
 /// §1.3 "hips lead shoulders". SHIPS AT 0.0 - see Step 3b.
@@ -779,10 +934,17 @@ const CLAV_YAW_MAX: f32 = 0.30;
 /// mesh spans z = -0.06 (heel) .. +0.16 (toe tip), length 0.22 m. The
 /// break sits at 0.72 of foot length from the heel:
 ///   -0.06 + 0.72 * 0.22 = 0.0984
-/// 0.72 is ASSUMED - no source consulted (de Leva, Winter, Dempster,
-/// Drillis & Contini) gives an MTP location. It is the ONE free parameter
-/// in the foot split; everything else follows from de Leva's measured
-/// whole-foot CoM (0.4415 of foot length from the heel).
+/// 0.72 was ASSUMED - no BSP source (de Leva, Winter, Dempster, Drillis &
+/// Contini) gives an MTP location. It is the ONE free parameter in the
+/// foot split; everything else follows from de Leva's measured whole-foot
+/// CoM (0.4415 of foot length from the heel).
+/// CORROBORATED (spec 2.3): Matsumoto et al. (2022) Front Bioeng
+/// Biotechnol 10:894731 measure phalanx mass at 14.4% of foot mass by CT
+/// segmentation. Back-solving our own model's identity `m_t = 0.883 - s`
+/// against that puts the break at s = 0.739 - 0.019 of foot length from
+/// our 0.72, i.e. 4.2 mm on this 0.22 m foot (TOE_BREAK_Z would be 0.103
+/// instead of 0.098). Two routes sharing no data, no subject and no
+/// modality. NOT changed: see spec 2.3 for why 0.163/0.72 stays.
 const TOE_BREAK_Z: f32 = 0.098;
 /// MTP joint ball radius. Must fully bridge the foot's 0.09 m depth.
 const TOE_R: f32 = 0.048;
@@ -848,7 +1010,7 @@ impl bsp::SegmentDef {
 }
 ```
 
-Worked values at `BODY_MASS_KG = 78.0`, `stature = BODY_HEIGHT = 1.78`:
+Worked values at `BODY_MASS_KG = 78.0`, `stature = BODY_HEIGHT = 1.78` — **this step was already at the §2.0 stature, and all four rows were recomputed and reproduce to the printed digits** (`I = 78·mass_frac · (1.78·len_frac)² · (rg_frac² + com_frac²)`, `k = I·(2π·4)²`):
 
 | Segment | `I_proximal` (kg·m²) | `k` at `f = 4 Hz` |
 |---|---|---|
@@ -934,14 +1096,16 @@ Two candidates, both explicitly **out of scope** and both requiring a replay-ver
 
 ## §6 — WHAT THIS SPEC DOES NOT CLAIM
 
-1. **Clavicle mass (0.005) is a guess.** No measured value exists in de Leva, Winter or Dempster. Carved from the thorax so closure is exact; bounded by `CLAV_YAW_MAX` and by being 1/1000th of the thorax's inertia.
-2. **Clavicle radius of gyration (0.289) is a uniform-rod geometric model**, not a measurement. Winter's three radius cells are em-dashes.
-3. **The MTP break at 0.72 of foot length is assumed.** Nothing else in the foot split is — the masses fall out of de Leva's measured whole-foot CoM and the model reconstructs his measured whole-foot radius to 3.9%.
-4. **`TOE_OFF_RAD = 0.45` is art-directed.** No toe ROM in any source consulted.
-5. **`CHAIN_PEAK_SCALE[3..=7]` is not derivable.** Only the pelvis→thorax ratio (1.43) is measured. Those five entries carry their by-feel per-hop gains forward, and index 7 cancels in the only production consumer anyway.
-6. **The javelin timing rests on one 50 fps study of n = 7** (`New Studies in Athletics` — a coaching-federation publication, not peer-reviewed; its prose contains multiple errors, though its Table 3 is clean and internally consistent). The *ordering* is independently corroborated (Navarro et al. at 200 Hz; Serrien & Baeyens's pooled handball meta-analysis with CIs). **The 20 ms frame interval is the precision ceiling — do not build sub-frame variation on top of it.**
-7. **The trunk carries no spine curvature.** Co-located pivots are a deliberate trade (§0.2): full axial separation, zero coordinate churn, `head_base_y` preserved.
-8. **de Leva's female column is not used and should not be** without fresh work: n = 15, mean age 19, stature 173.5 cm (statistically indistinguishable from the male mean), and the LPT/thigh rows diverge from the male column far more than any other segment.
+1. **Clavicle mass (0.005) is ASSUMED, not derived.** No measured value exists in de Leva, Winter, Dempster, or in the n = 7 cadaver dissection dataset behind Veeger et al. (1991) *"**Inertia** ... of the **shoulder mechanism**"* — that dataset has no clavicle row and no scapula row at all, and its own methods state its inertias came from Clauser/Hinrichs **regressions**. The Delft Shoulder Model's parameter file says `REM scapular mass and rotational inertia roughly estimated!!` and gives the scapula an isotropic tensor. 0.005 is retained because it sits inside DSEM's [0.0021 bone-only, 0.0115 girdle] bracket. Carved from the thorax so closure is exact; bounded by `CLAV_YAW_MAX`.
+2. **Clavicle radius of gyration (0.289) is a uniform-rod geometric model** — Hanavan/Yeadon lineage — not a measurement. Winter's three radius cells are em-dashes. *Do not* substitute DSEM's clavicle inertia: it implies a 45 mm clavicle.
+3. **The clavicle's inertia is `1.57e-5·M`, TWO orders of magnitude below the thorax — not three, and not the "1/1000th" this list used to claim.** `I_UPT / I_clav = 1.977e-3 / 1.5688e-5 = 126` (§2.2, defect D8). The old `1.4e-4·M` figure was 10× too large; the corrected number makes the negligibility argument *stronger*, and the "three orders" and "1/1000th" phrasings were never true under either number. **Never build a feature whose feel depends on the clavicle's mass.**
+4. **The MTP break at 0.72 of foot length was assumed and is now corroborated to 0.019 L (≈5 mm)** by Matsumoto et al. (2022)'s CT-measured 14.4% phalanx mass, which back-solves to 0.739 through our own `m_t = 0.883 − s` identity (§2.3). Two routes, no shared data. **The shipped 0.163 / 0.72 is unchanged** — the disagreement is 13% in toe mass, and BR-04's own ±50% sensitivity sweep found "virtually no effect" on joint moments. **Take BR-04's masses only, never its CoMs** — its axis is joint-centre-referenced, ours is heel-referenced. **n = 1, CT volume at an assumed uniform 1.1 g/cm³: three significant figures maximum, and no per-fighter foot-mass variance built on it.**
+5. **`TOE_OFF_RAD = 0.45` is art-directed.** No toe ROM in any source consulted. This is the only remaining unsourced number in the foot.
+6. **One stature, `H = BODY_HEIGHT = 1.78 m`, is used everywhere** (§2.0). de Leva's 1.741 m appears solely as the divisor that made `len_frac` dimensionless. The document previously mixed the two; every ratio was unaffected because `I ∝ H²` cancels, and **no shipped constant moved** — but the mixing is what produced D8 and D9, so **never write a bare length**.
+7. **`CHAIN_PEAK_SCALE[3..=7]` is not derivable.** Only the pelvis→thorax ratio (1.43) is measured. Those five entries carry their by-feel per-hop gains forward, and index 7 cancels in the only production consumer anyway.
+8. **The javelin timing rests on one 50 fps study of n = 7** (`New Studies in Athletics` — a coaching-federation publication, not peer-reviewed; its prose contains multiple errors, though its Table 3 is clean and internally consistent). The *ordering* is independently corroborated (Navarro et al. at 200 Hz; Serrien & Baeyens's pooled handball meta-analysis with CIs). **The 20 ms frame interval is the precision ceiling — do not build sub-frame variation on top of it.**
+9. **The trunk carries no spine curvature.** Co-located pivots are a deliberate trade (§0.2): full axial separation, zero coordinate churn, `head_base_y` preserved.
+10. **de Leva's female column is not used and should not be** without fresh work: n = 15, mean age 19, stature 173.5 cm (statistically indistinguishable from the male mean), and the LPT/thigh rows diverge from the male column far more than any other segment.
 
 ---
 
