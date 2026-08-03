@@ -103,6 +103,23 @@ parity has been a repeated defect class here — the mech turn rate and
 the acceleration model both shipped bot-broken first. A shared function
 cannot drift; two implementations always will.
 
+**7. Commit an agent's output as soon as it lands — the working tree is
+shared state.** Learned the hard way on 2026-08-02: Toto finished a
+research ledger (untracked) while Thor was mid-mutation-test on
+`main.rs`. Thor had been told it could revert with `git stash`. A bare
+`git stash` sweeps the ENTIRE working tree — it would have taken Toto's
+untracked ledger with it, and the spec already cited that file
+throughout. File-scoping prevents two agents *editing* the same file; it
+does **not** protect one agent's uncommitted work from another agent's
+git command.
+
+Two rules follow:
+- **Commit finished work before dispatching an agent that runs git.**
+- **Never tell an agent to `git stash` bare.** Scope the revert:
+  `git checkout -- <the one file you mutated>`. An agent doing
+  mutation-testing must revert surgically, because it does not know what
+  else is in the tree.
+
 ---
 
 ## Standing rules all three inherit
