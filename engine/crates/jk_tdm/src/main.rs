@@ -393,8 +393,53 @@ fn landing_rebound_vy(impact_vy: f32) -> f32 {
 /// every power move routes through. `elapsed_s` since the move's own
 /// onset; returns this segment's current velocity-scale multiplier (0
 /// before its own onset, ramping toward `peak_scale` after).
-const CHAIN_ONSET_OFFSETS: [f32; 8] = [0.000, 0.020, 0.035, 0.055, 0.065, 0.090, 0.110, 0.125];
-const CHAIN_PEAK_SCALE: [f32; 8] = [1.00, 1.08, 1.15, 1.25, 1.35, 1.60, 1.85, 2.10];
+/// §3 (BRIEF_VIII_B): the kinetic chain, DERIVED FROM MEASUREMENT -
+/// this table was authored by feel until 2026-08-02.
+///
+/// Anchors 0/3/4/7 are Campos, Brizuela & Ramon (2004), New Studies in
+/// Athletics 19:47-57, Table 3: n=7 elite male javelin finalists, 1999
+/// World Championships (Seville), two cameras at 50 fps. Peak linear
+/// velocity relative to release - hip -0.130 s, shoulder -0.090 s,
+/// elbow -0.060 s, release 0.000 - re-based so the pelvis peak is the
+/// chain's zero. A joint marker's linear velocity peaks when the
+/// segment PROXIMAL to it is at peak angular velocity (the marker is
+/// that segment's distal end), which is why the shoulder marker maps
+/// to the clavicle and the elbow marker to the upper arm.
+///
+/// Indices 1,2 are inertia-weighted across the de Leva trunk
+/// subsegments; 5,6 are a geometric compression seeded by the measured
+/// 40->30 ms gap and solved to land exactly on the 130 ms anchor. Full
+/// arithmetic in research/body-rig/SPEC_20_SEGMENT_RIG.md §3.3.
+///
+/// ONLY THE DIFFERENCES ARE LOAD-BEARING: `chain_peak_tick` adds a
+/// SHARED `ramp_s` to every entry, so the absolute zero is arbitrary
+/// and the shared ramp absorbs the onset-to-peak lag.
+///
+/// PRECISION CEILING: the source is 50 fps = 20 ms per frame. Do NOT
+/// build per-fighter timing variance or anything finer than ~20 ms on
+/// top of this table - the 5 ms floor used in the derivation is a
+/// monotonicity device, not a claim of 5 ms accuracy.
+const CHAIN_ONSET_OFFSETS: [f32; 8] =
+    [0.000, 0.016, 0.035, 0.040, 0.070, 0.094, 0.114, 0.130];
+
+/// The four MEASURED anchors, held separately so the test compares two
+/// independent tables rather than a constant against itself.
+const JAVELIN_ANCHOR_S: [(usize, f32); 4] =
+    [(0, 0.000), (3, 0.040), (4, 0.070), (7, 0.130)];
+
+/// Peak angular-velocity multiplier per segment. Indices 0..=2 are
+/// MEASURED: the thorax/pelvis peak angular-velocity ratio of 1.43 is
+/// the mean of four marker-based pitching datasets; lumbar = sqrt(1.43)
+/// as the single intermediate hop. Indices 3..=7 are NOT derivable from
+/// any source consulted - their per-hop gains are carried over from the
+/// by-feel table and rescaled onto the new thorax value.
+///
+/// This entire table is currently INERT in production, verified by
+/// algebra rather than assumed: its only consumer divides
+/// `chain_segment_scale`'s output by `CHAIN_PEAK_SCALE[TIP]`, and that
+/// function multiplies by exactly the same value.
+const CHAIN_PEAK_SCALE: [f32; 8] =
+    [1.000, 1.196, 1.430, 1.554, 1.679, 1.990, 2.300, 2.611];
 
 fn chain_segment_scale(segment_index: usize, elapsed_s: f32, ramp_s: f32) -> f32 {
     let onset = CHAIN_ONSET_OFFSETS[segment_index];
@@ -449,12 +494,23 @@ const SPEAR_RELEASE_YAW: f32 = COIL_AWAY_RAD + COIL_SWING_RAD;
 /// swung) - that returns 0, so a fighter who merely holds a spear is
 /// not born mid-unwind.
 ///
-/// The tip is sampled from its OWN onset (`CHAIN_ONSET_OFFSETS[7]`,
-/// 0.125 s) rather than from zero: that offset is the tip's delay
-/// behind the PELVIS when a chain starts, but here the chain already
-/// ran during the windup and the release IS the tip's moment. Sampling
-/// from zero made this silent for the first 0.125 s - a hard snap to
-/// neutral exactly when the motion should be at its most alive.
+/// The tip is sampled from its OWN onset rather than from zero: that
+/// offset is the tip's delay behind the PELVIS when a chain starts, but
+/// here the chain already ran during the windup and the release IS the
+/// tip's moment. Sampling from zero made this silent for the whole tip
+/// onset - a hard snap to neutral exactly when the motion should be at
+/// its most alive.
+///
+/// ALGEBRAIC NOTE (verified 2026-08-02, not assumed): passing
+/// `release_t + onset` means `chain_segment_scale` evaluates
+/// `elapsed - onset == release_t`, so the onset CANCELS; and dividing
+/// by `CHAIN_PEAK_SCALE[TIP]` cancels the peak the same function just
+/// multiplied in. This function therefore reduces exactly to
+/// `(release_t / RAMP_S).clamp(0,1)` and is INVARIANT to both tables.
+/// Written down because the sampling-from-onset reasoning above is
+/// still the right INTENT - it is what keeps the code correct if the
+/// scale ever stops cancelling - but a reader must not infer that
+/// retuning either table changes this curve. It does not.
 fn spear_followthrough_yaw(release_t: f32) -> f32 {
     const RAMP_S: f32 = 0.12;
     const OVERSHOOT_RAD: f32 = 0.10; // carried PAST the release, not back through it
@@ -11484,6 +11540,71 @@ mod elastic_load_tests {
                 names[i]
             );
             prev_peak_tick = peak_tick;
+        }
+    }
+
+    /// §3 (BRIEF_VIII_B): the chain table must still hit the MEASURED
+    /// javelin anchors exactly. `JAVELIN_ANCHOR_S` is held as its own
+    /// table so this compares two independent things rather than a
+    /// constant against itself - if someone retunes the interpolated
+    /// indices (1,2,5,6) that is a judgement call, but silently moving
+    /// a measured anchor is a factual error and fails here.
+    #[test]
+    fn the_kinetic_chain_still_hits_every_measured_javelin_anchor() {
+        for (idx, want) in JAVELIN_ANCHOR_S {
+            let got = CHAIN_ONSET_OFFSETS[idx];
+            assert!(
+                (got - want).abs() < 1e-6,
+                "index {idx} is a MEASURED anchor (Campos 2004 Table 3): \
+                 expected {want}s, table says {got}s"
+            );
+        }
+        // the interpolated indices must stay strictly inside their
+        // bracketing anchors - an interpolation that escapes its own
+        // window is not an interpolation
+        assert!(
+            CHAIN_ONSET_OFFSETS[1] > CHAIN_ONSET_OFFSETS[0]
+                && CHAIN_ONSET_OFFSETS[2] > CHAIN_ONSET_OFFSETS[1]
+                && CHAIN_ONSET_OFFSETS[2] < CHAIN_ONSET_OFFSETS[3],
+            "trunk interpolation escaped the pelvis..clavicle window"
+        );
+        assert!(
+            CHAIN_ONSET_OFFSETS[5] > CHAIN_ONSET_OFFSETS[4]
+                && CHAIN_ONSET_OFFSETS[6] > CHAIN_ONSET_OFFSETS[5]
+                && CHAIN_ONSET_OFFSETS[6] < CHAIN_ONSET_OFFSETS[7],
+            "arm interpolation escaped the upper-arm..tip window"
+        );
+        // the measured distal compression: the chain's gaps must
+        // NARROW toward the tip, never widen
+        let gap_trunk = CHAIN_ONSET_OFFSETS[3] - CHAIN_ONSET_OFFSETS[0]; // 40ms measured
+        let gap_arm = CHAIN_ONSET_OFFSETS[4] - CHAIN_ONSET_OFFSETS[3]; // 30ms measured
+        assert!(
+            gap_arm < gap_trunk,
+            "the chain must compress distally: {gap_trunk} then {gap_arm}"
+        );
+    }
+
+    /// The follow-through curve is INVARIANT to both chain tables -
+    /// the onset and the peak both cancel algebraically (see the
+    /// function's own note). Asserted rather than trusted, because the
+    /// whole "Step 1 is zero visual risk" argument rests on it.
+    #[test]
+    fn spear_followthrough_is_invariant_to_the_chain_tables() {
+        // reproduce the reduced form the algebra predicts
+        const RAMP_S: f32 = 0.12;
+        for step in 0..40 {
+            let release_t = step as f32 * 0.01;
+            let predicted_drive = (release_t / RAMP_S).clamp(0.0, 1.0);
+            // rebuild what the function computes, from the tables
+            let onset = CHAIN_ONSET_OFFSETS[7];
+            let actual_drive =
+                chain_segment_scale(7, release_t + onset, RAMP_S) / CHAIN_PEAK_SCALE[7];
+            assert!(
+                (predicted_drive - actual_drive).abs() < 1e-6,
+                "at release_t={release_t}: the tables did NOT cancel \
+                 (predicted {predicted_drive}, got {actual_drive}) - the \
+                 zero-risk argument for retuning the chain no longer holds"
+            );
         }
     }
 
