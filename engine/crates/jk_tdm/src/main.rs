@@ -2842,6 +2842,7 @@ fn main() {
                 fp_viewmodel,
                 arc_preview,
                 sync_health_bars,
+                mech_stage_presentation,
             )
                 .chain(),
         )
@@ -7451,6 +7452,133 @@ fn sync_health_bars(
     }
 }
 
+// ---- §B.1 (mech plan): entry/exit presentation ----------------------
+// `MechEnterStage` is a fully-specified, TESTED 8-stage sim timer that
+// had ZERO client references - the sim knew exactly which stage the
+// player was in and nothing ever asked. This is that wiring.
+//
+// No new sim state and no new constants: everything below reads
+// `mech_enter_stage_for` and drives presentation from it.
+
+/// Client-side view of where the player is in the boarding sequence.
+#[derive(Default)]
+struct MechStageState {
+    last_stage: Option<sim::MechEnterStage>,
+    /// True once boarding has REACHED `HudBoot`, cleared when a fresh
+    /// boarding begins. §B.3's visor camera keys off this.
+    visor_ready: bool,
+    /// True while an EXIT is running, so the power-down can be sequenced
+    /// even though `mech_enter_stage_for` deliberately returns `None`
+    /// for the exiting case.
+    was_exiting: bool,
+}
+
+/// Whether the visor camera may be used, given the stage transition.
+///
+/// **This exists because the obvious version is a trap.**
+/// `mech_enter_stage_for` returns `None` BOTH when boarding has finished
+/// AND when the fighter is not a mech at all - so a naive
+/// `matches!(stage, None | Some(HudBoot))` cannot tell "fully entered"
+/// from "never boarded", and would snap the camera into a visor that
+/// does not exist. Tracking the HudBoot EDGE is what distinguishes
+/// them. Pure, so the distinction is directly testable.
+fn visor_ready_after(
+    prev: Option<sim::MechEnterStage>,
+    new: Option<sim::MechEnterStage>,
+    current: bool,
+) -> bool {
+    match (prev, new) {
+        // a fresh boarding starts: the camera is OUTSIDE, watching
+        (_, Some(sim::MechEnterStage::CockpitOpen)) => false,
+        // the last stage: the cut into the visor happens here
+        (_, Some(sim::MechEnterStage::HudBoot)) => true,
+        // any other stage mid-boarding: hold whatever we had
+        (_, Some(_)) => current,
+        // not transitioning. `None` is ambiguous by itself, which is
+        // exactly the trap - so we keep the flag we already earned and
+        // let the caller clear it when the mech is actually gone.
+        (_, None) => current,
+    }
+}
+
+/// Drives the one-shot beat for each boarding stage.
+///
+/// Fires ONLY on a stage CHANGE, never every frame while inside a
+/// stage - the plan's "one at a time" rule, which is what keeps the
+/// sequence reading as a machine waking up rather than everything
+/// happening at once.
+///
+/// Audio and per-stage meshes are stubbed with `debug!` markers where
+/// the assets do not exist yet. That is deliberate per the plan: prove
+/// the SEQUENCING is right first, so art and audio drop into a
+/// timeline already known to be correct.
+fn mech_stage_presentation(
+    game: Res<Game>,
+    mut st: Local<MechStageState>,
+    mut commands: Commands,
+    sfx: Option<Res<Sfx>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let stage = sim::mech_enter_stage_for(p);
+    let in_mech = p.in_mech();
+
+    // Leaving the chassis entirely clears the earned visor state, so a
+    // pilot on foot can never be left looking through a visor.
+    if !in_mech {
+        st.visor_ready = false;
+    }
+
+    // EXIT sequencing. `mech_enter_stage_for` returns None while
+    // exiting (it has no stage list of its own), so drive the reverse
+    // walk directly off the timer. Presentation only.
+    let exiting = in_mech && p.mech_exiting && p.mech_transition_t > 0.0;
+    if exiting != st.was_exiting {
+        st.was_exiting = exiting;
+        if exiting {
+            debug!("mech: power-down begins - reverse stage walk over MECH_EXIT_S");
+            st.visor_ready = false; // the visor goes dark first
+        }
+    }
+
+    if stage == st.last_stage {
+        return; // still inside the same stage: nothing to fire
+    }
+    st.visor_ready = visor_ready_after(st.last_stage, stage, st.visor_ready);
+    st.last_stage = stage;
+
+    let Some(s) = stage else {
+        return; // not boarding: no beat to fire
+    };
+
+    // One dry mechanical click per stage is better than silence while
+    // the bespoke servo/hydraulic set does not exist - `click` is the
+    // one existing sound with the right character. Volume rises across
+    // the sequence so the machine audibly builds toward readiness.
+    if let Some(sfx) = sfx.as_ref() {
+        let idx = sim::MECH_ENTER_STAGES
+            .iter()
+            .position(|x| *x == s)
+            .unwrap_or(0) as f32;
+        let vol = 0.18 + idx * 0.035;
+        play(&mut commands, &sfx.click, vol);
+    }
+
+    match s {
+        sim::MechEnterStage::CockpitOpen => debug!("mech stage 1/8: cockpit opens"),
+        sim::MechEnterStage::ClimbIn => debug!("mech stage 2/8: pilot climbs in"),
+        sim::MechEnterStage::Harness => debug!("mech stage 3/8: harness closes"),
+        sim::MechEnterStage::PowerUp => debug!("mech stage 4/8: power-up, seam lights"),
+        sim::MechEnterStage::ServoSync => debug!("mech stage 5/8: servo sync"),
+        sim::MechEnterStage::GyroCalibration => debug!("mech stage 6/8: gyro calibration"),
+        sim::MechEnterStage::WeaponDiagnostics => {
+            debug!("mech stage 7/8: weapon diagnostics - both hull mounts cycle")
+        }
+        sim::MechEnterStage::HudBoot => {
+            debug!("mech stage 8/8: HUD boot - camera may cut to the visor")
+        }
+    }
+}
+
 fn camera_system(
     time: Res<Time>,
     game: Res<Game>,
@@ -11074,6 +11202,59 @@ mod hand_craft_tests {
 #[cfg(test)]
 mod camera_v2_tests {
     use super::*;
+
+    /// §B.1: `visor_ready` must distinguish "fully entered" from "never
+    /// boarded" — the two cases `mech_enter_stage_for` collapses into
+    /// the SAME `None`. The naive `matches!(stage, None | Some(HudBoot))`
+    /// the plan warns about would put an infantryman inside a visor,
+    /// because a plain foot soldier also reports `None`.
+    #[test]
+    fn visor_ready_tells_fully_entered_apart_from_never_boarded() {
+        use sim::MechEnterStage::*;
+
+        // A fighter who never boarded: None forever, never ready.
+        let mut ready = false;
+        for _ in 0..5 {
+            ready = visor_ready_after(None, None, ready);
+        }
+        assert!(
+            !ready,
+            "a fighter who never boarded reports None and must NEVER be visor-ready \
+             - this is the exact case the naive `matches!(None | HudBoot)` gets wrong"
+        );
+
+        // A full boarding sequence, stage by stage. The camera must stay
+        // OUTSIDE until the very last stage.
+        let mut ready = false;
+        let mut prev = None;
+        for (i, s) in sim::MECH_ENTER_STAGES.iter().enumerate() {
+            ready = visor_ready_after(prev, Some(*s), ready);
+            prev = Some(*s);
+            if *s == HudBoot {
+                assert!(ready, "HudBoot must make the visor available");
+            } else {
+                assert!(
+                    !ready,
+                    "stage {}/8 ({s:?}) made the camera cut to the visor early - \
+                     boarding should still be shown from outside",
+                    i + 1
+                );
+            }
+        }
+
+        // Once earned, it survives the transition ending (stage -> None,
+        // i.e. boarding complete and the timer hit zero).
+        let held = visor_ready_after(Some(HudBoot), None, true);
+        assert!(held, "the visor must not switch off the instant boarding completes");
+
+        // A FRESH boarding clears it again — re-entering starts outside.
+        let recleared = visor_ready_after(None, Some(CockpitOpen), true);
+        assert!(
+            !recleared,
+            "a new boarding must put the camera back outside, not leave it in the \
+             visor of the mech being climbed into"
+        );
+    }
 
     /// §B.2: the idle-life terms must actually keep the hull alive while
     /// standing still, must stay SMALL enough to read as machinery

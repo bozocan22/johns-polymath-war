@@ -885,3 +885,325 @@ main.rs:11869 to 5.96e-8/16.8x, reconcile the 5.6x-vs-33x contradiction
 (D8), and fix the per-hop assertion's message (D9).
 
 All mutations reverted; `git status` clean for `engine/crates/jk_tdm/src/main.rs`.
+
+## 2026-08-03 — VERIFY §C: the hull gatling + autocannon (`9b26280`, `5bd2ab7`)
+
+Baseline re-verified by me before and after every mutation: **161 passed,
+0 failed, 2 ignored**. All source mutations reverted with targeted
+`git checkout --`; `sim.rs` and `jk_core/src/timestep.rs` clean at exit.
+
+### 1. The defect Friday found — fix is COMPLETE. Agree.
+
+`hitscan_burst` (sim.rs:5485) is the **only** production caller of the
+hit chain, and it passes `damage` through to `apply_hit_dmg`. I searched
+every `gun(` in the file: no other re-derivation survives on the path.
+`apply_armor`/`apply_armor_tagged` take `base` as a parameter (6905-6913,
+7070) and never re-read; `damage_zombie` takes `dmg`; the zombie branch
+(5477, `damage * mult`) already carried the parameter.
+
+Two corrections, both minor and one in Friday's favour:
+
+- **Under-claim.** The commit describes ONE re-derivation site. There
+  were **two** — the zone multiplier (now 5699, `base_dmg * ...`) and the
+  armour floor (now 5711, `apply_armor(j, dmg, base_dmg, ...)`, formerly
+  its own `let base_dmg = gun(self.fighters[i].gun).damage`). Both were
+  live, both were fixed in the same commit.
+- **Overclaim, cosmetic.** "all 20-odd existing call sites keep their
+  meaning and read unchanged" is true, but **every one of them is inside
+  `mod tests`** (which starts at 7588). After this change `apply_hit` has
+  *zero* production callers. The wrapper exists for the test suite only.
+  Not a defect; the commit message implies a production surface that is
+  not there.
+
+### 2. The heat-decay gate — Friday's INSTINCT is right, its MECHANISM description is wrong. HIGHEST-VALUE ITEM.
+
+Measured, trigger held through `step()`, SIM_HZ=120:
+
+| configuration | time to forced vent | × minigun |
+|---|---|---|
+| **shipped (gated on `fire_cd`)** | **9.083 s** (122 shots, 1090 ticks) | **2.06×** |
+| decay ungated | 29.79 s | 6.74× |
+| no decay at all | 7.78 s | 1.76× |
+| minigun, measured the same way | 4.417 s (67 shots) | 1.00× |
+
+So the design intent ("sustains ~2× the minigun") **is met** — 2.06×. And
+Friday's ~7.8 s / ~30 s figures are correct. But:
+
+- **"mirroring how the minigun gates its decay on the trigger hold-timer"
+  is wrong.** `spin_cmd` is set at the TOP of `try_fire` (5216), *before
+  every early return including `fire_cd > 0.0`*, so while the trigger is
+  held it is refreshed every tick and the decay branch never runs —
+  **100 % suppression**. `fire_cd <= 0.0` is true for exactly **one tick
+  per fire cycle** (decrement 3225 → gate 3318 → fire 4131, same tick).
+  The gatling therefore cools by `GATLING_HEAT_DECAY * DT` = 0.0792 per
+  shot — **88.9 % suppression, not 100 %**. Hence 122 shots to reach 100
+  heat instead of 111.
+- **"a barrel group under fire does not cool"** is not what the code does.
+- **"~8×" the minigun ungated is an overclaim** — measured **6.74×**.
+- **"~9.4 s" sustain** — measured **9.083 s**.
+
+**Tick-granularity dependence: CONFIRMED, and worse than Friday guessed.**
+Because the surviving decay is one tick's worth per shot, it is *linear
+in DT*. Measured by rebuilding at three tick rates:
+
+| SIM_HZ | sustain |
+|---|---|
+| 240 | 8.221 s |
+| **120 (shipped)** | **9.083 s** |
+| 60 | 11.183 s |
+
+A **36 % swing** in the headline number from the tick rate alone. Note
+the irony: the *ungated* version is the tick-rate-stable one (ramp and
+decay are both per-second rates); **the gate is what introduces the DT
+dependence.** Related and undisclosed: `ticks_per_shot` measured 8.93,
+not the 8.4 the constant implies — the real fire period is
+`ceil(0.07/DT)*DT` = **0.075 s**, so the gatling's ROF is 800 RPM, not
+the 857 `GATLING_FIRE_PERIOD` reads as.
+
+**Is `fire_cd` shared in a way that can misfire? Yes — four vectors.**
+
+- **(i) Live — the dismount throttle.** Measured: after one gatling round
+  `fire_cd = 0.07`, and `try_fire` on foot immediately after returns
+  **false**. The hull mount's cycle clock throttles the pilot's carried
+  gun for up to 0.07 s after ejection. `autocannon_cd` exists as its own
+  field *precisely to avoid this*, and the file says so at
+  **sim.rs:1399-1401**: *"Its own field, not `fire_cd`, so the two mounts
+  cannot silently share a cooldown."* The gatling is the lone violator of
+  a principle stated three lines above the field it violates.
+- **(ii) Live, and NOT disclosed by Friday — the mounts freeze the
+  pilot's carried-gun spray index.** `try_fire_gatling` (5554) and
+  `try_fire_autocannon` (5598) both write `f.last_shot_at`. `step`
+  decays the carried gun's `spray_i` only when
+  `t_now - f.last_shot_at > gun(f.gun).fire_period * 1.1` (3370-3374).
+  The gatling refires every 0.075 s; every carried gun but the minigun
+  has a threshold above that (M4 0.099, AK 0.1155, Deagle 0.462). So
+  **`spray_i` never decays while the hull gatling fires.** Mech entry
+  (3592-3616) resets the mech fields but not `spray_i`. Board mid-burst,
+  hold the gatling, dismount → the carried rifle resumes at its old spray
+  index where an idle pilot would get a full reset. Same defect class as
+  (i), second instance, undisclosed. (The autocannon's 1.35 s cycle is
+  slower than every threshold, so it is harmless here.)
+- **(iii) Latent — stale heat on a dismounted pilot.** Measured: a
+  dismounted pilot carrying 50.0 stale `gatling_heat` cools to **40.50**
+  in 1 s idle but only to **49.13** while firing his carried rifle — the
+  carried gun's `fire_cd` suppresses 91 % of the cooling. Not observable
+  today because the only production route into a chassis is the
+  `RobotArmor` pickup (3592), which zeroes the mount state, as does death
+  (3452). It goes live the moment a second boarding route (the
+  `research/mech-climb` work) lands without that reset.
+- **(iv) Bots — benign today, armed for tomorrow.** A bot in a mech calls
+  `try_fire` (7392, ungated on `in_mech()`), setting `fire_cd` from its
+  *carried* gun. Its `gatling_heat` is 0, so the gate is a no-op. The
+  instant item 4 is fixed, that carried gun's `fire_cd` will gate both
+  the gatling's fire and its cooling. **Item 2 must land before item 4.**
+
+**Weapon switching mid-heat behaves sanely** — this part is clean. Key
+1/2 writes only `mech_weapon` (3756-3757); the decay/vent block (3312-
+3320) sits outside the `mech_weapon` match, so heat keeps cooling and a
+forced vent keeps draining while the autocannon is selected. Correct, but
+undocumented and untested.
+
+**RECOMMENDATION.** Keep the gate's intent; replace its mechanism.
+
+1. **Yes, add the dedicated field — but as a trigger-HOLD timer, not a
+   cooldown**, set at the top of `try_fire_gatling` before every early
+   return, exactly as `spin_cmd` is at try_fire:5216. That is the only
+   shape that delivers Friday's own stated rationale, and it removes the
+   DT dependence: suppression becomes 100 %, sustain becomes
+   `ceil(0.07/DT)*DT * ceil(100/0.9)` ≈ **8.4 s = 1.90×** the minigun —
+   still "~2×", and stable to within one tick across tick rates.
+2. **Also move the cycle clock off `fire_cd` onto its own `gatling_cd`**,
+   mirroring `autocannon_cd`. Not gold-plating: it enforces the rule the
+   file already wrote at 1399-1401, and it is what kills (i).
+3. **Decide (ii) separately** — cheapest correct fix is to stop writing
+   `last_shot_at` from the mounts unless something mech-side reads it.
+4. **Do item 3 (the test) FIRST.** None of these numbers is currently
+   observable to the suite, so any change here is unfalsifiable.
+
+*Rejected alternative, recorded so it is not re-proposed:* gating decay on
+`t - last_shot_at` needs no new field and is tick-rate stable, but
+`last_shot_at` is written by `try_fire` too (5307) — it reproduces exactly
+the sharing defect being fixed.
+
+### 3. The missing sustain test — AGREE, and the hole is far bigger than Friday stated.
+
+Confirmed absent. `gatling_vent_t` is never set to a non-zero value
+anywhere in `mod tests` (only zeroed, 10007 and 10109). Two of my own
+mutations prove the scope:
+
+- Ungate the decay (3318, `} else if f.fire_cd <= 0.0 {` → `} else {`) —
+  the exact 9.08 s → 29.79 s regression Friday's whole argument is
+  about → **161 passed, 0 failed. SURVIVES.**
+- Delete the forced-vent latch (5556-5559) *and* the `gatling_vent_t >
+  0.0` lockout (5532) — i.e. remove the entire forced-vent mechanism and
+  make the gatling infinite-sustain → **161 passed, 0 failed. SURVIVES.**
+
+**The vent does not exist as far as the suite is concerned.** What the
+test should assert, stepping `step()` with `shoot: true` held on a sealed
+chassis:
+
+1. `gatling_vent_t` latches to `GATLING_VENT_FORCED_S` after a bounded
+   elapsed time — pinned as a **range** (e.g. 8.0..10.5 s), not a point,
+   so it survives a tick-rate change but still fails on 7.8 s or 29.8 s.
+2. That time is `> 1.8×` and `< 2.4×` the **measured** minigun
+   time-to-vent, through the same held-trigger loop. Measuring both sides
+   is what keeps it from becoming another constants-ratio assertion.
+3. `try_fire_gatling` returns **false** for the whole vent window, and
+   `gatling_heat` is exactly 0.0 on the tick the vent clears.
+4. The pilot's carried `gun`, `ammo` and **`spray_i`** are unchanged
+   across the burst — this is the regression test for cross-talk (ii),
+   and it would have caught it.
+
+### 4. Bot parity — the call is defensible as SCOPING; the description understates the damage badly.
+
+Measured: seeded a bot into a sealed chassis, ran 2 s of `step()`. Result:
+`gatling_heat = 0`, `hits_dealt = 4`, `ammo = 26/30`, carried gun
+`Ak47`. It fires its **carried AK-47 (13.5 dmg)** from inside a 1000-hull
+chassis and never touches either mount. Concretely, a bot mech:
+
+- **Reloads.** 2.2 s of total inactivity per 30 rounds. Hull mounts never
+  reload.
+- **Runs out.** `bot_act` gates firing on `ammo > 0` (7378) and
+  `try_reload` needs reserve; AK-47 is 30 + 120 = **150 rounds**. After
+  that a bot mech is **permanently disarmed while sitting in a
+  full-health chassis** — a 1000-hull obstacle that cannot fight. The
+  hull mounts consume no ammo at all.
+- **Cannot threaten another mech.** 13.5 through the front 85 % cut is
+  2.0/shot against the autocannon's 21.75. ~50 s of uninterrupted fire to
+  kill a player mech.
+- Bots do reach mechs in production — the pickup loop is
+  `for i in 0..self.fighters.len()` (3556), not player-only.
+
+So it is not "the bot fires the wrong gun"; it is "**a bot mech is a
+rifleman with 1000 HP who eventually disarms himself permanently**."
+Given this file's record — turn rate, acceleration and §A's brace all
+shipped player-only first and all had to be re-wired — I judge this the
+**highest-priority §C follow-up after the sustain test**. Friday's
+determinism concern is legitimate (wiring the mounts into `bot_act`
+consumes RNG in `hitscan_burst` and moves every seeded replay), but that
+argues for doing it deliberately and soon with the seeds rebaselined in
+one commit, not for deferring it behind more §C work that enlarges the
+reseed. **And it must land after item 2**, or the `fire_cd` sharing
+becomes live for bots (see 2(iv)).
+
+### 5. The unasked noise emission — wired CORRECTLY, and it needs a test.
+
+Verified: `try_fire_gatling` 5563-5568 and `try_fire_autocannon`
+5612-5615 both call `emit_noise(at, gun_noise_m(GunKind::Minigun))` under
+`mode == Mode::Extraction`, after the hitscan, with
+`at = [pos[0], pos[2]]` — the `[x, z]` shape `emit_noise` expects
+(6455-6465). Identical in form to `try_fire`'s own call at 5377-5381.
+`gun_noise_m(Minigun) = 95.0` (2788). Friday's framing is right: a radius
+*lookup*, read-only, not an entry into the `GunKind` pipeline.
+
+**It needs a test, and mutation proves why.** Deleting the entire
+Extraction/`emit_noise` block from BOTH mounts — a completely silent mech
+against the horde director, the exact defect Friday added this to prevent
+— gives **161 passed, 0 failed. SURVIVES.** A one-line test (fire a mount
+in Extraction with a zombie inside 95 m, assert `z.alerted`) closes it,
+and also catches the likelier future slip: someone "tidying"
+`GunKind::Minigun` to a quieter weapon.
+
+### 6. Mutation table — MY OWN runs, not Friday's claims
+
+| # | mutation | site | result | Friday claimed |
+|---|---|---|---|---|
+| a | `apply_hit_dmg(i,j,hit_y,end,damage)` -> `apply_hit(i,j,hit_y,end)` (restore the real defect) | 5485 | **160/1** — `hull_mounts_carry_their_own_damage_down_the_shared_hit_path` | 159/1 |
+| b | `!f.in_mech()` -> `false`, both fire fns | 5528, 5583 | **160/1** — `mech_weapons_refuse_to_fire_for_non_mech_fighters` | 157/1 |
+| c | delete the `mech_weapon != Gatling` clause | 5529 | **160/1** — `autocannon_and_gatling_are_mutually_exclusive_by_mech_weapon` | 157/1 |
+| d | *(mine)* ungate heat decay | 3318 | **161/0 — SURVIVES** | — |
+| e | *(mine)* delete both mounts' Extraction noise | 5563, 5612 | **161/0 — SURVIVES** | — |
+| f | *(mine)* delete the forced-vent latch + lockout | 5532, 5556-5559 | **161/0 — SURVIVES** | — |
+
+Friday's 157/1 and 159/1 are consistent with the suite as it stood at
+`9b26280` (149 tests) and `5bd2ab7` (160); the baseline is 161 after
+`d6aa356`. **Every reproduced mutation killed exactly one test, and the
+right one.** The counts moved; the conclusions did not.
+
+### 7. Attacking the tests
+
+Four of six are genuinely falsifiable and mutation-proven above. Two have
+problems, and one of those explains why §C's headline mechanic went
+unguarded.
+
+**`gatling_heat_ramps_slower_than_minigun_in_absolute_terms` — its third
+block is self-referential AND its comment is false** (10083-10092):
+
+```rust
+let gat_s = 100.0 / (GATLING_HEAT_PER_SHOT / GATLING_FIRE_PERIOD);
+let mini_s = 100.0 / (MINIGUN_HEAT_PER_SHOT / gun(GunKind::Minigun).fire_period);
+assert!(gat_s > mini_s * 1.5, "hull gatling cooks off after {gat_s}s of fire ...");
+```
+
+It steps nothing. It rebuilds `heat_per_shot / fire_period` from four
+constants and compares. The comment calls it *"The same relationship
+expressed as TIME TO A FORCED VENT"* and the message says *"cooks off
+after {gat_s}s"* — both false: `gat_s` = **7.78 s**, the shipped time to
+a forced vent is **9.08 s**, because the expression ignores both the
+decay and the tick granularity. A constants-ratio assertion wearing a
+measurement's label — and it is the *only* thing in the suite that
+mentions time-to-vent, which is very likely why mutations (d) and (f)
+survive. The test's first two blocks are fine and do measure off the real
+fire paths.
+
+**`autocannon_kick_is_damped_exactly_by_mech_brace_recoil_damp` is partly
+tautological but acceptable.** `(braced - unbraced *
+MECH_BRACE_RECOIL_DAMP).abs() < 1e-6` rebuilds the source expression at
+5603-5607 and cannot fail for any value of the constant. It does catch
+real things — `mech_brace` unread, wrong sign, wrong `punch_vel` axis, a
+second independent braced constant appearing — and measures through the
+real fire path; the companion assertions are the falsifiable half. Weak,
+not worthless; worth knowing it pins the derivation, not a behaviour.
+
+**`gatling_spread_widens_with_heat` is the strongest of the six** — 300
+samples off real tracer geometry, heat pinned at both ends, constants
+used as *bounds* rather than as expected values.
+
+**One gap in the otherwise-excellent test 6:** it exercises only the
+fighter/hull branch. `hitscan_burst`'s zombie branch (5477,
+`damage * mult`) stays untested — which is precisely the branch Friday
+says "would have hidden the split indefinitely." Cheap to add; it is the
+branch that hid the bug.
+
+### Verdict — what Friday got wrong or overclaimed
+
+1. **"mirroring how the minigun gates its decay on the trigger
+   hold-timer"** — wrong. `spin_cmd` suppresses decay 100 % while held;
+   `fire_cd <= 0.0` lets one decay tick through per shot (88.9 % at
+   120 Hz).
+2. **"a barrel group under fire does not cool"** — not what the code
+   does; it cools 0.0792 per shot.
+3. **"~8×" the minigun ungated** — overclaim; measured **6.74×**.
+4. **"~9.4 s" sustain** — measured **9.083 s**.
+5. **"all 20-odd existing call sites"** — all of them are in `mod tests`;
+   `apply_hit` has zero production callers.
+6. **Missed:** the `last_shot_at` cross-talk — both mounts freeze the
+   pilot's carried-gun spray index (2(ii)).
+7. **Missed:** the real fire period is 0.075 s, not 0.07 s — 800 RPM, not
+   857.
+8. **Understated:** the missing test. Not just the sustain number — the
+   entire forced-vent mechanism can be deleted with a green suite.
+9. **Understated:** bot mech behaviour. Not "fires the wrong gun" but
+   "permanently disarms itself after 150 rounds inside a 1000-hull
+   chassis."
+10. **Under-claimed, in its favour:** it fixed two re-derivation sites and
+    described one.
+
+Where Friday deserves credit: **the defect it found is real and the fix
+is complete** — I could not find a surviving re-derivation anywhere on
+the hit path. Test 6's ratio design is the best-built test in §C. Keeping
+`MechWeapon` out of `GunKind` holds up under reading, as does the refusal
+to add `AUTOCANNON_BRACED_KICK`. And its instinct that the `fire_cd` gate
+is the weakest thing it shipped is exactly right — it simply
+under-diagnosed *why*: not the balance number (2.06× is on intent), but
+that the number is accidental, tick-rate dependent, and riding a field
+the file itself forbids the sibling mount from riding.
+
+**Net: §C's hit path is sound and its gates are proven. §C's heat/vent
+system — the gatling's entire identity — is unproven end-to-end, and the
+one line holding it up is the one Friday flagged.** Ship order:
+(3) sustain test → (2) dedicated trigger field + `gatling_cd` →
+(4) bot parity → (5) noise test.
+
+All mutations reverted; `git status` clean for
+`engine/crates/jk_tdm/src/sim.rs` and `engine/crates/jk_core/src/timestep.rs`.
