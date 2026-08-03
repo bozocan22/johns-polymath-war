@@ -12530,6 +12530,106 @@ mod tests {
         }
     }
 
+    /// The replay guarantee, extended to cover BOT MECHS.
+    ///
+    /// Friday found and reported the gap that motivates this: no
+    /// existing determinism test ever puts a bot in a mech — it probed
+    /// `deterministic_battle` and measured **zero** bot-mech ticks. So
+    /// the bit-identical replay guarantee, this project's core
+    /// discipline, did not cover the bot hull-mount path at all.
+    ///
+    /// **What this test can and cannot catch, stated honestly.** A
+    /// same-binary A/B replay compares the code against itself, so it
+    /// CANNOT catch "someone changed the deterministic behaviour" — both
+    /// halves change together. Friday was right about that, which is why
+    /// it declined to claim more. What it DOES catch is genuine
+    /// nondeterminism entering the mech path: an unseeded RNG, map/set
+    /// iteration order, uninitialised state, anything time-derived.
+    /// Those are exactly the bugs that make a replay stop replaying, and
+    /// nothing else in the suite watches for them here.
+    ///
+    /// It compares RAW BITS rather than the coarse score/deaths tuple
+    /// `deterministic_battle` uses, because a divergence of one ULP in a
+    /// mech's heat or hull is still a divergence — it just takes longer
+    /// to become a different match.
+    #[test]
+    fn a_bot_mech_engagement_replays_bit_identically() {
+        let fingerprint = || -> Vec<u32> {
+            // `range()` is the proven fixture the working hull-mount
+            // tests use: cover cleared, the two fighters 10 m apart and
+            // facing. Setting positions by hand on a fresh TdmSim does
+            // NOT survive - spawn logic re-places them ~50 m apart,
+            // outside most engage ranges, and the bots then never fire.
+            // (The vacuity guard below caught exactly that, twice.)
+            let mut s = range(0xB07);
+            let f = &mut s.fighters[1]; // the BOT - index 0 is the player
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.armor = POWER_MAX;
+            f.mech_transition_t = 0.0;
+            f.protect_t = 0.0;
+            s.fighters[0].protect_t = 0.0; // else the bot has no legal target
+            run(&mut s, 12, PlayerCmd::default());
+            // Raw bits of everything the mech path writes. f32::to_bits
+            // so a one-ULP drift is a failure, not a rounding artefact.
+            let mut out = Vec::new();
+            for f in &s.fighters {
+                out.push(f.pos[0].to_bits());
+                out.push(f.pos[1].to_bits());
+                out.push(f.pos[2].to_bits());
+                out.push(f.health.to_bits());
+                out.push(f.hull.to_bits());
+                out.push(f.gatling_heat.to_bits());
+                out.push(f.gatling_cd.to_bits());
+                out.push(f.autocannon_cd.to_bits());
+                out.push(f.punch_vel[0].to_bits());
+                out.push(f.punch_vel[1].to_bits());
+                out.push(f.mech_brace as u32);
+                out.push(f.mech_weapon as u32);
+                out.push(f.hits_dealt);
+            }
+            out
+        };
+        let a = fingerprint();
+        let b = fingerprint();
+        assert_eq!(
+            a, b,
+            "a bot-mech engagement did not replay bit-identically - something \
+             nondeterministic (unseeded RNG, iteration order, uninitialised \
+             state) has entered the hull-mount path"
+        );
+
+        // And prove the fixture actually EXERCISED the thing it claims
+        // to. A determinism test over a path that never runs is the
+        // most comfortable kind of green there is - this is the assertion
+        // whose absence let the gap exist in the first place.
+        let mut s = range(0xB07);
+        {
+            let f = &mut s.fighters[1];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.armor = POWER_MAX;
+            f.mech_transition_t = 0.0;
+            f.protect_t = 0.0;
+        }
+        s.fighters[0].protect_t = 0.0;
+        let mut mech_fired = false;
+        for _ in 0..(12 * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            if s.fighters.iter().skip(1).any(|f| {
+                f.in_mech() && (f.gatling_heat > 0.0 || f.autocannon_cd > 0.0)
+            }) {
+                mech_fired = true;
+            }
+        }
+        assert!(
+            mech_fired,
+            "no bot ever fired a hull mount in this fixture - the determinism \
+             assertion above would be vacuously green, which is exactly the \
+             hole this test exists to close"
+        );
+    }
+
     #[test]
     fn deterministic_battle() {
         let outcome = || {
