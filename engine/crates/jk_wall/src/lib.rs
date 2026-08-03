@@ -16,4 +16,4 @@ pub use agent::{Agent, DownCause, Side};
 pub use combat::{ArmorKind, StrikeOutcome, Weapon};
 pub use command::{PlayerInput, SquadCommand};
 pub use metrics::{StepMetrics, Telemetry, LIVE_CLIENT_RETENTION_STEPS};
-pub use sim::{WallSim, WallSimConfig};
+pub use sim::{KitDistribution, WallSim, WallSimConfig};

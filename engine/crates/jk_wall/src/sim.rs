@@ -22,6 +22,48 @@ use jk_core::timestep::DT;
 use jk_core::Pcg32;
 use rapier3d::prelude::*;
 
+/// Who is carrying what — the army-composition knob.
+///
+/// The defaults reproduce the Era-1 historical distribution exactly, so
+/// `WallSimConfig::default()` behaves bit-for-bit as it did before this
+/// existed. A campaign layer that equips its own armies overrides these
+/// rather than editing the spawn code.
+///
+/// Every field is a CUMULATIVE threshold against one `rng.next_f32()`
+/// draw, matching the comparison the spawner actually performs. Storing
+/// cumulative edges rather than per-class shares keeps the arithmetic
+/// identical to the literals these replaced — it avoids re-deriving an
+/// edge by addition, which is a rounding difference waiting to happen if
+/// the numbers are ever retuned, and a changed edge means a changed
+/// weapon for some man and a broken replay.
+#[derive(Clone, Copy, Debug)]
+pub struct KitDistribution {
+    /// P(mail) in the front rank. Mail for the rich, and the rich stand in front.
+    pub mail_front: f32,
+    /// P(mail) in every rank behind the front.
+    pub mail_rear: f32,
+    /// Width of the gambeson band ABOVE the mail probability: a man is
+    /// gambesoned when `r < p_mail + gambeson_span`. The remainder is cloth.
+    pub gambeson_span: f32,
+    /// Upper edge of the spear band: `wr < spear_max` carries a spear.
+    pub spear_max: f32,
+    /// Upper edge of the sword band: `wr < sword_max` carries a sword,
+    /// anything above it carries an axe. Must be >= `spear_max`.
+    pub sword_max: f32,
+}
+
+impl Default for KitDistribution {
+    fn default() -> Self {
+        KitDistribution {
+            mail_front: k::MAIL_FRACTION_FRONT,
+            mail_rear: k::MAIL_FRACTION_REAR,
+            gambeson_span: 0.5,
+            spear_max: 0.7,
+            sword_max: 0.9,
+        }
+    }
+}
+
 pub struct WallSimConfig {
     pub files: usize,
     pub ranks_a: usize,
@@ -35,6 +77,8 @@ pub struct WallSimConfig {
     /// Force one side's armor kit (None = historical rng distribution).
     pub armor_a: Option<ArmorKind>,
     pub armor_b: Option<ArmorKind>,
+    /// Army composition. Default = the Era-1 historical mix.
+    pub kit: KitDistribution,
 }
 
 impl Default for WallSimConfig {
@@ -48,6 +92,7 @@ impl Default for WallSimConfig {
             advance_speed: 1.1,
             armor_a: None,
             armor_b: None,
+            kit: KitDistribution::default(),
         }
     }
 }
@@ -169,15 +214,15 @@ impl WallSim {
                         Side::B => cfg.armor_b,
                     };
                     let mail_p = if rank == 0 {
-                        k::MAIL_FRACTION_FRONT
+                        cfg.kit.mail_front
                     } else {
-                        k::MAIL_FRACTION_REAR
+                        cfg.kit.mail_rear
                     };
                     let armor = forced.unwrap_or_else(|| {
                         let r = rng.next_f32();
                         if r < mail_p {
                             ArmorKind::Mail
-                        } else if r < mail_p + 0.5 {
+                        } else if r < mail_p + cfg.kit.gambeson_span {
                             ArmorKind::Gambeson
                         } else {
                             ArmorKind::Cloth
@@ -235,11 +280,14 @@ impl WallSim {
                     let aerobic = k::AEROBIC_POWER_W * rng.range(0.85, 1.15);
                     let pool = k::ANAEROBIC_POOL_J * rng.range(0.85, 1.15);
                     // Weapon mix: spears rule the wall; some swords; a few
-                    // axemen with the reach to break things open.
+                    // axemen, who open armour the others cannot. NOT reach —
+                    // the axe is the SHORTEST of the three (1.3 m against the
+                    // spear's 1.9 m); what it brings is ~100 J against mail's
+                    // 100 J threshold, where a spear lands 16.9 J.
                     let wr = rng.next_f32();
-                    let weapon = if wr < 0.7 {
+                    let weapon = if wr < cfg.kit.spear_max {
                         Weapon::spear()
-                    } else if wr < 0.9 {
+                    } else if wr < cfg.kit.sword_max {
                         Weapon::sword()
                     } else {
                         Weapon::axe()
