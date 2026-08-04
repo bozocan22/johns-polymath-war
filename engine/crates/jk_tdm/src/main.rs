@@ -185,6 +185,37 @@ const LOOK_PITCH_LIMIT: f32 = 1.53;
 fn recoil_kicked_pitch(pitch: f32, kick: f32, bloom: f32, brace: f32) -> f32 {
     (pitch - (kick * 6.0 + bloom * 1.5) * brace).clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT)
 }
+
+/// How far the bowstring is pulled back, 0..1, for rendering only.
+///
+/// ONE function for both views. The third-person rig and the first-person
+/// viewmodel used to answer this question separately - third person from
+/// `cam_ctl.ads` (so a binary 0.25 / 1.0), first person not at all - while
+/// the sim was keeping a real 0.15s..0.7s clock the whole time. That is
+/// the split brain from ANTI_PATTERNS.md: the client re-deriving what the
+/// sim already knows, then drifting from it. Two callers, one source.
+///
+/// The player's pull is the sim's clock. Note this deliberately has no
+/// dead zone below `BOW_DRAW_MIN_S`: the string really is moving in that
+/// window, you simply cannot loose a useful arrow yet, and freezing the
+/// visual there would misreport what the sim is doing.
+///
+/// Bots never enter `step_bow_draw` - they fire through `try_fire`, so
+/// their `bow_draw_t` is always 0 and reading it would leave every bot
+/// bow permanently slack. Their pull comes from the shot cadence
+/// instead: `fire_cd` runs down from `fire_period`, so the string draws
+/// back as the next arrow approaches and springs forward when it looses.
+/// That is a closer account of what a bot is doing than the fixed 0.6
+/// this replaces.
+fn bow_draw_visual(bow_draw_t: f32, fire_cd: f32, fire_period: f32, is_player: bool) -> f32 {
+    if is_player {
+        (bow_draw_t / sim::BOW_DRAW_FULL_S).clamp(0.0, 1.0)
+    } else if fire_period > 0.0 {
+        (1.0 - fire_cd / fire_period).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 /// Third-person boom: back / up / screen-right of the head pivot (§5.1).
 // §5.1 (Brief VII v2): hip 2.2m back / +0.45m right / +0.12m up.
 const TP_BOOM: f32 = 2.2;
@@ -7131,16 +7162,15 @@ fn sync_fighters(
         let wr_pitch = aim_pitch - torso_pitch;
         let spear_cocked =
             f.gun == GunKind::Spear && if is_player { cam_ctl.ads } else { true };
+        // The string follows the sim's draw clock, not the ADS toggle it
+        // used to guess from. See `bow_draw_visual`.
         let bow_draw = if f.gun == GunKind::Bow {
-            if is_player {
-                if cam_ctl.ads {
-                    1.0
-                } else {
-                    0.25
-                }
-            } else {
-                0.6
-            }
+            bow_draw_visual(
+                f.bow_draw_t,
+                f.fire_cd,
+                gun(GunKind::Bow).fire_period,
+                is_player,
+            )
         } else {
             0.0
         };
@@ -12345,6 +12375,77 @@ mod recoil_pitch_tests {
         let cold = recoil_kicked_pitch(0.0, kick, 0.0, 1.0).abs();
         let hot = recoil_kicked_pitch(0.0, kick, 0.05, 1.0).abs();
         assert!(hot > cold, "bloom should add climb: {hot} vs {cold}");
+    }
+}
+
+/// The bowstring must report the draw the SIM is running, not a guess
+/// assembled from the ADS toggle.
+#[cfg(test)]
+mod bow_draw_visual_tests {
+    use super::*;
+
+    const PERIOD: f32 = 0.95; // gun(Bow).fire_period
+
+    /// The split brain this replaces: the pull was `1.0` while aiming and
+    /// `0.25` otherwise, so the whole 0.15s..0.7s curve the sim runs was
+    /// invisible - two positions standing in for a continuous draw.
+    #[test]
+    fn the_players_pull_tracks_the_sims_clock() {
+        let at = |t: f32| bow_draw_visual(t, 0.0, PERIOD, true);
+        assert_eq!(at(0.0), 0.0, "an untouched bow is slack");
+        assert!(at(sim::BOW_DRAW_FULL_S) >= 1.0 - 1e-6, "0.7s is full draw");
+        assert_eq!(at(5.0), 1.0, "holding past full stays full, never past it");
+
+        // strictly increasing across the whole draw - a continuous pull,
+        // which is exactly what the two-position version could not show
+        let mut prev = -1.0;
+        for i in 0..=70 {
+            let v = at(i as f32 * 0.01);
+            assert!(v >= prev, "pull went backwards at t={}", i as f32 * 0.01);
+            prev = v;
+        }
+        // and it is genuinely partway at the halfway mark, not snapped
+        let mid = at(sim::BOW_DRAW_FULL_S * 0.5);
+        assert!(
+            (0.4..0.6).contains(&mid),
+            "half a draw should look half drawn, got {mid}"
+        );
+    }
+
+    /// Bots never run `step_bow_draw`, so their clock is pinned at 0.
+    /// Reading it directly would leave every bot bow permanently slack -
+    /// a regression from the fixed 0.6 this replaced.
+    #[test]
+    fn a_bot_bow_still_draws_even_though_its_clock_never_runs() {
+        let bot = |cd: f32| bow_draw_visual(0.0, cd, PERIOD, true.eq(&false));
+        assert_eq!(bot(PERIOD), 0.0, "just loosed: string forward");
+        assert!(bot(PERIOD * 0.5) > 0.4, "mid-cadence: drawing");
+        assert_eq!(bot(0.0), 1.0, "about to loose: fully drawn");
+
+        // the naive version of this fix - reading bow_draw_t for everyone
+        let naive = bow_draw_visual(0.0, PERIOD * 0.5, PERIOD, true);
+        assert_eq!(naive, 0.0, "which is why bots must not use that path");
+    }
+
+    /// A cadence-derived pull is meaningless without a period.
+    #[test]
+    fn a_zero_period_cannot_divide_by_zero() {
+        assert_eq!(bow_draw_visual(0.0, 0.0, 0.0, false), 0.0);
+    }
+
+    /// Whatever the input, the string is a 0..1 quantity - the renderer
+    /// multiplies anchor offsets by it.
+    #[test]
+    fn the_pull_is_always_a_unit_fraction() {
+        for &(t, cd, player) in &[
+            (-1.0, -1.0, true),
+            (99.0, 99.0, true),
+            (-1.0, -1.0, false),
+            (99.0, 99.0, false),
+        ] {
+            let v = bow_draw_visual(t, cd, PERIOD, player);
+            assert!((0.0..=1.0).contains(&v), "out of range: {v}");
+        }
     }
 }
 
