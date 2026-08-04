@@ -2011,7 +2011,13 @@ fn ammo_is_low(ammo: u32, mag: u32) -> bool {
 /// Both are real plumbing through the projectile path, not a flag.
 ///
 /// §0 (Brief VII): ASCII only - the bundled font has no glyph for U+271B.
-fn feed_glyphs(headshot: bool, noscope: bool, blind: bool, smoke: bool) -> String {
+fn feed_glyphs(
+    headshot: bool,
+    noscope: bool,
+    blind: bool,
+    smoke: bool,
+    wallbang: bool,
+) -> String {
     let mut s = String::new();
     if headshot {
         s.push('*');
@@ -2024,6 +2030,9 @@ fn feed_glyphs(headshot: bool, noscope: bool, blind: bool, smoke: bool) -> Strin
     }
     if smoke {
         s.push('~');
+    }
+    if wallbang {
+        s.push('#');
     }
     s
 }
@@ -2480,6 +2489,117 @@ struct MinimapHill;
 struct MinimapPlayer;
 
 const MINIMAP_PX: f32 = 170.0;
+/// §4.3: how many award toasts can stack.
+const AWARD_SLOTS: usize = 4;
+/// §4.3: "each fading after 2.5s".
+const AWARD_TTL_S: f32 = 2.5;
+/// Two kills inside this window read as a streak.
+const AWARD_STREAK_S: f32 = 4.0;
+
+#[derive(Component)]
+struct AwardToast(usize);
+
+/// The award detector's memory between frames.
+#[derive(Default)]
+struct AwardState {
+    items: Vec<(String, f32)>,
+    prev_kills: u32,
+    prev_assists: u32,
+    prev_owner: [Option<Team>; 2],
+    last_kill_t: f32,
+    streak: u32,
+    inited: bool,
+}
+
+/// §4.3: watch the sim's own stat deltas and push toasts. Client-side
+/// and read-only - the sim is never consulted about presentation.
+fn award_toasts(
+    game: Res<Game>,
+    time: Res<Time>,
+    mut st: Local<AwardState>,
+    mut q: Query<(&AwardToast, &mut Text, &mut TextColor)>,
+) {
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+    let my_team = p.team;
+    // first frame (and every rebuild): sync silently, no toast backlog
+    if !st.inited {
+        st.inited = true;
+        st.prev_kills = p.kills;
+        st.prev_assists = p.assists;
+        for (i, cp) in simr.checkpoints.iter().take(2).enumerate() {
+            st.prev_owner[i] = cp.owner;
+        }
+    }
+    // kills - with the streak names layered on top
+    if p.kills > st.prev_kills {
+        let now = simr.t;
+        if now - st.last_kill_t <= AWARD_STREAK_S {
+            st.streak += 1;
+        } else {
+            st.streak = 1;
+        }
+        st.last_kill_t = now;
+        let label = match st.streak {
+            1 => "KILL",
+            2 => "DOUBLE KILL",
+            3 => "TRIPLE KILL",
+            _ => "RAMPAGE",
+        };
+        st.items.push((label.to_string(), AWARD_TTL_S));
+        // the freshest kill-feed row says whether it was a headshot or
+        // a wallbang - both worth their own line
+        if let Some((ev, _)) = simr.kill_feed.last() {
+            if ev.killer == simr.player {
+                if ev.headshot {
+                    st.items.push(("HEADSHOT".to_string(), AWARD_TTL_S));
+                }
+                if ev.wallbang {
+                    st.items.push(("WALLBANG".to_string(), AWARD_TTL_S));
+                }
+            }
+        }
+    }
+    st.prev_kills = p.kills;
+    if p.assists > st.prev_assists {
+        st.items.push(("ASSIST".to_string(), AWARD_TTL_S));
+    }
+    st.prev_assists = p.assists;
+    // captures: a ring flipping TO my team
+    for (i, cp) in simr.checkpoints.iter().take(2).enumerate() {
+        if cp.owner != st.prev_owner[i] {
+            if cp.owner == Some(my_team) {
+                st.items.push(("POINT CAPTURED".to_string(), AWARD_TTL_S));
+            }
+            st.prev_owner[i] = cp.owner;
+        }
+    }
+    // tick + trim to the visible stack
+    let dt = time.delta_secs();
+    for it in &mut st.items {
+        it.1 -= dt;
+    }
+    st.items.retain(|it| it.1 > 0.0);
+    while st.items.len() > AWARD_SLOTS {
+        st.items.remove(0);
+    }
+    for (slot, mut text, mut color) in &mut q {
+        match st.items.get(slot.0) {
+            Some((label, ttl)) => {
+                **text = label.clone();
+                let g = branding::palette::GOLD.to_srgba();
+                *color = TextColor(Color::srgba(
+                    g.red,
+                    g.green,
+                    g.blue,
+                    (ttl / 0.6).clamp(0.0, 1.0),
+                ));
+            }
+            None => **text = String::new(),
+        }
+    }
+}
+
 /// Top inset for the minimap. Clears the K/D line that shares this
 /// corner rather than overlapping it - 52 still collided with it at the
 /// default window (the capture showed the text ON the map).
@@ -4018,6 +4138,7 @@ fn main() {
                 vitals_bars,
                 killfeed_rows,
                 context_bar,
+                award_toasts,
                 sync_rockets,
             )
                 .run_if(in_state(GameState::Playing)),
@@ -6839,7 +6960,67 @@ fn setup(
                 },
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.9)),
             ));
+            // §owner: the reference reticle - THICK stadia posts running
+            // in from the ring, thinning to the fine cross at centre.
+            // Vertical pair
+            for top in [true, false] {
+                let mut n = Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    width: Val::Px(5.0),
+                    height: Val::Percent(24.0),
+                    margin: UiRect::left(Val::Px(-2.5)),
+                    ..default()
+                };
+                if top {
+                    n.top = Val::Percent(11.0);
+                } else {
+                    n.bottom = Val::Percent(11.0);
+                }
+                p.spawn((n, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.95))));
+            }
+            // Horizontal pair
+            for left in [true, false] {
+                let mut n = Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Percent(50.0),
+                    height: Val::Px(5.0),
+                    width: Val::Percent(17.0),
+                    margin: UiRect::top(Val::Px(-2.5)),
+                    ..default()
+                };
+                if left {
+                    n.left = Val::Percent(21.0);
+                } else {
+                    n.right = Val::Percent(21.0);
+                }
+                p.spawn((n, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.95))));
+            }
         });
+
+    // §4.3: AWARD TOASTS - stacked under the minimap, 2.5 s fade each.
+    // The spec wrote them for a resource economy that does not exist;
+    // they are driven by the award-worthy events the game DOES have -
+    // kills, streaks, headshots, assists, captures - rather than faking
+    // a currency.
+    for i in 0..AWARD_SLOTS {
+        commands.spawn((
+            Text::new(""),
+            TextFont {
+                font_size: 15.0,
+                ..default()
+            },
+            TextColor(branding::palette::GOLD),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(14.0),
+                top: Val::Px(MINIMAP_TOP_PX + MINIMAP_PX + 10.0 + i as f32 * 20.0),
+                ..default()
+            },
+            AwardToast(i),
+            HudRoot,
+        ));
+    }
 
     // ---- minimap (M / settings to toggle) ------------------------------
     commands
@@ -11148,7 +11329,7 @@ fn killfeed_rows(
             1 => {
                 // glyphs sit between the two names, in neutral parchment
                 // so they never compete with the side colours either side
-                **text = format!("{}>", feed_glyphs(ev.headshot, ev.noscope, ev.blind, ev.smoke));
+                **text = format!("{}>", feed_glyphs(ev.headshot, ev.noscope, ev.blind, ev.smoke, ev.wallbang));
                 *color = TextColor(branding::palette::PARCHMENT_DIM);
             }
             _ => {
@@ -13397,19 +13578,20 @@ mod band_tests {
         // three), and a plain kill earns none - an empty string, not a
         // pad, so the row does not reserve space for a badge it lacks.
         let stream = [
-            ((false, false, false, false), ""),
-            ((true, false, false, false), "*"),
-            ((false, true, false, false), "o"),
-            ((false, false, true, false), "?"),
-            ((false, false, false, true), "~"),
-            ((true, true, false, false), "*o"),
-            ((true, true, true, true), "*o?~"),
+            ((false, false, false, false, false), ""),
+            ((true, false, false, false, false), "*"),
+            ((false, true, false, false, false), "o"),
+            ((false, false, true, false, false), "?"),
+            ((false, false, false, true, false), "~"),
+            ((false, false, false, false, true), "#"),
+            ((true, true, false, false, false), "*o"),
+            ((true, true, true, true, true), "*o?~#"),
         ];
-        for ((hs, ns, bl, sm), want) in stream {
+        for ((hs, ns, bl, sm, wb), want) in stream {
             assert_eq!(
-                feed_glyphs(hs, ns, bl, sm),
+                feed_glyphs(hs, ns, bl, sm, wb),
                 want,
-                "glyphs for headshot={hs} noscope={ns} blind={bl} smoke={sm}"
+                "glyphs for headshot={hs} noscope={ns} blind={bl} smoke={sm} wallbang={wb}"
             );
         }
     }

@@ -1415,6 +1415,8 @@ pub struct Fighter {
     /// §4.5: did the last trigger pull's ray pass THROUGH a smoke bloom?
     /// Same latch pattern as `fired_ads`, same reason.
     pub fired_smoke: bool,
+    /// §4.5: did the last landed shot punch THROUGH cover first?
+    pub fired_wallbang: bool,
     pub switch_t: f32,
     pub pos: [f32; 3], // feet
     pub vel: [f32; 2], // xz
@@ -1785,6 +1787,8 @@ pub struct KillEvent {
     pub noscope: bool,
     /// §4.5 modifier: the killing ray passed through a smoke bloom.
     pub smoke: bool,
+    /// §4.5 modifier: the killing round punched through cover first.
+    pub wallbang: bool,
     /// §4.5 (BRIEF VIII): the most recent OTHER fighter who damaged the
     /// victim within ASSIST_WINDOW_S of the kill. `None` if the killer
     /// landed every recent hit alone, or nobody else hit them recently
@@ -2126,6 +2130,15 @@ pub const ROCKET_LOS_BREAK_S: f32 = 0.4;
 ///   the mech's answer to a rocket duel, at the cost of being planted.
 ///   vs INFANTRY: 50 flat -> 2 rockets kill; a raised shield blocks at
 ///   most half -> 25 -> 4 rockets. Same cap philosophy as the spear.
+/// §4.5 WALLBANG, at last a real mechanic instead of a deferred glyph.
+/// A hitscan round that strikes cover keeps going for a short window
+/// past the ENTRY face; a victim inside that window is hit at half
+/// damage. The window doubles as an implicit thickness test - a soldier
+/// hugging the far side of a 20 cm crate wall is reachable, one behind
+/// a metre of stone is not, because his body starts beyond the window.
+pub const PEN_WINDOW_M: f32 = 0.35;
+pub const PEN_DMG_MULT: f32 = 0.5;
+
 pub const ROCKET_DMG: f32 = 290.0;
 pub const ROCKET_DMG_INFANTRY: f32 = 50.0;
 pub const ROCKET_SHIELD_BLOCK_CAP: f32 = 0.5;
@@ -3289,6 +3302,7 @@ impl TdmSim {
                     walking: false,
                     fired_ads: false,
                     fired_smoke: false,
+                    fired_wallbang: false,
                     switch_t: 0.0,
                     pos,
                     vel: [0.0, 0.0],
@@ -5768,6 +5782,7 @@ impl TdmSim {
         pellets: u32,
     ) {
         self.fighters[i].fired_smoke = false;
+        self.fighters[i].fired_wallbang = false;
         for _pellet in 0..pellets.max(1) {
             let (ex, ey) = (
                 self.rng.range(-spread, spread),
@@ -5823,6 +5838,29 @@ impl TdmSim {
                 team: shooter_team,
                 ttl: 0.06,
             });
+            // §4.5 WALLBANG: if the wall won, look a short window PAST
+            // its entry face - a body inside it takes the round at half
+            // damage. See PEN_WINDOW_M for why the window is also an
+            // honest thickness test.
+            let mut wallbang = false;
+            if victim.is_none() && zvictim.is_none() {
+                for (j, g) in self.fighters.iter().enumerate() {
+                    if j == i || g.team == shooter_team || !g.alive() || g.protect_t > 0.0 {
+                        continue;
+                    }
+                    if let Some((t, hit_y)) =
+                        ray_vs_cylinder(o, d, g.pos, g.radius(), g.height())
+                    {
+                        if t > t_hit
+                            && t <= t_hit + PEN_WINDOW_M
+                            && victim.map_or(true, |(_, bt, _)| t < bt)
+                        {
+                            victim = Some((j, t, hit_y));
+                            wallbang = true;
+                        }
+                    }
+                }
+            }
             // nearest body wins: zombie, fighter, or the wall
             if let Some((zi, zt, hit_y)) = zvictim {
                 if victim.map_or(true, |(_, ft, _)| zt < ft) {
@@ -5846,10 +5884,17 @@ impl TdmSim {
                 }
             }
             match victim {
-                Some((j, _, hit_y)) => {
+                Some((j, vt, hit_y)) => {
+                    if wallbang {
+                        self.fighters[i].fired_wallbang = true;
+                    }
+                    // a wallbanged round lands where the BODY is, at half
+                    // strength - not where the wall stopped the tracer
+                    let vat = [o[0] + d[0] * vt, o[1] + d[1] * vt, o[2] + d[2] * vt];
+                    let dmg = if wallbang { damage * PEN_DMG_MULT } else { damage };
                     // the PASSED damage, never a re-read of the held gun:
                     // the hull mounts have no gun in anyone's hands
-                    self.apply_hit_dmg(i, j, hit_y, end, damage);
+                    self.apply_hit_dmg(i, j, hit_y, if wallbang { vat } else { end }, dmg);
                 }
                 None => {
                     if end_t < 199.0 {
@@ -6147,6 +6192,7 @@ impl TdmSim {
                     noscope: gun(self.fighters[i].gun).scoped
                         && !self.fighters[i].fired_ads,
                     smoke: self.fighters[i].fired_smoke,
+                    wallbang: self.fighters[i].fired_wallbang,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -6515,6 +6561,7 @@ impl TdmSim {
                         blind: self.fighters[j].blind_t > 0.0,
                         noscope: false,
                         smoke: false,
+                        wallbang: false,
                         assist: assist_candidate,
                     },
                     5.0,
@@ -7603,6 +7650,7 @@ impl TdmSim {
                     blind: self.fighters[victim].blind_t > 0.0,
                     noscope: false,
                     smoke: false,
+                    wallbang: false,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -8688,6 +8736,42 @@ mod tests {
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
         );
+    }
+
+    /// §4.5: a thin wall wallbangs at half damage; a thick one still
+    /// protects. The window is the thickness test.
+    #[test]
+    fn thin_cover_wallbangs_thick_cover_protects() {
+        let mut rig = |wall_far_z: f32, victim_z: f32| -> (f32, bool) {
+            let mut s = range(0x77);
+            s.fighters[0].gun = GunKind::M4;
+            s.fighters[0].ammo = 30;
+            s.fighters[1].pos = [0.0, 0.0, victim_z];
+            s.fighters[1].protect_t = 0.0;
+            s.cover.push(Aabb {
+                min: [-3.0, 0.0, -0.1],
+                max: [3.0, 3.0, wall_far_z],
+            });
+            s.cover_kind.push(CoverKind::Crate);
+            s.rebuild_grid();
+            let hp0 = s.fighters[1].health;
+            // aim slightly DOWN: the muzzle sits at ~1.4 and a flat ray lands
+            // in the arms band (x0.75) - a dipped one crosses the torso, so
+            // the half-damage assertion is exact instead of zone-shaded
+            assert!(s.try_fire(0, [0.0, -0.12, 1.0], false), "the shot fires");
+            (hp0 - s.fighters[1].health, s.fighters[0].fired_wallbang)
+        };
+        // 20cm crate wall, victim hugging the far side: half damage, marked
+        let (dealt, banged) = rig(0.1, 0.55);
+        assert!(banged, "the thin-wall shot must latch wallbang");
+        assert!(
+            (dealt - gun(GunKind::M4).damage * PEN_DMG_MULT).abs() < 0.01,
+            "half damage through the crate, got {dealt}"
+        );
+        // a metre of wall: the window ends inside it, nobody is hit
+        let (dealt, banged) = rig(1.0, 1.45);
+        assert_eq!(dealt, 0.0, "thick cover still protects, got {dealt}");
+        assert!(!banged, "no wallbang credit for a stopped round");
     }
 
     /// §owner's rocket table, derived from the live constants.
