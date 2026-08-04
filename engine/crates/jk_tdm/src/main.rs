@@ -2804,7 +2804,9 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
-        .insert_resource(ClearColor(Color::srgb(0.58, 0.63, 0.72)))
+        // Sampled from the key art. Was a cool blue-grey, which fought
+        // the warm gold-and-sepia art on every menu screen.
+        .insert_resource(ClearColor(branding::palette::DUST))
         .init_resource::<CamCtl>()
         // R4: loaded once here, held fixed for the whole run - same
         // lifetime as the consts it can override.
@@ -5155,7 +5157,7 @@ fn setup(
                     font_size: 22.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.95, 1.0)),
+                TextColor(branding::palette::PARCHMENT),
                 ScoreTimerText,
             ));
         });
@@ -5195,7 +5197,7 @@ fn setup(
             font_size: 34.0,
             ..default()
         },
-        TextColor(Color::srgb(0.95, 0.85, 0.4)),
+        TextColor(branding::palette::GOLD),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Percent(30.0),
@@ -5272,7 +5274,7 @@ fn setup(
                 padding: UiRect::all(Val::Px(12.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.5)),
+            BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.55)),
         ))
         .with_children(|p| {
             p.spawn((
@@ -5281,7 +5283,7 @@ fn setup(
                     font_size: 34.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.96, 0.98)),
+                TextColor(branding::palette::PARCHMENT),
                 PanelInfoText,
             ));
         });
@@ -5297,7 +5299,7 @@ fn setup(
                 padding: UiRect::all(Val::Px(12.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.5)),
+            BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.55)),
         ))
         .with_children(|p| {
             p.spawn((
@@ -5322,7 +5324,7 @@ fn setup(
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.88)),
+            BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.90)),
             Visibility::Hidden,
             ScoreboardRoot,
         ))
@@ -5434,7 +5436,7 @@ fn setup(
                 height: Val::Px(MINIMAP_PX),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.06, 0.05, 0.72)),
+            BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.76)),
             MinimapRoot,
         ))
         .with_children(|p| {
@@ -9694,7 +9696,7 @@ fn open_controls(mut commands: Commands) {
                     font_size: 34.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                TextColor(branding::palette::GOLD),
                 Node {
                     margin: UiRect::bottom(Val::Px(16.0)),
                     ..default()
@@ -9711,7 +9713,7 @@ fn open_controls(mut commands: Commands) {
                     font_size: 19.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.93, 0.95)),
+                TextColor(branding::palette::PARCHMENT),
             ));
         });
 }
@@ -9758,7 +9760,7 @@ fn first_run_card(
                         font_size: 20.0,
                         ..default()
                     },
-                    TextColor(Color::srgb(0.95, 0.8, 0.3)),
+                    TextColor(branding::palette::GOLD),
                 ));
                 let mut body = String::new();
                 for b in BIND_REGISTRY.iter().filter(|b| b.essential) {
@@ -9771,7 +9773,7 @@ fn first_run_card(
                         font_size: 16.0,
                         ..default()
                     },
-                    TextColor(Color::srgb(0.9, 0.92, 0.95)),
+                    TextColor(branding::palette::PARCHMENT),
                 ));
             });
         return;
@@ -9858,7 +9860,10 @@ fn pick_row<C: Component + Copy>(
                     font_size: 15.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.6, 0.7, 0.9)),
+                // category labels: were cool periwinkle against a warm
+                // gold title. Bronze puts them in the same metal family
+                // as the selection they label.
+                TextColor(branding::palette::BRONZE),
                 Node {
                     width: Val::Px(110.0),
                     ..default()
@@ -10004,7 +10009,7 @@ fn open_intro(
             font_size: 15.0,
             ..default()
         },
-        TextColor(Color::srgb(0.62, 0.85, 0.90)),
+        TextColor(branding::palette::PARCHMENT),
         // capped width: the centered mode buttons are 620 wide, so on a
         // 1280-wide window they start around x=330 - an unconstrained
         // readout ran straight underneath them and the two texts
@@ -10026,7 +10031,7 @@ fn open_intro(
             font_size: 19.0,
             ..default()
         },
-        TextColor(Color::srgb(0.95, 0.85, 0.4)),
+        TextColor(branding::palette::GOLD),
         Node {
             position_type: PositionType::Absolute,
             right: Val::Px(18.0),
@@ -10057,7 +10062,7 @@ fn open_intro(
             p.spawn((
                 Text::new("JOHN KINGDOM - ARENA"),
                 TextFont { font_size: 40.0, ..default() },
-                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                TextColor(branding::palette::GOLD),
             ));
             p.spawn((
                 Text::new("build your LOADOUT - the shield always rides in its own slot (E raises it)\nfull controls: ESC menu > RULES & MANUAL"),
@@ -10124,7 +10129,7 @@ fn open_intro(
             p.spawn((
                 Text::new("\nPICK A MODE TO DEPLOY"),
                 TextFont { font_size: 22.0, ..default() },
-                TextColor(Color::srgb(0.95, 0.85, 0.4)),
+                TextColor(branding::palette::GOLD),
             ));
             for (label, which) in [
                 ("TEAM DEATHMATCH - first to 30", ModeButton::Tdm),
@@ -10146,7 +10151,7 @@ fn open_intro(
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
                 ))
                 .with_children(|b| {
                     b.spawn((
@@ -10196,8 +10201,8 @@ fn intro_buttons(
 ) {
     for (interaction, which, mut bg) in &mut q {
         match interaction {
-            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.24, 0.29, 0.40)),
-            Interaction::None => *bg = BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
+            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
             Interaction::Pressed => {
                 let mode = match which {
                     ModeButton::Tdm => Mode::Tdm,
@@ -10211,13 +10216,23 @@ fn intro_buttons(
 }
 
 /// Shared select-highlight painter for all the pick-rows.
+///
+/// Rethemed to the key art: selection was a flat green that fought the
+/// gold-and-bronze palette, and idle was a cool blue-grey. Selection is
+/// now struck BRONZE — the same metal as the emblem's frame — so the
+/// chosen item reads as part of the same object the title is made of.
+///
+/// One painter drives every pick-row on the loadout screen, which is
+/// why this is a three-line change rather than forty scattered ones.
 fn paint(bg: &mut BackgroundColor, selected: bool, hovered: bool) {
     *bg = BackgroundColor(if selected {
-        Color::srgb(0.20, 0.45, 0.24)
+        // struck bronze, lifted so white label text still reads on it
+        Color::srgb(0.42, 0.31, 0.14)
     } else if hovered {
-        Color::srgb(0.22, 0.30, 0.24)
+        Color::srgb(0.26, 0.21, 0.14)
     } else {
-        Color::srgb(0.14, 0.17, 0.22)
+        // warm shadow, not the old cool slate
+        Color::srgb(0.15, 0.13, 0.11)
     });
 }
 
@@ -10402,7 +10417,7 @@ fn open_menu(
                     font_size: 42.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                TextColor(branding::palette::GOLD),
                 Node {
                     margin: UiRect::bottom(Val::Px(18.0)),
                     ..default()
@@ -10427,7 +10442,7 @@ fn open_menu(
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
                 ))
                 .with_children(|b| {
                     b.spawn((
@@ -10482,7 +10497,7 @@ fn open_settings(
                     font_size: 40.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                TextColor(branding::palette::GOLD),
             ));
             p.spawn((
                 Text::new("Click a row to change it.  Settings apply immediately.\nmode / map / difficulty / team size / loadout:  ESC menu > Change Mode / Loadout"),
@@ -10533,7 +10548,7 @@ fn open_settings(
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
                 ))
                 .with_children(|b| {
                     let mut e = b.spawn((
@@ -10595,8 +10610,8 @@ fn settings_buttons(
     let mut dirty = false;
     for (interaction, which, mut bg) in &mut q {
         match interaction {
-            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.24, 0.29, 0.40)),
-            Interaction::None => *bg = BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
+            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
             Interaction::Pressed => match which {
                 SettingsButton::SwapMouse => {
                     settings.swap_mouse = !settings.swap_mouse;
@@ -10723,7 +10738,7 @@ fn open_manual(
                     font_size: 30.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.75, 0.27)),
+                TextColor(branding::palette::GOLD),
             ));
             p.spawn((
                 Text::new(manual),
@@ -10753,8 +10768,8 @@ fn menu_buttons(
 ) {
     for (interaction, which, mut bg) in &mut q {
         match interaction {
-            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.24, 0.29, 0.40)),
-            Interaction::None => *bg = BackgroundColor(Color::srgb(0.16, 0.19, 0.26)),
+            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
+            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
             Interaction::Pressed => match which {
                 MenuButton::Resume => next.set(GameState::Playing),
                 MenuButton::Restart => {

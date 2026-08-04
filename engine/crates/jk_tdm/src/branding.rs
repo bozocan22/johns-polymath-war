@@ -29,6 +29,40 @@
 
 use bevy::prelude::*;
 
+// ---- palette ---------------------------------------------------------
+// Sampled from the key art so the UI and the art are the same world.
+// The menu previously ran cool blue-grey chrome with cyan text over
+// warm gold-and-sepia art, which read as two different games stapled
+// together.
+//
+// **Decorative only.** Nothing here touches a colour that carries
+// MEANING — team blue and orange, danger red, low-health warning,
+// the minimap's friend/foe dots. Those are semantics a player reads
+// under pressure, and retheming them to match a painting would trade
+// readability for mood. That is the line: chrome follows the art,
+// signal does not.
+pub mod palette {
+    use bevy::prelude::Color;
+
+    /// Dusty amber haze — the key art's ground and sky.
+    pub const DUST: Color = Color::srgb(0.72, 0.62, 0.45);
+    /// Deep shadowed brown for panels and pills, replacing the old
+    /// cool navy `srgba(0.04, 0.05, 0.08, ..)`.
+    pub const SHADOW: Color = Color::srgb(0.10, 0.08, 0.06);
+    /// Antique gold — the laurel, the eagle, the emblem's frame. The
+    /// primary accent and the colour of anything selected.
+    pub const GOLD: Color = Color::srgb(0.80, 0.65, 0.26);
+    /// Struck bronze, for secondary rules and inactive accents.
+    pub const BRONZE: Color = Color::srgb(0.55, 0.42, 0.22);
+    /// The legionaries' plume. An accent, NOT the danger red — the HUD
+    /// keeps its own brighter red for damage so the two never confuse.
+    pub const PLUME: Color = Color::srgb(0.62, 0.13, 0.11);
+    /// Parchment — body text on dark ground. Warm, not the old blue-white.
+    pub const PARCHMENT: Color = Color::srgb(0.93, 0.89, 0.80);
+    /// Muted parchment for secondary/inactive text.
+    pub const PARCHMENT_DIM: Color = Color::srgb(0.68, 0.63, 0.55);
+}
+
 // ---- timings ---------------------------------------------------------
 // A splash is a promise about how long the player waits. These are the
 // whole contract, in one place.
@@ -464,6 +498,75 @@ mod tests {
         assert!(
             Z_EMBLEM_MARK < 40,
             "the mark must render beneath every HUD cluster"
+        );
+    }
+
+    /// The palette must actually be the key art's palette — warm, and
+    /// legible in the pairings the UI really uses.
+    ///
+    /// Asserts RELATIONSHIPS, not hex values, so the palette can be
+    /// re-sampled from new art without rewriting the test. What it
+    /// pins is the reason the palette exists: the old chrome was COOL
+    /// (blue channel dominant) over warm art, and that is the specific
+    /// mistake that must not come back.
+    #[test]
+    fn the_palette_is_warm_and_readable() {
+        use palette::*;
+        let rgb = |c: Color| {
+            let s = c.to_srgba();
+            (s.red, s.green, s.blue)
+        };
+
+        // 1. WARM: every ground/accent colour must have more red than
+        //    blue. The palette this replaced ran srgb(0.58,0.63,0.72) -
+        //    blue-dominant - against gold-and-sepia art.
+        for (name, c) in [
+            ("DUST", DUST),
+            ("GOLD", GOLD),
+            ("BRONZE", BRONZE),
+            ("PLUME", PLUME),
+            ("PARCHMENT", PARCHMENT),
+            ("PARCHMENT_DIM", PARCHMENT_DIM),
+            ("SHADOW", SHADOW),
+        ] {
+            let (r, _, b) = rgb(c);
+            assert!(
+                r > b,
+                "{name} is cool (r={r:.2} <= b={b:.2}) - the whole point of \
+                 this palette is that the chrome stops fighting warm art"
+            );
+        }
+
+        // 2. READABLE: text on its intended ground must actually
+        //    separate. Rough relative luminance is enough to catch a
+        //    palette edit that makes body text vanish into a panel.
+        let lum = |c: Color| {
+            let (r, g, b) = rgb(c);
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        assert!(
+            lum(PARCHMENT) - lum(SHADOW) > 0.5,
+            "parchment on shadow has too little contrast to read"
+        );
+        assert!(
+            lum(GOLD) - lum(SHADOW) > 0.25,
+            "gold on shadow has too little contrast for a selected item"
+        );
+        assert!(
+            lum(PARCHMENT) > lum(PARCHMENT_DIM),
+            "the dim variant must actually be dimmer than the primary"
+        );
+
+        // 3. The accent PLUME must stay distinguishable from the HUD's
+        //    danger red, which is deliberately NOT in this palette.
+        //    A decorative red that reads as a warning is a real hazard.
+        let hud_danger = Color::srgb(1.0, 0.25, 0.2);
+        let (pr, _, _) = rgb(PLUME);
+        let (dr, _, _) = rgb(hud_danger);
+        assert!(
+            dr - pr > 0.25,
+            "the decorative plume red is too close to the HUD's danger red - \
+             a player could read set dressing as a warning"
         );
     }
 
