@@ -64,8 +64,25 @@ You are the one agent whose work a unit test genuinely cannot check. So:
 3. Run the capture from the crate directory (assets resolve as
    `../../assets`, relative to the working directory):
    `cd engine/crates/jk_tdm && JK_CAPTURE=<script> ../../target/release/jk_tdm.exe`
-   Scripts: `baseline`, `traversal`, `map_lap`, `mech_scale`,
-   `minigun_check`, `idle_life`, `bow_draw`, `bow_draw_fp`, `menus`.
+   **Read `CAPTURE_SCRIPTS` in `main.rs` for the live list — do not trust
+   this one.** An unknown name is not a soft failure: `init_capture_mode`
+   prints the valid set and calls `std::process::exit(2)`, so you burn a
+   cycle on a hard exit. On `main` today the list is `baseline`,
+   `traversal`, `map_lap`, `mech_scale`, `minigun_check`, `idle_life`,
+   `bow_draw`, `menus`. A first-person bow script (`bow_draw_fp`) exists
+   only on the unmerged `feat/tdm-customization-bow-recoil` branch.
+4b. **Settings pollute captures, and this is not hypothetical.**
+   `config/settings.txt` is read at startup and rewritten on every
+   settings change. On a machine where a human has touched the options
+   screen it will not match the compiled defaults — right now it carries
+   `fov_idx = 4` (100 deg) against `FOV_DEFAULT_IDX = 3` (90 deg), plus
+   sensitivity, minimap and eighteen crosshair fields.
+   So a BEFORE/AFTER comparison is only sound when **both** frames came
+   from the same settings, and a capture taken here is NOT the capture a
+   clean checkout produces. Until the harness launches from
+   `GameSettings::default()` when `JK_CAPTURE` is set, either check that
+   file before trusting a comparison or state in your report that you
+   did not.
 4. **Actually open the PNG and look at it.** Exit code 0 and a
    screenshot count prove the process ran, not that the picture is
    right. A bow with no arrow captures perfectly cleanly.

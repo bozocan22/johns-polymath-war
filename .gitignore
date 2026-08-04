@@ -1,3 +1,12 @@
 # gstack tooling artifacts
 .gstack/
 export/
+
+# Player settings, rewritten by the game on every settings change. This is
+# per-machine state and must never be committed: it is READ AT STARTUP, so a
+# committed copy silently reframes every capture the harness takes. The file
+# on this machine currently holds fov_idx = 4 (100 deg) against the code's
+# FOV_DEFAULT_IDX = 3 (90 deg) - a capture taken here is not the capture a
+# clean checkout produces, and before/after comparison is only valid when
+# both frames came from the same settings.
+engine/crates/jk_tdm/config/settings.txt
