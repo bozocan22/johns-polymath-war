@@ -8339,10 +8339,15 @@ fn camera_system(
         let dx = f2.pos[0] - p.pos[0];
         let dz = f2.pos[2] - p.pos[2];
         let d = (dx * dx + dz * dz).sqrt();
-        if d < 6.0 {
+        // Addendum §A: the radius a footfall is FELT scales with the
+        // chassis. 6.0 m was tuned at the old 1.15x scale and never
+        // followed it to 1.7 - a machine half again as big should shake
+        // the ground further. Derived, so the next scale change follows.
+        let felt = (6.0 / 1.15) * MECH_SCALE;
+        if d < felt {
             // periodic thump matched to the walk cadence
             let pulse = (game.sim.t * std::f32::consts::TAU * 1.7).sin().max(0.0).powi(6);
-            shake += 0.2 * 0.09 * (1.0 - d / 6.0) * pulse;
+            shake += 0.2 * 0.09 * (1.0 - d / felt) * pulse;
         }
     }
     let shake = shake.min(0.14);

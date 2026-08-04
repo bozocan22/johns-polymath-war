@@ -135,7 +135,13 @@ pub const ROLL_SETTLE_S: f32 = 0.20;
 // fights its own silhouette. Its dodge is a BRACED SIDE-STEP: shorter,
 // grounded, tall, near-zero steering, with the same ease-out landing.
 pub const MECH_STEP_S: f32 = 0.30;
-pub const MECH_STEP_SPEED: f32 = 6.5;
+/// The braced side-step burst. Addendum §A: mobility distances scale
+/// WITH the chassis - this was hand-tuned when the mech was 1.15x and
+/// never followed the scale to 1.7. Expressed as (original tuning /
+/// original scale) x current scale, so the next scale change cannot
+/// leave it behind again. 6.5 at 1.15x -> ~9.6 at 1.7x: a bigger
+/// machine covers proportionally more ground per lunge.
+pub const MECH_STEP_SPEED: f32 = (6.5 / 1.15) * MECH_SCALE;
 pub const MECH_STEP_CD_S: f32 = 1.4;
 // ---- §2 (Brief V): the spear THRUST --------------------------------------
 // F while wielding the spear is a THRUST, not a knife swing: a visible
