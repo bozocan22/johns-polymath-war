@@ -160,6 +160,31 @@ const ADS_SENS_RATIO: f32 = 1.0;
 const ADS_TIME_S: f32 = 0.12;
 /// First↔third person blend time, ease-out (§5.1).
 const PERSON_BLEND_S: f32 = 0.18;
+/// How far the player may look up or down (radians, ±87.7°).
+///
+/// `cam.pitch` has TWO writers — the mouse (`mouse_look`) and the recoil
+/// kick (`input_and_step`) — and this is the one limit both must obey.
+/// They used to disagree: the mouse clamped to ±1.53 while recoil clamped
+/// to (-0.7, 0.8), and because recoil clamps the ACCUMULATED pitch rather
+/// than its own delta, firing while aimed steeply up snapped the view down
+/// by as much as 0.73 rad in a single frame. A clamp is not a place for a
+/// second opinion: one constant, both call sites.
+const LOOK_PITCH_LIMIT: f32 = 1.53;
+
+/// One shot's worth of muzzle climb applied to the look pitch.
+///
+/// Pure, and separate from the system that calls it, so the clamp can be
+/// tested without standing up a Bevy world — the reason the disagreement
+/// above went unnoticed is that this arithmetic only ever existed inside
+/// a 40-argument system nothing could call.
+///
+/// Lower pitch is higher aim, so the kick SUBTRACTS. The result is
+/// clamped to the same range the mouse may reach, which means the kick
+/// can push the aim to the ceiling but can never relocate an aim the
+/// player was already legitimately holding.
+fn recoil_kicked_pitch(pitch: f32, kick: f32, bloom: f32, brace: f32) -> f32 {
+    (pitch - (kick * 6.0 + bloom * 1.5) * brace).clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT)
+}
 /// Third-person boom: back / up / screen-right of the head pivot (§5.1).
 // §5.1 (Brief VII v2): hip 2.2m back / +0.45m right / +0.12m up.
 const TP_BOOM: f32 = 2.2;
@@ -6170,7 +6195,7 @@ fn input_and_step(
         for ev in motion.read() {
             cam.yaw -= ev.delta.x * sens * zoom_mult;
             cam.pitch = (cam.pitch + ev.delta.y * sens * zoom_mult * y_sign)
-                .clamp(-1.53, 1.53);
+                .clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT);
         }
     } else {
         motion.clear();
@@ -6380,12 +6405,31 @@ fn input_and_step(
         } else {
             gun(p.gun).kick
         };
-        let brace = if p.lean.abs() > 0.1 {
+        // Whatever the sim damps, the camera damps. The sim scales a
+        // braced mech's punch by MECH_BRACE_RECOIL_DAMP (sim.rs, the
+        // spray block) but this path only ever asked about `lean`, so a
+        // planted mech soaked its recoil in the simulation and still took
+        // the full kick in the view - the brace stance visibly did
+        // nothing for the thing the player actually feels. A pilot does
+        // not lean; on foot you cannot mech-brace. The two are exclusive,
+        // so this reads as one ladder rather than two.
+        let brace = if p.in_mech() {
+            if p.mech_brace {
+                sim::MECH_BRACE_RECOIL_DAMP
+            } else {
+                1.0
+            }
+        } else if p.lean.abs() > 0.1 {
             LEAN_RECOIL_MULT
         } else {
             1.0
         };
-        cam.pitch = (cam.pitch - (kick * 6.0 + p.bloom * 1.5) * brace).clamp(-0.7, 0.8);
+        // Clamp to the SAME limit the mouse obeys. Recoil clamps the
+        // accumulated pitch, not just its own delta, so a narrower limit
+        // here does not "restrain the kick" - it teleports an aim the
+        // player legitimately held into range the instant they pull the
+        // trigger.
+        cam.pitch = recoil_kicked_pitch(cam.pitch, kick, p.bloom, brace);
         cam.recoil = (cam.recoil + 0.6).min(1.0);
     }
 
@@ -12204,6 +12248,103 @@ mod camera_v2_tests {
             t90 < 0.35,
             "sprint boom-out should follow the 0.12s ease (~0.25s to 90%), took {t90}s"
         );
+    }
+}
+
+/// The look-pitch clamp: recoil and the mouse write the same state, so
+/// they must agree about how far it may go.
+#[cfg(test)]
+mod recoil_pitch_tests {
+    use super::*;
+
+    /// The bug this module exists for.
+    ///
+    /// Recoil clamps the ACCUMULATED pitch, not its own delta. While its
+    /// limit was (-0.7, 0.8) and the mouse's was ±1.53, a player holding
+    /// a steep aim had it yanked back to the recoil limit the instant
+    /// they fired — up to 0.73 rad in one frame, from one bullet, with no
+    /// input. Firing must never move the aim further than the kick.
+    #[test]
+    fn firing_at_a_steep_aim_does_not_teleport_the_view() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        for &pitch in &[
+            -LOOK_PITCH_LIMIT,
+            -1.2,
+            -0.71, // just outside the OLD lower clamp
+            0.0,
+            0.81, // just outside the OLD upper clamp
+            1.2,
+            LOOK_PITCH_LIMIT,
+        ] {
+            let after = recoil_kicked_pitch(pitch, kick, 0.0, 1.0);
+            let moved = (after - pitch).abs();
+            let most = kick * 6.0 + 1e-6;
+            assert!(
+                moved <= most,
+                "pitch {pitch} moved {moved} rad on one shot; the kick is only {most}"
+            );
+        }
+    }
+
+    /// ...and the guard above must not be satisfied by doing nothing.
+    #[test]
+    fn the_kick_still_kicks() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        let after = recoil_kicked_pitch(0.0, kick, 0.0, 1.0);
+        assert!(after < 0.0, "recoil must raise the muzzle (lower pitch)");
+        assert!(
+            (after.abs() - kick * 6.0).abs() < 1e-6,
+            "one shot should move exactly kick*6, got {after}"
+        );
+    }
+
+    /// Recoil may push the aim TO the ceiling, never through it.
+    #[test]
+    fn sustained_fire_stops_at_the_same_limit_the_mouse_obeys() {
+        let kick = gun(sim::GunKind::M249).kick;
+        let mut pitch = 0.0;
+        for _ in 0..500 {
+            pitch = recoil_kicked_pitch(pitch, kick, 0.05, 1.0);
+        }
+        assert!(
+            pitch >= -LOOK_PITCH_LIMIT,
+            "ran past the look limit: {pitch}"
+        );
+        assert!(
+            (pitch + LOOK_PITCH_LIMIT).abs() < 1e-3,
+            "500 rounds should pin the aim at the ceiling, got {pitch}"
+        );
+    }
+
+    /// A brace is a discount on the kick, in both directions of the
+    /// ladder — the sim damps a braced mech's punch, so the view must
+    /// damp too or the stance does nothing the player can feel.
+    #[test]
+    fn bracing_reduces_the_kick_by_the_sims_own_factor() {
+        let kick = 0.018; // the autocannon's camera kick
+        let unbraced = recoil_kicked_pitch(0.0, kick, 0.0, 1.0).abs();
+        let braced =
+            recoil_kicked_pitch(0.0, kick, 0.0, sim::MECH_BRACE_RECOIL_DAMP).abs();
+        assert!(braced < unbraced, "bracing must help: {braced} vs {unbraced}");
+        assert!(
+            (braced - unbraced * sim::MECH_BRACE_RECOIL_DAMP).abs() < 1e-6,
+            "the view should scale by the sim's own damp factor"
+        );
+        // and leaning on foot is the milder discount
+        let leaned = recoil_kicked_pitch(0.0, kick, 0.0, sim::LEAN_RECOIL_MULT).abs();
+        assert!(
+            leaned > braced && leaned < unbraced,
+            "lean sits between braced and unbraced: {braced} < {leaned} < {unbraced}"
+        );
+    }
+
+    /// Bloom widens the kick, so a hot gun climbs faster than a cold one.
+    #[test]
+    fn a_hot_gun_climbs_faster_than_a_cold_one() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        let cold = recoil_kicked_pitch(0.0, kick, 0.0, 1.0).abs();
+        let hot = recoil_kicked_pitch(0.0, kick, 0.05, 1.0).abs();
+        assert!(hot > cold, "bloom should add climb: {hot} vs {cold}");
     }
 }
 
