@@ -298,6 +298,538 @@ pub fn row_colors(kind: RowKind, state: RowState) -> (Color, Color, Color) {
     }
 }
 
+// ---- components ----------------------------------------------------------
+
+/// Every menu surface root. One marker, so a surface can be found without
+/// knowing which screen it is.
+#[derive(Component)]
+pub struct MenuSurface;
+
+/// The clip frame the key art is cover-fitted inside.
+#[derive(Component)]
+pub struct ArtFrame;
+
+/// The key art image itself. `key_art_refit` re-picks its constrained
+/// axis on resize.
+#[derive(Component)]
+pub struct KeyArtImage;
+
+/// The plaque.
+#[derive(Component)]
+pub struct MenuPlate;
+
+/// An interactive row. Carries only its KIND - the boss is found through
+/// `Children`, because `ChildBuilder::spawn` borrows a temporary and the
+/// boss entity does not exist until after the row's closure has run, so
+/// there is no point at which its id could be stored here.
+#[derive(Component)]
+pub struct PlateRow {
+    pub kind: RowKind,
+}
+
+/// The square stamp inside a row's left gutter.
+#[derive(Component)]
+pub struct RowBoss;
+
+// ---- 1. the ground -------------------------------------------------------
+
+fn full_bleed() -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(0.0),
+        top: Val::Px(0.0),
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        ..default()
+    }
+}
+
+/// Spawn a surface root and its three ground layers, returning the root
+/// so the caller can attach its own marker and its plate.
+///
+/// Replaces five hand-typed roots that each re-declared the same
+/// Absolute/100%/Center/Column node and the same cool navy scrim at four
+/// different alphas.
+pub fn spawn_surface(
+    commands: &mut Commands,
+    brand: Option<&branding::BrandAssets>,
+    win_aspect: f32,
+) -> Entity {
+    let root = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            GlobalZIndex(Z_MENU_SURFACE),
+            MenuSurface,
+        ))
+        .id();
+
+    commands.entity(root).with_children(|p| {
+        // L0 ART. A clip frame with one cover-fitted child. The frame's
+        // own background is the non-fatal fallback the branding contract
+        // promises: an empty assets/branding/ still boots, and still
+        // lands on a warm ground rather than a hole.
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(branding::palette::SHADOW),
+            ZIndex(ZL_ART),
+            ArtFrame,
+        ))
+        .with_children(|f| {
+            if let Some(b) = brand {
+                let (w, h) = key_art_fit(win_aspect);
+                f.spawn((
+                    Node {
+                        width: w,
+                        height: h,
+                        // MANDATORY. Node defaults flex_shrink to 1.0, and
+                        // in the tall-window branch the art's main axis is
+                        // Auto and larger than the frame - so flex would
+                        // shrink it back to fit and the "cover" becomes a
+                        // squash, which is the exact bug this recipe
+                        // exists to avoid.
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    ImageNode {
+                        image: b.key_art.clone(),
+                        color: ART_TINT,
+                        ..default()
+                    },
+                    KeyArtImage,
+                ));
+            }
+        });
+        // L1 SCRIM
+        p.spawn((
+            full_bleed(),
+            BackgroundColor(shadow_a(SCRIM_A)),
+            ZIndex(ZL_SCRIM),
+        ));
+        // L2 RAILS, top and bottom - where the art is brightest, and
+        // where the wordmark and the seal sit.
+        for top in [true, false] {
+            let mut n = Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Vh(RAIL_H_PCT),
+                ..default()
+            };
+            if top {
+                n.top = Val::Px(0.0);
+            } else {
+                n.bottom = Val::Px(0.0);
+            }
+            p.spawn((n, BackgroundColor(shadow_a(RAIL_A)), ZIndex(ZL_RAIL)));
+        }
+    });
+    root
+}
+
+/// Re-pick the constrained axis on resize, so the cover-fit survives a
+/// window that changes aspect.
+pub fn key_art_refit(
+    mut ev: EventReader<bevy::window::WindowResized>,
+    mut q: Query<&mut Node, With<KeyArtImage>>,
+) {
+    let Some(last) = ev.read().last() else { return };
+    if last.height <= 0.0 {
+        return;
+    }
+    let (w, h) = key_art_fit(last.width / last.height);
+    for mut n in &mut q {
+        n.width = w;
+        n.height = h;
+    }
+}
+
+// ---- 2. the plate --------------------------------------------------------
+
+/// The plaque: a two-line engraved frame - 2px bronze outer, 1px gold
+/// inner, U3 of dark between - with square corners throughout. `body`
+/// receives the INNER frame's builder.
+///
+/// `overflow` is deliberately left visible: the standard overhangs the
+/// plate by `RULE_OVERHANG_PX` and a clip would guillotine it.
+pub fn plate(p: &mut ChildBuilder, max_w: f32, body: impl FnOnce(&mut ChildBuilder)) {
+    p.spawn((
+        Node {
+            width: Val::Percent(88.0),
+            max_width: Val::Px(max_w),
+            max_height: Val::Percent(PLATE_MAX_H_PCT),
+            flex_direction: FlexDirection::Column,
+            border: UiRect::all(Val::Px(RULE_STAMP_PX)),
+            padding: UiRect::all(Val::Px(U3)),
+            ..default()
+        },
+        BackgroundColor(shadow_a(PLATE_A)),
+        BorderColor(branding::palette::BRONZE),
+        BorderRadius::ZERO,
+        ZIndex(ZL_PLATE),
+        MenuPlate,
+    ))
+    .with_children(|outer| {
+        outer
+            .spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    border: UiRect::all(Val::Px(RULE_HAIR_PX)),
+                    padding: UiRect::axes(Val::Px(U6), Val::Px(U5)),
+                    ..default()
+                },
+                BorderColor(gold_a(FRAME_INNER_A)),
+                BackgroundColor(Color::NONE),
+                BorderRadius::ZERO,
+            ))
+            .with_children(body);
+    });
+}
+
+/// The surface's own name. One per screen, GOLD, on a plate (R1).
+pub fn title(p: &mut ChildBuilder, text: &str) {
+    p.spawn((
+        Text::new(letterspaced(text)),
+        TextFont {
+            font_size: T_DISPLAY,
+            ..default()
+        },
+        TextColor(branding::palette::GOLD),
+        Node {
+            margin: UiRect::bottom(Val::Px(U2)),
+            ..default()
+        },
+    ));
+}
+
+// ---- 3. the signature: rule + boss ---------------------------------------
+
+/// A gold rule interrupted at dead centre by a square boss, both ends
+/// projecting past the plate's outer edge.
+///
+/// Lifted from the art, not invented: the wordmark's own ink is a long
+/// thin gold bar broken at centre by the laurel-gear-star, and the key
+/// art's shield wall is a locked row of plates each carrying one bright
+/// boss. Rule plus centre stamp is the whole visual idea of the artwork,
+/// reproducible in four nodes.
+///
+/// The overhang comes from leaving `width` UNSET and letting the column
+/// parent's default cross-axis stretch size it. Setting `width: 100%`
+/// with negative margins yields an ASYMMETRIC overhang instead.
+pub fn rule_and_boss(p: &mut ChildBuilder, filled: bool) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        height: Val::Px(BOSS_PX),
+        column_gap: Val::Px(U2),
+        margin: UiRect {
+            left: Val::Px(-RULE_OVERHANG_PX),
+            right: Val::Px(-RULE_OVERHANG_PX),
+            top: Val::Px(U4),
+            bottom: Val::Px(U3),
+        },
+        ..default()
+    })
+    .with_children(|r| {
+        for i in 0..3 {
+            if i == 1 {
+                r.spawn((
+                    Node {
+                        width: Val::Px(BOSS_PX),
+                        height: Val::Px(BOSS_PX),
+                        border: UiRect::all(Val::Px(RULE_STAMP_PX)),
+                        ..default()
+                    },
+                    BorderColor(branding::palette::GOLD),
+                    BackgroundColor(if filled {
+                        branding::palette::GOLD
+                    } else {
+                        Color::NONE
+                    }),
+                    BorderRadius::ZERO,
+                ));
+            } else {
+                r.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        height: Val::Px(RULE_STAMP_PX),
+                        ..default()
+                    },
+                    BackgroundColor(branding::palette::GOLD),
+                ));
+            }
+        }
+    });
+}
+
+/// The signature's minor key: the same rule broken by a WORD rather than
+/// a mark, running to the plate edge only. Groups sections, and replaces
+/// the bare `"\n"` used as a section break today.
+pub fn eyebrow(p: &mut ChildBuilder, label: &str) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(U3),
+        margin: UiRect {
+            top: Val::Px(U6),
+            bottom: Val::Px(U3),
+            ..default()
+        },
+        ..default()
+    })
+    .with_children(|r| {
+        r.spawn((
+            Text::new(letterspaced(label)),
+            TextFont {
+                font_size: T_MICRO,
+                ..default()
+            },
+            TextColor(branding::palette::PARCHMENT_DIM),
+        ));
+        r.spawn((
+            Node {
+                flex_grow: 1.0,
+                height: Val::Px(RULE_HAIR_PX),
+                ..default()
+            },
+            BackgroundColor(bronze_a(RULE_SECTION_A)),
+        ));
+    });
+}
+
+// ---- 4. the row ----------------------------------------------------------
+
+/// A keycap. Gold glyph on a dark cap - 7.4:1, well clear of AA.
+pub fn keycap(p: &mut ChildBuilder, key: &str, essential: bool) {
+    p.spawn((
+        Node {
+            min_width: Val::Px(KEYCAP_MIN_W),
+            height: Val::Px(KEYCAP_H),
+            border: UiRect::all(Val::Px(RULE_HAIR_PX)),
+            padding: UiRect::horizontal(Val::Px(U2)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BorderColor(if essential {
+            branding::palette::GOLD
+        } else {
+            branding::palette::BRONZE
+        }),
+        BackgroundColor(shadow_a(KEYCAP_A)),
+        BorderRadius::ZERO,
+    ))
+    .with_children(|c| {
+        c.spawn((
+            Text::new(key.to_string()),
+            TextFont {
+                font_size: T_DATA,
+                ..default()
+            },
+            TextColor(branding::palette::GOLD),
+        ));
+    });
+}
+
+/// One interactive row: `[boss gutter][name ..grows.. value][keycap]`,
+/// keeled on its left edge. THE one shape behind the pause actions, the
+/// settings rows, the intro pills and the nav buttons.
+///
+/// Returns `(row, boss, value)` so a caller can attach a label component
+/// to the VALUE node only - the settings refresh query is unscoped, so a
+/// label on two nodes per row would write the same string into both.
+pub fn menu_row(
+    p: &mut ChildBuilder,
+    tag: impl Bundle,
+    kind: RowKind,
+    name: &str,
+    value: Option<&str>,
+    keycap_hint: Option<&str>,
+) -> Entity {
+    p.spawn((
+        Button,
+        tag,
+        PlateRow { kind },
+        Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            width: Val::Percent(100.0),
+            height: Val::Px(ROW_H),
+            padding: UiRect::horizontal(Val::Px(U3)),
+            column_gap: Val::Px(U3),
+            border: UiRect::left(Val::Px(RULE_KEEL_PX)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor(branding::palette::BRONZE),
+        BorderRadius::ZERO,
+    ))
+    .with_children(|r| {
+        // The boss is a DIRECT child, so the painter finds it with one
+        // `Children` hop rather than two.
+        r.spawn((
+            Node {
+                width: Val::Px(BOSS_PX),
+                height: Val::Px(BOSS_PX),
+                margin: UiRect::right(Val::Px(BOSS_GUTTER_PX - BOSS_PX)),
+                border: UiRect::all(Val::Px(RULE_STAMP_PX)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BorderColor(branding::palette::BRONZE),
+            BackgroundColor(Color::NONE),
+            BorderRadius::ZERO,
+            RowBoss,
+        ));
+        // name - R2: PARCHMENT, always
+        r.spawn((
+            Text::new(name.to_string()),
+            TextFont { font_size: T_BODY, ..default() },
+            TextColor(branding::palette::PARCHMENT),
+            Node { flex_grow: 1.0, ..default() },
+        ));
+        // value - R2 again: same ink, smaller size, right edge
+        if let Some(v) = value {
+            r.spawn((
+                ValueCell,
+                Text::new(v.to_string()),
+                TextFont { font_size: T_DATA, ..default() },
+                TextColor(branding::palette::PARCHMENT),
+            ));
+        }
+        if let Some(k) = keycap_hint {
+            keycap(r, k, false);
+        }
+    })
+    .id()
+}
+
+/// The value half of a row, tagged so a caller can find it without a
+/// second component on the name node - the settings refresh query is
+/// unscoped, and a label on both would write the same string into both.
+#[derive(Component)]
+pub struct ValueCell;
+
+// ---- 5. the seal ---------------------------------------------------------
+
+/// The seal at the foot of a plate, plus the surface's exit hint. One
+/// placement across all six surfaces, so they read as one issued family.
+///
+/// The emblem is sized and tinted from `EmblemPlacement::MenuHeading`
+/// rather than hand-typed, and carries a LOCAL `ZIndex` - a
+/// `GlobalZIndex` on a child would lift it out of the surface root and
+/// break the single-`despawn_recursive` teardown.
+pub fn seal_footer(
+    p: &mut ChildBuilder,
+    brand: Option<&branding::BrandAssets>,
+    hint: Option<(&str, &str)>,
+) {
+    let place = branding::EmblemPlacement::MenuHeading;
+    debug_assert!(
+        place.size_px() >= EMBLEM_MIN_PX,
+        "emblem below the no-fringe floor"
+    );
+    p.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            margin: UiRect::top(Val::Px(U6)),
+            padding: UiRect::top(Val::Px(U3)),
+            border: UiRect::top(Val::Px(RULE_HAIR_PX)),
+            ..default()
+        },
+        BorderColor(bronze_a(RULE_SECTION_A)),
+    ))
+    .with_children(|f| {
+        if let Some(b) = brand {
+            f.spawn((
+                Node {
+                    width: Val::Px(place.size_px()),
+                    height: Val::Px(place.size_px()),
+                    ..default()
+                },
+                ImageNode {
+                    image: b.emblem.clone(),
+                    // white tint: alpha only, hue untouched
+                    color: Color::srgba(1.0, 1.0, 1.0, place.alpha()),
+                    ..default()
+                },
+                ZIndex(ZL_MARK),
+            ));
+        } else {
+            f.spawn(Node::default());
+        }
+        if let Some((key, what)) = hint {
+            f.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(U2),
+                ..default()
+            })
+            .with_children(|h| {
+                keycap(h, key, false);
+                h.spawn((
+                    Text::new(what.to_string()),
+                    TextFont {
+                        font_size: T_MICRO,
+                        ..default()
+                    },
+                    TextColor(branding::palette::PARCHMENT_DIM),
+                ));
+            });
+        }
+    });
+}
+
+// ---- 6. the painter ------------------------------------------------------
+
+/// Repaint one row from its state. THE one place a row's appearance is
+/// decided, so five separate `Changed<Interaction>` handlers cannot drift
+/// into five different hover treatments.
+pub fn paint_row(
+    kind: RowKind,
+    selected: bool,
+    interaction: Interaction,
+    bg: &mut BackgroundColor,
+    border: &mut BorderColor,
+    children: Option<&Children>,
+    bosses: &mut Query<&mut BackgroundColor, (With<RowBoss>, Without<PlateRow>)>,
+) {
+    let (fill, keel, boss) = row_colors(kind, row_state(selected, interaction));
+    *bg = BackgroundColor(fill);
+    *border = BorderColor(keel);
+    if let Some(kids) = children {
+        for c in kids.iter() {
+            if let Ok(mut b) = bosses.get_mut(*c) {
+                *b = BackgroundColor(boss);
+                break;
+            }
+        }
+    }
+}
+
 // ---- tests ---------------------------------------------------------------
 
 #[cfg(test)]

@@ -3243,7 +3243,18 @@ fn capture_menus(
             snap(&mut commands, "04-settings");
             *stage = 7;
         }
-        7 if *t > 5.8 => std::process::exit(0),
+        // The pause menu had NO capture coverage at all - it was the one
+        // surface nothing could prove, which is exactly why it was chosen
+        // to pilot the new design vocabulary.
+        7 if *t > 5.6 => {
+            next.set(GameState::Paused);
+            *stage = 8;
+        }
+        8 if *t > 6.6 => {
+            snap(&mut commands, "05-pause");
+            *stage = 9;
+        }
+        9 if *t > 7.4 => std::process::exit(0),
         _ => {}
     }
 }
@@ -3496,6 +3507,39 @@ enum MenuButton {
     Quit,
 }
 
+/// The pause menu's rows, in SCREEN order, with the bind that also
+/// performs them and whether they throw work away.
+///
+/// ONE table. The `MenuButton` declaration order above already disagrees
+/// with the display order, so a future data-driven loop over the enum
+/// would silently render them wrong. `menu_buttons` dispatches on the
+/// variant and never on an index, so this order is free to change.
+const PAUSE_ROWS: [(MenuButton, &str, Option<&str>, menu_ui::RowKind); 7] = [
+    (MenuButton::Resume, "RESUME", Some("ESC"), menu_ui::RowKind::Normal),
+    (MenuButton::Restart, "RESTART MATCH", None, menu_ui::RowKind::Destructive),
+    (MenuButton::BackToLoadout, "CHANGE MODE / LOADOUT", None, menu_ui::RowKind::Normal),
+    (MenuButton::Settings, "SETTINGS", None, menu_ui::RowKind::Normal),
+    (MenuButton::Controls, "CONTROLS", None, menu_ui::RowKind::Normal),
+    (MenuButton::Manual, "RULES & MANUAL", None, menu_ui::RowKind::Normal),
+    (MenuButton::Quit, "QUIT", None, menu_ui::RowKind::Destructive),
+];
+
+/// §4.x: drive `UiScale` from the window height so the whole interface
+/// keeps its authored proportions from 720p to 4K.
+///
+/// Writes ONLY on change. An unconditional write marks the resource
+/// `Changed` and forces a full layout pass over every node, every frame.
+fn sync_ui_scale(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut ui_scale: ResMut<UiScale>,
+) {
+    let Ok(w) = windows.get_single() else { return };
+    let want = menu_ui::menu_ui_scale(w.resolution.height());
+    if (ui_scale.0 - want).abs() > f32::EPSILON {
+        ui_scale.0 = want;
+    }
+}
+
 #[derive(Component, Clone, Copy)]
 enum SettingsButton {
     SwapMouse,
@@ -3695,6 +3739,14 @@ fn main() {
         .init_resource::<DistantShots>()
         .init_resource::<Toast>()
         .add_systems(Update, esc_toggle)
+        // §4.x: the interface keeps its authored proportions from 720p to
+        // 4K, and the key art re-picks its cover axis when the window
+        // changes aspect.
+        .add_systems(Update, sync_ui_scale)
+        .add_systems(
+            Update,
+            menu_ui::key_art_refit.run_if(on_event::<bevy::window::WindowResized>),
+        )
         .add_systems(OnEnter(GameState::Playing), grab_cursor)
         // The HUD's on/off switch. Both edges, one system - it reads the
         // state rather than assuming a direction, so the two
@@ -12140,71 +12192,29 @@ fn close_intro(
 fn open_menu(
     mut commands: Commands,
     mut cam: ResMut<CamCtl>,
+    brand: Option<Res<branding::BrandAssets>>,
+    // ONE window query. Two - even `&Window` plus `&mut Window` - are a
+    // B0001 conflict and panic the state transition on entry.
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
     cam.ads = false; // no stale scope glass / zoom over the menu
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(14.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.75)),
-            MenuRoot,
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("PAUSED"),
-                TextFont {
-                    font_size: 42.0,
-                    ..default()
-                },
-                TextColor(branding::palette::GOLD),
-                Node {
-                    margin: UiRect::bottom(Val::Px(18.0)),
-                    ..default()
-                },
-            ));
-            for (label, which) in [
-                ("Resume        (ESC)", MenuButton::Resume),
-                ("Restart Match", MenuButton::Restart),
-                ("Change Mode / Loadout", MenuButton::BackToLoadout),
-                ("Settings", MenuButton::Settings),
-                ("Controls", MenuButton::Controls),
-                ("Rules & Manual", MenuButton::Manual),
-                ("Quit", MenuButton::Quit),
-            ] {
-                p.spawn((
-                    Button,
-                    which,
-                    Node {
-                        width: Val::Px(280.0),
-                        height: Val::Px(52.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-                ))
-                .with_children(|b| {
-                    b.spawn((
-                        Text::new(label),
-                        TextFont {
-                            font_size: 22.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                    ));
-                });
+    let brand = brand.as_deref();
+    let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
+    commands.entity(root).insert(MenuRoot).with_children(|p| {
+        menu_ui::plate(p, menu_ui::PLATE_W_PAUSE, |b| {
+            menu_ui::title(b, "PAUSED");
+            menu_ui::rule_and_boss(b, true);
+            for (which, label, hint, kind) in PAUSE_ROWS {
+                menu_ui::menu_row(b, which, kind, label, None, hint);
             }
+            menu_ui::seal_footer(b, brand, Some(("ESC", "resume")));
         });
+    });
 }
 
 fn close_menu(mut commands: Commands, menu: Query<Entity, With<MenuRoot>>) {
@@ -12633,18 +12643,40 @@ fn close_manual(mut commands: Commands, q: Query<Entity, With<ManualRoot>>) {
 
 fn menu_buttons(
     mut q: Query<
-        (&Interaction, &MenuButton, &mut BackgroundColor),
+        (
+            &Interaction,
+            &MenuButton,
+            &menu_ui::PlateRow,
+            &Children,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
         (Changed<Interaction>, With<Button>),
+    >,
+    mut bosses: Query<
+        &mut BackgroundColor,
+        (With<menu_ui::RowBoss>, Without<menu_ui::PlateRow>),
     >,
     mut game: ResMut<Game>,
     mut next: ResMut<NextState<GameState>>,
     mut exit: EventWriter<AppExit>,
 ) {
-    for (interaction, which, mut bg) in &mut q {
-        match interaction {
-            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
-            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-            Interaction::Pressed => match which {
+    for (interaction, which, row, kids, mut bg, mut border) in &mut q {
+        // ONE painter for every interactive row in the menus, so five
+        // handlers cannot drift into five different hover treatments.
+        // Nothing in the pause menu is "selected" - it is a list of
+        // actions, not a set of choices.
+        menu_ui::paint_row(
+            row.kind,
+            false,
+            *interaction,
+            &mut bg,
+            &mut border,
+            Some(kids),
+            &mut bosses,
+        );
+        if *interaction == Interaction::Pressed {
+            match which {
                 MenuButton::Resume => next.set(GameState::Playing),
                 MenuButton::Restart => {
                     // same match again - mode, map, difficulty, size kept
@@ -12661,7 +12693,7 @@ fn menu_buttons(
                 MenuButton::Quit => {
                     exit.send(AppExit::Success);
                 }
-            },
+            }
         }
     }
 }
