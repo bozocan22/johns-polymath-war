@@ -2989,6 +2989,62 @@ struct TechReadout;
 #[derive(Component)]
 struct IntroUi;
 
+// ---- the pre-game flow ----------------------------------------------
+// The intro used to be ONE screen carrying the title, ten pick-rows and
+// three deploy buttons. At the game's own 720p default that is a wall
+// of controls with no order to it - a capture of it is genuinely hard
+// to read, and nothing tells a new player what to look at first.
+//
+// Split into three pages, each answering one question:
+//   1. TITLE      - what is this? (key art, wordmark, emblem)
+//   2. THE MATCH  - where and how hard? (mode, map, difficulty, size)
+//   3. THE SOLDIER- what am I carrying? (weapons, grenades, colours)
+//
+// Deliberately a RESOURCE rather than new `GameState` variants: every
+// row already exists and is already wired: paging only decides what is
+// VISIBLE. New states would mean re-spawning the whole tree per page
+// and re-solving teardown, which is how the lingering-entity bug that
+// `close_intro` documents got in the first time.
+
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IntroPage(pub u8);
+
+impl IntroPage {
+    pub const TITLE: u8 = 0;
+    pub const MATCH: u8 = 1;
+    pub const SOLDIER: u8 = 2;
+    pub const LAST: u8 = 2;
+
+    /// Heading for each page - the question the page answers.
+    pub fn heading(self) -> &'static str {
+        match self.0 {
+            Self::MATCH => "CHOOSE YOUR BATTLE",
+            Self::SOLDIER => "EQUIP YOUR SOLDIER",
+            _ => "",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self.0 {
+            Self::TITLE => "ENTER to begin    -    ESC menu > RULES & MANUAL",
+            Self::MATCH => "the battlefield, the mode, and how hard it pushes back",
+            Self::SOLDIER => "the shield always rides in its own slot (E raises it)",
+            _ => "",
+        }
+    }
+}
+
+/// Tags a row/element with the page it belongs to.
+#[derive(Component, Clone, Copy)]
+struct OnIntroPage(u8);
+
+/// Page navigation buttons.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum IntroNav {
+    Back,
+    Next,
+}
+
 fn tech_readout(sel: Res<Selected>, mut q: Query<&mut Text, With<TechReadout>>) {
     let Ok(mut t) = q.get_single_mut() else {
         return;
@@ -3164,6 +3220,7 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
+        .init_resource::<IntroPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
         // the warm gold-and-sepia art on every menu screen.
         .insert_resource(ClearColor(branding::palette::DUST))
@@ -3242,6 +3299,10 @@ fn main() {
         .add_systems(Update, esc_toggle)
         .add_systems(OnEnter(GameState::Playing), grab_cursor)
         .add_systems(OnEnter(GameState::Intro), open_intro)
+        .add_systems(
+            Update,
+            (intro_paging, intro_nav_buttons).run_if(in_state(GameState::Intro)),
+        )
         .add_systems(OnExit(GameState::Intro), close_intro)
         .add_systems(
             Update,
@@ -10275,12 +10336,28 @@ fn pick_row<C: Component + Copy>(
     items: &[(&str, C)],
     w: f32,
 ) {
-    p.spawn((Node {
-        flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(8.0),
-        align_items: AlignItems::Center,
-        ..default()
-    },))
+    pick_row_on(p, label, items, w, IntroPage::SOLDIER)
+}
+
+/// `pick_row`, tagged with the page it belongs to. The row is spawned
+/// exactly as before - the tag only decides when it is VISIBLE, so
+/// paging cannot change what any row does or how it is wired.
+fn pick_row_on<C: Component + Copy>(
+    p: &mut ChildBuilder,
+    label: &str,
+    items: &[(&str, C)],
+    w: f32,
+    page: u8,
+) {
+    p.spawn((
+        Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(8.0),
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        OnIntroPage(page),
+    ))
         .with_children(|row| {
             row.spawn((
                 Text::new(label.to_string()),
@@ -10368,9 +10445,14 @@ fn open_intro(
     mut cam: ResMut<CamCtl>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     brand: Option<Res<branding::BrandAssets>>,
+    mut page: ResMut<IntroPage>,
 ) {
     release_cursor(&mut cam, &mut windows);
     cam.ads = false;
+    // Always open on the title. Touching the resource also marks it
+    // changed, which is what makes  run its first pass -
+    // without it every page would be visible at once on the first frame.
+    page.0 = IntroPage::TITLE;
     // The key art behind the menu. `Option<Res<..>>` so the menu still
     // builds if branding is ever unplugged - and a missing PNG just
     // draws nothing over the existing background, exactly as the splash
@@ -10487,15 +10569,20 @@ fn open_intro(
             IntroRoot,
         ))
         .with_children(|p| {
+            // heading + subtitle are PAGE-DRIVEN: the title page names
+            // the game, the other two name the question they answer.
+            // `intro_paging` rewrites both on every page change.
             p.spawn((
                 Text::new("JOHN KINGDOM - ARENA"),
                 TextFont { font_size: 40.0, ..default() },
                 TextColor(branding::palette::GOLD),
+                IntroHeading,
             ));
             p.spawn((
-                Text::new("build your LOADOUT - the shield always rides in its own slot (E raises it)\nfull controls: ESC menu > RULES & MANUAL"),
+                Text::new(IntroPage(IntroPage::TITLE).subtitle()),
                 TextFont { font_size: 15.0, ..default() },
-                TextColor(Color::srgb(0.7, 0.78, 0.95)),
+                TextColor(branding::palette::PARCHMENT_DIM),
+                IntroSubtitle,
             ));
             let prim: Vec<(&str, LoadoutButton)> = PRIMARIES
                 .iter()
@@ -10545,19 +10632,20 @@ fn open_intro(
                     .filter(|m| **m != MapKind::Battlefield)
                     .map(|m| (m.name(), MapButton(*m)))
                     .collect();
-            pick_row(p, "BATTLEFIELD", &maps, 160.0);
+            pick_row_on(p, "BATTLEFIELD", &maps, 160.0, IntroPage::MATCH);
             let diffs: Vec<(&str, DiffButton)> = Difficulty::ALL
                 .iter()
                 .map(|d| (d.name(), DiffButton(*d)))
                 .collect();
-            pick_row(p, "DIFFICULTY", &diffs, 100.0);
+            pick_row_on(p, "DIFFICULTY", &diffs, 100.0, IntroPage::MATCH);
             let sizes: Vec<(&str, SizeButton)> =
                 vec![("5 v 5", SizeButton(5)), ("8 v 8", SizeButton(8))];
-            pick_row(p, "BATTLE SIZE", &sizes, 100.0);
+            pick_row_on(p, "BATTLE SIZE", &sizes, 100.0, IntroPage::MATCH);
             p.spawn((
                 Text::new("\nPICK A MODE TO DEPLOY"),
                 TextFont { font_size: 22.0, ..default() },
                 TextColor(branding::palette::GOLD),
+                OnIntroPage(IntroPage::MATCH),
             ));
             for (label, which) in [
                 ("TEAM DEATHMATCH - first to 30", ModeButton::Tdm),
@@ -10567,6 +10655,7 @@ fn open_intro(
                 p.spawn((
                     Button,
                     which,
+                    OnIntroPage(IntroPage::MATCH),
                     // 620 wide / 18pt: the longest label ("ZOMBIE
                     // EXTRACTION - survive, then hold the ring") is 46
                     // chars, which WRAPPED inside the old 420x48 box and
@@ -10589,7 +10678,144 @@ fn open_intro(
                     ));
                 });
             }
+            // page navigation, present on every page; the system below
+            // hides BACK on the first page and relabels NEXT on the last
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(14.0),
+                    margin: UiRect::top(Val::Px(16.0)),
+                    ..default()
+                },
+                IntroNavRow,
+            ))
+            .with_children(|row| {
+                for (label, which) in
+                    [("< BACK", IntroNav::Back), ("NEXT >", IntroNav::Next)]
+                {
+                    row.spawn((
+                        Button,
+                        which,
+                        Node {
+                            width: Val::Px(150.0),
+                            height: Val::Px(44.0),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn((
+                            Text::new(label),
+                            TextFont { font_size: 17.0, ..default() },
+                            TextColor(branding::palette::GOLD),
+                            NavLabel(which),
+                        ));
+                    });
+                }
+            });
         });
+}
+
+/// Container for the page nav, so it can sit below whichever page is up.
+#[derive(Component)]
+struct IntroNavRow;
+
+/// The big heading — the game's name on the title page, the page's own
+/// question on the others.
+#[derive(Component)]
+struct IntroHeading;
+
+/// The line under the heading, rewritten per page.
+#[derive(Component)]
+struct IntroSubtitle;
+
+/// The nav button's own label, so page changes can relabel it.
+#[derive(Component)]
+struct NavLabel(IntroNav);
+
+/// Shows only the current page's rows, and keeps the nav honest.
+///
+/// Everything on the intro screen is spawned ONCE, tagged with its page.
+/// This system decides visibility - so no page change ever respawns the
+/// tree, and the teardown path `close_intro` owns stays exactly as it
+/// was. That is deliberate: respawning per page is how the lingering-
+/// entity bug documented on `close_intro` would come back.
+fn intro_paging(
+    page: Res<IntroPage>,
+    mut rows: Query<(&OnIntroPage, &mut Node), Without<NavLabel>>,
+    mut nav_label: Query<(&NavLabel, &mut Text), Without<IntroSubtitle>>,
+    mut nav_vis: Query<(&IntroNav, &mut Node), (Without<OnIntroPage>, Without<NavLabel>)>,
+    mut heading: Query<&mut Text, (With<IntroHeading>, Without<NavLabel>, Without<IntroSubtitle>)>,
+    mut subtitle: Query<&mut Text, (With<IntroSubtitle>, Without<NavLabel>, Without<IntroHeading>)>,
+) {
+    if !page.is_changed() {
+        return;
+    }
+    // the title page names the game; the others name their question
+    for mut t in &mut heading {
+        **t = if page.0 == IntroPage::TITLE {
+            "JOHN KINGDOM - ARENA".to_string()
+        } else {
+            page.heading().to_string()
+        };
+    }
+    for mut t in &mut subtitle {
+        **t = page.subtitle().to_string();
+    }
+    // `Display::None` rather than `Visibility::Hidden`: a hidden node
+    // still occupies layout space, which would leave the current page
+    // floating in the middle of ten invisible rows.
+    for (owner, mut node) in &mut rows {
+        node.display = if owner.0 == page.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (which, mut node) in &mut nav_vis {
+        // nothing to go back to on the title page
+        node.display = if *which == IntroNav::Back && page.0 == IntroPage::TITLE {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
+    for (label, mut text) in &mut nav_label {
+        if label.0 == IntroNav::Next {
+            // the last page's forward action is not "next", it is the
+            // thing the whole flow exists to reach
+            **text = if page.0 == IntroPage::LAST {
+                "DEPLOY >".to_string()
+            } else {
+                "NEXT >".to_string()
+            };
+        }
+    }
+}
+
+/// Drives the nav buttons and paints their hover state.
+fn intro_nav_buttons(
+    mut page: ResMut<IntroPage>,
+    mut q: Query<(&Interaction, &IntroNav, &mut BackgroundColor), Changed<Interaction>>,
+) {
+    for (interaction, which, mut bg) in &mut q {
+        match interaction {
+            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
+            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
+            Interaction::Pressed => {
+                let p = page.0;
+                page.0 = match which {
+                    IntroNav::Back => p.saturating_sub(1),
+                    // clamped, not wrapped: DEPLOY on the last page is
+                    // handled by the mode buttons, and wrapping back to
+                    // the title from there would read as a bug
+                    IntroNav::Next => (p + 1).min(IntroPage::LAST),
+                };
+            }
+        }
+    }
 }
 
 /// Shared by a real button click AND the capture harness's quick-deploy -
