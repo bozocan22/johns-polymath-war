@@ -2601,6 +2601,37 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(2.8) },
 ];
 
+/// The same draw, seen from inside the archer's head.
+///
+/// The third-person script above cannot check the first-person bow: the
+/// capture starts in third person (`CamCtl::first_person` defaults false)
+/// and never presses V, so every bow frame ever captured has been of the
+/// world model. The viewmodel bow went years without a nocked arrow partly
+/// because nothing ever looked at it.
+///
+/// V first, then equip - toggling person AFTER the draw starts would
+/// re-pose mid-pull and confuse what the frames mean.
+const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.9) },
+    CapBeat { snap: Some("01-fp-bow-idle"), ..beat(1.3) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.4) },
+    // ~0.2s of draw: nocked, string moving, nowhere near anchor
+    CapBeat { snap: Some("02-fp-bow-quarter-draw"), ..beat(1.6) },
+    // past BOW_DRAW_FULL_S (0.7s): at anchor, full power
+    CapBeat { snap: Some("03-fp-bow-full-draw"), ..beat(2.2) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left)],
+        snap: Some("04-fp-bow-release"),
+        ..beat(2.3)
+    },
+    // the arrow is gone and the nock is empty until the auto-nock lands
+    CapBeat { snap: Some("05-fp-bow-after-shot"), ..beat(2.7) },
+    CapBeat { end: true, ..beat(3.1) },
+];
+
 // Task 5.7 (MISSION doc): the mech at its new scale/palette, held
 // stationary at a known-clear spot (Arena center, set in
 // capture_quick_deploy) with the camera aimed level and slightly down -
@@ -2691,6 +2722,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
         "bow_draw" => BOW_DRAW_BEATS,
+        "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
@@ -2702,10 +2734,11 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 8] = [
+const CAPTURE_SCRIPTS: [&str; 9] = [
     "baseline",
     "idle_life",
     "bow_draw",
+    "bow_draw_fp",
     "mech_scale",
     "minigun_check",
     "menus",
@@ -2762,7 +2795,9 @@ fn capture_quick_deploy(
         // (spear_throw / bow_pierce arms lived here with no beat table
         // behind them, so naming either just hung the process. Validated
         // against CAPTURE_SCRIPTS at startup now.)
-        Some("bow_draw") => sel.loadout[2] = GunKind::Bow,
+        // both bow scripts press Digit3, so slot 3 has to actually hold a
+        // bow or they capture whatever the default special happens to be
+        Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
@@ -8595,6 +8630,13 @@ fn fp_viewmodel(
             Visibility::Hidden
         };
     }
+    // How drawn the bow is, from the same function the body rig uses so
+    // the two views cannot disagree.
+    let bow_pull = if p.gun == GunKind::Bow {
+        bow_draw_visual(p.bow_draw_t, p.fire_cd, spec.fire_period, true)
+    } else {
+        0.0
+    };
     let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
     // §2.2 suppression during ADS: ×(1 − 0.85-ads_t) - a trace of life
     // stays at full zoom, but a scoped gun does not swim
@@ -8781,7 +8823,15 @@ fn fp_viewmodel(
         } else {
             Visibility::Inherited
         };
+        // §2/§3 pose for the bow, the one main.rs marked "pending".
+        // Drawing brings the bow up and in toward the aiming eye and
+        // settles it closer to the face; an undrawn bow hangs low and
+        // left, out of the sightline. This is the whole reason the ADS
+        // ramp was ever pointed at projectile weapons - it was standing
+        // in for a pose that did not exist.
+        let bow_t = Vec3::new(-0.075, 0.030, 0.050) * bow_pull;
         tf.translation = ads_shift
+            + bow_t
             + Vec3::new(-0.06, -0.02, 0.06) * ie
             + rl_t
             + mel_t
