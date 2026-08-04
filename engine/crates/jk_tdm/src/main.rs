@@ -231,8 +231,30 @@ fn settings_path() -> std::path::PathBuf {
 fn settings_to_text(s: &GameSettings) -> String {
     format!(
         "# jk_tdm player settings - rewritten on every change\n\
-         swap_mouse = {}\nminimap = {}\nsens_idx = {}\nfov_idx = {}\ninvert_y = {}\n",
-        s.swap_mouse as u8, s.minimap as u8, s.sens_idx, s.fov_idx, s.invert_y as u8
+         swap_mouse = {}\nminimap = {}\nsens_idx = {}\nfov_idx = {}\ninvert_y = {}\n\
+         # §4.6 crosshair - gap may be NEGATIVE (the arms cross the centre)\n\
+         cross_size = {}\ncross_gap = {}\ncross_thickness = {}\n\
+         cross_dot = {}\ncross_outline = {}\ncross_outline_px = {}\n\
+         cross_color_idx = {}\ncross_r = {}\ncross_g = {}\ncross_b = {}\n\
+         cross_alpha = {}\ncross_t_shape = {}\ncross_dynamic = {}\n",
+        s.swap_mouse as u8,
+        s.minimap as u8,
+        s.sens_idx,
+        s.fov_idx,
+        s.invert_y as u8,
+        s.cross_size,
+        s.cross_gap,
+        s.cross_thickness,
+        s.cross_dot as u8,
+        s.cross_outline as u8,
+        s.cross_outline_px,
+        s.cross_color_idx,
+        s.cross_rgb.0,
+        s.cross_rgb.1,
+        s.cross_rgb.2,
+        s.cross_alpha,
+        s.cross_t_shape as u8,
+        s.cross_dynamic as u8,
     )
 }
 
@@ -258,6 +280,24 @@ fn parse_settings(text: &str) -> GameSettings {
             "sens_idx" => s.sens_idx = (v.max(0) as usize).min(SENS_CHOICES.len() - 1),
             "fov_idx" => s.fov_idx = (v.max(0) as usize).min(FOV_CHOICES.len() - 1),
             "invert_y" => s.invert_y = v != 0,
+            // §4.6: same rule as the indices above - every crosshair
+            // number is CLAMPED into a drawable range on the way in, so
+            // the renderer never has to defend itself against the file.
+            "cross_size" => s.cross_size = clamp_setting_i32(v, CROSS_SIZE_RANGE),
+            "cross_gap" => s.cross_gap = clamp_setting_i32(v, CROSS_GAP_RANGE),
+            "cross_thickness" => s.cross_thickness = clamp_setting_i32(v, CROSS_THICK_RANGE),
+            "cross_dot" => s.cross_dot = v != 0,
+            "cross_outline" => s.cross_outline = v != 0,
+            "cross_outline_px" => s.cross_outline_px = clamp_setting_i32(v, CROSS_OUTLINE_RANGE),
+            "cross_color_idx" => {
+                s.cross_color_idx = (v.max(0) as usize).min(CROSS_COLOR_CHOICES.len() - 1)
+            }
+            "cross_r" => s.cross_rgb.0 = v.clamp(0, 255) as u8,
+            "cross_g" => s.cross_rgb.1 = v.clamp(0, 255) as u8,
+            "cross_b" => s.cross_rgb.2 = v.clamp(0, 255) as u8,
+            "cross_alpha" => s.cross_alpha = v.clamp(0, 255) as u8,
+            "cross_t_shape" => s.cross_t_shape = v != 0,
+            "cross_dynamic" => s.cross_dynamic = v != 0,
             _ => {}
         }
     }
@@ -826,6 +866,37 @@ struct GameSettings {
     fov_idx: usize,
     /// Invert the vertical look axis.
     invert_y: bool,
+
+    // ---- §4.6 (Brief VIII): the crosshair family -------------------
+    // Every one of these is clamped on load (`parse_settings`) to the
+    // range constants below, so a hand-edited or stale file can only
+    // ever produce a DRAWABLE crosshair - never a zero-size rect, never
+    // an inverted one, never an out-of-range colour channel.
+    /// Arm length in pixels.
+    cross_size: i32,
+    /// Distance from the exact centre to each arm's INNER edge.
+    /// **Negative is legal and specified** - the arms then cross the
+    /// centre, which is a real and common preference.
+    cross_gap: i32,
+    /// Arm width in pixels (the cross-axis of each arm).
+    cross_thickness: i32,
+    /// Centre dot. Off by default.
+    cross_dot: bool,
+    /// Dark backing outline. On by default, `cross_outline_px` wide.
+    cross_outline: bool,
+    cross_outline_px: i32,
+    /// Index into `CROSS_COLOR_CHOICES`; the last entry is CUSTOM and
+    /// reads `cross_rgb` instead of a fixed triple.
+    cross_color_idx: usize,
+    /// The custom colour, 0-255 per channel. Spec default green.
+    cross_rgb: (u8, u8, u8),
+    /// Opacity 0-255. Spec default 200.
+    cross_alpha: u8,
+    /// T-shape: drop the TOP arm so nothing occludes the target's head.
+    cross_t_shape: bool,
+    /// Dynamic (arms bloom with the live aim cone) vs the spec default,
+    /// **classic static**.
+    cross_dynamic: bool,
 }
 
 /// Sensitivity multipliers applied to `MOUSE_SENS`.
@@ -889,8 +960,242 @@ impl Default for GameSettings {
             sens_idx: SENS_DEFAULT_IDX,
             fov_idx: FOV_DEFAULT_IDX,
             invert_y: false,
+            // §4.6 defaults, verbatim from the brief: size 5, gap 0,
+            // thickness 1, dot off, outline on at 1, green 50/250/50,
+            // alpha 200, no T-shape, classic static.
+            cross_size: CROSS_SIZE_DEFAULT,
+            cross_gap: CROSS_GAP_DEFAULT,
+            cross_thickness: CROSS_THICK_DEFAULT,
+            cross_dot: false,
+            cross_outline: true,
+            cross_outline_px: CROSS_OUTLINE_DEFAULT,
+            cross_color_idx: CROSS_COLOR_DEFAULT_IDX,
+            cross_rgb: CROSS_RGB_DEFAULT,
+            cross_alpha: CROSS_ALPHA_DEFAULT,
+            cross_t_shape: false,
+            cross_dynamic: false,
         }
     }
+}
+
+// ---- §4.6 (Brief VIII): the crosshair, as DRAWN GEOMETRY ------------------
+//
+// It used to be a single hardcoded `+` text glyph: one size, one colour,
+// no gap, no thickness, no dot, no outline - and, because `GameSettings`
+// had no crosshair fields at all, §4.9's "crosshair settings round-trip
+// through the settings file" was not a failing test, it was an
+// unwriteable one. This section is the whole family: the clamp ranges,
+// the pure geometry, and the pure colour decision. Everything here is a
+// free function so it is testable without spinning up Bevy - the same
+// extraction this codebase already made for `view_recoil_offset`,
+// `bow_sway_deg` and `splash_alpha`.
+
+/// Arm length, px. Lower bound is 1: a zero-length arm is not a
+/// preference, it is an invisible crosshair.
+const CROSS_SIZE_RANGE: (i32, i32) = (1, 12);
+/// Centre-to-inner-edge gap, px. **The low bound is negative on
+/// purpose** (§4.6) - at gap < 0 the arms overlap through the centre.
+const CROSS_GAP_RANGE: (i32, i32) = (-5, 12);
+/// Arm width, px. Also the diameter of the centre dot.
+const CROSS_THICK_RANGE: (i32, i32) = (1, 5);
+/// Outline width, px. 0 is legal and means "outline on, but hairline-off".
+const CROSS_OUTLINE_RANGE: (i32, i32) = (0, 3);
+const CROSS_SIZE_DEFAULT: i32 = 5;
+const CROSS_GAP_DEFAULT: i32 = 0;
+const CROSS_THICK_DEFAULT: i32 = 1;
+const CROSS_OUTLINE_DEFAULT: i32 = 1;
+const CROSS_ALPHA_DEFAULT: u8 = 200;
+/// Spec default: green 50,250,50. This is a SIGNAL colour, deliberately
+/// outside `branding::palette` - the art palette is warm dust/gold/bronze
+/// and a crosshair drawn in it would vanish against this game's own
+/// ground. Readability beats theme at the centre of the screen.
+const CROSS_RGB_DEFAULT: (u8, u8, u8) = (50, 250, 50);
+
+/// Colour presets. The LAST entry is the custom slot - it ignores the
+/// triple stored here and reads `GameSettings::cross_rgb`.
+const CROSS_COLOR_CHOICES: [(&str, (u8, u8, u8)); 8] = [
+    ("GREEN", CROSS_RGB_DEFAULT),
+    ("WHITE", (255, 255, 255)),
+    ("CYAN", (40, 235, 245)),
+    ("YELLOW", (250, 235, 60)),
+    ("MAGENTA", (245, 70, 220)),
+    ("RED", (240, 60, 55)),
+    ("BLUE", (70, 130, 255)),
+    ("CUSTOM", CROSS_RGB_DEFAULT),
+];
+const CROSS_COLOR_DEFAULT_IDX: usize = 0;
+const CROSS_COLOR_CUSTOM_IDX: usize = CROSS_COLOR_CHOICES.len() - 1;
+/// Opacity presets the settings row cycles through. The stored value is
+/// a raw u8, so a hand-edited file may sit anywhere in 0..=255.
+const CROSS_ALPHA_CHOICES: [u8; 6] = [80, 120, 160, 200, 230, 255];
+/// Pixels of extra gap per radian of live aim cone, for the DYNAMIC
+/// crosshair. Shared with `stability_bracket` so the two readouts of the
+/// same spread can never drift apart (OPERATION.md rule 6).
+const CROSS_SPREAD_PX_PER_RAD: f32 = 2400.0;
+/// How far the arms kick outward during the kill-confirm pop, px.
+const CROSS_KILL_POP_PX: f32 = 3.0;
+
+/// One axis-aligned crosshair rectangle, in PIXELS relative to the exact
+/// screen centre. `+left` is right, `+top` is down - Bevy UI's own sign
+/// convention, so these drop straight into a `Node`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CrossRect {
+    left: f32,
+    top: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Arm indices. 4 is the centre dot; the renderer uses the same numbering.
+const CROSS_ARM_TOP: usize = 0;
+const CROSS_ARM_RIGHT: usize = 1;
+const CROSS_ARM_BOTTOM: usize = 2;
+const CROSS_ARM_LEFT: usize = 3;
+const CROSS_PIECES: usize = 5;
+
+/// The four arms, from (size, gap, thickness).
+///
+/// Each arm runs OUTWARD from `gap` to `gap + size`, so `size` is the
+/// arm's own length and `gap` only moves it - the two never fight. That
+/// is what makes a negative gap safe: it slides the inner edge past the
+/// centre without ever shortening the arm, so no rect can invert or
+/// collapse (§4.6 explicitly allows negative gap).
+fn crosshair_arm_rects(size: f32, gap: f32, thickness: f32) -> [CrossRect; 4] {
+    let len = size.max(1.0);
+    let thick = thickness.max(1.0);
+    let half = thick * 0.5;
+    let mut out = [CrossRect { left: 0.0, top: 0.0, w: 0.0, h: 0.0 }; 4];
+    out[CROSS_ARM_TOP] = CrossRect { left: -half, top: -(gap + len), w: thick, h: len };
+    out[CROSS_ARM_RIGHT] = CrossRect { left: gap, top: -half, w: len, h: thick };
+    out[CROSS_ARM_BOTTOM] = CrossRect { left: -half, top: gap, w: thick, h: len };
+    out[CROSS_ARM_LEFT] = CrossRect { left: -(gap + len), top: -half, w: len, h: thick };
+    out
+}
+
+/// The centre dot - a square of the arm thickness, centred exactly.
+fn crosshair_dot_rect(thickness: f32) -> CrossRect {
+    let d = thickness.max(1.0);
+    CrossRect { left: -d * 0.5, top: -d * 0.5, w: d, h: d }
+}
+
+/// The dark backing rect for a piece: the same rect grown `px` on every
+/// side. Grown, never shrunk, so an outline can never eat its own fill.
+fn crosshair_outline_rect(r: CrossRect, px: f32) -> CrossRect {
+    let px = px.max(0.0);
+    CrossRect { left: r.left - px, top: r.top - px, w: r.w + 2.0 * px, h: r.h + 2.0 * px }
+}
+
+/// §4.6 T-shape: the TOP arm is dropped so the crosshair never sits on
+/// the head of what you are aiming at. Every other piece is unaffected.
+fn crosshair_arm_shown(arm: usize, t_shape: bool) -> bool {
+    !(t_shape && arm == CROSS_ARM_TOP)
+}
+
+/// The gap actually drawn this frame. **Classic static** (the default)
+/// ignores the aim cone entirely - the gap you set is the gap you get.
+/// Dynamic adds the live spread, so the arms bloom while moving/firing.
+fn crosshair_gap_px(base_gap: i32, spread: f32, dynamic: bool) -> f32 {
+    if dynamic {
+        base_gap as f32 + spread.max(0.0) * CROSS_SPREAD_PX_PER_RAD
+    } else {
+        base_gap as f32
+    }
+}
+
+/// The player's chosen colour: a preset, or the custom triple.
+fn crosshair_rgb(s: &GameSettings) -> (u8, u8, u8) {
+    let idx = s.cross_color_idx.min(CROSS_COLOR_CUSTOM_IDX);
+    if idx == CROSS_COLOR_CUSTOM_IDX {
+        s.cross_rgb
+    } else {
+        CROSS_COLOR_CHOICES[idx].1
+    }
+}
+
+/// What the crosshair is SAYING this frame, in strict priority order.
+/// Extracted from `hud_system`'s old inline match so the drawn geometry
+/// and any future readout cannot disagree about the same event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossFeedback {
+    /// §5.2 (Brief VI): a scoped-class weapon, unscoped - draw NOTHING.
+    Hidden,
+    Kill,
+    Headshot,
+    Hit,
+    /// §5.3: the muzzle→aim-point segment is blocked close-by.
+    Blocked,
+    Idle,
+}
+
+/// The priority ladder, unchanged from the glyph version: hiding wins
+/// over everything (a no-scope must not leak an aim point through a
+/// hitmarker), then kill, then headshot, then hit, then blocked.
+fn crosshair_feedback(
+    noscope_hidden: bool,
+    fresh_kill: bool,
+    fresh_hit_head: Option<bool>,
+    blocked: bool,
+) -> CrossFeedback {
+    if noscope_hidden {
+        CrossFeedback::Hidden
+    } else if fresh_kill {
+        CrossFeedback::Kill
+    } else if let Some(head) = fresh_hit_head {
+        if head {
+            CrossFeedback::Headshot
+        } else {
+            CrossFeedback::Hit
+        }
+    } else if blocked {
+        CrossFeedback::Blocked
+    } else {
+        CrossFeedback::Idle
+    }
+}
+
+/// The colour to paint the geometry. Only `Idle` uses the player's
+/// settings - every feedback state keeps its own full-strength signal
+/// colour, so turning the alpha down cannot mute a hitmarker.
+fn crosshair_color(fb: CrossFeedback, rgb: (u8, u8, u8), alpha: u8) -> Color {
+    match fb {
+        CrossFeedback::Hidden => Color::srgba(0.0, 0.0, 0.0, 0.0),
+        CrossFeedback::Kill => Color::srgb(1.0, 0.55, 0.2),
+        CrossFeedback::Headshot => Color::srgb(1.0, 0.85, 0.2),
+        CrossFeedback::Hit => Color::srgb(1.0, 0.3, 0.25),
+        CrossFeedback::Blocked => Color::srgba(1.0, 0.55, 0.1, 0.9),
+        CrossFeedback::Idle => Color::srgba(
+            rgb.0 as f32 / 255.0,
+            rgb.1 as f32 / 255.0,
+            rgb.2 as f32 / 255.0,
+            alpha as f32 / 255.0,
+        ),
+    }
+}
+
+/// Click-to-cycle for a bounded integer settings row: step forward one,
+/// wrap to the low end. One helper, so no row can wrap differently.
+fn cycle_i32(v: i32, range: (i32, i32)) -> i32 {
+    if v >= range.1 {
+        range.0
+    } else {
+        (v + 1).max(range.0)
+    }
+}
+
+/// Click-to-cycle alpha: the next preset strictly above the current
+/// value, wrapping to the lowest. Defined against the VALUE, not an
+/// index, so it still behaves from a hand-edited file's 137.
+fn cycle_alpha(a: u8) -> u8 {
+    CROSS_ALPHA_CHOICES
+        .iter()
+        .copied()
+        .find(|&c| c > a)
+        .unwrap_or(CROSS_ALPHA_CHOICES[0])
+}
+
+/// Clamp a value read off disk into a settings range.
+fn clamp_setting_i32(v: i64, range: (i32, i32)) -> i32 {
+    v.clamp(range.0 as i64, range.1 as i64) as i32
 }
 
 const HAT_CHOICES: [(&str, (f32, f32, f32)); 4] = [
@@ -1937,8 +2242,20 @@ struct HitFeedText;
 #[derive(Component)]
 struct BannerText;
 
+/// §4.6: the zero-size node pinned to the exact screen centre that every
+/// crosshair piece hangs off. It carries the kill-confirm rotation, so a
+/// single `Transform` write spins the whole cross into an X.
 #[derive(Component)]
-struct CrosshairText;
+struct CrosshairRoot;
+
+/// §4.6: one drawn piece of the crosshair. `idx` 0..3 are the arms
+/// (top/right/bottom/left) and 4 is the centre dot; `outline` marks the
+/// dark backing rect that sits behind the fill.
+#[derive(Component, Clone, Copy)]
+struct CrosshairPiece {
+    idx: u8,
+    outline: bool,
+}
 
 /// §4.2: numeric range beside the trajectory impact marker.
 #[derive(Component)]
@@ -2765,6 +3082,18 @@ enum SettingsButton {
     Sens,
     Fov,
     InvertY,
+    // §4.6 (Brief VIII): the crosshair family. A persisted setting with
+    // no control is a dead control - these are the rows that make the
+    // eleven new `GameSettings` fields reachable without a text editor.
+    CrossSize,
+    CrossGap,
+    CrossThickness,
+    CrossDot,
+    CrossOutline,
+    CrossColor,
+    CrossAlpha,
+    CrossTShape,
+    CrossDynamic,
     Back,
 }
 
@@ -2779,7 +3108,38 @@ enum SettingsButtonKind {
     Sens,
     Fov,
     InvertY,
+    CrossSize,
+    CrossGap,
+    CrossThickness,
+    CrossDot,
+    CrossOutline,
+    CrossColor,
+    CrossAlpha,
+    CrossTShape,
+    CrossDynamic,
 }
+
+/// Every value row on the settings page, in screen order, paired with
+/// the label kind that renders it. ONE table, so the page, the click
+/// handler and the label text cannot disagree about what exists - the
+/// list used to be hand-written inline in `open_settings` only.
+/// (`Back` is not here: it has no value to show.)
+const SETTINGS_ROWS: [(SettingsButton, SettingsButtonKind); 14] = [
+    (SettingsButton::Sens, SettingsButtonKind::Sens),
+    (SettingsButton::Fov, SettingsButtonKind::Fov),
+    (SettingsButton::InvertY, SettingsButtonKind::InvertY),
+    (SettingsButton::SwapMouse, SettingsButtonKind::SwapMouse),
+    (SettingsButton::Minimap, SettingsButtonKind::Minimap),
+    (SettingsButton::CrossSize, SettingsButtonKind::CrossSize),
+    (SettingsButton::CrossGap, SettingsButtonKind::CrossGap),
+    (SettingsButton::CrossThickness, SettingsButtonKind::CrossThickness),
+    (SettingsButton::CrossDot, SettingsButtonKind::CrossDot),
+    (SettingsButton::CrossOutline, SettingsButtonKind::CrossOutline),
+    (SettingsButton::CrossColor, SettingsButtonKind::CrossColor),
+    (SettingsButton::CrossAlpha, SettingsButtonKind::CrossAlpha),
+    (SettingsButton::CrossTShape, SettingsButtonKind::CrossTShape),
+    (SettingsButton::CrossDynamic, SettingsButtonKind::CrossDynamic),
+];
 
 fn main() {
     App::new()
@@ -2928,7 +3288,7 @@ fn main() {
                 update_casings,
                 spin_minigun_barrels,
                 grenade_arc,
-                crosshair_kill_pop,
+                crosshair_render,
                 ammo_bar_sync,
                 hud_colors,
                 sync_rockets,
@@ -5026,21 +5386,37 @@ fn setup(
     }
 
     // ---- HUD ------------------------------------------------------------
-    commands.spawn((
-        Text::new("+"),
-        TextFont {
-            font_size: 26.0,
-            ..default()
-        },
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(49.6),
-            top: Val::Percent(48.6),
-            ..default()
-        },
-        CrosshairText,
-    ));
+    // §4.6 (Brief VIII): the crosshair is DRAWN, not typed. A zero-size
+    // root at the exact screen centre (the old `+` glyph had to be nudged
+    // to 49.6%/48.6% to fake centring, and still drifted with font
+    // metrics), with ten absolutely-positioned children: five outlines
+    // first so they sit BEHIND their five fills in the UI stack.
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: Val::Px(0.0),
+                height: Val::Px(0.0),
+                ..default()
+            },
+            CrosshairRoot,
+        ))
+        .with_children(|c| {
+            for outline in [true, false] {
+                for idx in 0..CROSS_PIECES as u8 {
+                    c.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
+                        CrosshairPiece { idx, outline },
+                    ));
+                }
+            }
+        });
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -9072,7 +9448,6 @@ fn fmt_clock(t: f32) -> String {
 fn hud_system(
     game: Res<Game>,
     settings: Res<GameSettings>,
-    cam: Res<CamCtl>,
     arc_state: Res<ArcState>,
     mut texts: ParamSet<(
         Query<&mut Text, With<HudText>>,
@@ -9084,10 +9459,6 @@ fn hud_system(
         Query<&mut Text, With<PanelAmmoText>>,
         Query<&mut Text, With<RangeText>>,
     )>,
-    // TextColor ONLY - a &mut Text here aliases the ParamSet's eight
-    // Text queries and trips B0001 at schedule init (startup crash).
-    // The glyph swap lives in `crosshair_kill_pop`, its own system.
-    mut cross: Query<&mut TextColor, With<CrosshairText>>,
 ) {
     let simr = &game.sim;
     let p = &simr.fighters[simr.player];
@@ -9323,32 +9694,8 @@ fn hud_system(
         };
     }
 
-    // crosshair flash: white → gold on a fresh headshot, red on a fresh
-    // hit; §5.3 amber when the muzzle→crosshair path is blocked close-by
-    // (the shot will hit YOUR cover - not a mystery, a warning)
-    if let Ok(mut tc) = cross.get_single_mut() {
-        let fresh = simr
-            .hits
-            .iter()
-            .rev()
-            .find(|(ev, ttl)| ev.shooter == simr.player && *ttl > 2.0);
-        let fresh_kill = simr
-            .kill_feed
-            .iter()
-            .rev()
-            .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
-        // §5.2 (Brief VI): scoped-class weapons draw NO crosshair while
-        // unscoped - the no-scope prayer is the tradeoff
-        let noscope_hidden = gun(p.gun).scoped && !cam.ads;
-        *tc = TextColor(match fresh {
-            _ if noscope_hidden => Color::srgba(0.0, 0.0, 0.0, 0.0),
-            _ if fresh_kill => Color::srgb(1.0, 0.55, 0.2),
-            Some((ev, _)) if ev.zone == HitZone::Head => Color::srgb(1.0, 0.85, 0.2),
-            Some(_) => Color::srgb(1.0, 0.3, 0.25),
-            None if cam.blocked && p.alive() => Color::srgba(1.0, 0.55, 0.1, 0.9),
-            None => Color::srgba(1.0, 1.0, 1.0, 0.9),
-        });
-    }
+    // (the crosshair's colour + geometry moved to `crosshair_render`,
+    // §4.6 - it is drawn now, so it is a Node/BackgroundColor job)
 }
 
 /// §3 (Brief VI): the semantic color pass - vitals red at ≤25 / pulsing
@@ -9420,21 +9767,100 @@ fn ammo_bar_sync(
     }
 }
 
-/// The kill-confirm glyph pop, in its OWN system: the crosshair `+`
-/// becomes an X for half a second after your kill. Separate from
-/// `hud_system` because two &mut Text accesses in one system alias.
-fn crosshair_kill_pop(game: Res<Game>, mut q: Query<&mut Text, With<CrosshairText>>) {
+/// §4.6 (Brief VIII): draw the crosshair.
+///
+/// Owns ALL of it - geometry, colour, the scoped-hide rule and the
+/// kill-confirm pop - because the previous split (colour in `hud_system`,
+/// glyph in `crosshair_kill_pop`) existed only to dodge a `&mut Text`
+/// alias, and there is no `Text` here any more.
+///
+/// The pop is unchanged in meaning: after your kill the cross becomes an
+/// X for the same half second. It is now a 45° rotation of the drawn
+/// geometry plus a small outward kick, instead of swapping one glyph for
+/// another, so it inherits the player's own size/thickness/colour.
+fn crosshair_render(
+    game: Res<Game>,
+    cam: Res<CamCtl>,
+    settings: Res<GameSettings>,
+    mut root: Query<&mut Transform, With<CrosshairRoot>>,
+    mut pieces: Query<(&CrosshairPiece, &mut Node, &mut BackgroundColor)>,
+) {
     let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+
+    let fresh_hit_head = simr
+        .hits
+        .iter()
+        .rev()
+        .find(|(ev, ttl)| ev.shooter == simr.player && *ttl > 2.0)
+        .map(|(ev, _)| ev.zone == HitZone::Head);
     let fresh_kill = simr
         .kill_feed
         .iter()
         .rev()
         .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
-    if let Ok(mut tx) = q.get_single_mut() {
-        let want = if fresh_kill { "X" } else { "+" };
-        if **tx != want {
-            **tx = want.to_string();
+    // §5.2 (Brief VI): scoped-class weapons draw NO crosshair while
+    // unscoped - the no-scope prayer is the tradeoff. Unchanged.
+    let noscope_hidden = gun(p.gun).scoped && !cam.ads;
+    let fb = crosshair_feedback(
+        noscope_hidden,
+        fresh_kill,
+        fresh_hit_head,
+        cam.blocked && p.alive(),
+    );
+    let fill = crosshair_color(fb, crosshair_rgb(&settings), settings.cross_alpha);
+    let hidden = fb == CrossFeedback::Hidden;
+
+    // the same live cone the stability bracket reads, so a DYNAMIC
+    // crosshair and the bracket bloom off one number
+    let spread = simr.aim_spread_of(simr.player, cam.ads_t > 0.9);
+    let gap = crosshair_gap_px(settings.cross_gap, spread, settings.cross_dynamic)
+        + if fresh_kill { CROSS_KILL_POP_PX } else { 0.0 };
+    let arms = crosshair_arm_rects(
+        settings.cross_size as f32,
+        gap,
+        settings.cross_thickness as f32,
+    );
+    let dot = crosshair_dot_rect(settings.cross_thickness as f32);
+    let outline_px = if settings.cross_outline {
+        settings.cross_outline_px as f32
+    } else {
+        0.0
+    };
+
+    if let Ok(mut tf) = root.get_single_mut() {
+        tf.rotation = Quat::from_rotation_z(if fresh_kill { PI * 0.25 } else { 0.0 });
+    }
+
+    for (piece, mut node, mut bg) in &mut pieces {
+        let idx = piece.idx as usize;
+        let shown = !hidden
+            && (idx == CROSS_PIECES - 1 || crosshair_arm_shown(idx, settings.cross_t_shape))
+            && (idx != CROSS_PIECES - 1 || settings.cross_dot)
+            && !(piece.outline && !settings.cross_outline);
+        if !shown {
+            *bg = BackgroundColor(Color::NONE);
+            node.width = Val::Px(0.0);
+            node.height = Val::Px(0.0);
+            continue;
         }
+        let base = if idx == CROSS_PIECES - 1 { dot } else { arms[idx] };
+        let r = if piece.outline {
+            crosshair_outline_rect(base, outline_px)
+        } else {
+            base
+        };
+        node.left = Val::Px(r.left);
+        node.top = Val::Px(r.top);
+        node.width = Val::Px(r.w);
+        node.height = Val::Px(r.h);
+        *bg = BackgroundColor(if piece.outline {
+            // a dark backing, never a second colour to tune - its job is
+            // contrast against a bright wall, nothing else
+            Color::srgba(0.0, 0.0, 0.0, 0.75 * (settings.cross_alpha as f32 / 255.0))
+        } else {
+            fill
+        });
     }
 }
 
@@ -9500,7 +9926,9 @@ fn stability_bracket(
     // saw a bracket that ignored the flat 0.002 laser value the sim
     // actually shoots with.
     let spread = game.sim.aim_spread_of(game.sim.player, cam.ads_t > 0.9);
-    let px = 12.0 + spread * 2400.0;
+    // §4.6: the SAME px-per-radian the dynamic crosshair uses, so the
+    // bracket and the arms cannot bloom at two different rates.
+    let px = 12.0 + spread * CROSS_SPREAD_PX_PER_RAD;
     for (b, mut node, mut vis) in &mut q {
         *vis = if p.alive() && p.armed() {
             Visibility::Visible
@@ -10507,65 +10935,62 @@ fn open_settings(
                 },
                 TextColor(Color::srgb(0.7, 0.78, 0.95)),
             ));
-            for (which, kind, label) in [
-                (
-                    SettingsButton::Sens,
-                    Some(SettingsButtonKind::Sens),
-                    settings_label_text(SettingsButtonKind::Sens, &settings),
-                ),
-                (
-                    SettingsButton::Fov,
-                    Some(SettingsButtonKind::Fov),
-                    settings_label_text(SettingsButtonKind::Fov, &settings),
-                ),
-                (
-                    SettingsButton::InvertY,
-                    Some(SettingsButtonKind::InvertY),
-                    settings_label_text(SettingsButtonKind::InvertY, &settings),
-                ),
-                (
-                    SettingsButton::SwapMouse,
-                    Some(SettingsButtonKind::SwapMouse),
-                    settings_label_text(SettingsButtonKind::SwapMouse, &settings),
-                ),
-                (
-                    SettingsButton::Minimap,
-                    Some(SettingsButtonKind::Minimap),
-                    settings_label_text(SettingsButtonKind::Minimap, &settings),
-                ),
-                (SettingsButton::Back, None, "Back (ESC)".to_string()),
-            ] {
-                p.spawn((
-                    Button,
-                    which,
-                    // 620 wide / 18pt: the mouse-swap row is 48 chars and
-                    // WRAPPED to two lines inside the old 420x48 box,
-                    // spilling past the button's own background.
-                    Node {
-                        width: Val::Px(620.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-                ))
-                .with_children(|b| {
-                    let mut e = b.spawn((
-                        Text::new(label),
-                        TextFont {
-                            font_size: 18.0,
+            // §4.6 added nine crosshair rows; fifteen 50 px rows in one
+            // column is 890 px of list, which does not fit the game's own
+            // 720 p default window - the Back row would have been off
+            // screen. A wrapping two-column grid holds all of it in ~430.
+            p.spawn(Node {
+                width: Val::Px(2.0 * SETTINGS_ROW_W + SETTINGS_ROW_GAP),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                justify_content: JustifyContent::Center,
+                align_content: AlignContent::Center,
+                column_gap: Val::Px(SETTINGS_ROW_GAP),
+                row_gap: Val::Px(SETTINGS_ROW_GAP),
+                ..default()
+            })
+            .with_children(|p| {
+                let rows = SETTINGS_ROWS
+                    .iter()
+                    .map(|(b, k)| (*b, Some(*k), settings_label_text(*k, &settings)))
+                    .chain([(SettingsButton::Back, None, "Back (ESC)".to_string())]);
+                for (which, kind, label) in rows {
+                    p.spawn((
+                        Button,
+                        which,
+                        // 18pt in a 620 px box wrapped the 48-char
+                        // mouse-swap row to two lines; 16pt in 470 px
+                        // holds the same string on one.
+                        Node {
+                            width: Val::Px(SETTINGS_ROW_W),
+                            height: Val::Px(SETTINGS_ROW_H),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
                             ..default()
                         },
-                        TextColor(Color::WHITE),
-                    ));
-                    if let Some(k) = kind {
-                        e.insert(SettingsLabel(k));
-                    }
-                });
-            }
+                        BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
+                    ))
+                    .with_children(|b| {
+                        let mut e = b.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: 16.0,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                        if let Some(k) = kind {
+                            e.insert(SettingsLabel(k));
+                        }
+                    });
+                }
+            });
         });
 }
+
+const SETTINGS_ROW_W: f32 = 470.0;
+const SETTINGS_ROW_H: f32 = 42.0;
+const SETTINGS_ROW_GAP: f32 = 10.0;
 
 fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
     match kind {
@@ -10589,6 +11014,40 @@ fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
         SettingsButtonKind::InvertY => {
             format!("Invert look Y: {}", if s.invert_y { "ON" } else { "OFF" })
         }
+        // §4.6 - every row prints its LIVE value, so the settings page
+        // and the drawn crosshair read off the same field
+        SettingsButtonKind::CrossSize => format!("Crosshair size: {}", s.cross_size),
+        SettingsButtonKind::CrossGap => format!("Crosshair gap: {}", s.cross_gap),
+        SettingsButtonKind::CrossThickness => {
+            format!("Crosshair thickness: {}", s.cross_thickness)
+        }
+        SettingsButtonKind::CrossDot => {
+            format!("Crosshair dot: {}", if s.cross_dot { "ON" } else { "OFF" })
+        }
+        SettingsButtonKind::CrossOutline => {
+            if s.cross_outline {
+                format!("Crosshair outline: ON  ({} px)", s.cross_outline_px)
+            } else {
+                "Crosshair outline: OFF".to_string()
+            }
+        }
+        SettingsButtonKind::CrossColor => {
+            let idx = s.cross_color_idx.min(CROSS_COLOR_CUSTOM_IDX);
+            let (r, g, b) = crosshair_rgb(s);
+            format!(
+                "Crosshair colour: {}  ({r},{g},{b})",
+                CROSS_COLOR_CHOICES[idx].0
+            )
+        }
+        SettingsButtonKind::CrossAlpha => format!("Crosshair alpha: {}", s.cross_alpha),
+        SettingsButtonKind::CrossTShape => format!(
+            "Crosshair T-shape: {}",
+            if s.cross_t_shape { "ON" } else { "OFF" }
+        ),
+        SettingsButtonKind::CrossDynamic => format!(
+            "Crosshair style: {}",
+            if s.cross_dynamic { "DYNAMIC" } else { "STATIC" }
+        ),
     }
 }
 
@@ -10632,6 +11091,58 @@ fn settings_buttons(
                 }
                 SettingsButton::InvertY => {
                     settings.invert_y = !settings.invert_y;
+                    dirty = true;
+                }
+                // §4.6: numeric rows step forward and wrap through the
+                // SAME range constants `parse_settings` clamps to, so a
+                // value produced by clicking can never be a value the
+                // file loader would reject.
+                SettingsButton::CrossSize => {
+                    settings.cross_size = cycle_i32(settings.cross_size, CROSS_SIZE_RANGE);
+                    dirty = true;
+                }
+                SettingsButton::CrossGap => {
+                    settings.cross_gap = cycle_i32(settings.cross_gap, CROSS_GAP_RANGE);
+                    dirty = true;
+                }
+                SettingsButton::CrossThickness => {
+                    settings.cross_thickness =
+                        cycle_i32(settings.cross_thickness, CROSS_THICK_RANGE);
+                    dirty = true;
+                }
+                SettingsButton::CrossDot => {
+                    settings.cross_dot = !settings.cross_dot;
+                    dirty = true;
+                }
+                // one row for both outline fields: it cycles the width
+                // up and rolls OFF past the top, so the toggle and the
+                // width never disagree about whether an outline is drawn
+                SettingsButton::CrossOutline => {
+                    if !settings.cross_outline {
+                        settings.cross_outline = true;
+                        settings.cross_outline_px = CROSS_OUTLINE_RANGE.0.max(1);
+                    } else if settings.cross_outline_px >= CROSS_OUTLINE_RANGE.1 {
+                        settings.cross_outline = false;
+                    } else {
+                        settings.cross_outline_px += 1;
+                    }
+                    dirty = true;
+                }
+                SettingsButton::CrossColor => {
+                    settings.cross_color_idx =
+                        (settings.cross_color_idx + 1) % CROSS_COLOR_CHOICES.len();
+                    dirty = true;
+                }
+                SettingsButton::CrossAlpha => {
+                    settings.cross_alpha = cycle_alpha(settings.cross_alpha);
+                    dirty = true;
+                }
+                SettingsButton::CrossTShape => {
+                    settings.cross_t_shape = !settings.cross_t_shape;
+                    dirty = true;
+                }
+                SettingsButton::CrossDynamic => {
+                    settings.cross_dynamic = !settings.cross_dynamic;
                     dirty = true;
                 }
                 SettingsButton::Back => next.set(GameState::Paused),
@@ -12000,12 +12511,37 @@ mod forge_tests {
         s.sens_idx = SENS_CHOICES.len() - 1;
         s.fov_idx = 0;
         s.invert_y = true;
+        // §4.6 (Brief VIII): the crosshair family rides the same file.
+        // Every field is set AWAY from its default, so a field the
+        // serializer forgot cannot pass by accidentally matching.
+        s.cross_size = 9;
+        s.cross_gap = -3; // negative is legal (§4.6) and must survive
+        s.cross_thickness = 4;
+        s.cross_dot = true;
+        s.cross_outline = false;
+        s.cross_outline_px = 3;
+        s.cross_color_idx = CROSS_COLOR_CUSTOM_IDX;
+        s.cross_rgb = (17, 200, 240);
+        s.cross_alpha = 137;
+        s.cross_t_shape = true;
+        s.cross_dynamic = true;
         let back = parse_settings(&settings_to_text(&s));
         assert_eq!(back.swap_mouse, s.swap_mouse);
         assert_eq!(back.minimap, s.minimap);
         assert_eq!(back.sens_idx, s.sens_idx);
         assert_eq!(back.fov_idx, s.fov_idx);
         assert_eq!(back.invert_y, s.invert_y);
+        assert_eq!(back.cross_size, s.cross_size, "crosshair size must persist");
+        assert_eq!(back.cross_gap, s.cross_gap, "a NEGATIVE gap must persist as-is");
+        assert_eq!(back.cross_thickness, s.cross_thickness);
+        assert_eq!(back.cross_dot, s.cross_dot);
+        assert_eq!(back.cross_outline, s.cross_outline);
+        assert_eq!(back.cross_outline_px, s.cross_outline_px);
+        assert_eq!(back.cross_color_idx, s.cross_color_idx);
+        assert_eq!(back.cross_rgb, s.cross_rgb, "custom RGB must persist per channel");
+        assert_eq!(back.cross_alpha, s.cross_alpha);
+        assert_eq!(back.cross_t_shape, s.cross_t_shape);
+        assert_eq!(back.cross_dynamic, s.cross_dynamic);
 
         // hostile: out-of-range indices clamp instead of panicking later
         let evil = "sens_idx = 999\nfov_idx = -5\nswap_mouse = 7\n";
@@ -12017,11 +12553,421 @@ mod forge_tests {
         let _ = p.sens_mult();
         let _ = p.fov_deg();
 
+        // §4.6 hostile: every crosshair number clamps into a DRAWABLE
+        // range. A zero-size or negative-thickness crosshair is not a
+        // preference, it is an invisible or inverted one.
+        let evil_cross = "cross_size = 9999\ncross_gap = -9999\ncross_thickness = 0\n\
+                          cross_outline_px = 77\ncross_color_idx = 4000\n\
+                          cross_r = 900\ncross_g = -12\ncross_alpha = 4096\n";
+        let c = parse_settings(evil_cross);
+        assert_eq!(c.cross_size, CROSS_SIZE_RANGE.1, "oversize size clamps to max");
+        assert_eq!(c.cross_gap, CROSS_GAP_RANGE.0, "gap clamps to its NEGATIVE floor");
+        assert_eq!(c.cross_thickness, CROSS_THICK_RANGE.0, "thickness never below 1");
+        assert_eq!(c.cross_outline_px, CROSS_OUTLINE_RANGE.1);
+        assert_eq!(
+            c.cross_color_idx,
+            CROSS_COLOR_CHOICES.len() - 1,
+            "an out-of-range colour index must not index off the preset table"
+        );
+        assert_eq!(c.cross_rgb.0, 255, "channel clamps to 255");
+        assert_eq!(c.cross_rgb.1, 0, "a negative channel clamps to 0");
+        assert_eq!(c.cross_alpha, 255);
+        // the clamped values actually produce drawable geometry
+        let _ = crosshair_rgb(&c);
+        for r in crosshair_arm_rects(c.cross_size as f32, c.cross_gap as f32, c.cross_thickness as f32) {
+            assert!(r.w > 0.0 && r.h > 0.0, "clamped settings must still draw: {r:?}");
+        }
+
         // garbage lines are ignored, defaults survive
-        let junk = "!!!\nsens_idx = banana\n= 3\nfov_idx\n";
+        let junk = "!!!\nsens_idx = banana\n= 3\nfov_idx\ncross_size = wide\n\
+                    cross_gap = \ncross_alpha = 3.5\n";
         let j = parse_settings(junk);
         assert_eq!(j.sens_idx, GameSettings::default().sens_idx);
         assert_eq!(j.fov_idx, GameSettings::default().fov_idx);
+        assert_eq!(j.cross_size, CROSS_SIZE_DEFAULT, "non-numeric size keeps the default");
+        assert_eq!(j.cross_gap, CROSS_GAP_DEFAULT);
+        assert_eq!(j.cross_alpha, CROSS_ALPHA_DEFAULT, "'3.5' is not an integer");
+    }
+
+    /// **§4.9, the test that could not previously be written.**
+    /// "Crosshair settings round-trip through the settings file" - and
+    /// this one goes through an actual FILE, not just the two pure
+    /// functions, so a serializer that emits something `parse_settings`
+    /// reads but a disk write mangles (line endings, the comment line,
+    /// a trailing newline) is caught too.
+    #[test]
+    fn crosshair_settings_round_trip_through_the_settings_file() {
+        let mut s = GameSettings::default();
+        s.cross_size = CROSS_SIZE_RANGE.1;
+        s.cross_gap = CROSS_GAP_RANGE.0; // the negative extreme
+        s.cross_thickness = CROSS_THICK_RANGE.1;
+        s.cross_dot = true;
+        s.cross_outline = true;
+        s.cross_outline_px = 2;
+        s.cross_color_idx = CROSS_COLOR_CUSTOM_IDX;
+        s.cross_rgb = (1, 2, 254);
+        s.cross_alpha = 200;
+        s.cross_t_shape = true;
+        s.cross_dynamic = true;
+
+        let path = std::env::temp_dir().join(format!(
+            "jk_tdm_crosshair_settings_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, settings_to_text(&s)).expect("write the settings file");
+        let text = std::fs::read_to_string(&path).expect("read it back");
+        let _ = std::fs::remove_file(&path);
+
+        let back = parse_settings(&text);
+        assert_eq!(back.cross_size, s.cross_size);
+        assert_eq!(back.cross_gap, s.cross_gap);
+        assert_eq!(back.cross_thickness, s.cross_thickness);
+        assert_eq!(back.cross_dot, s.cross_dot);
+        assert_eq!(back.cross_outline, s.cross_outline);
+        assert_eq!(back.cross_outline_px, s.cross_outline_px);
+        assert_eq!(back.cross_color_idx, s.cross_color_idx);
+        assert_eq!(back.cross_rgb, s.cross_rgb);
+        assert_eq!(back.cross_alpha, s.cross_alpha);
+        assert_eq!(back.cross_t_shape, s.cross_t_shape);
+        assert_eq!(back.cross_dynamic, s.cross_dynamic);
+        // and the colour the renderer would use is the one we saved
+        assert_eq!(crosshair_rgb(&back), (1, 2, 254));
+
+        // a DEFAULT settings file round-trips to the spec's own defaults:
+        // size 5, gap 0, thickness 1, dot off, outline on 1, green
+        // 50/250/50, alpha 200, no T-shape, classic STATIC.
+        let d = parse_settings(&settings_to_text(&GameSettings::default()));
+        assert_eq!(d.cross_size, 5);
+        assert_eq!(d.cross_gap, 0);
+        assert_eq!(d.cross_thickness, 1);
+        assert!(!d.cross_dot, "the dot is OFF by default");
+        assert!(d.cross_outline && d.cross_outline_px == 1);
+        assert_eq!(crosshair_rgb(&d), (50, 250, 50), "spec default is green 50,250,50");
+        assert_eq!(d.cross_alpha, 200);
+        assert!(!d.cross_t_shape);
+        assert!(!d.cross_dynamic, "the default is classic STATIC");
+    }
+
+    /// The drawn geometry must actually MOVE with the settings - the
+    /// whole point of replacing a `+` glyph. Every assertion here is
+    /// derived by hand from what "size / gap / thickness" mean, not read
+    /// back out of the function.
+    #[test]
+    fn crosshair_geometry_responds_to_size_gap_and_thickness() {
+        let a = crosshair_arm_rects(5.0, 2.0, 1.0);
+        let top = a[CROSS_ARM_TOP];
+        let right = a[CROSS_ARM_RIGHT];
+        let bottom = a[CROSS_ARM_BOTTOM];
+        let left = a[CROSS_ARM_LEFT];
+
+        // each arm is `size` long along its own axis and `thickness` across
+        assert_eq!((top.w, top.h), (1.0, 5.0));
+        assert_eq!((bottom.w, bottom.h), (1.0, 5.0));
+        assert_eq!((right.w, right.h), (5.0, 1.0));
+        assert_eq!((left.w, left.h), (5.0, 1.0));
+        // inner edges sit exactly `gap` from the centre, all four ways
+        assert_eq!(right.left, 2.0, "right arm starts at the gap");
+        assert_eq!(bottom.top, 2.0, "bottom arm starts at the gap");
+        assert_eq!(left.left + left.w, -2.0, "left arm ends at -gap");
+        assert_eq!(top.top + top.h, -2.0, "top arm ends at -gap");
+        // and each arm is centred on its own axis
+        assert_eq!(top.left, -0.5);
+        assert_eq!(right.top, -0.5);
+
+        // SIZE lengthens the arms without moving their inner edges
+        let bigger = crosshair_arm_rects(9.0, 2.0, 1.0);
+        assert_eq!(bigger[CROSS_ARM_RIGHT].w, 9.0, "size is the arm length");
+        assert_eq!(
+            bigger[CROSS_ARM_RIGHT].left, right.left,
+            "size must not move the inner edge - that is the gap's job"
+        );
+        assert!(
+            bigger[CROSS_ARM_TOP].top < top.top,
+            "a longer top arm must reach FURTHER up"
+        );
+
+        // GAP moves the inner edges outward without changing the length
+        let wider = crosshair_arm_rects(5.0, 6.0, 1.0);
+        assert_eq!(wider[CROSS_ARM_RIGHT].left, 6.0);
+        assert_eq!(wider[CROSS_ARM_RIGHT].w, right.w, "gap must not resize an arm");
+        assert!(
+            wider[CROSS_ARM_LEFT].left < left.left,
+            "a bigger gap pushes the left arm further left"
+        );
+
+        // THICKNESS widens the cross-axis and keeps the arm centred
+        let fat = crosshair_arm_rects(5.0, 2.0, 4.0);
+        assert_eq!(fat[CROSS_ARM_TOP].w, 4.0, "thickness is the arm's width");
+        assert_eq!(fat[CROSS_ARM_TOP].h, 5.0, "thickness must not change the length");
+        assert_eq!(fat[CROSS_ARM_TOP].left, -2.0, "still centred on the vertical axis");
+        assert_eq!(fat[CROSS_ARM_RIGHT].top, -2.0, "still centred on the horizontal axis");
+        // the dot follows the thickness, centred
+        let dot = crosshair_dot_rect(4.0);
+        assert_eq!((dot.w, dot.h), (4.0, 4.0));
+        assert_eq!((dot.left, dot.top), (-2.0, -2.0));
+
+        // opposite arms are exact mirrors of each other
+        assert_eq!(top.left, bottom.left);
+        assert_eq!(top.top + top.h, -(bottom.top), "top/bottom mirror through 0");
+        assert_eq!(left.top, right.top);
+        assert_eq!(left.left + left.w, -(right.left), "left/right mirror through 0");
+    }
+
+    /// §4.6 says gap may go NEGATIVE. That is the case most likely to
+    /// produce a zero-size or inverted rect, so it gets its own test: at
+    /// every legal gap, all four arms stay positively-sized and full
+    /// length, and a negative gap really does cross the centre.
+    #[test]
+    fn crosshair_negative_gap_is_legal_and_never_inverts_a_rect() {
+        for gap in CROSS_GAP_RANGE.0..=CROSS_GAP_RANGE.1 {
+            for size in CROSS_SIZE_RANGE.0..=CROSS_SIZE_RANGE.1 {
+                for thick in CROSS_THICK_RANGE.0..=CROSS_THICK_RANGE.1 {
+                    let arms =
+                        crosshair_arm_rects(size as f32, gap as f32, thick as f32);
+                    for (i, r) in arms.iter().enumerate() {
+                        assert!(
+                            r.w > 0.0 && r.h > 0.0,
+                            "arm {i} collapsed at size={size} gap={gap} thick={thick}: {r:?}"
+                        );
+                        // vertical arms run along h, horizontal along w -
+                        // asserted per-axis, not by max/min, because at
+                        // size 1 / thickness 5 an arm is legitimately
+                        // wider than it is long
+                        let vertical = i == CROSS_ARM_TOP || i == CROSS_ARM_BOTTOM;
+                        let (along, across) = if vertical { (r.h, r.w) } else { (r.w, r.h) };
+                        assert_eq!(
+                            along, size as f32,
+                            "arm {i} lost length at size={size} gap={gap} thick={thick}"
+                        );
+                        assert_eq!(
+                            across, thick as f32,
+                            "arm {i} lost thickness at size={size} gap={gap} thick={thick}"
+                        );
+                    }
+                }
+            }
+        }
+        // a negative gap must genuinely cross the centre, not clamp to 0
+        let crossed = crosshair_arm_rects(5.0, -3.0, 1.0);
+        assert!(
+            crossed[CROSS_ARM_TOP].top + crossed[CROSS_ARM_TOP].h > 0.0,
+            "at gap -3 the top arm's lower edge must sit BELOW the centre"
+        );
+        assert!(
+            crossed[CROSS_ARM_RIGHT].left < 0.0,
+            "at gap -3 the right arm must start LEFT of the centre"
+        );
+        // and the outline only ever grows the rect it backs
+        let base = crossed[CROSS_ARM_RIGHT];
+        let o = crosshair_outline_rect(base, 2.0);
+        assert_eq!((o.w, o.h), (base.w + 4.0, base.h + 4.0));
+        assert_eq!((o.left, o.top), (base.left - 2.0, base.top - 2.0));
+        let none = crosshair_outline_rect(base, -5.0);
+        assert_eq!(none, base, "a negative outline width can never SHRINK the fill");
+    }
+
+    /// The three remaining §4.6 switches: T-shape drops exactly one arm,
+    /// static ignores the aim cone while dynamic blooms with it, and the
+    /// colour comes from the preset table or the custom triple.
+    #[test]
+    fn crosshair_t_shape_static_dynamic_and_colour_presets() {
+        // T-shape hides the TOP arm and nothing else
+        for arm in 0..4 {
+            assert!(crosshair_arm_shown(arm, false), "arm {arm} shows without T-shape");
+        }
+        assert!(!crosshair_arm_shown(CROSS_ARM_TOP, true), "T-shape drops the top arm");
+        for arm in [CROSS_ARM_RIGHT, CROSS_ARM_BOTTOM, CROSS_ARM_LEFT] {
+            assert!(crosshair_arm_shown(arm, true), "T-shape must keep arm {arm}");
+        }
+
+        // classic STATIC ignores spread entirely
+        assert_eq!(crosshair_gap_px(2, 0.0, false), 2.0);
+        assert_eq!(
+            crosshair_gap_px(2, 0.05, false),
+            2.0,
+            "a static crosshair must not move with the aim cone"
+        );
+        // DYNAMIC blooms with it, monotonically, from the same base
+        assert_eq!(crosshair_gap_px(2, 0.0, true), 2.0, "no spread, no bloom");
+        let a = crosshair_gap_px(2, 0.01, true);
+        let b = crosshair_gap_px(2, 0.05, true);
+        assert!(a > 2.0 && b > a, "more spread must open the gap further: {a} then {b}");
+        // a negative base gap still blooms outward from where it started
+        assert!(crosshair_gap_px(-4, 0.02, true) > -4.0);
+
+        // colour: presets come from the table, CUSTOM from the settings
+        let mut s = GameSettings::default();
+        s.cross_color_idx = 0;
+        assert_eq!(crosshair_rgb(&s), CROSS_COLOR_CHOICES[0].1);
+        s.cross_color_idx = 3;
+        assert_eq!(crosshair_rgb(&s), CROSS_COLOR_CHOICES[3].1);
+        s.cross_color_idx = CROSS_COLOR_CUSTOM_IDX;
+        s.cross_rgb = (11, 22, 33);
+        assert_eq!(crosshair_rgb(&s), (11, 22, 33), "CUSTOM reads the stored triple");
+        // every preset is distinct, or a cycle click would look dead
+        for i in 0..CROSS_COLOR_CUSTOM_IDX {
+            for j in (i + 1)..CROSS_COLOR_CUSTOM_IDX {
+                assert_ne!(
+                    CROSS_COLOR_CHOICES[i].1, CROSS_COLOR_CHOICES[j].1,
+                    "presets {i} and {j} are the same colour"
+                );
+            }
+        }
+    }
+
+    /// The feedback ladder that used to be an inline `match` on the
+    /// glyph's `TextColor`. Hiding must beat everything: a scoped weapon
+    /// firing from the hip must not leak an aim point through a
+    /// hitmarker, which is exactly what a re-ordered ladder would do.
+    #[test]
+    fn crosshair_hiding_beats_every_other_feedback_state() {
+        // §5.2: scoped + unscoped = nothing drawn, whatever else happened
+        for kill in [false, true] {
+            for hit in [None, Some(false), Some(true)] {
+                for blocked in [false, true] {
+                    assert_eq!(
+                        crosshair_feedback(true, kill, hit, blocked),
+                        CrossFeedback::Hidden,
+                        "noscope must hide through kill={kill} hit={hit:?} blocked={blocked}"
+                    );
+                }
+            }
+        }
+        // and Hidden really is invisible, at ANY settings alpha
+        for alpha in [0u8, 137, 255] {
+            let c = crosshair_color(CrossFeedback::Hidden, (50, 250, 50), alpha)
+                .to_srgba();
+            assert_eq!(c.alpha, 0.0, "a hidden crosshair must be fully transparent");
+        }
+
+        // the rest of the ladder, in order
+        assert_eq!(
+            crosshair_feedback(false, true, Some(true), true),
+            CrossFeedback::Kill,
+            "a kill outranks a headshot marker"
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, Some(true), true),
+            CrossFeedback::Headshot
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, Some(false), true),
+            CrossFeedback::Hit,
+            "a body hit outranks the blocked warning"
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, None, true),
+            CrossFeedback::Blocked
+        );
+        assert_eq!(crosshair_feedback(false, false, None, false), CrossFeedback::Idle);
+
+        // Idle is the ONLY state painted in the player's own colour
+        let idle = crosshair_color(CrossFeedback::Idle, (50, 250, 50), 200).to_srgba();
+        assert!((idle.red - 50.0 / 255.0).abs() < 1e-6);
+        assert!((idle.green - 250.0 / 255.0).abs() < 1e-6);
+        assert!((idle.blue - 50.0 / 255.0).abs() < 1e-6);
+        assert!(
+            (idle.alpha - 200.0 / 255.0).abs() < 1e-6,
+            "idle alpha is the settings alpha, got {}",
+            idle.alpha
+        );
+        // a feedback flash keeps its own signal colour - turning the
+        // crosshair alpha down must not be able to mute a hitmarker
+        let quiet_hit = crosshair_color(CrossFeedback::Hit, (50, 250, 50), 10).to_srgba();
+        assert!(
+            quiet_hit.alpha > 0.9,
+            "a hitmarker must stay legible at alpha 10, got {}",
+            quiet_hit.alpha
+        );
+        assert!(quiet_hit.red > quiet_hit.green, "the hit flash is red, not the fill green");
+    }
+
+    /// The settings rows are a real control surface: every row renders a
+    /// live label, and every crosshair row's click actually changes the
+    /// value it advertises. A persisted field with a no-op row is a dead
+    /// control wearing a live one's clothes.
+    #[test]
+    fn every_crosshair_row_cycles_its_own_value_and_wraps_in_range() {
+        // numeric cycles step up and wrap to the FLOOR, not to zero
+        assert_eq!(cycle_i32(2, (-5, 12)), 3);
+        assert_eq!(cycle_i32(12, (-5, 12)), -5, "wraps to the negative floor");
+        assert_eq!(cycle_i32(-5, (-5, 12)), -4, "steps up out of the floor");
+        // clicking from ANY start lands inside the range, always
+        for range in [CROSS_SIZE_RANGE, CROSS_GAP_RANGE, CROSS_THICK_RANGE] {
+            let mut v = range.0;
+            for _ in 0..(range.1 - range.0 + 3) {
+                v = cycle_i32(v, range);
+                assert!(v >= range.0 && v <= range.1, "cycled out of range: {v} in {range:?}");
+            }
+        }
+        // and the cycle visits every value before repeating
+        let mut seen = std::collections::BTreeSet::new();
+        let mut v = CROSS_GAP_RANGE.0;
+        for _ in 0..(CROSS_GAP_RANGE.1 - CROSS_GAP_RANGE.0 + 1) {
+            seen.insert(v);
+            v = cycle_i32(v, CROSS_GAP_RANGE);
+        }
+        assert_eq!(
+            seen.len() as i32,
+            CROSS_GAP_RANGE.1 - CROSS_GAP_RANGE.0 + 1,
+            "every gap value must be reachable by clicking"
+        );
+
+        // alpha cycles by VALUE, so it recovers from a hand-edited file
+        assert_eq!(cycle_alpha(200), 230);
+        assert_eq!(cycle_alpha(255), CROSS_ALPHA_CHOICES[0], "wraps at the top");
+        assert_eq!(cycle_alpha(137), 160, "an off-preset value steps to the next preset");
+        assert_eq!(cycle_alpha(0), CROSS_ALPHA_CHOICES[0]);
+
+        // every row on the page has a live label, and no two rows share
+        // one (a duplicated label means two rows edit the same thing)
+        let s = GameSettings::default();
+        let mut labels = std::collections::BTreeSet::new();
+        for (_, kind) in SETTINGS_ROWS {
+            let l = settings_label_text(kind, &s);
+            assert!(!l.is_empty(), "a settings row rendered an empty label");
+            assert!(labels.insert(l.clone()), "two settings rows render {l:?}");
+        }
+        assert_eq!(labels.len(), SETTINGS_ROWS.len());
+
+        // and every CROSSHAIR row's label moves when its value moves
+        let mut s = GameSettings::default();
+        let before = settings_label_text(SettingsButtonKind::CrossSize, &s);
+        s.cross_size = cycle_i32(s.cross_size, CROSS_SIZE_RANGE);
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossSize, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossGap, &s);
+        s.cross_gap = cycle_i32(s.cross_gap, CROSS_GAP_RANGE);
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossGap, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossThickness, &s);
+        s.cross_thickness = cycle_i32(s.cross_thickness, CROSS_THICK_RANGE);
+        assert_ne!(
+            before,
+            settings_label_text(SettingsButtonKind::CrossThickness, &s)
+        );
+        let before = settings_label_text(SettingsButtonKind::CrossDot, &s);
+        s.cross_dot = !s.cross_dot;
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossDot, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossColor, &s);
+        s.cross_color_idx = (s.cross_color_idx + 1) % CROSS_COLOR_CHOICES.len();
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossColor, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossAlpha, &s);
+        s.cross_alpha = cycle_alpha(s.cross_alpha);
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossAlpha, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossTShape, &s);
+        s.cross_t_shape = !s.cross_t_shape;
+        assert_ne!(before, settings_label_text(SettingsButtonKind::CrossTShape, &s));
+        let before = settings_label_text(SettingsButtonKind::CrossDynamic, &s);
+        s.cross_dynamic = !s.cross_dynamic;
+        assert_ne!(
+            before,
+            settings_label_text(SettingsButtonKind::CrossDynamic, &s)
+        );
+        // every value reached by clicking still survives the file
+        let back = parse_settings(&settings_to_text(&s));
+        assert_eq!(back.cross_size, s.cross_size);
+        assert_eq!(back.cross_gap, s.cross_gap);
+        assert_eq!(back.cross_alpha, s.cross_alpha);
+        assert_eq!(back.cross_color_idx, s.cross_color_idx);
     }
 
     /// Settings must be real: every choice list has to be non-empty,
