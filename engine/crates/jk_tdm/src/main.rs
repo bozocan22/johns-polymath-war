@@ -2505,6 +2505,7 @@ struct AwardState {
     items: Vec<(String, f32)>,
     prev_kills: u32,
     prev_assists: u32,
+    prev_parries: u32,
     prev_owner: [Option<Team>; 2],
     last_kill_t: f32,
     streak: u32,
@@ -2527,6 +2528,7 @@ fn award_toasts(
         st.inited = true;
         st.prev_kills = p.kills;
         st.prev_assists = p.assists;
+        st.prev_parries = p.parries;
         for (i, cp) in simr.checkpoints.iter().take(2).enumerate() {
             st.prev_owner[i] = cp.owner;
         }
@@ -2565,6 +2567,10 @@ fn award_toasts(
         st.items.push(("ASSIST".to_string(), AWARD_TTL_S));
     }
     st.prev_assists = p.assists;
+    if p.parries > st.prev_parries {
+        st.items.push(("PARRY".to_string(), AWARD_TTL_S));
+    }
+    st.prev_parries = p.parries;
     // captures: a ring flipping TO my team
     for (i, cp) in simr.checkpoints.iter().take(2).enumerate() {
         if cp.owner != st.prev_owner[i] {

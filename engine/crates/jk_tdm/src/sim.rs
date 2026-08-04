@@ -1417,6 +1417,11 @@ pub struct Fighter {
     pub fired_smoke: bool,
     /// §4.5: did the last landed shot punch THROUGH cover first?
     pub fired_wallbang: bool,
+    /// Melee v1: staggered after being parried - no firing, no swinging,
+    /// half pace, until it ticks out.
+    pub stagger_t: f32,
+    /// Melee v1: successful parries, for the scoreboard-adjacent toast.
+    pub parries: u32,
     pub switch_t: f32,
     pub pos: [f32; 3], // feet
     pub vel: [f32; 2], // xz
@@ -2846,6 +2851,20 @@ pub const REGEN_RATE_HPS: f32 = 8.33;
 // Tap: quick slash. Hold: committed lunge — visibly wound up, punishable.
 // Silent (4 m noise), backstabs are lethal, and it works on the horde:
 // the correct tool for zombie extraction and (later) mech rear arcs.
+// ---- melee depth v1 (BACKLOG #4): the PARRY --------------------------
+// Swing INTO the incoming strike. A fighter whose own blade is in its
+// WIND (raised, not yet through) deflects any melee blow arriving
+// through their front arc: zero damage, and the ATTACKER staggers -
+// briefly unable to fire or swing, and slowed. Deliberately the same
+// front-arc cosine the shield uses: one facing rule for the whole game.
+/// How long a parried attacker is staggered.
+pub const PARRY_STAGGER_S: f32 = 0.9;
+/// Move-speed multiplier while staggered.
+pub const STAGGER_SPEED_MULT: f32 = 0.55;
+/// A parried ZOMBIE eats a longer stun - the claw has no discipline to
+/// recover with.
+pub const ZOMBIE_PARRY_STUN_S: f32 = 1.8;
+
 pub const KNIFE_QUICK_WIND_S: f32 = 0.28;
 pub const KNIFE_QUICK_ACTIVE_S: f32 = 0.12;
 pub const KNIFE_QUICK_RECOVER_S: f32 = 0.34;
@@ -3303,6 +3322,8 @@ impl TdmSim {
                     fired_ads: false,
                     fired_smoke: false,
                     fired_wallbang: false,
+                    stagger_t: 0.0,
+                    parries: 0,
                     switch_t: 0.0,
                     pos,
                     vel: [0.0, 0.0],
@@ -3613,6 +3634,7 @@ impl TdmSim {
             // - the design says the hull gun sustains about TWICE the
             // minigun's ~4.4 s, not nine times.
             f.gatling_cd = (f.gatling_cd - DT).max(0.0);
+            f.stagger_t = (f.stagger_t - DT).max(0.0);
             f.gatling_trigger_t = (f.gatling_trigger_t - DT).max(0.0);
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
@@ -4145,6 +4167,10 @@ impl TdmSim {
             // crouch speed tax for a stance it never entered
             if self.fighters[p].crouch {
                 speed *= CROUCH_SPEED_MULT;
+            }
+            // Melee v1: a staggered fighter reels at half pace
+            if self.fighters[p].stagger_t > 0.0 {
+                speed *= STAGGER_SPEED_MULT;
             }
             // the raised shield owns the pace — ADS/scope mults don't
             // stack on top (you're not sighting anything behind a plate)
@@ -4735,7 +4761,9 @@ impl TdmSim {
             }
             // ---- §5 the knife: tap = quick slash, hold = committed
             // lunge. Silent, capsule-swept, lethal from behind. ---------
-            if cmd.knife_hold
+            if self.fighters[p].stagger_t > 0.0 {
+                // Melee v1: staggered - the arms will not answer
+            } else if cmd.knife_hold
                 && self.fighters[p].knife_phase <= 0.0
                 && self.fighters[p].roll_t <= 0.0
                 && !self.fighters[p].shield_up
@@ -4866,6 +4894,13 @@ impl TdmSim {
                         let dzv = v.pos[2] - ppos[2];
                         let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
                         let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
+                        // Melee v1: a victim mid-wind facing the sweep
+                        // PARRIES it - the attacker staggers instead.
+                        if self.is_parrying(j, ppos) {
+                            self.fighters[p].stagger_t = PARRY_STAGGER_S;
+                            self.fighters[j].parries += 1;
+                            continue;
+                        }
                         let d_out = if behind { backstab } else { dmg };
                         // attacker's position - the arc model measures
                         // where the blow came FROM, and the victim's own
@@ -5597,6 +5632,8 @@ impl TdmSim {
                 // mounts, but that is one caller - this gate makes the
                 // guarantee local to the weapon itself.
                 || f.in_mech()
+                // Melee v1: a parried attacker is staggered - no firing
+                || f.stagger_t > 0.0
                 // §6.2: the chassis is still sealing up. Scoped to
                 // ACTUALLY being in a chassis: the timer is mech state,
                 // but this gate is not, so a pilot who dismounts (or is
@@ -6046,6 +6083,32 @@ impl TdmSim {
             self.emit_noise(at, gun_noise_m(GunKind::Minigun));
         }
         true
+    }
+
+    /// Melee v1: is `victim` currently PARRYING a blow from `attack_from`?
+    /// True when their own blade is in its wind (raised, not yet through)
+    /// and the attacker stands inside their front arc. Pure read - the
+    /// caller decides what a successful parry does to whom.
+    pub fn is_parrying(&self, victim: usize, attack_from: [f32; 3]) -> bool {
+        let v = &self.fighters[victim];
+        if !v.alive() || v.knife_phase <= 0.0 {
+            return false;
+        }
+        let wind = if v.melee_axe {
+            AXE_QUICK_WIND_S
+        } else {
+            KNIFE_QUICK_WIND_S
+        };
+        if v.knife_phase >= wind {
+            return false; // the blade is already through - too late
+        }
+        let dx = attack_from[0] - v.pos[0];
+        let dz = attack_from[2] - v.pos[2];
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-3 {
+            return true; // point blank counts as in front
+        }
+        (v.yaw.sin() * dx + v.yaw.cos() * dz) / len > SHIELD_ARC_COS
     }
 
     /// Damage reduction from a raised shield, if the attack comes through
@@ -6681,7 +6744,7 @@ impl TdmSim {
         // §8: claw hits are collected and applied AFTER the walk, so they
         // can go through the shared armor pipeline (which needs &mut self)
         // instead of writing `health` raw. (victim, raw damage, from)
-        let mut claw_hits: Vec<(usize, f32, [f32; 3])> = Vec::new();
+        let mut claw_hits: Vec<(usize, f32, [f32; 3], usize)> = Vec::new();
         for zi in 0..self.zombies.len() {
             let (zpos, kind) = (self.zombies[zi].pos, self.zombies[zi].kind);
             let spec = zspec(kind);
@@ -6726,7 +6789,7 @@ impl TdmSim {
                 let dy = (fpos[1] - z.pos[1]).abs();
                 if d2 < 1.4 * 1.4 && dy < 1.4 && z.atk_cd <= 0.0 && spec.dmg > 0.0 {
                     z.atk_cd = 1.0;
-                    claw_hits.push((j, spec.dmg, zpos));
+                    claw_hits.push((j, spec.dmg, zpos, zi));
                 }
             }
             // §1 (Brief III) audit fix: an unalerted zombie previously
@@ -6835,8 +6898,19 @@ impl TdmSim {
         // overwrite respawn_t with the standard timer.
         let now = self.t;
         let rt = self.death_respawn_t();
-        for (j, raw, from) in claw_hits {
+        for (j, raw, from, zi) in claw_hits {
             if !self.fighters[j].alive() {
+                continue;
+            }
+            // Melee v1: swing INTO the claw and it glances off - the
+            // zombie reels. Indexing `zi` is safe here: nothing between
+            // the collection above and this loop kills a zombie, so no
+            // swap_remove has moved anyone.
+            if self.is_parrying(j, from) {
+                if let Some(z) = self.zombies.get_mut(zi) {
+                    z.atk_cd = ZOMBIE_PARRY_STUN_S;
+                }
+                self.fighters[j].parries += 1;
                 continue;
             }
             let d =
@@ -8735,6 +8809,51 @@ mod tests {
         assert!(
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
+        );
+    }
+
+    /// Melee v1: the parry window and arc, exactly as specified - blade
+    /// in its wind, attacker in the front arc, and not a moment longer.
+    #[test]
+    fn a_raised_blade_parries_from_the_front_only() {
+        let mut s = range(0x9A);
+        s.fighters[1].pos = [0.0, 0.0, 2.0];
+        s.fighters[1].yaw = std::f32::consts::PI; // facing the attacker at z<0
+        let attacker_at = [0.0, 0.0, 0.0];
+        // no swing: no parry
+        assert!(!s.is_parrying(1, attacker_at), "no blade up, no parry");
+        // mid-wind: parry
+        s.fighters[1].knife_phase = KNIFE_QUICK_WIND_S * 0.5;
+        assert!(s.is_parrying(1, attacker_at), "mid-wind must parry");
+        // blade already through: too late
+        s.fighters[1].knife_phase = KNIFE_QUICK_WIND_S + 0.05;
+        assert!(!s.is_parrying(1, attacker_at), "after the wind is too late");
+        // attacker behind: never
+        s.fighters[1].knife_phase = KNIFE_QUICK_WIND_S * 0.5;
+        s.fighters[1].yaw = 0.0; // back turned
+        assert!(!s.is_parrying(1, attacker_at), "a parry has a facing");
+    }
+
+    /// Melee v1: a staggered fighter can neither fire nor swing, and
+    /// recovers when the timer runs out.
+    #[test]
+    fn stagger_silences_the_trigger_until_it_ticks_out() {
+        let mut s = range(0x9B);
+        s.fighters[0].ammo = 30;
+        s.fighters[0].protect_t = 0.0;
+        s.fighters[0].stagger_t = PARRY_STAGGER_S;
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "a staggered fighter must not fire"
+        );
+        // tick it out
+        for _ in 0..((PARRY_STAGGER_S / DT) as usize + 2) {
+            s.step(PlayerCmd::default());
+        }
+        s.fighters[0].protect_t = 0.0;
+        assert!(
+            s.try_fire(0, [0.0, 0.0, 1.0], false),
+            "recovered - the trigger answers again"
         );
     }
 
