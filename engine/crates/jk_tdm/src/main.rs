@@ -2908,6 +2908,7 @@ fn capture_menus(
     mut t: Local<f32>,
     mut stage: Local<usize>,
     mut next: ResMut<NextState<GameState>>,
+    mut page: ResMut<IntroPage>,
     window: Query<Entity, With<PrimaryWindow>>,
 ) {
     if cap.script.as_deref() != Some("menus") {
@@ -2925,20 +2926,38 @@ fn capture_menus(
                 )));
         }
     };
+    // walks all three intro pages, then Settings - the paged flow means
+    // one snap no longer shows the menu, it shows a THIRD of it
     match *stage {
         0 if *t > 1.2 => {
-            snap(&mut commands, "01-loadout-intro");
+            snap(&mut commands, "01-title-page");
             *stage = 1;
         }
-        1 if *t > 1.8 => {
-            next.set(GameState::Settings);
+        1 if *t > 1.6 => {
+            page.0 = IntroPage::SOLDIER;
             *stage = 2;
         }
-        2 if *t > 2.8 => {
-            snap(&mut commands, "02-settings");
+        2 if *t > 2.4 => {
+            snap(&mut commands, "02-soldier-page");
             *stage = 3;
         }
-        3 if *t > 3.6 => std::process::exit(0),
+        3 if *t > 2.8 => {
+            page.0 = IntroPage::MATCH;
+            *stage = 4;
+        }
+        4 if *t > 3.6 => {
+            snap(&mut commands, "03-match-page");
+            *stage = 5;
+        }
+        5 if *t > 4.0 => {
+            next.set(GameState::Settings);
+            *stage = 6;
+        }
+        6 if *t > 5.0 => {
+            snap(&mut commands, "04-settings");
+            *stage = 7;
+        }
+        7 if *t > 5.8 => std::process::exit(0),
         _ => {}
     }
 }
@@ -3011,8 +3030,8 @@ pub struct IntroPage(pub u8);
 
 impl IntroPage {
     pub const TITLE: u8 = 0;
-    pub const MATCH: u8 = 1;
-    pub const SOLDIER: u8 = 2;
+    pub const SOLDIER: u8 = 1;
+    pub const MATCH: u8 = 2;
     pub const LAST: u8 = 2;
 
     /// Heading for each page - the question the page answers.
@@ -3301,7 +3320,8 @@ fn main() {
         .add_systems(OnEnter(GameState::Intro), open_intro)
         .add_systems(
             Update,
-            (intro_paging, intro_nav_buttons).run_if(in_state(GameState::Intro)),
+            (intro_paging, intro_nav_buttons, intro_keyboard_paging)
+                .run_if(in_state(GameState::Intro)),
         )
         .add_systems(OnExit(GameState::Intro), close_intro)
         .add_systems(
@@ -10832,7 +10852,6 @@ struct NavLabel(IntroNav);
 fn intro_paging(
     page: Res<IntroPage>,
     mut rows: Query<(&OnIntroPage, &mut Node), Without<NavLabel>>,
-    mut nav_label: Query<(&NavLabel, &mut Text), Without<IntroSubtitle>>,
     mut nav_vis: Query<(&IntroNav, &mut Node), (Without<OnIntroPage>, Without<NavLabel>)>,
     mut heading: Query<&mut Text, (With<IntroHeading>, Without<NavLabel>, Without<IntroSubtitle>)>,
     mut subtitle: Query<&mut Text, (With<IntroSubtitle>, Without<NavLabel>, Without<IntroHeading>)>,
@@ -10862,23 +10881,28 @@ fn intro_paging(
         };
     }
     for (which, mut node) in &mut nav_vis {
-        // nothing to go back to on the title page
-        node.display = if *which == IntroNav::Back && page.0 == IntroPage::TITLE {
-            Display::None
-        } else {
-            Display::Flex
+        let hide = match which {
+            // nothing to go back to on the title page
+            IntroNav::Back => page.0 == IntroPage::TITLE,
+            // the deploy buttons ARE the forward action on the last
+            // page; a NEXT that only clamps would lie about doing
+            // something
+            IntroNav::Next => page.0 == IntroPage::LAST,
         };
+        node.display = if hide { Display::None } else { Display::Flex };
     }
-    for (label, mut text) in &mut nav_label {
-        if label.0 == IntroNav::Next {
-            // the last page's forward action is not "next", it is the
-            // thing the whole flow exists to reach
-            **text = if page.0 == IntroPage::LAST {
-                "DEPLOY >".to_string()
-            } else {
-                "NEXT >".to_string()
-            };
-        }
+}
+
+/// Keyboard paging — the title page literally says "ENTER to begin",
+/// so Enter must do that. Right/Left arrows page too; everything is
+/// clamped the same way the buttons are (no wrapping - see the note on
+/// `intro_nav_buttons`).
+fn intro_keyboard_paging(keys: Res<ButtonInput<KeyCode>>, mut page: ResMut<IntroPage>) {
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::ArrowRight) {
+        page.0 = (page.0 + 1).min(IntroPage::LAST);
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::Backspace) {
+        page.0 = page.0.saturating_sub(1);
     }
 }
 
