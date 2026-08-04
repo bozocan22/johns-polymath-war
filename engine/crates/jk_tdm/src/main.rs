@@ -1757,6 +1757,27 @@ const N_WEAPONS: usize = 11;
 /// §2.3: render layer for the first-person viewmodel - seen only by the
 /// dedicated fixed-FOV viewmodel camera, never by the world camera.
 const VIEWMODEL_LAYER: usize = 1;
+/// §7.2/§8.2: the Forge TURNTABLE renders on its own layer, to a texture
+/// the soldier page shows as a UI image. Layer isolation means the main
+/// camera never sees the stage and the stage camera never sees the world.
+const FORGE_PREVIEW_LAYER: usize = 6;
+const FORGE_PREVIEW_PX: u32 = 512;
+/// The stage lives far under the map - irrelevant to rendering (layers
+/// isolate it) but keeps physics/audio/debug tooling from ever tripping
+/// over it.
+const FORGE_STAGE_POS: Vec3 = Vec3::new(300.0, -50.0, 300.0);
+
+/// §7.2: the turntable's handles - the UI image, the rotating stand, one
+/// pre-spawned weapon model per kind, and the two cosmetic materials the
+/// sync system recolours in place.
+#[derive(Resource)]
+struct ForgePreview {
+    image: Handle<Image>,
+    stand: Entity,
+    weapons: [Entity; N_WEAPONS],
+    hat_mat: Handle<StandardMaterial>,
+    tunic_mat: Handle<StandardMaterial>,
+}
 /// Viewmodel camera FOV. §1.2 (Brief VI): CS:GO Classic preset = 68°.
 const VM_FOV_DEG: f32 = 68.0;
 // ---- §1.3 (Brief VI): the no-bounce contract ------------------------------
@@ -4062,6 +4083,7 @@ fn main() {
                 minimap_system,
                 zone_overlay,
                 tag_viewmodel_layer,
+                tag_forge_preview_layer,
             ),
         )
         .init_resource::<DebugZones>()
@@ -4113,6 +4135,9 @@ fn main() {
                 intro_diff_buttons,
                 intro_size_buttons,
                 tech_readout, // §14: live weapon numbers on the loadout
+                forge_preview_spin,
+                forge_preview_sync,
+                attach_turntable_card,
                 forge_keybinds, // §7.2 (Brief VII v2): Ctrl+1/2/3 save, 1/2/3 load
                 lobby_toast,    // ...and where its confirmations appear
             )
@@ -5955,6 +5980,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let game = Game {
         sim: TdmSim::new(MatchConfig::default()),
@@ -6114,6 +6140,133 @@ fn setup(
     let red = materials.add(unlit(Color::srgb(0.92, 0.18, 0.15)));
     commands.insert_resource(BarAssets { green, orange, red });
     commands.insert_resource(kit.clone());
+
+    // ---- §7.2 the Forge turntable stage --------------------------------
+    // A mannequin on a slowly turning pedestal, lit and filmed by its own
+    // camera into a texture. The soldier page frames that texture, so the
+    // player SEES the kit they are assembling - the piece that turns the
+    // Forge from a save file into an editor.
+    {
+        use bevy::render::camera::RenderTarget;
+        use bevy::render::render_resource::{
+            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        };
+        let size = Extent3d {
+            width: FORGE_PREVIEW_PX,
+            height: FORGE_PREVIEW_PX,
+            depth_or_array_layers: 1,
+        };
+        let mut target = Image {
+            texture_descriptor: TextureDescriptor {
+                label: Some("forge_turntable"),
+                size,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Bgra8UnormSrgb,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            },
+            ..default()
+        };
+        target.resize(size);
+        let image = images.add(target);
+
+        // the stage's own camera - renders BEFORE the main pass
+        commands.spawn((
+            Camera3d::default(),
+            Camera {
+                target: RenderTarget::Image(image.clone()),
+                order: -2,
+                clear_color: ClearColorConfig::Custom(Color::srgb(0.07, 0.055, 0.04)),
+                ..default()
+            },
+            Transform::from_translation(FORGE_STAGE_POS + Vec3::new(1.5, 1.35, 2.1))
+                .looking_at(FORGE_STAGE_POS + Vec3::new(0.0, 0.85, 0.0), Vec3::Y),
+            RenderLayers::layer(FORGE_PREVIEW_LAYER),
+        ));
+        commands.spawn((
+            PointLight {
+                intensity: 300_000.0,
+                range: 12.0,
+                ..default()
+            },
+            Transform::from_translation(FORGE_STAGE_POS + Vec3::new(1.6, 2.6, 1.4)),
+            RenderLayers::layer(FORGE_PREVIEW_LAYER),
+        ));
+
+        // unique cosmetic materials the sync system recolours in place
+        let hat_mat = materials.add(metal(Color::srgb(0.92, 0.90, 0.85), 0.0, 0.5));
+        let tunic_mat = materials.add(metal(Color::srgb(0.80, 0.65, 0.26), 0.0, 0.55));
+        let shell = materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42));
+        let dark = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
+        let bronze_ped = materials.add(metal(Color::srgb(0.55, 0.42, 0.22), 0.3, 0.5));
+
+        // the STAND - everything on it rotates together
+        let stand = commands
+            .spawn((
+                Transform::from_translation(FORGE_STAGE_POS),
+                Visibility::default(),
+            ))
+            .id();
+        let part = |commands: &mut Commands,
+                    mesh: Handle<Mesh>,
+                    mat: Handle<StandardMaterial>,
+                    tr: Vec3,
+                    sc: Vec3| {
+            let e = commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(mat),
+                    Transform {
+                        translation: tr,
+                        rotation: Quat::IDENTITY,
+                        scale: sc,
+                    },
+                ))
+                .set_parent(stand)
+                .id();
+            e
+        };
+        // pedestal
+        part(&mut commands, kit.cyl.clone(), bronze_ped, Vec3::new(0.0, 0.03, 0.0), Vec3::new(0.95, 0.06, 0.95));
+        // mannequin: legs / torso in TUNIC / head / HAT crown + brim
+        part(&mut commands, kit.cyl.clone(), dark.clone(), Vec3::new(-0.09, 0.42, 0.0), Vec3::new(0.11, 0.72, 0.11));
+        part(&mut commands, kit.cyl.clone(), dark.clone(), Vec3::new(0.09, 0.42, 0.0), Vec3::new(0.11, 0.72, 0.11));
+        part(&mut commands, kit.cyl.clone(), tunic_mat.clone(), Vec3::new(0.0, 1.02, 0.0), Vec3::new(0.36, 0.52, 0.26));
+        part(&mut commands, kit.ball.clone(), shell, Vec3::new(0.0, 1.44, 0.0), Vec3::new(0.24, 0.26, 0.24));
+        part(&mut commands, kit.cyl.clone(), hat_mat.clone(), Vec3::new(0.0, 1.60, 0.0), Vec3::new(0.22, 0.12, 0.22));
+        part(&mut commands, kit.cyl.clone(), hat_mat.clone(), Vec3::new(0.0, 1.545, 0.0), Vec3::new(0.40, 0.02, 0.40));
+        // one weapon model per kind, held out beside the mannequin; the
+        // sync system shows the selected primary and hides the rest
+        let mut weapons = [Entity::PLACEHOLDER; N_WEAPONS];
+        for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
+            let model = spawn_weapon_model(&mut commands, &kit, wk, true, false);
+            commands
+                .entity(model)
+                .insert((
+                    Transform {
+                        translation: Vec3::new(0.44, 1.02, 0.0),
+                        // side-on, slightly raked - a display pose
+                        rotation: Quat::from_rotation_y(FRAC_PI_2)
+                            * Quat::from_rotation_x(-0.06),
+                        scale: Vec3::splat(1.15),
+                    },
+                    Visibility::Hidden,
+                ))
+                .set_parent(stand);
+            weapons[wi] = model;
+        }
+        commands.insert_resource(ForgePreview {
+            image,
+            stand,
+            weapons,
+            hat_mat,
+            tunic_mat,
+        });
+    }
 
     // ---- shot / impact FX pools ----------------------------------------
     commands.insert_resource(FxAssets {
@@ -9846,6 +9999,146 @@ fn camera_system(
 /// walk the viewmodel hierarchy once (after the spawn flush) and stamp
 /// every descendant onto the viewmodel layer so only the fixed-FOV
 /// viewmodel camera renders it.
+#[derive(Component)]
+struct TurntableCard;
+
+/// §7.2: attach the turntable card to the intro AFTER both exist.
+///
+/// It cannot be spawned inside `open_intro`: the app boots into Intro and
+/// that first `OnEnter` runs before `setup` has built the stage - the
+/// same startup-ordering trap that once cost the intro its key art. A
+/// late attach needs no ordering at all: whenever an IntroRoot exists
+/// with no card and the stage is ready, the card appears.
+fn attach_turntable_card(
+    mut commands: Commands,
+    fp: Option<Res<ForgePreview>>,
+    intro: Query<Entity, With<IntroRoot>>,
+    existing: Query<(), With<TurntableCard>>,
+) {
+    let Some(fp) = fp else { return };
+    if !existing.is_empty() {
+        return;
+    }
+    let Ok(root) = intro.get_single() else { return };
+    commands.entity(root).with_children(|p| {
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Percent(2.5),
+                top: Val::Percent(22.0),
+                width: Val::Px(264.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(menu_ui::RULE_STAMP_PX)),
+                padding: UiRect::all(Val::Px(menu_ui::U3)),
+                row_gap: Val::Px(menu_ui::U2),
+                ..default()
+            },
+            BackgroundColor(menu_ui::shadow_a(menu_ui::PLATE_A)),
+            BorderColor(branding::palette::BRONZE),
+            BorderRadius::ZERO,
+            ZIndex(menu_ui::ZL_PLATE),
+            OnIntroPage(IntroPage::SOLDIER),
+            TurntableCard,
+        ))
+        .with_children(|card| {
+            menu_ui::eyebrow(card, "TURNTABLE");
+            card.spawn((
+                Node {
+                    width: Val::Px(236.0),
+                    height: Val::Px(236.0),
+                    border: UiRect::all(Val::Px(menu_ui::RULE_HAIR_PX)),
+                    ..default()
+                },
+                BorderColor(menu_ui::gold_a(menu_ui::FRAME_INNER_A)),
+                ImageNode {
+                    image: fp.image.clone(),
+                    ..default()
+                },
+            ));
+            card.spawn((
+                Text::new("your soldier, as equipped"),
+                TextFont {
+                    font_size: menu_ui::T_MICRO,
+                    ..default()
+                },
+                TextColor(branding::palette::PARCHMENT_DIM),
+            ));
+        });
+    });
+}
+
+/// §7.2: stamp the whole turntable stage onto its layer once the spawn
+/// flush has run - RenderLayers does not propagate to children in Bevy
+/// 0.15, the same reason `tag_viewmodel_layer` below exists.
+fn tag_forge_preview_layer(
+    mut done: Local<bool>,
+    mut commands: Commands,
+    fp: Res<ForgePreview>,
+    children: Query<&Children>,
+) {
+    if *done {
+        return;
+    }
+    let mut stack = vec![fp.stand];
+    let mut count = 0usize;
+    while let Some(e) = stack.pop() {
+        commands
+            .entity(e)
+            .insert(RenderLayers::layer(FORGE_PREVIEW_LAYER));
+        count += 1;
+        if let Ok(ch) = children.get(e) {
+            stack.extend(ch.iter().copied());
+        }
+    }
+    if count > 1 {
+        *done = true;
+    }
+}
+
+/// §7.2: the turntable TURNS. Intro only - the stage is invisible
+/// everywhere else, so spinning it would be free but pointless.
+fn forge_preview_spin(
+    time: Res<Time>,
+    fp: Res<ForgePreview>,
+    mut q: Query<&mut Transform>,
+) {
+    if let Ok(mut tf) = q.get_mut(fp.stand) {
+        tf.rotate_y(0.55 * time.delta_secs());
+    }
+}
+
+/// §7.2: the mannequin WEARS the current picks. Hat and tunic recolour
+/// their unique materials in place; the weapon rack shows the selected
+/// primary and hides the rest.
+fn forge_preview_sync(
+    sel: Res<Selected>,
+    fp: Res<ForgePreview>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut vis: Query<&mut Visibility>,
+) {
+    if !sel.is_changed() {
+        return;
+    }
+    let (_, (hr, hg, hb)) = HAT_CHOICES[sel.hat % HAT_CHOICES.len()];
+    if let Some(mat) = materials.get_mut(&fp.hat_mat) {
+        mat.base_color = Color::srgb(hr, hg, hb);
+    }
+    let (_, (tr, tg, tb)) = TUNIC_CHOICES[sel.tunic % TUNIC_CHOICES.len()];
+    if let Some(mat) = materials.get_mut(&fp.tunic_mat) {
+        mat.base_color = Color::srgb(tr, tg, tb);
+    }
+    let show = ALL_WEAPONS.iter().position(|w| *w == sel.loadout[0]);
+    for (wi, e) in fp.weapons.iter().enumerate() {
+        if let Ok(mut v) = vis.get_mut(*e) {
+            *v = if Some(wi) == show {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
+}
+
 fn tag_viewmodel_layer(
     mut done: Local<bool>,
     mut commands: Commands,
