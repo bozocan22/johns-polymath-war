@@ -138,6 +138,11 @@ pub const ROW_H: f32 = 36.0; // 9U
 /// at 36 each that column overran the plate.
 pub const PILL_H: f32 = 28.0; // 7U
 pub const BIND_ROW_H: f32 = 28.0; // 7U
+/// Dense-list row. Settings stacks 17 rows + 4 eyebrows + title + back +
+/// seal; at the standard 36 that column is ~670px against a 619px plate
+/// cap at 720p, and the clip guillotined the BACK row and the seal - the
+/// capture caught it. 30px puts the whole surface at ~600.
+pub const ROW_H_DENSE: f32 = 30.0;
 pub const KEYCAP_MIN_W: f32 = 44.0;
 pub const KEYCAP_H: f32 = 22.0;
 pub const ROW_LABEL_W: f32 = 120.0; // the pick-row label gutter
@@ -608,7 +613,7 @@ pub fn eyebrow(p: &mut ChildBuilder, label: &str) {
         align_items: AlignItems::Center,
         column_gap: Val::Px(U3),
         margin: UiRect {
-            top: Val::Px(U6),
+            top: Val::Px(U4),
             bottom: Val::Px(U3),
             ..default()
         },
@@ -646,6 +651,10 @@ pub fn keycap(p: &mut ChildBuilder, key: &str, essential: bool) {
             padding: UiRect::horizontal(Val::Px(U2)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
+            // A key never wraps. Flex was compressing multi-word caps
+            // ("RMB + SHIFT", "C (hold)") inside narrow bind columns and
+            // the glyphs folded over their own border.
+            flex_shrink: 0.0,
             ..default()
         },
         BorderColor(if essential {
@@ -683,6 +692,20 @@ pub fn menu_row(
     value: Option<&str>,
     keycap_hint: Option<&str>,
 ) -> Entity {
+    menu_row_at(p, tag, kind, name, value, keycap_hint, ROW_H)
+}
+
+/// `menu_row` with an explicit height - the dense surfaces (Settings,
+/// Controls) pass `ROW_H_DENSE`, everything else stays on `ROW_H`.
+pub fn menu_row_at(
+    p: &mut ChildBuilder,
+    tag: impl Bundle,
+    kind: RowKind,
+    name: &str,
+    value: Option<&str>,
+    keycap_hint: Option<&str>,
+    row_h: f32,
+) -> Entity {
     p.spawn((
         Button,
         tag,
@@ -691,7 +714,7 @@ pub fn menu_row(
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             width: Val::Percent(100.0),
-            height: Val::Px(ROW_H),
+            height: Val::Px(row_h),
             padding: UiRect::horizontal(Val::Px(U3)),
             column_gap: Val::Px(U3),
             border: UiRect::left(Val::Px(RULE_KEEL_PX)),
@@ -871,6 +894,35 @@ pub fn page_pips(p: &mut ChildBuilder, count: u8) {
     });
 }
 
+/// One key binding: a keycap and its action, wrapped so the registry's
+/// longest action (99 chars) folds to two lines instead of overrunning
+/// the window - as one format!-padded Text with no width bound, it
+/// rendered ~1300px wide inside the game's own 1280px window.
+pub fn bind_row(p: &mut ChildBuilder, key: &str, action: &str, essential: bool) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        min_height: Val::Px(BIND_ROW_H),
+        column_gap: Val::Px(U3),
+        ..default()
+    })
+    .with_children(|r| {
+        keycap(r, key, essential);
+        r.spawn((
+            Text::new(action.to_string()),
+            TextFont {
+                font_size: T_DATA,
+                ..default()
+            },
+            TextColor(branding::palette::PARCHMENT),
+            Node {
+                max_width: Val::Px(BIND_ACTION_W),
+                ..default()
+            },
+        ));
+    });
+}
+
 // ---- 5. the seal ---------------------------------------------------------
 
 /// The seal at the foot of a plate, plus the surface's exit hint. One
@@ -912,7 +964,12 @@ pub fn seal_footer(
                     ..default()
                 },
                 ImageNode {
-                    image: b.emblem.clone(),
+                    // the 128px LANCZOS reduction, not the 1024px source:
+                    // Bevy generates no mipmaps for UI textures, so a 40px
+                    // draw from 1024 is one bilinear tap over a 25x25
+                    // texel footprint - it samples 4 texels in 625 and
+                    // shimmers. The small copy was resampled offline.
+                    image: b.emblem_small.clone(),
                     // white tint: alpha only, hue untouched
                     color: Color::srgba(1.0, 1.0, 1.0, place.alpha()),
                     ..default()

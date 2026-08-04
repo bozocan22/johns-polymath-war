@@ -156,6 +156,16 @@ const SPLASH_FADE_OUT_S: f32 = 0.45;
 /// it cannot drift from the three numbers above.
 pub const SPLASH_TOTAL_S: f32 = SPLASH_FADE_IN_S + SPLASH_HOLD_S + SPLASH_FADE_OUT_S;
 
+/// Where a skip jumps to: the start of the fade-out. Any key or click
+/// during the splash lands here, so the player is never trapped but the
+/// frame never snaps to black either - the fade-out still plays.
+pub const SPLASH_SKIP_TO_S: f32 = SPLASH_FADE_IN_S + SPLASH_HOLD_S;
+
+/// The one capture script allowed to SEE the splash. Every other script
+/// still skips it. Lives here, beside the skip, so the name and the
+/// guard cannot drift apart.
+pub const CAPTURE_SPLASH_SCRIPT: &str = "splash";
+
 /// Draw order. The splash sits above ALL gameplay and menu UI (the
 /// highest pre-existing `GlobalZIndex` in this crate is 40).
 const Z_SPLASH: i32 = 1000;
@@ -248,6 +258,10 @@ pub struct BrandAssets {
     pub wordmark: Handle<Image>,
     /// The gear-and-helm crest. The mark that recurs in small places.
     pub emblem: Handle<Image>,
+    /// The crest pre-reduced to 128px offline (LANCZOS), for the 32-46px
+    /// placements - UI textures get no mipmaps, so drawing the 1024px
+    /// source that small aliases hard.
+    pub emblem_small: Handle<Image>,
 }
 
 impl BrandAssets {
@@ -256,6 +270,7 @@ impl BrandAssets {
             key_art: asset_server.load("branding/key_art.png"),
             wordmark: asset_server.load("branding/wordmark.png"),
             emblem: asset_server.load("branding/emblem.png"),
+            emblem_small: asset_server.load("branding/emblem_small.png"),
         }
     }
 }
@@ -312,7 +327,30 @@ pub fn splash_alpha(elapsed_s: f32) -> f32 {
     (1.0 - out / SPLASH_FADE_OUT_S).clamp(0.0, 1.0)
 }
 
-fn spawn_splash(commands: &mut Commands, brand: &BrandAssets) {
+/// The BACKDROP's own curve: solid black through fade-in and hold, then
+/// falling with the fade-out. It used to be `a.min(0.96)` - and because
+/// Startup and the first Update run inside the same frame, that
+/// overwrote the spawn's alpha-1.0 with ~0 BEFORE anything was ever
+/// presented. The "black beat" the module doc promises had never once
+/// happened, and 4% of the live world bled through the whole hold.
+pub fn splash_backdrop_alpha(elapsed_s: f32) -> f32 {
+    if elapsed_s < SPLASH_FADE_IN_S + SPLASH_HOLD_S {
+        return 1.0;
+    }
+    let out = elapsed_s - SPLASH_FADE_IN_S - SPLASH_HOLD_S;
+    (1.0 - out / SPLASH_FADE_OUT_S).clamp(0.0, 1.0)
+}
+
+/// The splash's drawn rule-and-boss, faded on the same clock as the art.
+/// Its own marker because the art query is `&mut ImageNode` and these
+/// are plain colour nodes.
+#[derive(Component)]
+struct SplashInk {
+    /// The node's colour at full opacity.
+    gold: bool,
+}
+
+fn spawn_splash(commands: &mut Commands, brand: &BrandAssets, win_aspect: f32) {
     commands
         .spawn((
             Node {
@@ -329,25 +367,50 @@ fn spawn_splash(commands: &mut Commands, brand: &BrandAssets) {
             // then reads as an intentional black beat, not a broken screen.
             BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 1.0)),
             GlobalZIndex(Z_SPLASH),
+            // Block, deliberately - the root is a plain Node, so without
+            // this a click during the splash passes THROUGH it and lands
+            // on an invisible menu button underneath. The one place in
+            // the menu system where Block is correct.
+            bevy::ui::FocusPolicy::Block,
             SplashRoot,
             SplashBackdrop,
         ))
         .with_children(|p| {
-            // Key art, full-bleed behind everything else in the splash.
+            // Key art, COVER-fitted behind everything else. Forcing both
+            // axes to 100% stretched the 16:9 source at every other
+            // window shape; this is the same clip-frame recipe the menu
+            // surfaces use. NOT tinted - the splash is the one moment
+            // the art is allowed to be itself.
             p.spawn((
                 Node {
                     position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    overflow: Overflow::clip(),
                     ..default()
                 },
-                ImageNode {
-                    image: brand.key_art.clone(),
-                    color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-                    ..default()
-                },
-                SplashArt,
-            ));
+            ))
+            .with_children(|f| {
+                let (w, h) = crate::menu_ui::key_art_fit(win_aspect);
+                f.spawn((
+                    Node {
+                        width: w,
+                        height: h,
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    ImageNode {
+                        image: brand.key_art.clone(),
+                        color: Color::srgba(1.0, 1.0, 1.0, 0.0),
+                        ..default()
+                    },
+                    SplashArt,
+                ));
+            });
             // Wordmark, centred and generously sized. Sits in normal
             // flow (not absolute) so it stays centred at any resolution.
             p.spawn((
@@ -362,12 +425,56 @@ fn spawn_splash(commands: &mut Commands, brand: &BrandAssets) {
                 },
                 SplashArt,
             ));
-            // Emblem beneath the wordmark — the mark's first appearance,
-            // establishing it before it recurs small elsewhere.
+            // THE DEVICE'S ESTABLISHING SHOT: a drawn gold rule broken by
+            // a square boss, directly beneath the wordmark - whose own
+            // printed ink is a gold bar broken by the laurel-gear-star.
+            // The printed rule and the drawn rule are the same object at
+            // two fidelities, and this adjacency is where the player is
+            // taught the vocabulary every menu surface then uses.
+            p.spawn(Node {
+                width: Val::Percent(30.0),
+                height: Val::Px(10.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                margin: UiRect::top(Val::Px(14.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                for i in 0..3 {
+                    if i == 1 {
+                        r.spawn((
+                            Node {
+                                width: Val::Px(10.0),
+                                height: Val::Px(10.0),
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BorderColor(Color::NONE),
+                            BackgroundColor(Color::NONE),
+                            SplashInk { gold: true },
+                        ));
+                    } else {
+                        r.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                height: Val::Px(2.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            SplashInk { gold: true },
+                        ));
+                    }
+                }
+            });
+            // Emblem beneath - the mark's first appearance, establishing
+            // it before it recurs small elsewhere. Sized and weighted by
+            // its own placement contract instead of hand-typed pixels.
+            let place = EmblemPlacement::Splash;
             p.spawn((
                 Node {
-                    width: Val::Px(84.0),
-                    height: Val::Px(84.0),
+                    width: Val::Px(place.size_px()),
+                    height: Val::Px(place.size_px()),
                     margin: UiRect::top(Val::Px(18.0)),
                     ..default()
                 },
@@ -384,25 +491,49 @@ fn spawn_splash(commands: &mut Commands, brand: &BrandAssets) {
 /// Drives the fade and tears the splash down exactly once.
 fn drive_splash(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mut st: ResMut<SplashState>,
     mut commands: Commands,
     mut art: Query<&mut ImageNode, With<SplashArt>>,
-    mut backdrop: Query<&mut BackgroundColor, With<SplashBackdrop>>,
+    mut ink: Query<
+        (&SplashInk, &mut BackgroundColor, &mut BorderColor),
+        Without<SplashBackdrop>,
+    >,
+    mut backdrop: Query<&mut BackgroundColor, (With<SplashBackdrop>, Without<SplashInk>)>,
     roots: Query<Entity, With<SplashRoot>>,
 ) {
     if st.done {
         return;
     }
     st.elapsed += time.delta_secs();
+    // Any key or click skips TO THE FADE-OUT, not past it - the player is
+    // never trapped, and the frame never snaps.
+    if keys.get_just_pressed().next().is_some() || buttons.get_just_pressed().next().is_some() {
+        st.elapsed = st.elapsed.max(SPLASH_SKIP_TO_S);
+    }
     let a = splash_alpha(st.elapsed);
 
     for mut img in &mut art {
         img.color = Color::srgba(1.0, 1.0, 1.0, a);
     }
-    // The backdrop fades slightly AHEAD of the art so the menu is never
-    // revealed through a still-opaque black plate.
+    // The drawn rule fades on the art's clock - gold at the art's alpha.
+    for (i, mut bg, mut border) in &mut ink {
+        let c = if i.gold {
+            let g = palette::GOLD.to_srgba();
+            Color::srgba(g.red, g.green, g.blue, a)
+        } else {
+            Color::NONE
+        };
+        bg.0 = c;
+        *border = BorderColor(c);
+    }
+    // The backdrop holds SOLID BLACK through fade-in and hold, then
+    // leads the art out. The old `a.min(0.96)` overwrote the spawn's
+    // opaque black before the first frame was ever presented - the black
+    // beat this module's doc promises had never actually happened.
     for mut bg in &mut backdrop {
-        bg.0 = Color::srgba(0.02, 0.02, 0.03, a.min(0.96));
+        bg.0 = Color::srgba(0.02, 0.02, 0.03, splash_backdrop_alpha(st.elapsed));
     }
 
     if st.elapsed >= SPLASH_TOTAL_S {
@@ -502,13 +633,26 @@ fn spawn_brand_ui(
     mut commands: Commands,
     brand: Res<BrandAssets>,
     mut splash: ResMut<SplashState>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    if std::env::var("JK_CAPTURE").is_ok() {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(16.0 / 9.0);
+    // Captures skip the splash - EXCEPT the one script whose whole job is
+    // to photograph it. "Visible or it didn't happen" applies to the
+    // splash too, and a guard that skipped it unconditionally made any
+    // splash change unprovable under the project's own rule.
+    let skip = match std::env::var("JK_CAPTURE") {
+        Ok(script) => script != CAPTURE_SPLASH_SCRIPT,
+        Err(_) => false,
+    };
+    if skip {
         // Mark it finished so `drive_splash` returns immediately and
         // never tries to tear down a tree that was never spawned.
         splash.done = true;
     } else {
-        spawn_splash(&mut commands, &brand);
+        spawn_splash(&mut commands, &brand, aspect);
     }
     // The mark is always present — it is the game's identity, not a
     // splash flourish, and captures SHOULD show it.
@@ -563,6 +707,24 @@ mod tests {
             );
             t += 0.01;
         }
+    }
+
+    /// The backdrop must hold SOLID black through fade-in and hold -
+    /// that is the black beat - then lead the art out.
+    #[test]
+    fn splash_backdrop_holds_black_then_releases() {
+        assert_eq!(splash_backdrop_alpha(0.0), 1.0, "black at frame zero");
+        assert_eq!(
+            splash_backdrop_alpha(SPLASH_FADE_IN_S * 0.5),
+            1.0,
+            "still black mid fade-in - the art fades up OVER it"
+        );
+        assert_eq!(splash_backdrop_alpha(SPLASH_SKIP_TO_S), 1.0, "black to the last moment of hold");
+        let mid = splash_backdrop_alpha(SPLASH_SKIP_TO_S + SPLASH_FADE_OUT_S * 0.5);
+        assert!((mid - 0.5).abs() < 1e-5, "half-faded mid fade-out, got {mid}");
+        assert!(splash_backdrop_alpha(SPLASH_TOTAL_S) < 1e-5, "gone at the end");
+        // and the skip point is derived, not hand-typed
+        assert!((SPLASH_SKIP_TO_S - (SPLASH_FADE_IN_S + SPLASH_HOLD_S)).abs() < 1e-6);
     }
 
     /// The splash's total cost is DERIVED from its three phases. If

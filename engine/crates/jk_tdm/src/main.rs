@@ -23,7 +23,8 @@
 //! Controls: WASD move - SPACE jump - Q dodge roll - V first/third person -
 //! mouse look - LEFT CLICK fire - RIGHT CLICK focus/aim (hold; a two-stage
 //! zoom cycle on scoped guns, a draw on bow/spear) - CTRL/C crouch -
-//! SHIFT walk (quiet + steady) - ALT sprint - R reload - TAB scoreboard -
+//! SHIFT sprint - RIGHT CLICK + SHIFT drops into a steady SILENT walk that
+//! stays on when you release right click - R reload - TAB scoreboard -
 //! ESC menu. Mouse buttons swap in Settings.
 
 mod branding;
@@ -59,6 +60,8 @@ struct Game {
     pending_slot: Option<u8>,
     /// §5: G pressed - cycle the selected throwable (edge, latched).
     pending_cycle_throw: bool,
+    /// §5: the throwable is in hand (G). RMB aims it, LMB throws it.
+    nade_ready: bool,
 }
 
 #[derive(Resource)]
@@ -67,6 +70,10 @@ struct CamCtl {
     pitch: f32,
     grabbed: bool,
     ads: bool,
+    /// §3.6: the LATCHED steady stance. Entered by holding focus and
+    /// pressing Shift; survives releasing focus; ends when Shift is
+    /// released. While it is set, Shift walks instead of sprinting.
+    steady: bool,
     recoil: f32,
     /// V toggles: first-person (hands + viewmodel) vs third-person.
     first_person: bool,
@@ -129,6 +136,7 @@ impl Default for CamCtl {
             pitch: 0.08,
             grabbed: false,
             ads: false,
+            steady: false,
             recoil: 0.0,
             first_person: false,
             ads_t: 0.0,
@@ -1745,7 +1753,7 @@ const VM_AIR_BOB: f32 = 0.2;
 /// Mouse-sway rotational cap, degrees (Brief VI: 0.3°).
 const VM_SWAY_CAP_DEG: f32 = 0.3;
 /// Fire back-slide: ≤ 1.5 cm along the barrel, returned in ≤ 120 ms.
-const VM_KICK_SLIDE_M: f32 = 0.015;
+const VM_KICK_SLIDE_M: f32 = 0.015 * VIEW_KICK_TRIM;
 const VM_KICK_RETURN_S: f32 = 0.12;
 /// §1.4a screen-intrusion budgets: every weapon's geometry must fit a
 /// two-part envelope around the vm root - a RECEIVER box (wide but low)
@@ -2429,6 +2437,9 @@ struct MinimapHill;
 struct MinimapPlayer;
 
 const MINIMAP_PX: f32 = 170.0;
+/// Top inset for the minimap. Clears the K/D line that shares this
+/// corner rather than overlapping it.
+const MINIMAP_TOP_PX: f32 = 52.0;
 
 // ---- AWM scope overlay ---------------------------------------------------
 
@@ -2569,44 +2580,67 @@ enum GameState {
 // controls screen and the first-run card are GENERATED from it, so they
 // can never drift from reality. Every new action registers here.
 
+/// §1.2: the grouping the registry's own doc comment has promised since
+/// it was written ("ONE table owns every action's bind, display name,
+/// and grouping") - the field never existed until now.
+#[derive(Clone, Copy, PartialEq)]
+enum BindGroup {
+    Move,
+    Fight,
+    Gear,
+    View,
+}
+
+impl BindGroup {
+    const ALL: [BindGroup; 4] = [Self::Move, Self::Fight, Self::Gear, Self::View];
+    fn title(self) -> &'static str {
+        match self {
+            Self::Move => "MOVEMENT",
+            Self::Fight => "COMBAT",
+            Self::Gear => "GEAR",
+            Self::View => "VIEW AND INFO",
+        }
+    }
+}
+
 struct Bind {
     key: &'static str,
     action: &'static str,
     /// Shown on the one-time first-run card (the non-obvious binds).
     essential: bool,
+    group: BindGroup,
 }
 
 const BIND_REGISTRY: &[Bind] = &[
-    Bind { key: "W A S D", action: "Move", essential: false },
-    Bind { key: "MOUSE", action: "Look", essential: false },
-    Bind { key: "LMB", action: "Fire", essential: false },
-    Bind { key: "RMB", action: "HOLD: focus/aim - scope zoom cycle (heavy rifle), draw (bow, spear)", essential: false },
-    Bind { key: "T", action: "Inspect weapon", essential: false },
-    Bind { key: "SHIFT", action: "Walk - slow, SILENT, steadier recoil", essential: true },
-    Bind { key: "ALT", action: "Sprint", essential: false },
-    // §4.3 (Brief VI): mech FLIGHT IS DELETED in the sim - the chassis
-    // never leaves the ground. These strings promised thrusters the
-    // simulation has not had for two briefs.
-    Bind { key: "SPACE", action: "Jump", essential: true },
-    Bind { key: "CTRL", action: "Crouch", essential: false },
-    Bind { key: "Q", action: "Ground: dodge roll - Air + direction: FLIP (no firing)", essential: true },
-    Bind { key: "V or O", action: "Camera: first <-> third person", essential: true },
-    Bind { key: "E", action: "Shield stance (throwables only while up)", essential: true },
-    Bind { key: "F", action: "Knife - tap: slash, hold: lunge (backstab kills)", essential: true },
-    Bind { key: "C (hold)", action: "Armor ability (brace / flame / repulsor)", essential: true },
-    Bind { key: "G", action: "Cycle throwable (frag/flash/smoke/molotov)", essential: true },
-    Bind { key: "H / Mouse4", action: "HOLD: aim throw (arc previews, power charges) - release: throw", essential: true },
-    Bind { key: "B", action: "Cancel aimed throw (keeps the grenade)", essential: false },
-    Bind { key: "U", action: "Dismount the mech (chassis is scrapped; the pad respawns)", essential: false },
-    Bind { key: "Y (hold)", action: "Mech missile pod: hold to LOCK a mech (1.3s), release to fire - tap: dumb-fire. Never locks infantry", essential: false },
-    Bind { key: "1 2 3", action: "Weapon slots", essential: false },
-    Bind { key: "R", action: "Reload", essential: false },
-    Bind { key: "Z / X", action: "Lean left / right", essential: false },
-    Bind { key: "TAB", action: "Scoreboard", essential: false },
-    Bind { key: "M", action: "Minimap on/off", essential: false },
-    Bind { key: "F3", action: "Hit-zone debug rings", essential: false },
-    Bind { key: "F4", action: "Rig joint markers (gap view)", essential: false },
-    Bind { key: "ESC", action: "Menu", essential: false },
+    Bind { key: "W A S D", action: "Move", essential: false, group: BindGroup::Move },
+    Bind { key: "SHIFT", action: "Sprint", essential: false, group: BindGroup::Move },
+    Bind { key: "RMB + SHIFT", action: "Steady walk - slow, SILENT, steadier. Stays on when you release RMB", essential: true, group: BindGroup::Move },
+    Bind { key: "SPACE", action: "Jump (crouch first to jump higher)", essential: true, group: BindGroup::Move },
+    Bind { key: "CTRL", action: "Crouch", essential: false, group: BindGroup::Move },
+    Bind { key: "Q", action: "Ground: dodge roll - Air + direction: FLIP (no firing)", essential: true, group: BindGroup::Move },
+    Bind { key: "LMB", action: "Fire", essential: false, group: BindGroup::Fight },
+    Bind { key: "RMB", action: "HOLD: focus/aim - scope zoom cycle (heavy rifle), draw (bow, spear)", essential: false, group: BindGroup::Fight },
+    Bind { key: "F", action: "Knife - tap: slash, hold: lunge (backstab kills)", essential: true, group: BindGroup::Fight },
+    Bind { key: "C (hold)", action: "Armor ability (brace / flame / repulsor)", essential: true, group: BindGroup::Fight },
+    // §5 (owner): the grenade grammar changed this session and the
+    // registry must say what the hands actually do now.
+    Bind { key: "G", action: "Grenade to hand (again: cycle type) - RMB aims the arc, LMB throws", essential: true, group: BindGroup::Fight },
+    Bind { key: "H / Mouse4", action: "Legacy: hold to cook, release to throw", essential: false, group: BindGroup::Fight },
+    Bind { key: "B", action: "Stow the grenade / cancel an aimed throw (keeps it)", essential: false, group: BindGroup::Fight },
+    Bind { key: "E", action: "Shield stance (throwables only while up)", essential: true, group: BindGroup::Fight },
+    Bind { key: "1 2 3", action: "Weapon slots", essential: false, group: BindGroup::Fight },
+    Bind { key: "R", action: "Reload", essential: false, group: BindGroup::Fight },
+    Bind { key: "U", action: "Dismount the mech (chassis is scrapped; the pad respawns)", essential: false, group: BindGroup::Gear },
+    Bind { key: "Y (hold)", action: "Mech missile pod: hold to LOCK a mech (1.3s), release to fire - tap: dumb-fire. Never locks infantry", essential: false, group: BindGroup::Gear },
+    Bind { key: "T", action: "Inspect weapon", essential: false, group: BindGroup::Gear },
+    Bind { key: "MOUSE", action: "Look", essential: false, group: BindGroup::View },
+    Bind { key: "V or O", action: "Camera: first <-> third person", essential: true, group: BindGroup::View },
+    Bind { key: "Z / X", action: "Lean left / right", essential: false, group: BindGroup::View },
+    Bind { key: "TAB", action: "Scoreboard", essential: false, group: BindGroup::View },
+    Bind { key: "M", action: "Minimap on/off", essential: false, group: BindGroup::View },
+    Bind { key: "F3", action: "Hit-zone debug rings", essential: false, group: BindGroup::View },
+    Bind { key: "F4", action: "Rig joint markers (gap view)", essential: false, group: BindGroup::View },
+    Bind { key: "ESC", action: "Menu", essential: false, group: BindGroup::View },
 ];
 
 /// §1.2: armor pads must announce themselves - the sets were shipped and
@@ -2875,16 +2909,14 @@ const MAP_LAP_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((4.7124, 0.05)), snap: Some("04-west"), ..beat(2.4) },
     CapBeat {
         look: Some((0.7854, 0.02)),
-        // §3.6: sprint is ALT now - Shift here would have walked the lap
-        // at half pace and silently changed what these frames show.
-        press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::AltLeft)],
+        press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
         ..beat(2.8)
     },
     CapBeat { snap: Some("05-sprint-leg-1"), ..beat(4.2) },
     CapBeat { look: Some((2.3562, 0.02)), ..beat(4.4) },
     CapBeat { snap: Some("06-sprint-leg-2"), ..beat(5.8) },
     CapBeat {
-        release: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::AltLeft)],
+        release: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
         snap: Some("07-lap-end"),
         ..beat(6.2)
     },
@@ -2929,7 +2961,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 9] = [
+const CAPTURE_SCRIPTS: [&str; 10] = [
     "baseline",
     "idle_life",
     "bow_draw",
@@ -2939,7 +2971,49 @@ const CAPTURE_SCRIPTS: [&str; 9] = [
     "menus",
     "traversal",
     "map_lap",
+    branding::CAPTURE_SPLASH_SCRIPT,
 ];
+
+/// Photograph the splash: mid-hold (full art + wordmark + rule), then
+/// mid-fade-out, then exit. Wall-clock driven like `capture_menus`.
+fn capture_splash(
+    mut commands: Commands,
+    cap: Res<CaptureMode>,
+    time: Res<Time>,
+    mut t: Local<f32>,
+    mut stage: Local<usize>,
+    window: Query<Entity, With<PrimaryWindow>>,
+) {
+    if cap.script.as_deref() != Some(branding::CAPTURE_SPLASH_SCRIPT) {
+        return;
+    }
+    *t += time.delta_secs();
+    let snap = |commands: &mut Commands, label: &str| {
+        let dir = capture_dir(branding::CAPTURE_SPLASH_SCRIPT);
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(win) = window.get_single() {
+            commands
+                .spawn(Screenshot::window(win))
+                .observe(bevy::render::view::screenshot::save_to_disk(format!(
+                    "{dir}/{label}.png"
+                )));
+        }
+    };
+    match *stage {
+        // mid-hold: fade-in complete, everything at full strength
+        0 if *t > branding::SPLASH_SKIP_TO_S - 0.3 => {
+            snap(&mut commands, "01-hold");
+            *stage = 1;
+        }
+        // mid fade-out: the backdrop leading the art out
+        1 if *t > branding::SPLASH_SKIP_TO_S + 0.2 => {
+            snap(&mut commands, "02-fade-out");
+            *stage = 2;
+        }
+        2 if *t > branding::SPLASH_SKIP_TO_S + 1.2 => std::process::exit(0),
+        _ => {}
+    }
+}
 
 fn init_capture_mode(mut cap: ResMut<CaptureMode>) {
     if let Ok(script) = std::env::var("JK_CAPTURE") {
@@ -2975,7 +3049,14 @@ fn capture_quick_deploy(
     // "menus" stays in Intro on purpose - it is capturing the loadout
     // and settings SCREENS, which never enter Playing at all, so the
     // Playing-gated drivers below can never see them.
-    if cap.script.as_deref() == Some("menus") {
+    // UI scripts stay in Intro on purpose - they capture SCREENS, which
+    // never enter Playing at all, so the Playing-gated drivers below
+    // could never see them. A new UI script added without this guard is
+    // silently dropped into a fight instead.
+    if matches!(
+        cap.script.as_deref(),
+        Some("menus") | Some(branding::CAPTURE_SPLASH_SCRIPT)
+    ) {
         return;
     }
     *started = true;
@@ -3254,7 +3335,25 @@ fn capture_menus(
             snap(&mut commands, "05-pause");
             *stage = 9;
         }
-        9 if *t > 7.4 => std::process::exit(0),
+        // Manual and Controls had no capture coverage at all - the same
+        // hole the pause menu sat in until it became the pilot surface.
+        9 if *t > 7.2 => {
+            next.set(GameState::Manual);
+            *stage = 10;
+        }
+        10 if *t > 8.2 => {
+            snap(&mut commands, "06-manual");
+            *stage = 11;
+        }
+        11 if *t > 8.8 => {
+            next.set(GameState::Controls);
+            *stage = 12;
+        }
+        12 if *t > 9.8 => {
+            snap(&mut commands, "07-controls");
+            *stage = 13;
+        }
+        13 if *t > 10.6 => std::process::exit(0),
         _ => {}
     }
 }
@@ -3596,27 +3695,66 @@ enum SettingsButtonKind {
 /// handler and the label text cannot disagree about what exists - the
 /// list used to be hand-written inline in `open_settings` only.
 /// (`Back` is not here: it has no value to show.)
-const SETTINGS_ROWS: [(SettingsButton, SettingsButtonKind); 17] = [
-    (SettingsButton::Sens, SettingsButtonKind::Sens),
-    (SettingsButton::Fov, SettingsButtonKind::Fov),
-    (SettingsButton::InvertY, SettingsButtonKind::InvertY),
-    (SettingsButton::SwapMouse, SettingsButtonKind::SwapMouse),
-    (SettingsButton::Minimap, SettingsButtonKind::Minimap),
-    // §4.3: the two minimap tunables sit directly under the on/off that
-    // governs them, so the group reads as one idea.
-    (SettingsButton::MinimapRotate, SettingsButtonKind::MinimapRotate),
-    (SettingsButton::MinimapScale, SettingsButtonKind::MinimapScale),
-    (SettingsButton::VitalsStyle, SettingsButtonKind::VitalsStyle),
-    (SettingsButton::CrossSize, SettingsButtonKind::CrossSize),
-    (SettingsButton::CrossGap, SettingsButtonKind::CrossGap),
-    (SettingsButton::CrossThickness, SettingsButtonKind::CrossThickness),
-    (SettingsButton::CrossDot, SettingsButtonKind::CrossDot),
-    (SettingsButton::CrossOutline, SettingsButtonKind::CrossOutline),
-    (SettingsButton::CrossColor, SettingsButtonKind::CrossColor),
-    (SettingsButton::CrossAlpha, SettingsButtonKind::CrossAlpha),
-    (SettingsButton::CrossTShape, SettingsButtonKind::CrossTShape),
-    (SettingsButton::CrossDynamic, SettingsButtonKind::CrossDynamic),
+/// Settings sections.
+///
+/// The old table's own comment claimed the two minimap tunables "sit
+/// directly under the on/off that governs them, so the group reads as one
+/// idea". They did not: the layout wrapped ROW-MAJOR into two columns, so
+/// Minimap landed in the left cell and MinimapRotate in the RIGHT cell of
+/// the same visual line. Sections are explicit now, and a column holds
+/// WHOLE sections, so the grouping the comment promised is finally the
+/// grouping on screen.
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsGroup {
+    Aim,
+    Minimap,
+    Hud,
+    Crosshair,
+}
+
+impl SettingsGroup {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Aim => "AIM AND VIEW",
+            Self::Minimap => "MINIMAP",
+            Self::Hud => "HUD",
+            Self::Crosshair => "CROSSHAIR",
+        }
+    }
+}
+
+/// Every value row, grouped. REORDERING IS SAFE: `settings_buttons`
+/// matches on the VARIANT, never on an index or a position - which is the
+/// single most important fact about this surface.
+const SETTINGS_ROWS: [(SettingsButton, SettingsButtonKind, SettingsGroup); 17] = [
+    (SettingsButton::Sens, SettingsButtonKind::Sens, SettingsGroup::Aim),
+    (SettingsButton::Fov, SettingsButtonKind::Fov, SettingsGroup::Aim),
+    (SettingsButton::InvertY, SettingsButtonKind::InvertY, SettingsGroup::Aim),
+    (SettingsButton::SwapMouse, SettingsButtonKind::SwapMouse, SettingsGroup::Aim),
+    (SettingsButton::Minimap, SettingsButtonKind::Minimap, SettingsGroup::Minimap),
+    (SettingsButton::MinimapRotate, SettingsButtonKind::MinimapRotate, SettingsGroup::Minimap),
+    (SettingsButton::MinimapScale, SettingsButtonKind::MinimapScale, SettingsGroup::Minimap),
+    (SettingsButton::VitalsStyle, SettingsButtonKind::VitalsStyle, SettingsGroup::Hud),
+    (SettingsButton::CrossSize, SettingsButtonKind::CrossSize, SettingsGroup::Crosshair),
+    (SettingsButton::CrossGap, SettingsButtonKind::CrossGap, SettingsGroup::Crosshair),
+    (SettingsButton::CrossThickness, SettingsButtonKind::CrossThickness, SettingsGroup::Crosshair),
+    (SettingsButton::CrossDot, SettingsButtonKind::CrossDot, SettingsGroup::Crosshair),
+    (SettingsButton::CrossOutline, SettingsButtonKind::CrossOutline, SettingsGroup::Crosshair),
+    (SettingsButton::CrossColor, SettingsButtonKind::CrossColor, SettingsGroup::Crosshair),
+    (SettingsButton::CrossAlpha, SettingsButtonKind::CrossAlpha, SettingsGroup::Crosshair),
+    (SettingsButton::CrossTShape, SettingsButtonKind::CrossTShape, SettingsGroup::Crosshair),
+    (SettingsButton::CrossDynamic, SettingsButtonKind::CrossDynamic, SettingsGroup::Crosshair),
 ];
+
+/// The tests assert on `settings_label_text`'s FULL "Name: value" string -
+/// that every one is non-empty, globally distinct, and changes when its
+/// field changes. So the function keeps returning the whole thing, and the
+/// two-node split is derived HERE, at the call site, where it cannot
+/// disturb six tests.
+fn split_label(full: &str) -> (&str, &str) {
+    full.split_once(": ").unwrap_or((full, ""))
+}
+
 
 fn main() {
     App::new()
@@ -3655,7 +3793,7 @@ fn main() {
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
         // menu capture runs in the MENU states, not Playing
-        .add_systems(Update, capture_menus)
+        .add_systems(Update, (capture_menus, capture_splash))
         // PreUpdate, not Update: a synthetic `.press()` only sets
         // just_pressed for one frame, same as real OS input — but real
         // input arrives in PreUpdate (guaranteed before every Update
@@ -3836,11 +3974,15 @@ fn main() {
 fn grenade_arc(
     game: Res<Game>,
     arc: Res<GrenadeArcVis>,
+    cam_ctl: Res<CamCtl>,
     cam_q: Query<&Transform, With<MainCam>>,
     mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
-    let show = p.alive() && p.cook_t > 0.0;
+    // §5 (owner): the arc is what RIGHT CLICK buys. Holding a grenade
+    // shows nothing; AIMING it draws the flight. You can still throw
+    // blind - it just does not tell you where it lands.
+    let show = p.alive() && p.cook_t > 0.0 && cam_ctl.ads;
     if !show {
         for e in arc.pre.iter().chain(arc.post.iter()).chain([&arc.ring]) {
             if let Ok((_, mut v)) = q.get_mut(*e) {
@@ -4324,8 +4466,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.05), 0.0, (0.042, 0.045, 0.20)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.05, -0.01), 0.18, (0.042, 0.13, 0.06)));
             parts.push(wp(false, Tone::Black, (0.0, -0.018, 0.048), 0.0, (0.012, 0.012, 0.05)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
         }
         GunKind::Deagle => {
             // the hand cannon: long light slide, heavy dark frame
@@ -4334,8 +4476,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.07), 0.0, (0.048, 0.05, 0.24)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
             push_muzzle(&mut parts, 0.055, 0.27, 0.055);
-            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
         }
         GunKind::Mp5 => {
             // compact SMG: short everything - slab receiver, raked mag
@@ -4350,6 +4492,11 @@ fn spawn_weapon_model(
             // receiver - nothing protrudes past the grip line
             parts.push(wp(false, Tone::Mid, (0.0, 0.02, -0.135), 0.0, (0.046, 0.075, 0.018)));
             parts.push(wp(false, Tone::Dark, (0.055, 0.025, 0.02), 0.0, (0.016, 0.02, 0.26)));
+            // §5 (owner): the MP5 was the one gun with no sights modelled
+            // at all. Rear notch on the receiver, front post at the muzzle
+            // end, both at the same height so they line up.
+            parts.push(wp(false, Tone::Light, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.088, -0.02), 0.0, (0.014, 0.014, 0.01)));
         }
         GunKind::Shotgun => {
             // pump gun: barrel + tube pair over a light pump
@@ -4359,7 +4506,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Light, (0.0, -0.015, 0.30), 0.0, (0.054, 0.05, 0.16)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
         }
         GunKind::Ak47 => {
             // the classic: long gas tube, big two-segment raked magazine
@@ -4373,8 +4520,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.045);
             push_muzzle(&mut parts, 0.045, 0.635, 0.038);
-            parts.push(wd(false, Tone::Light, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
         }
         GunKind::M4 => {
             // modern carbine: notched top rail, straight raked mag
@@ -4388,8 +4535,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Mid, (0.0, -0.09, 0.06), 0.15, (0.038, 0.16, 0.08)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.05);
-            parts.push(wd(false, Tone::Light, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
         }
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
@@ -4416,7 +4563,7 @@ fn spawn_weapon_model(
             push_stock(&mut parts, -0.30, 0.05);
             parts.push(wp(false, Tone::Dark, (0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
             parts.push(wp(false, Tone::Dark, (-0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
         }
         GunKind::Bow => {
             // hard-surface war bow: dark blocky limbs, mid riser, light tips
@@ -5457,6 +5604,7 @@ fn setup(
         pending_shield: false,
         pending_slot: None,
         pending_cycle_throw: false,
+        nade_ready: false,
     };
     commands.insert_resource(Selected::default());
     // settings survive restarts now - loaded from config/settings.txt,
@@ -6565,7 +6713,10 @@ fn setup(
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(14.0),
-                bottom: Val::Px(16.0),
+                // TOP-left (owner). It sat bottom-left, which put it in
+                // the same corner as the vitals cluster and left the top
+                // -left anchor HUD_ANCHORS already reserves for it empty.
+                top: Val::Px(MINIMAP_TOP_PX),
                 width: Val::Px(MINIMAP_PX),
                 height: Val::Px(MINIMAP_PX),
                 ..default()
@@ -7055,8 +7206,29 @@ fn input_and_step(
     if keys.just_pressed(KeyCode::KeyE) {
         game.pending_shield = true;
     }
+    // §5 (owner, revised): G PUTS THE GRENADE IN YOUR HAND.
+    //
+    // It used to only cycle which throwable was selected, and the actual
+    // throw lived on a separate hold-H-and-release - two hands, three
+    // keys, and no way to see what you were about to throw until you were
+    // already committed to throwing it. Now:
+    //
+    //   G          equip / stow the throwable (tap again to put it away)
+    //   RIGHT CLICK aim it - the arc preview appears
+    //   LEFT CLICK  throw
+    //
+    // G on an ALREADY-equipped grenade cycles to the next type rather than
+    // stowing, so the old cycling is still reachable without a second key.
     if keys.just_pressed(KeyCode::KeyG) {
-        game.pending_cycle_throw = true; // §5: cycle the throwable
+        if game.nade_ready {
+            game.pending_cycle_throw = true;
+        } else {
+            game.nade_ready = true;
+        }
+    }
+    // B stows without throwing, and still cancels a live aim.
+    if keys.just_pressed(KeyCode::KeyB) {
+        game.nade_ready = false;
     }
     for (key, s) in [
         (KeyCode::Digit1, 0u8),
@@ -7082,12 +7254,36 @@ fn input_and_step(
     //
     // Walk is NOT gated on `!ads` the way sprint is. Focus-and-creep is
     // the exact combination the mechanic exists to enable.
-    let walking = keys.pressed(KeyCode::ShiftLeft);
-    let sprinting = keys.pressed(KeyCode::AltLeft) && !ads && !walking;
+    // §3.6 (owner, revised): SHIFT IS SPRINT AGAIN. The steady walk did
+    // not need its own key - it needed a STANCE.
+    //
+    // Hold RIGHT-CLICK (focus) and press SHIFT and you drop into a
+    // steady, silent walk. Then - and this is the point - LET GO OF
+    // RIGHT-CLICK and you stay in it, for as long as Shift is held. So
+    // the approach is: focus, settle, release the aim, and creep in.
+    // Shift on its own, from a standing start, still sprints.
+    //
+    // Latched rather than held, because the whole use case is a long
+    // quiet approach and holding two buttons for the length of one is
+    // a hand cramp, not a mechanic.
+    let shift = keys.pressed(KeyCode::ShiftLeft);
+    if !shift {
+        cam.steady = false; // releasing the key always ends the stance
+    } else if ads {
+        cam.steady = true; // RMB + Shift enters it
+    }
+    let steady = shift && cam.steady;
+    let walking = steady;
+    let sprinting = shift && !steady && !ads;
     if keys.just_pressed(KeyCode::KeyQ)
         || (sprinting && keys.just_pressed(KeyCode::ControlLeft))
     {
         game.pending_dodge = true;
+    }
+    // The click that throws also empties the hand - otherwise the flag
+    // stays set and the next grenade starts cooking on its own.
+    if game.nade_ready && buttons.just_pressed(fire_btn) {
+        game.nade_ready = false;
     }
     let mut cmd = PlayerCmd {
         move_x: world.x,
@@ -7107,8 +7303,16 @@ fn input_and_step(
         slot: game.pending_slot,
         shield: game.pending_shield,
         lean,
-        // §5: hold H (or Mouse4) to cook, release to throw
-        throw_hold: keys.pressed(KeyCode::KeyH) || buttons.pressed(MouseButton::Back),
+        // §5: the grenade is HELD from the moment it is equipped, and
+        // leaves on the falling edge - which is what the sim already
+        // watches for. So LEFT CLICK throws simply by dropping this
+        // false for one tick.
+        //
+        // H and Mouse4 stay wired as the old hold-to-cook, so muscle
+        // memory and the capture scripts both keep working.
+        throw_hold: (game.nade_ready && !buttons.just_pressed(fire_btn))
+            || keys.pressed(KeyCode::KeyH)
+            || buttons.pressed(MouseButton::Back),
         // §1 (Brief V): B cancels the aimed throw, grenade kept
         throw_cancel: keys.just_pressed(KeyCode::KeyB),
         // §4.6 (Brief VI): U dismounts the mech
@@ -9624,7 +9828,7 @@ fn fp_viewmodel(
             sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y
                 + lr * LOWREADY_YAW,
         ) * Quat::from_rotation_x(
-            kick_vm * 0.16
+            kick_vm * 0.16 * VIEW_KICK_TRIM
                 + breathe
                 + sway_rad.y
                 + st.pitch_lag
@@ -9635,7 +9839,7 @@ fn fp_viewmodel(
                 - wind * 0.55
                 + 0.22 * ie
                 - lr * LOWREADY_PITCH,
-        ) * Quat::from_rotation_z(kick_vm * 0.07 + rl_e.z + mel_e.z + 0.08 * gr);
+        ) * Quat::from_rotation_z(kick_vm * 0.07 * VIEW_KICK_TRIM + rl_e.z + mel_e.z + 0.08 * gr);
     }
 }
 
@@ -11302,50 +11506,73 @@ fn esc_toggle(
 
 /// §1.2: the Controls screen - GENERATED from the keybind registry, so it
 /// can never drift from what the game actually binds.
-fn open_controls(mut commands: Commands, mut cam: ResMut<CamCtl>) {
-    cam.ads = false; // no stale scope glass over the menu
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
+fn open_controls(
+    mut commands: Commands,
+    mut cam: ResMut<CamCtl>,
+    brand: Option<Res<branding::BrandAssets>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(menu_ui::KEY_ART_ASPECT);
+    // Controls used to take only Commands, which was safe purely because
+    // it is reachable only from Paused (whose opener had already released
+    // the cursor). Any future entry path would have soft-locked it with a
+    // grabbed, invisible cursor - so it releases for itself now.
+    release_cursor(&mut cam, &mut windows);
+    cam.ads = false;
+
+    let brand = brand.as_deref();
+    let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
+    commands.entity(root).insert(ControlsRoot).with_children(|p| {
+        menu_ui::plate(p, menu_ui::PLATE_W_CONTROLS, |b| {
+            menu_ui::title(b, "CONTROLS");
+            menu_ui::rule_and_boss(b, true);
+            // Four group columns, wrapping. The old screen was the whole
+            // 27-row registry as ONE format!-padded Text with no width
+            // bound: the longest row rendered ~1300px wide inside the
+            // game's own 1280px window, overrunning both edges.
+            // THREE columns, sized by flex rather than a fixed width.
+            // The first cut of this screen wrapped four fixed-460px
+            // group columns 2x2 - and the second row fell off the plate,
+            // exactly the overflow the settings screen had already
+            // taught. Column 1 stacks the two short groups; the capture
+            // gate caught it, not the code review.
+            const COLS: [&[BindGroup]; 3] = [
+                &[BindGroup::Move, BindGroup::Gear],
+                &[BindGroup::Fight],
+                &[BindGroup::View],
+            ];
+            b.spawn(Node {
                 width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_direction: FlexDirection::Column,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(menu_ui::U6),
+                align_items: AlignItems::FlexStart,
                 ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.92)),
-            GlobalZIndex(30),
-            ControlsRoot,
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("CONTROLS"),
-                TextFont {
-                    font_size: 34.0,
-                    ..default()
-                },
-                TextColor(branding::palette::GOLD),
-                Node {
-                    margin: UiRect::bottom(Val::Px(16.0)),
-                    ..default()
-                },
-            ));
-            let mut body = String::new();
-            for b in BIND_REGISTRY {
-                body += &format!("{:<12}  {}\n", b.key, b.action);
-            }
-            body += "\nESC - back";
-            p.spawn((
-                Text::new(body),
-                TextFont {
-                    font_size: 19.0,
-                    ..default()
-                },
-                TextColor(branding::palette::PARCHMENT),
-            ));
+            })
+            .with_children(|row| {
+                for groups in COLS {
+                    row.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: Val::Px(0.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(menu_ui::U),
+                        ..default()
+                    })
+                    .with_children(|col| {
+                        for g in groups {
+                            menu_ui::eyebrow(col, g.title());
+                            for bind in BIND_REGISTRY.iter().filter(|x| x.group == *g) {
+                                menu_ui::bind_row(col, bind.key, bind.action, bind.essential);
+                            }
+                        }
+                    });
+                }
+            });
+            menu_ui::seal_footer(b, brand, Some(("ESC", "BACK")));
         });
+    });
 }
 
 fn close_controls(mut commands: Commands, q: Query<Entity, With<ControlsRoot>>) {
@@ -11379,7 +11606,7 @@ fn first_run_card(
                     flex_direction: FlexDirection::Column,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.05, 0.07, 0.10, 0.85)),
+                BackgroundColor(menu_ui::shadow_a(0.88)),
                 GlobalZIndex(25),
                 FirstRunRoot,
                 HudRoot,
@@ -11393,18 +11620,24 @@ fn first_run_card(
                     },
                     TextColor(branding::palette::GOLD),
                 ));
-                let mut body = String::new();
+                // the SAME gold-ruled keycaps the Controls screen uses - one
+                // visual language for a key, on both surfaces
                 for b in BIND_REGISTRY.iter().filter(|b| b.essential) {
-                    body += &format!("{:<10} {}\n", b.key, b.action);
+                    menu_ui::bind_row(p, b.key, b.action, true);
                 }
-                body += "\nARMOR SETS lie on glowing pads - walk over one.\nFull list: ESC > Controls.  (any key to dismiss)";
                 p.spawn((
-                    Text::new(body),
+                    Text::new(
+                        "ARMOR SETS lie on glowing pads - walk over one.\nFull list: ESC > Controls.  (any key to dismiss)",
+                    ),
                     TextFont {
-                        font_size: 16.0,
+                        font_size: menu_ui::T_MICRO,
                         ..default()
                     },
-                    TextColor(branding::palette::PARCHMENT),
+                    TextColor(branding::palette::PARCHMENT_DIM),
+                    Node {
+                        margin: UiRect::top(Val::Px(menu_ui::U3)),
+                        ..default()
+                    },
                 ));
             });
         return;
@@ -12194,104 +12427,95 @@ fn close_menu(mut commands: Commands, menu: Query<Entity, With<MenuRoot>>) {
 fn open_settings(
     mut commands: Commands,
     settings: Res<GameSettings>,
+    brand: Option<Res<branding::BrandAssets>>,
     mut cam: ResMut<CamCtl>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
-    // no stale scope glass over the menu. `open_menu` and `open_intro`
-    // always did this; the other three openers did not, so entering
-    // Settings/Manual/Controls while scoped left the overlay up.
-    cam.ads = false;
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
+    cam.ads = false; // no stale scope glass over the menu
+
+    // Left column carries three whole sections, right carries the
+    // crosshair's nine rows. Columns break BETWEEN groups and never
+    // inside one - that is what makes the grouping survive the split.
+    // The old layout wrapped ROW-MAJOR through a fixed 1010px grid, which
+    // put the minimap on/off and its own rotate toggle on opposite sides
+    // of the same visual line.
+    const LEFT: [SettingsGroup; 3] =
+        [SettingsGroup::Aim, SettingsGroup::Minimap, SettingsGroup::Hud];
+    const RIGHT: [SettingsGroup; 1] = [SettingsGroup::Crosshair];
+
+    let brand = brand.as_deref();
+    let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
+    commands.entity(root).insert(SettingsRoot).with_children(|p| {
+        menu_ui::plate(p, menu_ui::PLATE_W_SETTINGS, |b| {
+            menu_ui::title(b, "SETTINGS");
+            menu_ui::rule_and_boss(b, true);
+            // ONE line, warm. The old subtitle ran to two full lines in a
+            // cool lavender - the only cool colour on a warm page - and
+            // its second sentence duplicated a pause row one keypress away.
+            b.spawn((
+                Text::new("CHANGES APPLY IMMEDIATELY"),
+                TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                TextColor(branding::palette::PARCHMENT_DIM),
+                Node { margin: UiRect::bottom(Val::Px(menu_ui::U2)), ..default() },
+            ));
+            b.spawn(Node {
                 width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(14.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.92)),
-            SettingsRoot,
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("SETTINGS"),
-                TextFont {
-                    font_size: 40.0,
-                    ..default()
-                },
-                TextColor(branding::palette::GOLD),
-            ));
-            p.spawn((
-                Text::new("Click a row to change it.  Settings apply immediately.\nmode / map / difficulty / team size / loadout:  ESC menu > Change Mode / Loadout"),
-                TextFont {
-                    font_size: 15.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.7, 0.78, 0.95)),
-            ));
-            // §4.6 added nine crosshair rows; fifteen 50 px rows in one
-            // column is 890 px of list, which does not fit the game's own
-            // 720 p default window - the Back row would have been off
-            // screen. A wrapping two-column grid holds all of it in ~430.
-            p.spawn(Node {
-                width: Val::Px(2.0 * SETTINGS_ROW_W + SETTINGS_ROW_GAP),
                 flex_direction: FlexDirection::Row,
-                flex_wrap: FlexWrap::Wrap,
-                justify_content: JustifyContent::Center,
-                align_content: AlignContent::Center,
-                column_gap: Val::Px(SETTINGS_ROW_GAP),
-                row_gap: Val::Px(SETTINGS_ROW_GAP),
+                column_gap: Val::Px(menu_ui::U6),
+                align_items: AlignItems::FlexStart,
                 ..default()
             })
-            .with_children(|p| {
-                let rows = SETTINGS_ROWS
-                    .iter()
-                    .map(|(b, k)| (*b, Some(*k), settings_label_text(*k, &settings)))
-                    .chain([(SettingsButton::Back, None, "Back (ESC)".to_string())]);
-                for (which, kind, label) in rows {
-                    p.spawn((
-                        Button,
-                        which,
-                        // The mouse-swap row is the longest label at 51
-                        // chars. 18pt in 620 px wrapped it to two lines
-                        // and it wrapped again at 16pt in 470 - measured
-                        // in a capture, not assumed. 15pt in 500 px is
-                        // 51 x ~9 px = 459 px, which fits with margin.
-                        Node {
-                            width: Val::Px(SETTINGS_ROW_W),
-                            height: Val::Px(SETTINGS_ROW_H),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-                    ))
-                    .with_children(|b| {
-                        let mut e = b.spawn((
-                            Text::new(label),
-                            TextFont {
-                                font_size: 15.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                        if let Some(k) = kind {
-                            e.insert(SettingsLabel(k));
+            .with_children(|cols| {
+                for groups in [&LEFT[..], &RIGHT[..]] {
+                    cols.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: Val::Px(0.0),
+                        flex_direction: FlexDirection::Column,
+                        ..default()
+                    })
+                    .with_children(|col| {
+                        for g in groups {
+                            menu_ui::eyebrow(col, g.title());
+                            for (which, kind, group) in SETTINGS_ROWS {
+                                if group != *g {
+                                    continue;
+                                }
+                                let full = settings_label_text(kind, &settings);
+                                let (name, value) = split_label(&full);
+                                menu_ui::menu_row_at(
+                                    col,
+                                    (which, SettingsLabel(kind)),
+                                    menu_ui::RowKind::Normal,
+                                    name,
+                                    Some(value),
+                                    None,
+                                    menu_ui::ROW_H_DENSE,
+                                );
+                            }
                         }
                     });
                 }
             });
+            // Back is NOT an 18th setting. Full width, below both columns,
+            // carrying the key that already does it.
+            menu_ui::menu_row_at(
+                b,
+                SettingsButton::Back,
+                menu_ui::RowKind::Normal,
+                "BACK",
+                None,
+                Some("ESC"),
+                menu_ui::ROW_H_DENSE,
+            );
+            menu_ui::seal_footer(b, brand, None);
         });
+    });
 }
-
-const SETTINGS_ROW_W: f32 = 500.0;
-const SETTINGS_ROW_H: f32 = 42.0;
-const SETTINGS_ROW_GAP: f32 = 10.0;
 
 fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
     match kind {
@@ -12377,19 +12601,37 @@ fn close_settings(mut commands: Commands, q: Query<Entity, With<SettingsRoot>>) 
 
 fn settings_buttons(
     mut q: Query<
-        (&Interaction, &SettingsButton, &mut BackgroundColor),
+        (
+            &Interaction,
+            &SettingsButton,
+            &menu_ui::PlateRow,
+            &Children,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
         (Changed<Interaction>, With<Button>),
+    >,
+    mut bosses: Query<
+        &mut BackgroundColor,
+        (With<menu_ui::RowBoss>, Without<menu_ui::PlateRow>),
     >,
     mut settings: ResMut<GameSettings>,
     mut labels: Query<(&SettingsLabel, &mut Text)>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     let mut dirty = false;
-    for (interaction, which, mut bg) in &mut q {
-        match interaction {
-            Interaction::Hovered => *bg = BackgroundColor(Color::srgb(0.30, 0.24, 0.15)),
-            Interaction::None => *bg = BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-            Interaction::Pressed => match which {
+    for (interaction, which, row, kids, mut bg, mut border) in &mut q {
+        menu_ui::paint_row(
+            row.kind,
+            false,
+            *interaction,
+            &mut bg,
+            &mut border,
+            Some(kids),
+            &mut bosses,
+        );
+        if *interaction == Interaction::Pressed {
+            match which {
                 SettingsButton::SwapMouse => {
                     settings.swap_mouse = !settings.swap_mouse;
                     dirty = true;
@@ -12482,12 +12724,16 @@ fn settings_buttons(
                     dirty = true;
                 }
                 SettingsButton::Back => next.set(GameState::Paused),
-            },
+            }
         }
     }
     if dirty {
         for (l, mut t) in &mut labels {
-            **t = settings_label_text(l.0, &settings);
+            // the VALUE half only - the name node is static. `labels` is
+            // an UNSCOPED query, so one SettingsLabel per row is a
+            // correctness requirement, not a style preference: a second
+            // one would have this write the same string into both nodes.
+            **t = split_label(&settings_label_text(l.0, &settings)).1.to_string();
         }
     }
 }
@@ -12497,106 +12743,167 @@ fn settings_buttons(
 fn open_manual(
     mut commands: Commands,
     settings: Res<GameSettings>,
+    brand: Option<Res<branding::BrandAssets>>,
     mut cam: ResMut<CamCtl>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
     cam.ads = false; // no stale scope glass over the menu
-    // from the shared mapping - this block had it inverted, and also
-    // still listed T as a fire key (T is INSPECT) and C as crouch (C is
-    // the armor ability; a player following it fired the flamethrower
-    // while trying to duck)
+
+    // The ONLY sanctioned way to name the mouse buttons. The settings
+    // label and this manual once derived the mapping independently and
+    // BOTH had it backwards - on the very control that changes it.
     let (aim_b, fire_b) = mouse_map_names(settings.swap_mouse);
-    let mut manual = format!(
-        "CONTROLS\n\
-         WASD move - SPACE jump - Q dodge roll (hard landings roll automatically)\n\
-         E shield up/down - O or V first/third person - Z / X lean - M minimap\n\
-         {aim_b} aim (bow/spear draw the flight arc; AWM opens the scope)\n\
-         {fire_b} fire - 1/2/3 weapon slots - CTRL crouch - C armor ability\n\
-         T inspect weapon\n\
-         SHIFT sprint (tap crouch at a sprint to roll) - R reload - TAB scores\n\n\
-         THE SHIELD\n\
-         Always carried. Blocks the FRONT ARC only (+/-60deg): standing cuts\n\
-         damage 65%, crouched 95%. Sides and rear ignore it - FLANK.\n\
-         Shield up = no shooting, slow walk.\n\n\
-         DAMAGE MODEL\n\
-         100 HP. Zones: head x4, torso x1, arms/legs x0.75.\n\
-         Baseline M4A1: 2 headshots / 8 body shots.\n\
-         AWM: head instant; torso, arms, legs = 2 shots.\n\n\
-         CHECKPOINTS ('check back')\n\
-         Stand in a white ring uncontested to flip it; your team then\n\
-         respawns AT the ring. Contested rings freeze.\n\n\
-         MODES\n\
-         TDM first to 30 - KOTH hold the center 90 s - 5-min clock,\n\
-         80 s sudden-death overtime.\n\n\
-         WEAPONS (torso dmg / shots to kill body / head / mag)\n",
+
+    // Every number below is the LIVE constant, never a retyped copy. The
+    // old prose hardcoded all of them, and the weapon table twelve lines
+    // under it was already derived correctly - one screen, two policies.
+    let shield = format!(
+        "Always carried. Blocks the FRONT ARC only (+/-{:.0}deg): standing\n\
+         cuts damage {:.0}%, crouched {:.0}%. Sides and rear ignore it - FLANK.\n\
+         Shield up = no shooting, slow walk.",
+        SHIELD_ARC_COS.acos().to_degrees(),
+        SHIELD_BLOCK_STAND * 100.0,
+        SHIELD_BLOCK_CROUCH * 100.0,
     );
-    for g in ALL_WEAPONS {
-        let s = gun(g);
-        let body_stk = if s.projectile.is_some() {
-            ((MAX_HEALTH / s.damage).ceil()) as u32
-        } else {
-            (MAX_HEALTH / (s.damage * s.pellets.max(1) as f32)).ceil() as u32
-        };
-        let head_stk = if s.projectile.is_some() {
-            body_stk
-        } else {
-            (MAX_HEALTH / (s.damage * HEAD_MULT * s.pellets.max(1) as f32)).ceil() as u32
-        };
-        let class = match s.class {
-            GunClass::Primary => "PRIMARY  ",
-            GunClass::Secondary => "SECONDARY",
-            GunClass::Special => "SPECIAL  ",
-        };
-        manual += &format!(
-            "{:<14} {class} {:>5.1}{}  body x{}  head x{}{}  mag {}\n",
-            s.name,
-            s.damage,
-            if s.pellets > 1 {
-                format!(" x{} pellets", s.pellets)
-            } else {
-                String::new()
-            },
-            body_stk,
-            head_stk,
-            // honesty clause: pellet numbers assume the WHOLE spread lands
-            if s.pellets > 1 { " (full spread)" } else { "" },
-            s.mag
-        );
-    }
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
+    let damage = format!(
+        "{:.0} HP. Zones: head x{HEAD_MULT}, torso x1, arms x{ARM_MULT},\n\
+         legs x{LEG_MULT}. Baseline M4A1: 2 headshots / 8 body shots.\n\
+         {fire_b} fires; {aim_b} focuses every weapon.",
+        MAX_HEALTH,
+    );
+    let checkpoints = "Stand in a white ring uncontested to flip it; your team then\n\
+         respawns AT the ring. Contested rings freeze."
+        .to_string();
+    let modes = format!(
+        "TDM first to {:.0} - KOTH hold the center {:.0} s -\n\
+         {:.0}-min clock, {:.0} s sudden-death overtime.",
+        TDM_TARGET,
+        KOTH_TARGET_S,
+        MATCH_LEN_S / 60.0,
+        OVERTIME_S,
+    );
+
+    let brand = brand.as_deref();
+    let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
+    commands.entity(root).insert(ManualRoot).with_children(|p| {
+        menu_ui::plate(p, menu_ui::PLATE_W_MANUAL, |b| {
+            menu_ui::title(b, "FIELD MANUAL");
+            menu_ui::rule_and_boss(b, true);
+            b.spawn(Node {
                 width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(menu_ui::U8),
+                align_items: AlignItems::FlexStart,
                 ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.94)),
-            ManualRoot,
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("RULES & MANUAL          (ESC to go back)"),
-                TextFont {
-                    font_size: 30.0,
+            })
+            .with_children(|cols| {
+                // LEFT: the rules prose
+                cols.spawn(Node {
+                    flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
+                    flex_direction: FlexDirection::Column,
                     ..default()
-                },
-                TextColor(branding::palette::GOLD),
-            ));
-            p.spawn((
-                Text::new(manual),
-                TextFont {
-                    font_size: 14.0,
+                })
+                .with_children(|col| {
+                    for (head, body) in [
+                        ("THE SHIELD", shield.as_str()),
+                        ("DAMAGE MODEL", damage.as_str()),
+                        ("CHECKPOINTS", checkpoints.as_str()),
+                        ("MODES", modes.as_str()),
+                    ] {
+                        menu_ui::eyebrow(col, head);
+                        col.spawn((
+                            Text::new(body.to_string()),
+                            TextFont { font_size: menu_ui::T_DATA, ..default() },
+                            TextColor(branding::palette::PARCHMENT),
+                        ));
+                    }
+                    menu_ui::eyebrow(col, "CONTROLS");
+                    // The hand-written control list is GONE, not fixed. It
+                    // duplicated BIND_REGISTRY, omitted eight binds, and
+                    // described keys this session had already remapped -
+                    // two screens on the same pause menu disagreeing about
+                    // the controls. One pointer now.
+                    menu_ui::bind_row(col, "ESC", "MENU > CONTROLS for the full bind list", false);
+                });
+                // RIGHT: the weapon table, still derived from live specs
+                cols.spawn(Node {
+                    flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
+                    flex_direction: FlexDirection::Column,
                     ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
+                })
+                .with_children(|col| {
+                    menu_ui::eyebrow(col, "WEAPONS");
+                    col.spawn((
+                        Text::new("torso dmg / shots to kill body / head / mag"),
+                        TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                        TextColor(branding::palette::PARCHMENT_DIM),
+                        Node { margin: UiRect::bottom(Val::Px(menu_ui::U2)), ..default() },
+                    ));
+                    for g in ALL_WEAPONS {
+                        let s = gun(g);
+                        let body_stk = if s.projectile.is_some() {
+                            ((MAX_HEALTH / s.damage).ceil()) as u32
+                        } else {
+                            (MAX_HEALTH / (s.damage * s.pellets.max(1) as f32)).ceil() as u32
+                        };
+                        let head_stk = if s.projectile.is_some() {
+                            body_stk
+                        } else {
+                            (MAX_HEALTH / (s.damage * HEAD_MULT * s.pellets.max(1) as f32)).ceil()
+                                as u32
+                        };
+                        col.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(menu_ui::U3),
+                            ..default()
+                        })
+                        .with_children(|r| {
+                            // real fixed-width name cell - the old screen
+                            // faked columns with {:<14} format padding
+                            r.spawn((
+                                Text::new(s.name.to_string()),
+                                TextFont { font_size: menu_ui::T_DATA, ..default() },
+                                TextColor(branding::palette::PARCHMENT),
+                                Node {
+                                    width: Val::Px(menu_ui::ROW_LABEL_W),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                            ));
+                            r.spawn((
+                                Text::new(format!(
+                                    "{:>5.1}{}  body x{}  head x{}{}  mag {}",
+                                    s.damage,
+                                    if s.pellets > 1 {
+                                        format!(" x{} pellets", s.pellets)
+                                    } else {
+                                        String::new()
+                                    },
+                                    body_stk,
+                                    head_stk,
+                                    // honesty clause: pellet numbers assume
+                                    // the WHOLE spread lands
+                                    if s.pellets > 1 { " (full spread)" } else { "" },
+                                    s.mag
+                                )),
+                                TextFont { font_size: menu_ui::T_DATA, ..default() },
+                                TextColor(branding::palette::PARCHMENT),
+                            ));
+                        });
+                    }
+                });
+            });
+            menu_ui::seal_footer(b, brand, Some(("ESC", "BACK")));
         });
+    });
 }
 
 fn close_manual(mut commands: Commands, q: Query<Entity, With<ManualRoot>>) {
@@ -14687,7 +14994,7 @@ mod forge_tests {
         // one (a duplicated label means two rows edit the same thing)
         let s = GameSettings::default();
         let mut labels = std::collections::BTreeSet::new();
-        for (_, kind) in SETTINGS_ROWS {
+        for (_, kind, _) in SETTINGS_ROWS {
             let l = settings_label_text(kind, &s);
             assert!(!l.is_empty(), "a settings row rendered an empty label");
             assert!(labels.insert(l.clone()), "two settings rows render {l:?}");

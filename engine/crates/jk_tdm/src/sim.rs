@@ -218,23 +218,47 @@ pub const DRAW_SPEED_MULT_SPEAR: f32 = 0.70;
 /// Strafe/backpedal fraction of forward pace while drawn (bracing).
 pub const DRAW_SIDE_MULT: f32 = 0.85;
 /// Turn this fast (rad/s) for free; above it stability decays.
-pub const AIM_TURN_FREE: f32 = 1.6;
+pub const AIM_TURN_FREE: f32 = 3.2;
 /// Stability penalty per rad/s above the free turn rate. (§4 Brief II:
 /// raised 0.22 → 0.28 alongside the flatter ballistics — easier to aim,
 /// no easier to spam.)
-pub const AIM_TURN_K: f32 = 0.28;
+pub const AIM_TURN_K: f32 = 0.12;
 /// Walk this fast (m/s) for free; above it stability decays.
-pub const AIM_MOVE_FREE: f32 = 1.2;
+pub const AIM_MOVE_FREE: f32 = 2.6;
 /// Stability penalty per m/s above the free walk speed.
-pub const AIM_MOVE_K: f32 = 0.28;
+pub const AIM_MOVE_K: f32 = 0.12;
 /// A whip-shot is never fully un-aimable — spread caps at base/this.
-pub const AIM_STABILITY_MIN: f32 = 0.35;
+/// §4-B (owner): the drawn bow and the cocked spear should aim like the
+/// AWP - free, direct, and rewarding a longer hold rather than punishing
+/// a moving crosshair.
+///
+/// The turn and move allowances roughly DOUBLE and their penalty
+/// coefficients roughly HALVE, and the stability floor lifts from 0.35 to
+/// 0.65, so even a shot taken mid-turn keeps two thirds of its accuracy
+/// instead of one third. The old numbers made a projectile weapon feel
+/// like it was fighting the mouse; the flatter, faster flight above is
+/// what makes that safe to relax.
+pub const AIM_STABILITY_MIN: f32 = 0.65;
 // ---- §4 (Brief II): flattened projectile ballistics ----------------------
 // The old arcs (spear 17 m/s at full gravity = 15.3 m of drop at 30 m)
 // were unaimable by eye. Flatter flight, same damage, same draw times —
 // and a steeper turn penalty so it gets easier to AIM, not easier to spam.
 /// One shared gravity base for every missile — `predict_arc` and
 /// `step_missiles` MUST read the same numbers or the preview lies.
+/// §4-B (owner): every missile flies 1.5x faster.
+///
+/// The point is not reach, it is READ. Drop scales with time squared and
+/// time scales with 1/v, so a 1.5x launch speed cuts the drop at any given
+/// range to 1/2.25 of what it was - the arrow that fell 0.69 m over 30 m
+/// now falls 0.31 m. The arc stops looking like a lob and starts looking
+/// like a shot, and an incoming spear reads as a threat rather than a
+/// thrown stick.
+///
+/// It is one multiplier rather than four edited literals so the preview,
+/// the integrator and the damage tables cannot drift apart - `predict_arc`
+/// and `step_missiles` both read the launch speeds this scales.
+pub const MISSILE_SPEED_MULT: f32 = 1.5;
+
 pub const MISSILE_G: f32 = 9.81;
 pub const GRAV_FACTOR_SPEAR: f32 = 0.72;
 pub const GRAV_FACTOR_ARROW: f32 = 0.42;
@@ -249,7 +273,7 @@ pub fn missile_g(is_spear: bool) -> f32 {
 }
 /// Hip-thrown spear (no ADS settle) flies at min charge — the full 26 m/s
 /// needs the cocked, settled throw.
-pub const SPEAR_V0_MIN: f32 = 11.0;
+pub const SPEAR_V0_MIN: f32 = 11.0 * MISSILE_SPEED_MULT;
 // ---- §5.4 (BRIEF VIII): the running-throw bonus --------------------------
 // "A throw initiated at >=70% run speed with >=2 steps of momentum gets
 // velocity x1.15." The speed gate is exact per the brief; "2 steps of
@@ -515,7 +539,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             damage: 34.0,
             // §4 (Brief II): 52 m/s at gravity ×0.42 — 0.69 m of drop at
             // 30 m, near point-and-click inside 20 m
-            projectile: Some((52.0, 34.0)),
+            projectile: Some((52.0 * MISSILE_SPEED_MULT, 34.0)),
             zoom_deg: 45.0,
             ..base
         },
@@ -533,7 +557,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             // applied at hit resolution (SPEAR_HEAD_MULT/LEG_MULT).
             damage: 85.0,
             // §3.1 (Brief VII v2): 22 m/s full-throw, gravity ×0.72.
-            projectile: Some((22.0, 85.0)),
+            projectile: Some((22.0 * MISSILE_SPEED_MULT, 85.0)),
             zoom_deg: 50.0,
             ..base
         },
@@ -1833,7 +1857,7 @@ pub const BOW_DRAW_FULL_S: f32 = 0.7;
 /// Held this long total with no release - forced letdown, no shot.
 pub const BOW_DRAW_FORCE_S: f32 = 10.0;
 /// Full-draw arrow speed, gravity ×0.42 (unchanged factor from Brief II).
-pub const BOW_V0_FULL: f32 = 55.0;
+pub const BOW_V0_FULL: f32 = 55.0 * MISSILE_SPEED_MULT;
 /// §4.2: passes through up to 3 soldiers - 90 -> 68 -> 45 (×0.75/pierce),
 /// each scaled by the shot's own draw-power fraction.
 pub const BOW_PIERCE_DMG: [f32; 3] = [90.0, 67.5, 50.625];
@@ -2100,6 +2124,24 @@ pub fn rotate_toward(dir: [f32; 3], want: [f32; 3], max_ang: f32) -> [f32; 3] {
 // Channel 2 (view): the camera shows punch × RECOIL_SCALE × 0.45 — the
 // crosshair itself NEVER moves. Channel 3 (viewmodel): rotational only.
 pub const RECOIL_SCALE: f32 = 2.0;
+/// §3.5 (owner, revised): trim the gun's visible BOUNCE by a further 35%.
+///
+/// Applied to the VIEWMODEL only - its rotational kick and its 1.5 cm
+/// back-slide. Those are pure decoration: nothing reads them, so nothing
+/// downstream can change.
+///
+/// It deliberately does NOT touch `VIEW_RECOIL_TRACKING` below, which
+/// looks like the obvious knob and is not. That number SPLITS one kick
+/// between two channels - the camera shows `tracking`, and `punched_aim`
+/// deflects the bullet by the remaining `1 - tracking` on top. The total
+/// is invariant, so lowering it really would show less kick for the same
+/// bullets - but it is load-bearing arithmetic shared with the mech hull
+/// mounts, and an early attempt at exactly that broke the 2-head/8-torso
+/// TTK test, which fires along a fixed aim vector with no camera to take
+/// the other half. A cosmetic request is not worth touching the one
+/// constant that defines where bullets actually go.
+pub const VIEW_KICK_TRIM: f32 = 0.65;
+
 pub const VIEW_RECOIL_TRACKING: f32 = 0.45;
 /// Punch-angle decay per tick: ×e^(−8·dt), then −18°·dt toward zero;
 /// punch velocity ×e^(−4.5·dt). Camera at rest ≈0.3–0.5 s after firing.
@@ -8475,6 +8517,36 @@ mod tests {
         );
     }
 
+    /// §4-B: the missiles fly 1.5x faster, and that has to FLATTEN them.
+    ///
+    /// Speed alone is not the point - the point is that drop scales with
+    /// time squared while time scales with 1/v, so the arc should fall to
+    /// 1/2.25 of its old depth at any given range. Asserted as a ratio
+    /// rather than an absolute so it survives a retune of either number.
+    #[test]
+    fn faster_missiles_fly_measurably_flatter() {
+        for (name, v0_base, is_spear) in
+            [("arrow", 52.0_f32, false), ("spear", 22.0_f32, true)]
+        {
+            let g = missile_g(is_spear);
+            let drop_at = |v0: f32| {
+                let t = 30.0 / v0;
+                0.5 * g * t * t
+            };
+            let old = drop_at(v0_base);
+            let new = drop_at(v0_base * MISSILE_SPEED_MULT);
+            let ratio = old / new;
+            assert!(
+                (ratio - MISSILE_SPEED_MULT * MISSILE_SPEED_MULT).abs() < 1e-3,
+                "{name}: drop must fall by the SQUARE of the speed-up, got {ratio:.3}"
+            );
+            assert!(
+                new < old * 0.5,
+                "{name}: 30 m drop must more than halve - {old:.2} m -> {new:.2} m"
+            );
+        }
+    }
+
     /// §1.6.3 ZERO-INSTANT-STOP SWEEP.
     ///
     /// "Scan every stop/landing/turn state on both rigs for velocity
@@ -9422,8 +9494,10 @@ mod tests {
         let full = bow_power_fraction(BOW_DRAW_FULL_S).expect("full draw is valid");
         assert!((full - 1.0).abs() < 1e-6, "a full draw must be 1.0, got {full}");
         // and the launch speeds those imply, which the preview now mirrors
-        assert!((BOW_V0_FULL * at_min - 19.25).abs() < 0.01);
-        assert!((BOW_V0_FULL * full - 55.0).abs() < 0.01);
+        // derived, not hardcoded - the launch speed is scaled by
+        // MISSILE_SPEED_MULT and a literal here would pin the old value
+        assert!((BOW_V0_FULL * at_min - 55.0 * MISSILE_SPEED_MULT * BOW_POWER_MIN).abs() < 0.01);
+        assert!((BOW_V0_FULL * full - 55.0 * MISSILE_SPEED_MULT).abs() < 0.01);
     }
 
     #[test]
