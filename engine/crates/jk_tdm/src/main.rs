@@ -162,6 +162,62 @@ const ADS_SENS_RATIO: f32 = 1.0;
 const ADS_TIME_S: f32 = 0.12;
 /// First↔third person blend time, ease-out (§5.1).
 const PERSON_BLEND_S: f32 = 0.18;
+/// How far the player may look up or down (radians, ±87.7°).
+///
+/// `cam.pitch` has TWO writers — the mouse (`mouse_look`) and the recoil
+/// kick (`input_and_step`) — and this is the one limit both must obey.
+/// They used to disagree: the mouse clamped to ±1.53 while recoil clamped
+/// to (-0.7, 0.8), and because recoil clamps the ACCUMULATED pitch rather
+/// than its own delta, firing while aimed steeply up snapped the view down
+/// by as much as 0.73 rad in a single frame. A clamp is not a place for a
+/// second opinion: one constant, both call sites.
+const LOOK_PITCH_LIMIT: f32 = 1.53;
+
+/// One shot's worth of muzzle climb applied to the look pitch.
+///
+/// Pure, and separate from the system that calls it, so the clamp can be
+/// tested without standing up a Bevy world — the reason the disagreement
+/// above went unnoticed is that this arithmetic only ever existed inside
+/// a 40-argument system nothing could call.
+///
+/// Lower pitch is higher aim, so the kick SUBTRACTS. The result is
+/// clamped to the same range the mouse may reach, which means the kick
+/// can push the aim to the ceiling but can never relocate an aim the
+/// player was already legitimately holding.
+fn recoil_kicked_pitch(pitch: f32, kick: f32, bloom: f32, brace: f32) -> f32 {
+    (pitch - (kick * 6.0 + bloom * 1.5) * brace).clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT)
+}
+
+/// How far the bowstring is pulled back, 0..1, for rendering only.
+///
+/// ONE function for both views. The third-person rig and the first-person
+/// viewmodel used to answer this question separately - third person from
+/// `cam_ctl.ads` (so a binary 0.25 / 1.0), first person not at all - while
+/// the sim was keeping a real 0.15s..0.7s clock the whole time. That is
+/// the split brain from ANTI_PATTERNS.md: the client re-deriving what the
+/// sim already knows, then drifting from it. Two callers, one source.
+///
+/// The player's pull is the sim's clock. Note this deliberately has no
+/// dead zone below `BOW_DRAW_MIN_S`: the string really is moving in that
+/// window, you simply cannot loose a useful arrow yet, and freezing the
+/// visual there would misreport what the sim is doing.
+///
+/// Bots never enter `step_bow_draw` - they fire through `try_fire`, so
+/// their `bow_draw_t` is always 0 and reading it would leave every bot
+/// bow permanently slack. Their pull comes from the shot cadence
+/// instead: `fire_cd` runs down from `fire_period`, so the string draws
+/// back as the next arrow approaches and springs forward when it looses.
+/// That is a closer account of what a bot is doing than the fixed 0.6
+/// this replaces.
+fn bow_draw_visual(bow_draw_t: f32, fire_cd: f32, fire_period: f32, is_player: bool) -> f32 {
+    if is_player {
+        (bow_draw_t / sim::BOW_DRAW_FULL_S).clamp(0.0, 1.0)
+    } else if fire_period > 0.0 {
+        (1.0 - fire_cd / fire_period).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 /// Third-person boom: back / up / screen-right of the head pivot (§5.1).
 // §5.1 (Brief VII v2): hip 2.2m back / +0.45m right / +0.12m up.
 const TP_BOOM: f32 = 2.2;
@@ -2716,6 +2772,37 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(2.8) },
 ];
 
+/// The same draw, seen from inside the archer's head.
+///
+/// The third-person script above cannot check the first-person bow: the
+/// capture starts in third person (`CamCtl::first_person` defaults false)
+/// and never presses V, so every bow frame ever captured has been of the
+/// world model. The viewmodel bow went years without a nocked arrow partly
+/// because nothing ever looked at it.
+///
+/// V first, then equip - toggling person AFTER the draw starts would
+/// re-pose mid-pull and confuse what the frames mean.
+const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.9) },
+    CapBeat { snap: Some("01-fp-bow-idle"), ..beat(1.3) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.4) },
+    // ~0.2s of draw: nocked, string moving, nowhere near anchor
+    CapBeat { snap: Some("02-fp-bow-quarter-draw"), ..beat(1.6) },
+    // past BOW_DRAW_FULL_S (0.7s): at anchor, full power
+    CapBeat { snap: Some("03-fp-bow-full-draw"), ..beat(2.2) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left)],
+        snap: Some("04-fp-bow-release"),
+        ..beat(2.3)
+    },
+    // the arrow is gone and the nock is empty until the auto-nock lands
+    CapBeat { snap: Some("05-fp-bow-after-shot"), ..beat(2.7) },
+    CapBeat { end: true, ..beat(3.1) },
+];
+
 // Task 5.7 (MISSION doc): the mech at its new scale/palette, held
 // stationary at a known-clear spot (Arena center, set in
 // capture_quick_deploy) with the camera aimed level and slightly down -
@@ -2808,6 +2895,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
         "bow_draw" => BOW_DRAW_BEATS,
+        "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
@@ -2819,10 +2907,11 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 8] = [
+const CAPTURE_SCRIPTS: [&str; 9] = [
     "baseline",
     "idle_life",
     "bow_draw",
+    "bow_draw_fp",
     "mech_scale",
     "minigun_check",
     "menus",
@@ -2879,7 +2968,9 @@ fn capture_quick_deploy(
         // (spear_throw / bow_pierce arms lived here with no beat table
         // behind them, so naming either just hung the process. Validated
         // against CAPTURE_SCRIPTS at startup now.)
-        Some("bow_draw") => sel.loadout[2] = GunKind::Bow,
+        // both bow scripts press Digit3, so slot 3 has to actually hold a
+        // bow or they capture whatever the default special happens to be
+        Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
@@ -6642,7 +6733,7 @@ fn input_and_step(
         for ev in motion.read() {
             cam.yaw -= ev.delta.x * sens * zoom_mult;
             cam.pitch = (cam.pitch + ev.delta.y * sens * zoom_mult * y_sign)
-                .clamp(-1.53, 1.53);
+                .clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT);
         }
     } else {
         motion.clear();
@@ -6887,12 +6978,31 @@ fn input_and_step(
         } else {
             gun(p.gun).kick
         };
-        let brace = if p.lean.abs() > 0.1 {
+        // Whatever the sim damps, the camera damps. The sim scales a
+        // braced mech's punch by MECH_BRACE_RECOIL_DAMP (sim.rs, the
+        // spray block) but this path only ever asked about `lean`, so a
+        // planted mech soaked its recoil in the simulation and still took
+        // the full kick in the view - the brace stance visibly did
+        // nothing for the thing the player actually feels. A pilot does
+        // not lean; on foot you cannot mech-brace. The two are exclusive,
+        // so this reads as one ladder rather than two.
+        let brace = if p.in_mech() {
+            if p.mech_brace {
+                sim::MECH_BRACE_RECOIL_DAMP
+            } else {
+                1.0
+            }
+        } else if p.lean.abs() > 0.1 {
             LEAN_RECOIL_MULT
         } else {
             1.0
         };
-        cam.pitch = (cam.pitch - (kick * 6.0 + p.bloom * 1.5) * brace).clamp(-0.7, 0.8);
+        // Clamp to the SAME limit the mouse obeys. Recoil clamps the
+        // accumulated pitch, not just its own delta, so a narrower limit
+        // here does not "restrain the kick" - it teleports an aim the
+        // player legitimately held into range the instant they pull the
+        // trigger.
+        cam.pitch = recoil_kicked_pitch(cam.pitch, kick, p.bloom, brace);
         cam.recoil = (cam.recoil + 0.6).min(1.0);
     }
 
@@ -7594,16 +7704,15 @@ fn sync_fighters(
         let wr_pitch = aim_pitch - torso_pitch;
         let spear_cocked =
             f.gun == GunKind::Spear && if is_player { cam_ctl.ads } else { true };
+        // The string follows the sim's draw clock, not the ADS toggle it
+        // used to guess from. See `bow_draw_visual`.
         let bow_draw = if f.gun == GunKind::Bow {
-            if is_player {
-                if cam_ctl.ads {
-                    1.0
-                } else {
-                    0.25
-                }
-            } else {
-                0.6
-            }
+            bow_draw_visual(
+                f.bow_draw_t,
+                f.fire_cd,
+                gun(GunKind::Bow).fire_period,
+                is_player,
+            )
         } else {
             0.0
         };
@@ -9064,6 +9173,13 @@ fn fp_viewmodel(
             Visibility::Hidden
         };
     }
+    // How drawn the bow is, from the same function the body rig uses so
+    // the two views cannot disagree.
+    let bow_pull = if p.gun == GunKind::Bow {
+        bow_draw_visual(p.bow_draw_t, p.fire_cd, spec.fire_period, true)
+    } else {
+        0.0
+    };
     let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
     // §2.2 suppression during ADS: ×(1 − 0.85-ads_t) - a trace of life
     // stays at full zoom, but a scoped gun does not swim
@@ -9282,7 +9398,15 @@ fn fp_viewmodel(
         } else {
             Visibility::Inherited
         };
+        // §2/§3 pose for the bow, the one main.rs marked "pending".
+        // Drawing brings the bow up and in toward the aiming eye and
+        // settles it closer to the face; an undrawn bow hangs low and
+        // left, out of the sightline. This is the whole reason the ADS
+        // ramp was ever pointed at projectile weapons - it was standing
+        // in for a pose that did not exist.
+        let bow_t = Vec3::new(-0.075, 0.030, 0.050) * bow_pull;
         tf.translation = ads_shift
+            + bow_t
             + Vec3::new(-0.06, -0.02, 0.06) * ie
             + rl_t
             + mel_t
@@ -13339,6 +13463,174 @@ mod camera_v2_tests {
             t90 < 0.35,
             "sprint boom-out should follow the 0.12s ease (~0.25s to 90%), took {t90}s"
         );
+    }
+}
+
+/// The look-pitch clamp: recoil and the mouse write the same state, so
+/// they must agree about how far it may go.
+#[cfg(test)]
+mod recoil_pitch_tests {
+    use super::*;
+
+    /// The bug this module exists for.
+    ///
+    /// Recoil clamps the ACCUMULATED pitch, not its own delta. While its
+    /// limit was (-0.7, 0.8) and the mouse's was ±1.53, a player holding
+    /// a steep aim had it yanked back to the recoil limit the instant
+    /// they fired — up to 0.73 rad in one frame, from one bullet, with no
+    /// input. Firing must never move the aim further than the kick.
+    #[test]
+    fn firing_at_a_steep_aim_does_not_teleport_the_view() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        for &pitch in &[
+            -LOOK_PITCH_LIMIT,
+            -1.2,
+            -0.71, // just outside the OLD lower clamp
+            0.0,
+            0.81, // just outside the OLD upper clamp
+            1.2,
+            LOOK_PITCH_LIMIT,
+        ] {
+            let after = recoil_kicked_pitch(pitch, kick, 0.0, 1.0);
+            let moved = (after - pitch).abs();
+            let most = kick * 6.0 + 1e-6;
+            assert!(
+                moved <= most,
+                "pitch {pitch} moved {moved} rad on one shot; the kick is only {most}"
+            );
+        }
+    }
+
+    /// ...and the guard above must not be satisfied by doing nothing.
+    #[test]
+    fn the_kick_still_kicks() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        let after = recoil_kicked_pitch(0.0, kick, 0.0, 1.0);
+        assert!(after < 0.0, "recoil must raise the muzzle (lower pitch)");
+        assert!(
+            (after.abs() - kick * 6.0).abs() < 1e-6,
+            "one shot should move exactly kick*6, got {after}"
+        );
+    }
+
+    /// Recoil may push the aim TO the ceiling, never through it.
+    #[test]
+    fn sustained_fire_stops_at_the_same_limit_the_mouse_obeys() {
+        let kick = gun(sim::GunKind::M249).kick;
+        let mut pitch = 0.0;
+        for _ in 0..500 {
+            pitch = recoil_kicked_pitch(pitch, kick, 0.05, 1.0);
+        }
+        assert!(
+            pitch >= -LOOK_PITCH_LIMIT,
+            "ran past the look limit: {pitch}"
+        );
+        assert!(
+            (pitch + LOOK_PITCH_LIMIT).abs() < 1e-3,
+            "500 rounds should pin the aim at the ceiling, got {pitch}"
+        );
+    }
+
+    /// A brace is a discount on the kick, in both directions of the
+    /// ladder — the sim damps a braced mech's punch, so the view must
+    /// damp too or the stance does nothing the player can feel.
+    #[test]
+    fn bracing_reduces_the_kick_by_the_sims_own_factor() {
+        let kick = 0.018; // the autocannon's camera kick
+        let unbraced = recoil_kicked_pitch(0.0, kick, 0.0, 1.0).abs();
+        let braced =
+            recoil_kicked_pitch(0.0, kick, 0.0, sim::MECH_BRACE_RECOIL_DAMP).abs();
+        assert!(braced < unbraced, "bracing must help: {braced} vs {unbraced}");
+        assert!(
+            (braced - unbraced * sim::MECH_BRACE_RECOIL_DAMP).abs() < 1e-6,
+            "the view should scale by the sim's own damp factor"
+        );
+        // and leaning on foot is the milder discount
+        let leaned = recoil_kicked_pitch(0.0, kick, 0.0, sim::LEAN_RECOIL_MULT).abs();
+        assert!(
+            leaned > braced && leaned < unbraced,
+            "lean sits between braced and unbraced: {braced} < {leaned} < {unbraced}"
+        );
+    }
+
+    /// Bloom widens the kick, so a hot gun climbs faster than a cold one.
+    #[test]
+    fn a_hot_gun_climbs_faster_than_a_cold_one() {
+        let kick = gun(sim::GunKind::Ak47).kick;
+        let cold = recoil_kicked_pitch(0.0, kick, 0.0, 1.0).abs();
+        let hot = recoil_kicked_pitch(0.0, kick, 0.05, 1.0).abs();
+        assert!(hot > cold, "bloom should add climb: {hot} vs {cold}");
+    }
+}
+
+/// The bowstring must report the draw the SIM is running, not a guess
+/// assembled from the ADS toggle.
+#[cfg(test)]
+mod bow_draw_visual_tests {
+    use super::*;
+
+    const PERIOD: f32 = 0.95; // gun(Bow).fire_period
+
+    /// The split brain this replaces: the pull was `1.0` while aiming and
+    /// `0.25` otherwise, so the whole 0.15s..0.7s curve the sim runs was
+    /// invisible - two positions standing in for a continuous draw.
+    #[test]
+    fn the_players_pull_tracks_the_sims_clock() {
+        let at = |t: f32| bow_draw_visual(t, 0.0, PERIOD, true);
+        assert_eq!(at(0.0), 0.0, "an untouched bow is slack");
+        assert!(at(sim::BOW_DRAW_FULL_S) >= 1.0 - 1e-6, "0.7s is full draw");
+        assert_eq!(at(5.0), 1.0, "holding past full stays full, never past it");
+
+        // strictly increasing across the whole draw - a continuous pull,
+        // which is exactly what the two-position version could not show
+        let mut prev = -1.0;
+        for i in 0..=70 {
+            let v = at(i as f32 * 0.01);
+            assert!(v >= prev, "pull went backwards at t={}", i as f32 * 0.01);
+            prev = v;
+        }
+        // and it is genuinely partway at the halfway mark, not snapped
+        let mid = at(sim::BOW_DRAW_FULL_S * 0.5);
+        assert!(
+            (0.4..0.6).contains(&mid),
+            "half a draw should look half drawn, got {mid}"
+        );
+    }
+
+    /// Bots never run `step_bow_draw`, so their clock is pinned at 0.
+    /// Reading it directly would leave every bot bow permanently slack -
+    /// a regression from the fixed 0.6 this replaced.
+    #[test]
+    fn a_bot_bow_still_draws_even_though_its_clock_never_runs() {
+        let bot = |cd: f32| bow_draw_visual(0.0, cd, PERIOD, true.eq(&false));
+        assert_eq!(bot(PERIOD), 0.0, "just loosed: string forward");
+        assert!(bot(PERIOD * 0.5) > 0.4, "mid-cadence: drawing");
+        assert_eq!(bot(0.0), 1.0, "about to loose: fully drawn");
+
+        // the naive version of this fix - reading bow_draw_t for everyone
+        let naive = bow_draw_visual(0.0, PERIOD * 0.5, PERIOD, true);
+        assert_eq!(naive, 0.0, "which is why bots must not use that path");
+    }
+
+    /// A cadence-derived pull is meaningless without a period.
+    #[test]
+    fn a_zero_period_cannot_divide_by_zero() {
+        assert_eq!(bow_draw_visual(0.0, 0.0, 0.0, false), 0.0);
+    }
+
+    /// Whatever the input, the string is a 0..1 quantity - the renderer
+    /// multiplies anchor offsets by it.
+    #[test]
+    fn the_pull_is_always_a_unit_fraction() {
+        for &(t, cd, player) in &[
+            (-1.0, -1.0, true),
+            (99.0, 99.0, true),
+            (-1.0, -1.0, false),
+            (99.0, 99.0, false),
+        ] {
+            let v = bow_draw_visual(t, cd, PERIOD, player);
+            assert!((0.0..=1.0).contains(&v), "out of range: {v}");
+        }
     }
 }
 
