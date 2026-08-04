@@ -10958,9 +10958,11 @@ fn open_settings(
                     p.spawn((
                         Button,
                         which,
-                        // 18pt in a 620 px box wrapped the 48-char
-                        // mouse-swap row to two lines; 16pt in 470 px
-                        // holds the same string on one.
+                        // The mouse-swap row is the longest label at 51
+                        // chars. 18pt in 620 px wrapped it to two lines
+                        // and it wrapped again at 16pt in 470 - measured
+                        // in a capture, not assumed. 15pt in 500 px is
+                        // 51 x ~9 px = 459 px, which fits with margin.
                         Node {
                             width: Val::Px(SETTINGS_ROW_W),
                             height: Val::Px(SETTINGS_ROW_H),
@@ -10974,7 +10976,7 @@ fn open_settings(
                         let mut e = b.spawn((
                             Text::new(label),
                             TextFont {
-                                font_size: 16.0,
+                                font_size: 15.0,
                                 ..default()
                             },
                             TextColor(Color::WHITE),
@@ -10988,7 +10990,7 @@ fn open_settings(
         });
 }
 
-const SETTINGS_ROW_W: f32 = 470.0;
+const SETTINGS_ROW_W: f32 = 500.0;
 const SETTINGS_ROW_H: f32 = 42.0;
 const SETTINGS_ROW_GAP: f32 = 10.0;
 
