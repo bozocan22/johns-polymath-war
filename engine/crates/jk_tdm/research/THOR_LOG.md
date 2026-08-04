@@ -1207,3 +1207,48 @@ one line holding it up is the one Friday flagged.** Ship order:
 
 All mutations reverted; `git status` clean for
 `engine/crates/jk_tdm/src/sim.rs` and `engine/crates/jk_core/src/timestep.rs`.
+
+---
+
+## 2026-08-03 — §4.6 crosshair: Friday's #1 uncertainty resolved from source
+
+Friday shipped the crosshair settings family (180 tests, 20 mutations
+applied and all 20 killed, verified by counting PIXELS in a real
+capture rather than trusting the suite — 44 green pixels at exactly
+(50,250,50) at defaults, and a non-default `config/settings.txt` with
+size 10 / gap **−4** / T-shape produced device-space arm positions
+matching its prediction exactly).
+
+It flagged five uncertainties and named one as the thing it most wanted
+checked:
+
+> **The kill-pop X is uncaptured.** It relies on Bevy UI honouring
+> `Transform.rotation`. No capture script reaches a player kill, so
+> there is no PNG of the X. If rotation no-ops, the kill confirm
+> degrades silently to just the orange flash.
+
+**RESOLVED — it works, verified from the Bevy 0.15.3 source, not
+assumed:**
+- `bevy_ui/src/layout/mod.rs:413-414` writes **only**
+  `transform.translation`; rotation is never touched by the layout
+  system.
+- `bevy_ui/src/render/mod.rs:290,381,459,492` extract via
+  `transform.compute_matrix()`, and :653 via `global_transform.affine()`
+  — the FULL affine, rotation included.
+
+So a rotated UI node renders rotated. The kill-pop X is real.
+
+**Still genuinely open from Friday's list, recorded rather than
+waved through:** `crosshair_render` itself is Bevy-side and untested
+(a swapped arm index would pass the whole suite — every pure function
+it calls is proven, but the piece-index→rect mapping is not);
+`CROSS_SPREAD_PX_PER_RAD` replaced a bare literal in a system no test
+covers; and the dynamic bloom rate, the outline's 0.75x alpha coupling
+and all four clamp ranges are Friday's own judgement, not specified.
+
+**Process note worth keeping:** Friday's menus capture caught a defect
+that its own code comment had asserted away — a 51-character row it had
+claimed fit was still wrapping. It re-measured, fixed it, and changed
+the comment to say "measured, not assumed". That is the confident-
+narrator anti-pattern being caught by evidence in the same session it
+was written.
