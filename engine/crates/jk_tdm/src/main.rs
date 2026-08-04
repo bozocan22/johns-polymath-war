@@ -27,6 +27,7 @@
 //! ESC menu. Mouse buttons swap in Settings.
 
 mod branding;
+mod menu_ui;
 mod sim;
 
 use bevy::audio::Volume;
