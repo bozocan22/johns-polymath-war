@@ -204,6 +204,15 @@ pub const SHIELD_BLOCK_STAND: f32 = 0.65;
 /// Crouched behind the shield: near-total protection from the front.
 /// Flanking is THE counter — sides and rear ignore the shield entirely.
 pub const SHIELD_BLOCK_CROUCH: f32 = 0.95;
+/// §owner: a raised shield is NOT an answer to war projectiles. An arrow
+/// slips past its edge entirely (the shield contributes NOTHING to an
+/// arrow hit); a thrown spear punches through, the shield keeping at most
+/// this fraction of its block - in ANY stance, crouched included.
+/// Tuned to the owner's rule that THREE hits of either kill a
+/// shield-bearer: spear 85 x (1 - 0.6) = 34, arrow 34 flat; 3 x 34 = 102.
+/// Bullets and blades still respect the plate in full - flanking stays
+/// the counter to a shield, and now so does a warbow.
+pub const SPEAR_SHIELD_BLOCK_CAP: f32 = 0.6;
 pub const SHIELD_SPEED_MULT: f32 = 0.55;
 /// AWM scoped-in crawl.
 pub const SCOPED_SPEED_MULT: f32 = 0.5; // §5.2 (Brief VI): 50% scoped
@@ -258,6 +267,9 @@ pub const AIM_STABILITY_MIN: f32 = 0.65;
 /// the integrator and the damage tables cannot drift apart - `predict_arc`
 /// and `step_missiles` both read the launch speeds this scales.
 pub const MISSILE_SPEED_MULT: f32 = 1.5;
+/// The spear's own bump ON TOP of the shared 1.5x - a heavy committed
+/// throw read too slow even after the fleet-wide speed-up (owner).
+pub const SPEAR_SPEED_EXTRA: f32 = 1.25;
 
 pub const MISSILE_G: f32 = 9.81;
 pub const GRAV_FACTOR_SPEAR: f32 = 0.72;
@@ -273,7 +285,7 @@ pub fn missile_g(is_spear: bool) -> f32 {
 }
 /// Hip-thrown spear (no ADS settle) flies at min charge — the full 26 m/s
 /// needs the cocked, settled throw.
-pub const SPEAR_V0_MIN: f32 = 11.0 * MISSILE_SPEED_MULT;
+pub const SPEAR_V0_MIN: f32 = 11.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA;
 // ---- §5.4 (BRIEF VIII): the running-throw bonus --------------------------
 // "A throw initiated at >=70% run speed with >=2 steps of momentum gets
 // velocity x1.15." The speed gate is exact per the brief; "2 steps of
@@ -557,7 +569,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             // applied at hit resolution (SPEAR_HEAD_MULT/LEG_MULT).
             damage: 85.0,
             // §3.1 (Brief VII v2): 22 m/s full-throw, gravity ×0.72.
-            projectile: Some((22.0 * MISSILE_SPEED_MULT, 85.0)),
+            projectile: Some((22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA, 85.0)),
             zoom_deg: 50.0,
             ..base
         },
@@ -6339,8 +6351,17 @@ impl TdmSim {
             let from_dir = [at[0] - vel[0], at[1] - vel[1], at[2] - vel[2]];
             let mut shielded = false;
             if let Some(block) = self.shield_block(j, from_dir) {
+                // §owner: war projectiles beat the plate - see
+                // SPEAR_SHIELD_BLOCK_CAP. The arrow ignores it outright,
+                // so its hit is NOT reported as blocked; the spear keeps
+                // a capped block and still reads as a shield hit.
+                let block = if is_spear {
+                    block.min(SPEAR_SHIELD_BLOCK_CAP)
+                } else {
+                    0.0
+                };
                 d *= 1.0 - block;
-                shielded = true;
+                shielded = block > 0.0;
             }
             // §6.1 flats + floor (projectiles are flat-torso damage)
             d = self.apply_armor(j, d, dmg * zone_mult, HitZone::Torso, Some(from_dir));
@@ -8515,6 +8536,28 @@ mod tests {
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
         );
+    }
+
+    /// §owner: THREE hits of either war projectile fell a shield-bearer,
+    /// in any stance - even crouched behind the plate, where a rifle is
+    /// blocked at 95%. Derived from the live constants, so a retune of
+    /// any of them moves this test, not silently past it.
+    #[test]
+    fn three_war_projectile_hits_fell_a_shield_bearer() {
+        // the arrow ignores the shield entirely
+        let arrow = gun(GunKind::Bow).damage;
+        let arrow_hits = (MAX_HEALTH / arrow).ceil() as u32;
+        assert_eq!(arrow_hits, 3, "3 arrows through a shield, got {arrow_hits}");
+
+        // the spear keeps a capped block, even against the crouched 95%
+        let spear = gun(GunKind::Spear).damage
+            * (1.0 - SHIELD_BLOCK_CROUCH.min(SPEAR_SHIELD_BLOCK_CAP));
+        let spear_hits = (MAX_HEALTH / spear).ceil() as u32;
+        assert_eq!(spear_hits, 3, "3 spears through a shield, got {spear_hits}");
+
+        // and the cap must actually be a CAP - if someone lowers the
+        // stand block under it, the weaker of the two must win
+        assert!(SPEAR_SHIELD_BLOCK_CAP < SHIELD_BLOCK_CROUCH);
     }
 
     /// §4-B: the missiles fly 1.5x faster, and that has to FLATTEN them.

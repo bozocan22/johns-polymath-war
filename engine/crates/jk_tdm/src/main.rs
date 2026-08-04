@@ -2438,8 +2438,9 @@ struct MinimapPlayer;
 
 const MINIMAP_PX: f32 = 170.0;
 /// Top inset for the minimap. Clears the K/D line that shares this
-/// corner rather than overlapping it.
-const MINIMAP_TOP_PX: f32 = 52.0;
+/// corner rather than overlapping it - 52 still collided with it at the
+/// default window (the capture showed the text ON the map).
+const MINIMAP_TOP_PX: f32 = 96.0;
 
 // ---- AWM scope overlay ---------------------------------------------------
 
@@ -4466,8 +4467,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.05), 0.0, (0.042, 0.045, 0.20)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.05, -0.01), 0.18, (0.042, 0.13, 0.06)));
             parts.push(wp(false, Tone::Black, (0.0, -0.018, 0.048), 0.0, (0.012, 0.012, 0.05)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
         }
         GunKind::Deagle => {
             // the hand cannon: long light slide, heavy dark frame
@@ -4476,8 +4477,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.07), 0.0, (0.048, 0.05, 0.24)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
             push_muzzle(&mut parts, 0.055, 0.27, 0.055);
-            parts.push(wp(false, Tone::Light, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
         }
         GunKind::Mp5 => {
             // compact SMG: short everything - slab receiver, raked mag
@@ -4495,8 +4496,8 @@ fn spawn_weapon_model(
             // §5 (owner): the MP5 was the one gun with no sights modelled
             // at all. Rear notch on the receiver, front post at the muzzle
             // end, both at the same height so they line up.
-            parts.push(wp(false, Tone::Light, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.088, -0.02), 0.0, (0.014, 0.014, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.088, -0.02), 0.0, (0.014, 0.014, 0.01)));
         }
         GunKind::Shotgun => {
             // pump gun: barrel + tube pair over a light pump
@@ -4506,7 +4507,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Light, (0.0, -0.015, 0.30), 0.0, (0.054, 0.05, 0.16)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
         }
         GunKind::Ak47 => {
             // the classic: long gas tube, big two-segment raked magazine
@@ -4520,8 +4521,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.045);
             push_muzzle(&mut parts, 0.045, 0.635, 0.038);
-            parts.push(wp(false, Tone::Light, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
         }
         GunKind::M4 => {
             // modern carbine: notched top rail, straight raked mag
@@ -4535,8 +4536,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Mid, (0.0, -0.09, 0.06), 0.15, (0.038, 0.16, 0.08)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.05);
-            parts.push(wp(false, Tone::Light, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
         }
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
@@ -4563,7 +4564,7 @@ fn spawn_weapon_model(
             push_stock(&mut parts, -0.30, 0.05);
             parts.push(wp(false, Tone::Dark, (0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
             parts.push(wp(false, Tone::Dark, (-0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
         }
         GunKind::Bow => {
             // hard-surface war bow: dark blocky limbs, mid riser, light tips
@@ -6719,9 +6720,16 @@ fn setup(
                 top: Val::Px(MINIMAP_TOP_PX),
                 width: Val::Px(MINIMAP_PX),
                 height: Val::Px(MINIMAP_PX),
+                border: UiRect::all(Val::Px(1.0)),
+                // CLIP. In rotate-with-facing mode the world's corners
+                // swing OUTSIDE the square - dots and rings were drawing
+                // loose on the open HUD, which is the "glitched" look.
+                overflow: Overflow::clip(),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.76)),
+            BorderColor(branding::palette::BRONZE.with_alpha(0.55)),
+            BorderRadius::all(Val::Px(4.0)),
             MinimapRoot,
             HudRoot,
         ))
@@ -9337,6 +9345,12 @@ fn camera_system(
         let zoom = if p.armed() && !p.shield_up {
             if gun(p.gun).scoped && cam_ctl.zoom_stage == 2 {
                 10.0
+            } else if gun(p.gun).projectile.is_some() {
+                // §owner: drawing a bow or cocking a spear TIGHTENS THE
+                // AIM - it does not zoom the world. The zoom was hiding
+                // the arc and making the draw feel like a scope instead
+                // of a weapon coming up to full power.
+                settings.fov_deg()
             } else {
                 gun(p.gun).zoom_deg
             }
@@ -9591,7 +9605,10 @@ fn fp_viewmodel(
     let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
     // §2.2 suppression during ADS: ×(1 − 0.85-ads_t) - a trace of life
     // stays at full zoom, but a scoped gun does not swim
-    let supp = 1.0 - cam_ctl.ads_t * 0.85;
+    // §owner: focused = STILL. Sway and breathe all but stop (0.85 ->
+    // 0.97 suppression), and the recoil's visible rotation is damped
+    // separately below - the bullet still goes where the sim says.
+    let supp = 1.0 - cam_ctl.ads_t * 0.97;
     // §2.3 (Brief IV): MINIMAL bob - half the old amplitudes. CS:GO's
     // gun barely bobs; steadiness is what reads as professional.
     // §1.3 (Brief VI): the bob CLOCK only advances while moving - theta
@@ -9694,6 +9711,11 @@ fn fp_viewmodel(
     let kick_vm = if p.armed() && p.fire_cd > 0.0 {
         ((VM_KICK_RETURN_S - (spec.fire_period - p.fire_cd)) / VM_KICK_RETURN_S)
             .clamp(0.0, 1.0)
+            // §owner: while focused, the gun visibly kicks at a QUARTER
+            // strength - "guns stay stable while aiming". Cosmetic only:
+            // the sim's punch (which decides where bullets go) is not
+            // read from here.
+            * (1.0 - 0.75 * ease_out(cam_ctl.ads_t))
     } else {
         0.0
     };
@@ -9831,7 +9853,7 @@ fn fp_viewmodel(
             kick_vm * 0.16 * VIEW_KICK_TRIM
                 + breathe
                 + sway_rad.y
-                + st.pitch_lag
+                + st.pitch_lag * supp
                 + rl_e.x
                 + mel_e.x
                 - 0.12 * gr
@@ -11969,10 +11991,14 @@ fn open_intro(
             // Name and objective are separate cells now. As one 46-char
             // string they forced a 620px fixed width that wrapped and
             // overlapped the row beneath it at any smaller size.
+            // §owner: ZOMBIE EXTRACTION is withdrawn from the menu. The
+            // mode still exists in the sim - its tests and its systems
+            // stay - but nothing user-facing offers it. Removing the ROW
+            // is the whole change; the handler dispatches on the variant
+            // and dead variants dispatch nothing.
             for (name, obj, which) in [
                 ("TEAM DEATHMATCH", "first to 30", ModeButton::Tdm),
                 ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
-                ("ZOMBIE EXTRACTION", "survive, then hold the ring", ModeButton::Extraction),
             ] {
                 menu_ui::menu_row(
                     b,
