@@ -36,11 +36,11 @@ use bevy::prelude::*;
 // together.
 //
 // **Decorative only.** Nothing here touches a colour that carries
-// MEANING — team blue and orange, danger red, low-health warning,
-// the minimap's friend/foe dots. Those are semantics a player reads
+// MEANING — team identity, danger red, low-health warning, the
+// minimap's friend/foe dots. Those are semantics a player reads
 // under pressure, and retheming them to match a painting would trade
 // readability for mood. That is the line: chrome follows the art,
-// signal does not.
+// signal does not. Signal colours live in `signal`, below.
 pub mod palette {
     use bevy::prelude::Color;
 
@@ -61,6 +61,84 @@ pub mod palette {
     pub const PARCHMENT: Color = Color::srgb(0.93, 0.89, 0.80);
     /// Muted parchment for secondary/inactive text.
     pub const PARCHMENT_DIM: Color = Color::srgb(0.68, 0.63, 0.55);
+}
+
+// ---- signal ----------------------------------------------------------
+// The deliberate counterpart to `palette`: colours that carry MEANING.
+// `palette` follows the art and may be retuned freely; nothing here may
+// be, because a player reads these under fire.
+//
+// **Team colour is RELATIVE to the viewer, not absolute.** The old code
+// asked "is this fighter Blue or Red" at six separate call sites and
+// answered with a hardcoded literal. That is a bug waiting to happen the
+// moment the player spawns on Red — their own team would render in the
+// enemy colour. Every site now asks `side_of(their_team, my_team)` and
+// gets ALLY or ENEMY, so the answer is correct from either side.
+//
+// The owner's rule: allies read WHITE + GOLD, enemies read RED + ORANGE.
+//
+// LUMINANCE carries the signal, hue only reinforces it — allies are
+// bright and cool, enemies are dark-bodied with a hot glowing accent.
+// That ordering matters: roughly 1 in 12 men cannot separate red from
+// green by hue, and a red-vs-blue scheme collapses for them under the
+// game's amber dust fog. A bright-vs-dark split survives greyscale,
+// which is the real test.
+pub mod signal {
+    use bevy::prelude::Color;
+
+    /// Ally body shell — bright cold steel. Deliberately the highest
+    /// luminance in the world so a teammate reads at silhouette range.
+    pub const ALLY: Color = Color::srgb(0.93, 0.95, 0.97);
+    /// Ally accent — antique gold on the shoulder band and emblem ring.
+    /// Warm against the cold shell, and the same gold the player's own
+    /// minimap marker uses, so "my side" is one colour idea.
+    pub const ALLY_ACCENT: Color = Color::srgb(0.95, 0.78, 0.28);
+    /// Enemy body shell — dark oxide red. Low luminance: the enemy is
+    /// the dark shape, always.
+    pub const ENEMY: Color = Color::srgb(0.42, 0.11, 0.09);
+    /// Enemy accent — hot orange, emissive. The only strongly glowing
+    /// thing on a body, so a muzzle-lit enemy still reads as enemy.
+    pub const ENEMY_ACCENT: Color = Color::srgb(1.00, 0.45, 0.10);
+
+    /// Which side a fighter is on **from the viewer's seat**.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Side {
+        Ally,
+        Enemy,
+    }
+
+    impl Side {
+        /// Shell / primary colour.
+        pub fn body(self) -> Color {
+            match self {
+                Side::Ally => ALLY,
+                Side::Enemy => ENEMY,
+            }
+        }
+        /// Accent / trim colour — bands, rings, tracers, dots.
+        pub fn accent(self) -> Color {
+            match self {
+                Side::Ally => ALLY_ACCENT,
+                Side::Enemy => ENEMY_ACCENT,
+            }
+        }
+        /// Linear RGB triple of `accent`, for the many call sites that
+        /// build a `srgba` with a computed alpha or an emissive scale.
+        pub fn accent_rgb(self) -> (f32, f32, f32) {
+            let c = self.accent().to_srgba();
+            (c.red, c.green, c.blue)
+        }
+    }
+
+    /// The one question every colour site asks. `viewer` is the team the
+    /// player is actually on this round — never assume Blue.
+    pub fn side_of<T: PartialEq>(theirs: T, viewer: T) -> Side {
+        if theirs == viewer {
+            Side::Ally
+        } else {
+            Side::Enemy
+        }
+    }
 }
 
 // ---- timings ---------------------------------------------------------

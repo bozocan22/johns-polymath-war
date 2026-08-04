@@ -31,6 +31,25 @@ pub const BODY_HEIGHT: f32 = 1.78;
 pub const CROUCH_HEIGHT: f32 = 1.15;
 pub const MOVE_SPEED: f32 = 4.8;
 pub const SPRINT_SPEED: f32 = 6.6;
+/// §3.6 walk pace, as a fraction of `MOVE_SPEED`. CS:GO's own ratio
+/// (250 → 130 units/s = 0.52), kept rather than re-invented because it
+/// is the number a decade of players already has in their hands.
+pub const WALK_SPEED_MULT: f32 = 0.52;
+/// §3.6: a walking shooter is a PLANTED shooter. Recoil impulse is
+/// damped on the same generic lever `LEAN_RECOIL_MULT` and
+/// `MECH_BRACE_RECOIL_DAMP` already use, so the three compose instead
+/// of each being a special case at the fire site.
+pub const WALK_RECOIL_DAMP: f32 = 0.72;
+/// §8.2 movement noise radii, in metres, fed to the horde director.
+/// The tiers are what make walking a real choice: before this, ordinary
+/// running was already silent, so a walk key would have bought nothing.
+/// Sprinting is the loud one, running is a real but shorter tell, and a
+/// walk emits nothing at all.
+pub const NOISE_SPRINT_M: f32 = 14.0;
+pub const NOISE_RUN_M: f32 = 7.0;
+/// Recon Weave runs quiet — its own, smaller pair.
+pub const NOISE_SPRINT_RECON_M: f32 = 6.0;
+pub const NOISE_RUN_RECON_M: f32 = 3.0;
 
 // ---- §1.3 (BRIEF VIII): "full stops never hit instant zero" ---------
 // The doctrine's headline rule, and the single largest source of the
@@ -107,6 +126,13 @@ pub const ROLL_SPEED: f32 = 8.6; // faster than a sprint — it's a dodge
 /// loads the legs, and the release is faster than a dead-start. A dodge
 /// WITH your movement is already riding momentum and gets nothing.
 pub const ROLL_COUNTER_BONUS: f32 = 0.12;
+/// §C.3: the same counter-movement rule, applied to the JUMP - a
+/// crouch-jump launches out of loaded legs, a flat-footed jump does not.
+/// Smaller than the dodge's bonus because the sports-science measure it
+/// comes from is smaller: a countermovement jump beats a static squat
+/// jump by only a few per cent of height, where a lateral cut against
+/// real momentum has far more to give back.
+pub const JUMP_COUNTER_BONUS: f32 = 0.06;
 
 /// Task 3 rule 3, the pure rule: a counter-movement (motion opposite the
 /// coming release) grants the bonus; a dead start does not. `prior_dir`
@@ -1340,6 +1366,16 @@ pub struct Fighter {
     /// −1..+1 sideways lean (peek): shifts the muzzle, trims recoil.
     pub lean: f32,
     pub crouch: bool,
+    /// §3.6: holding the walk key this tick. AUTHORITATIVE state, not
+    /// raw intent — `try_fire` and the noise pass both read it, and a
+    /// speed-derived guess would be wrong for one tick every time the
+    /// key is tapped, which is exactly when a stealth player cares.
+    pub walking: bool,
+    /// §4.5: was the shot that is currently in flight fired while aimed?
+    /// Latched in `try_fire`, read when the kill resolves — the kill site
+    /// is several calls downstream of the trigger and has no other way
+    /// to know how the shot was taken.
+    pub fired_ads: bool,
     pub switch_t: f32,
     pub pos: [f32; 3], // feet
     pub vel: [f32; 2], // xz
@@ -1652,6 +1688,11 @@ pub struct PlayerCmd {
     pub move_x: f32,
     pub move_z: f32,
     pub sprint: bool,
+    /// §3.6: hold-to-WALK (CS:GO grammar). Slower, silent, and steadier
+    /// on the trigger. The opposite end of `sprint` on the same axis, so
+    /// both held at once resolves to walk — the careful intent wins,
+    /// which is the safe way round for a stealth input.
+    pub walk: bool,
     pub yaw: f32,
     pub aim: [f32; 3],
     pub shoot: bool,
@@ -1694,6 +1735,13 @@ pub struct KillEvent {
     pub killer: usize,
     pub victim: usize,
     pub headshot: bool,
+    /// §4.5 modifier: the victim was flash-blind when they died.
+    pub blind: bool,
+    /// §4.5 modifier: a scoped-class weapon fired without being scoped.
+    /// Only ever true for `GunSpec::scoped` guns - a rifle has no scope
+    /// to not be looking through, so calling its shot a "noscope" would
+    /// hand out the badge for nothing.
+    pub noscope: bool,
     /// §4.5 (BRIEF VIII): the most recent OTHER fighter who damaged the
     /// victim within ASSIST_WINDOW_S of the kill. `None` if the killer
     /// landed every recent hit alone, or nobody else hit them recently
@@ -2958,6 +3006,13 @@ pub struct TdmSim {
     /// §8.3 director pressure 0..1 — time, noise, and player health feed
     /// it; spawn rate and composition scale off it.
     pub pressure: f32,
+    /// Count of noise events emitted this round. Sim state (so it stays
+    /// bit-identical under replay), and the only way to assert "this was
+    /// silent" without reaching into the zombie list — `pressure` cannot
+    /// serve, because the director also raises it on its own clock, so a
+    /// pressure delta cannot distinguish a footstep from the passage of
+    /// time.
+    pub noise_pings: u32,
     /// §8.4 extraction: two candidate sites, the active index, and the
     /// hold progress in seconds.
     pub extract_sites: [[f32; 3]; 2],
@@ -3111,6 +3166,8 @@ impl TdmSim {
                     shield_up: false,
                     lean: 0.0,
                     crouch: false,
+                    walking: false,
+                    fired_ads: false,
                     switch_t: 0.0,
                     pos,
                     vel: [0.0, 0.0],
@@ -3239,6 +3296,7 @@ impl TdmSim {
             zombies: Vec::new(),
             toxics: Vec::new(),
             pressure: 0.0,
+            noise_pings: 0,
             extract_sites: [
                 [half - 20.0, 0.0, half - 20.0],
                 [-(half - 20.0), 0.0, -(half - 20.0)],
@@ -3919,7 +3977,14 @@ impl TdmSim {
                     f.stride_heat = (f.stride_heat - POWER_STRIDE_HEAT_PER_S * 0.5 * DT).max(0.0);
                 }
             }
-            let mut speed = if cmd.sprint && !drawn && !in_mech {
+            // §3.6: latch walk BEFORE it is read anywhere else this tick.
+            // Walk beats sprint when both are held (see `PlayerCmd::walk`),
+            // and a mech has one pace — it cannot tiptoe.
+            let walking = cmd.walk && !in_mech;
+            self.fighters[p].walking = walking;
+            let mut speed = if walking {
+                MOVE_SPEED * WALK_SPEED_MULT
+            } else if cmd.sprint && !drawn && !in_mech {
                 SPRINT_SPEED // sprinting at full draw is genuinely not possible
             } else {
                 MOVE_SPEED
@@ -4116,7 +4181,24 @@ impl TdmSim {
                     && self.fighters[p].hull > 0.0)
             {
                 let f = &mut self.fighters[p];
-                f.vy = JUMP_SPEED;
+                // §C.3 (BRIEF VIII_B): the counter-movement rule is
+                // specified to govern "the jump, the dodge launch, and
+                // the melee thrust", not only the throw. The dodge got
+                // it (`roll_boost`); the jump never did, and took a flat
+                // JUMP_SPEED whatever the legs had been doing.
+                //
+                // A crouch IS the counter-movement: the legs are already
+                // coiled, so releasing into a jump is a real
+                // stretch-shortening cycle rather than a dead start.
+                // Routed through the SAME `counter_movement_bonus` the
+                // dodge uses - prior motion down, release up - so the
+                // two can never drift apart.
+                let boost = if f.crouch {
+                    counter_movement_bonus(-1.0, 1.0, JUMP_COUNTER_BONUS)
+                } else {
+                    0.0
+                };
+                f.vy = JUMP_SPEED * (1.0 + boost);
                 f.pos[1] += 0.05; // clear the support clamp so the ascent integrates
                 f.grounded = false;
             }
@@ -4745,18 +4827,28 @@ impl TdmSim {
             self.fighters[p].vel = [0.0, 0.0];
         }
 
-        // §8.2: sprinting is noise too (Recon Weave runs quiet)
+        // §8.2: moving is noise (Recon Weave runs quiet). Three tiers, so
+        // §3.6's walk key buys something real: sprinting carries far,
+        // running carries half as far, and a WALK is silent. Walk is
+        // checked as authoritative state rather than by speed, because a
+        // man shoved by a blast can be moving slowly without treading
+        // carefully — and that distinction is the whole mechanic.
         if self.mode == Mode::Extraction && self.tick % 60 == 0 {
             let mut events: Vec<([f32; 2], f32)> = Vec::new();
             for f in &self.fighters {
-                if !f.alive() {
+                if !f.alive() || f.walking {
                     continue;
                 }
+                let recon = f.armor_set == ArmorSet::Recon;
                 let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
-                if sp > 6.0 {
-                    let r = if f.armor_set == ArmorSet::Recon { 6.0 } else { 14.0 };
-                    events.push(([f.pos[0], f.pos[2]], r));
-                }
+                let r = if sp > 6.0 {
+                    if recon { NOISE_SPRINT_RECON_M } else { NOISE_SPRINT_M }
+                } else if sp > MOVE_SPEED * 0.55 {
+                    if recon { NOISE_RUN_RECON_M } else { NOISE_RUN_M }
+                } else {
+                    continue; // creeping, crouched, or standing still
+                };
+                events.push(([f.pos[0], f.pos[2]], r));
             }
             for (at, r) in events {
                 self.emit_noise(at, r);
@@ -5380,14 +5472,23 @@ impl TdmSim {
             let f = &mut self.fighters[i];
             f.ammo -= 1;
             f.fire_cd = spec.fire_period;
+            // §4.5: latch HOW this shot was taken. The kill resolves
+            // several calls downstream and cannot see the trigger.
+            f.fired_ads = ads;
             // opening fire drops your spawn protection — no shooting from
             // behind the untargetable shimmer
             f.protect_t = 0.0;
-            let kick = if lean.abs() > 0.1 {
-                spec.kick * LEAN_RECOIL_MULT
-            } else {
-                spec.kick
-            };
+            // §3.6: walking damps the kick, and it MULTIPLIES with lean
+            // rather than replacing it — a leaning walker is the steadiest
+            // stance a man on his feet can take, and the arithmetic should
+            // say so instead of picking one bonus and dropping the other.
+            let mut kick = spec.kick;
+            if lean.abs() > 0.1 {
+                kick *= LEAN_RECOIL_MULT;
+            }
+            if f.walking {
+                kick *= WALK_RECOIL_DAMP;
+            }
             f.bloom = (f.bloom + kick).min(0.05);
             // §2 (Brief VI): advance the deterministic spray — the
             // per-weapon table feeds the punch VELOCITY (first shots
@@ -5888,6 +5989,12 @@ impl TdmSim {
                     killer: i,
                     victim: j,
                     headshot: zone == HitZone::Head,
+                    // §4.5 modifiers. Both are read from state that
+                    // already existed at this point - neither needed a
+                    // new system, only a new question asked of one.
+                    blind: self.fighters[j].blind_t > 0.0,
+                    noscope: gun(self.fighters[i].gun).scoped
+                        && !self.fighters[i].fired_ads,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -6240,6 +6347,12 @@ impl TdmSim {
                         killer: i,
                         victim: j,
                         headshot: false,
+                        // §4.5: an area/explosive kill. Blindness still
+                        // reads (a flashed man caught by a grenade was
+                        // still flashed); noscope does not - there was
+                        // no aimed shot to take unaimed.
+                        blind: self.fighters[j].blind_t > 0.0,
+                        noscope: false,
                         assist: assist_candidate,
                     },
                     5.0,
@@ -6590,6 +6703,7 @@ impl TdmSim {
     /// §8.2: noise pulls the horde. Zombies inside the radius re-target
     /// the source; the director feels it too.
     fn emit_noise(&mut self, at: [f32; 2], radius: f32) {
+        self.noise_pings += 1;
         self.pressure = (self.pressure + 0.008).min(1.0);
         for z in &mut self.zombies {
             let dx = z.pos[0] - at[0];
@@ -7305,6 +7419,9 @@ impl TdmSim {
                     killer: src,
                     victim,
                     headshot: false,
+                    // §4.5: same reasoning as the area-kill site above.
+                    blind: self.fighters[victim].blind_t > 0.0,
+                    noscope: false,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -8312,6 +8429,384 @@ mod tests {
         assert!(
             mech_speed <= cap,
             "a bot mech must obey its armor pace: {mech_speed} > {cap}"
+        );
+    }
+
+    /// §C.3: the counter-movement rule reaches the JUMP.
+    ///
+    /// This was one of Thor's named dead wirings: the brief says the
+    /// rule "should govern the jump, the dodge launch, and the melee
+    /// thrust", and only the dodge had it. A crouch-jump must now clear
+    /// more than a flat-footed one, by exactly the stated bonus.
+    #[test]
+    fn a_crouch_jump_out_of_loaded_legs_beats_a_flat_footed_one() {
+        let launch = |crouch: bool| {
+            let mut s = range(53);
+            // settle, holding the crouch so the legs are actually loaded
+            for _ in 0..(SIM_HZ as usize / 2) {
+                s.step(PlayerCmd { crouch, ..Default::default() });
+            }
+            assert!(s.fighters[0].grounded, "must be grounded to jump");
+            s.step(PlayerCmd { crouch, jump: true, ..Default::default() });
+            s.fighters[0].vy
+        };
+        let flat = launch(false);
+        let loaded = launch(true);
+        assert!(
+            loaded > flat,
+            "a crouch-jump must out-launch a flat-footed one: {loaded} vs {flat}"
+        );
+        // Compare the DIFFERENCE, not the ratio. One tick of gravity has
+        // already been applied to both readings by the time `step`
+        // returns, which biases a ratio (it read 0.0612 against an
+        // expected 0.0600) but cancels exactly in a subtraction.
+        assert!(
+            ((loaded - flat) - JUMP_SPEED * JUMP_COUNTER_BONUS).abs() < 1e-3,
+            "the bonus must be exactly JUMP_SPEED × JUMP_COUNTER_BONUS ({}), got {}",
+            JUMP_SPEED * JUMP_COUNTER_BONUS,
+            loaded - flat
+        );
+        // and the flat jump must be untouched - this change may not
+        // quietly retune the ordinary jump everyone already has in hand.
+        // One tick of gravity is the whole allowance.
+        assert!(
+            (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
+            "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
+        );
+    }
+
+    /// §1.6.3 ZERO-INSTANT-STOP SWEEP.
+    ///
+    /// "Scan every stop/landing/turn state on both rigs for velocity
+    /// discontinuity above threshold. **Regression sweep, not one-off.**"
+    ///
+    /// So it is a sweep: every entry speed crossed with every way a man
+    /// can stop — release, hard reversal, perpendicular cut, landing,
+    /// crouch-stop, walk-stop. The §1.5 anti-pattern this hunts is named
+    /// "the wall stop", and one hand-picked scenario would not find it.
+    ///
+    /// The threshold is DERIVED from the movement constants, not chosen,
+    /// so a hardcoded number here cannot silently pass the day someone
+    /// retunes them.
+    ///
+    /// It is `GROUND_ACCEL`, not `GROUND_DECEL`, and that is deliberate:
+    /// a HARD REVERSAL legitimately takes the accel path. Pressing the
+    /// opposite direction sets a target of equal magnitude, which reads
+    /// as "accelerating" the moment current speed drops below it — that
+    /// asymmetry IS the counter-strafe, documented at `GROUND_ACCEL`.
+    /// This sweep first ran with the decel ceiling and flagged the
+    /// reversal at 0.458 m/s/tick; the number is exactly
+    /// `GROUND_ACCEL * DT`, which is the mechanic working, not a wall
+    /// stop. Bounded is the property under test — never instantaneous.
+    #[test]
+    fn zero_instant_stop_sweep_over_every_stop_state() {
+        // the physics ceiling on one tick, plus float slack
+        let cap = GROUND_ACCEL.max(GROUND_DECEL) * DT * 1.05;
+
+        // how the stop is commanded, once the run-up is done
+        let stops: [(&str, PlayerCmd); 6] = [
+            ("release", PlayerCmd::default()),
+            ("hard reversal", PlayerCmd { move_z: -1.0, ..Default::default() }),
+            ("perpendicular cut", PlayerCmd { move_x: 1.0, ..Default::default() }),
+            ("crouch stop", PlayerCmd { crouch: true, ..Default::default() }),
+            ("walk stop", PlayerCmd { move_z: 1.0, walk: true, ..Default::default() }),
+            (
+                "reversal at a walk",
+                PlayerCmd { move_z: -1.0, walk: true, ..Default::default() },
+            ),
+        ];
+        // every entry pace, including the airborne case (a landing)
+        let entries: [(&str, PlayerCmd); 4] = [
+            ("sprint", PlayerCmd { move_z: 1.0, sprint: true, ..Default::default() }),
+            ("run", PlayerCmd { move_z: 1.0, ..Default::default() }),
+            ("walk", PlayerCmd { move_z: 1.0, walk: true, ..Default::default() }),
+            (
+                "sprint into a jump",
+                PlayerCmd { move_z: 1.0, sprint: true, jump: true, ..Default::default() },
+            ),
+        ];
+
+        let mut worst = 0.0_f32;
+        let mut worst_case = String::new();
+        for (ename, entry) in entries {
+            for (sname, stop) in stops {
+                let mut s = range(11);
+                // The sweep measures MOVEMENT, so nothing else may move
+                // the fighter. The range's enemy is live and shooting:
+                // an early run of this test flagged a clean 4.8000 m/s
+                // "discontinuity" at tick 109, which was exactly
+                // MOVE_SPEED because the player had been killed and
+                // respawned mid-sweep. Disarm the opposition rather than
+                // filter the symptom - a respawn is not a stop state and
+                // does not belong in this sample at all.
+                for f in s.fighters.iter_mut().skip(1) {
+                    f.gun = GunKind::Fists;
+                    f.ammo = 0;
+                }
+                // run up to a settled pace
+                for _ in 0..(SIM_HZ as usize) {
+                    s.step(entry);
+                }
+                assert!(s.fighters[0].alive(), "{ename}: setup must not kill the subject");
+                let mut prev = s.fighters[0].vel;
+                // then stop, and watch EVERY tick of the transition
+                for tick in 0..(SIM_HZ as usize) {
+                    s.step(stop);
+                    assert!(
+                        s.fighters[0].alive(),
+                        "{ename} -> {sname}: the subject died mid-sweep at tick {tick}, so the \
+                         sample is no longer about stopping"
+                    );
+                    let v = s.fighters[0].vel;
+                    let d = ((v[0] - prev[0]).powi(2) + (v[1] - prev[1]).powi(2)).sqrt();
+                    if d > worst {
+                        worst = d;
+                        worst_case = format!("{ename} -> {sname} at tick {tick}");
+                    }
+                    assert!(
+                        d <= cap,
+                        "THE WALL STOP (§1.5): {ename} -> {sname} changed velocity by \
+                         {d:.4} m/s in one tick at tick {tick}, over the {cap:.4} ceiling \
+                         that GROUND_DECEL itself sets"
+                    );
+                    // and the literal anti-pattern: a man at speed must
+                    // never be at EXACTLY rest on the following tick.
+                    // The bounded check above implies this, but "the
+                    // wall stop" is worth asserting in its own words so
+                    // a failure names the defect the brief named.
+                    let was = (prev[0] * prev[0] + prev[1] * prev[1]).sqrt();
+                    let now = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                    assert!(
+                        !(was > 1.0 && now == 0.0),
+                        "THE WALL STOP (§1.5): {ename} -> {sname} went from {was:.2} m/s to \
+                         a dead zero in one tick at tick {tick}"
+                    );
+                    prev = v;
+                }
+                // and it must actually have STOPPED, or the test above
+                // is satisfied by a man who simply never slows down
+                let end = s.fighters[0].vel;
+                let sp = (end[0] * end[0] + end[1] * end[1]).sqrt();
+                if sname == "release" {
+                    assert!(sp < 0.05, "{ename} -> release must reach rest, got {sp}");
+                }
+            }
+        }
+        // a passing sweep should still have found real deceleration -
+        // if the worst tick were ~0 the harness would be measuring a
+        // fighter that never moved.
+        assert!(
+            worst > 0.05,
+            "the sweep never observed real deceleration (worst {worst:.4} at {worst_case}) - \
+             it is not exercising what it claims to"
+        );
+    }
+
+    /// §1.6.4 VERTICAL-BOB BUDGET.
+    ///
+    /// "Hip-height trace over a scripted sprint stays under cap."
+    ///
+    /// Measured on the SIM's own hip trace across a scripted sprint, and
+    /// against a cap expressed in centimetres, because the anti-pattern
+    /// ("the ice skater" at one end, a bouncing camera at the other) is a
+    /// property of how far the hip travels, not of the constants that
+    /// happen to produce it.
+    #[test]
+    fn vertical_bob_budget_over_a_scripted_sprint() {
+        /// Peak-to-trough hip travel a sprint may spend, metres.
+        const BOB_BUDGET_M: f32 = 0.06;
+
+        let mut s = range(23);
+        let sprint = PlayerCmd { move_z: 1.0, sprint: true, ..Default::default() };
+        // let the accel model reach steady state before measuring
+        for _ in 0..(SIM_HZ as usize / 2) {
+            s.step(sprint);
+        }
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for _ in 0..(SIM_HZ as usize * 2) {
+            s.step(sprint);
+            let f = &s.fighters[0];
+            assert!(f.grounded, "a scripted flat sprint must stay grounded");
+            lo = lo.min(f.pos[1]);
+            hi = hi.max(f.pos[1]);
+        }
+        let travel = hi - lo;
+        assert!(
+            travel <= BOB_BUDGET_M,
+            "vertical bob budget blown: hip travelled {:.1} cm over a sprint, cap is {:.1} cm",
+            travel * 100.0,
+            BOB_BUDGET_M * 100.0
+        );
+    }
+
+    /// §1.6.2 LEAN-AND-CUT.
+    ///
+    /// "Direction-change fuzz; assert ... no orientation snap beyond a
+    /// per-frame cap."
+    ///
+    /// WHAT "ORIENTATION" MEANS HERE. It is the body's MOMENTUM, not the
+    /// aim yaw. Aim yaw is the mouse, and this project's own operating
+    /// contract says "player intent wins — procedural motion yields to
+    /// direct input within one frame"; a per-frame cap on where the
+    /// player is looking would break that rule, not enforce it. This
+    /// test first ran against `Fighter::yaw` and flagged a 47 rad/s
+    /// "snap" on tick 0, which was simply a mouse turn being obeyed.
+    ///
+    /// The thing §1.3 actually forbids is the BODY changing direction
+    /// with no plant and no transition — "the mannequin spin". That is a
+    /// property of the velocity vector, and it is what is swept here.
+    ///
+    /// FUZZ, per the brief: 16 cut angles rather than one scripted turn,
+    /// because the defect is angle-dependent and a single sample misses
+    /// it. The sim is seeded, so it stays reproducible.
+    #[test]
+    fn lean_and_cut_never_snaps_orientation() {
+        // Angular rate is |Δv| / (speed · dt), so the SAME linear
+        // acceleration swings the direction faster the slower you are
+        // going. That is geometry, not a defect - which means the cap
+        // and the speed gate have to be derived together or the test
+        // fails on a legitimate mid-cut speed dip (an earlier run flagged
+        // 12.9 rad/s against a 12.6 cap for exactly this reason).
+        //
+        // So: only sample above `GATE`, and set the cap to the fastest
+        // swing physically reachable at that speed.
+        let gate = MOVE_SPEED * 0.6;
+        let cap = (GROUND_ACCEL / gate) * 1.05;
+
+        for step in 0..16 {
+            let ang = step as f32 * std::f32::consts::TAU / 16.0;
+            let mut s = range(37 + step as u64);
+            let run = PlayerCmd { move_z: 1.0, ..Default::default() };
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(run);
+            }
+            let cut = PlayerCmd {
+                move_x: ang.sin(),
+                move_z: ang.cos(),
+                yaw: ang,
+                ..Default::default()
+            };
+            let mut prev = s.fighters[0].vel;
+            for tick in 0..(SIM_HZ as usize / 2) {
+                s.step(cut);
+                let v = s.fighters[0].vel;
+                let (pm, nm) = (
+                    (prev[0] * prev[0] + prev[1] * prev[1]).sqrt(),
+                    (v[0] * v[0] + v[1] * v[1]).sqrt(),
+                );
+                // a direction is only meaningful while actually moving;
+                // through the dead centre of a reversal it is not
+                if pm > gate && nm > gate {
+                    let dot = (prev[0] * v[0] + prev[1] * v[1]) / (pm * nm);
+                    let swing = dot.clamp(-1.0, 1.0).acos() / DT;
+                    assert!(
+                        swing <= cap,
+                        "THE MANNEQUIN SPIN (§1.5): cut to {:.0} deg swung the body's \
+                         momentum at {swing:.1} rad/s on tick {tick} - cap is {cap:.1}",
+                        ang.to_degrees()
+                    );
+                }
+                prev = v;
+            }
+            // the cut must actually have HAPPENED - otherwise a fighter
+            // who ignored the input would pass on a technicality
+            let v = s.fighters[0].vel;
+            let m = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            assert!(m > 0.5, "the cut never got the body moving again: {m}");
+            let want = (ang.sin(), ang.cos());
+            let dot = (v[0] * want.0 + v[1] * want.1) / m;
+            assert!(
+                dot > 0.85,
+                "after half a second the body should be travelling the new way, got dot {dot:.2} \
+                 for a cut to {:.0} deg",
+                ang.to_degrees()
+            );
+        }
+    }
+
+    /// §3.6: the walk key has to buy all THREE things it advertises —
+    /// slower, steadier, silent — or it is a speed debuff with good PR.
+    /// One test per promise, each falsifiable on its own.
+    #[test]
+    fn walking_is_slower_steadier_and_silent() {
+        let step_n = |s: &mut TdmSim, cmd: PlayerCmd, n: usize| {
+            for _ in 0..n {
+                s.step(cmd);
+            }
+        };
+        let settle = |walk: bool| {
+            let mut s = range(94);
+            step_n(
+                &mut s,
+                PlayerCmd { move_z: 1.0, walk, ..Default::default() },
+                SIM_HZ as usize,
+            );
+            s
+        };
+
+        // 1. SLOWER — and by the advertised ratio, not merely "less".
+        let run = settle(false);
+        let walk = settle(true);
+        let speed = |s: &TdmSim| {
+            let v = s.fighters[0].vel;
+            (v[0] * v[0] + v[1] * v[1]).sqrt()
+        };
+        let (sr, sw) = (speed(&run), speed(&walk));
+        assert!(sw < sr, "a walk must be slower than a run: {sw} vs {sr}");
+        let ratio = sw / sr;
+        assert!(
+            (ratio - WALK_SPEED_MULT).abs() < 0.05,
+            "walk pace must be ~{WALK_SPEED_MULT} of the run, got {ratio}"
+        );
+        assert!(walk.fighters[0].walking, "the walk flag must be latched");
+
+        // 2. STEADIER — the same shot from the same state kicks less.
+        let kick_of = |walking: bool| {
+            let mut s = range(94);
+            s.fighters[0].gun = GunKind::M4;
+            s.fighters[0].ammo = 30;
+            s.fighters[0].protect_t = 0.0;
+            s.fighters[0].walking = walking;
+            let before = s.fighters[0].bloom;
+            assert!(s.try_fire(0, [0.0, 0.0, 1.0], false), "the test shot must fire");
+            s.fighters[0].bloom - before
+        };
+        let (k_run, k_walk) = (kick_of(false), kick_of(true));
+        assert!(
+            k_walk < k_run,
+            "walking must damp the kick: {k_walk} vs {k_run}"
+        );
+        assert!(
+            (k_walk / k_run - WALK_RECOIL_DAMP).abs() < 0.02,
+            "kick must scale by {WALK_RECOIL_DAMP}, got {}",
+            k_walk / k_run
+        );
+
+        // 3. SILENT — the promise that actually matters to the horde.
+        // Run one full noise cycle each way and count what the director
+        // was told. A run is a real tell; a walk is nothing at all.
+        let noise_events = |walk: bool, sprint: bool| {
+            let mut s = TdmSim::new(cfg(7, 1, Mode::Extraction, MapKind::Arena));
+            let before = s.noise_pings;
+            step_n(
+                &mut s,
+                PlayerCmd { move_z: 1.0, walk, sprint, ..Default::default() },
+                SIM_HZ as usize * 2,
+            );
+            s.noise_pings - before
+        };
+        assert!(
+            noise_events(false, true) > 0,
+            "sprinting must be heard"
+        );
+        assert!(
+            noise_events(false, false) > 0,
+            "running must be heard - otherwise the walk key buys nothing"
+        );
+        assert_eq!(
+            noise_events(true, false),
+            0,
+            "a WALK must emit no movement noise at all"
         );
     }
 

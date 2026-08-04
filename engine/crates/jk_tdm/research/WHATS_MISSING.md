@@ -12,24 +12,44 @@ an item moves up when its blocker clears, not when it becomes interesting.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-1. **§3.4 low-ready + ready-up** — muzzle obstruction dip (22°) near
-   walls, with overshoot on ready-up. Pure presentation.
-2. **§4.1 vitals bars + armor cluster** — HUD health presented as
-   segmented bars with an armor pip cluster (numbers exist; the visual
-   language doesn't).
-3. **§4.3 minimap rotate/scale options** — settings entries; minimap
-   itself works.
-4. **§1.6 missing tests** — zero-instant-stop sweep, vertical-bob
-   budget, lean-and-cut ordering. Mechanics exist; falsifiable coverage
-   doesn't.
-5. **§4.7 context progress bar** — the killer-cam/spectate flow shipped;
-   the generic "channeling" progress bar it was specced beside didn't.
-6. **Killfeed rich formatting** — team colors + border + modifier icons
-   (headshot etc.). Assists already track and display.
-7. **Remainder of THOR_LOG's 97 double-confirmed small gaps** — HUD
-   toasts, crosshair settings, dead-field wirings
-   (`ElasticMove.return_efficiency`, counter-movement→jump), numeric
-   tunings. Picked off one at a time as work continues.
+**All seven of the items that stood here on 2026-08-04 are now BUILT** —
+see "Closed 2026-08-04" below. What remains of this tier is the tail of
+THOR_LOG's 97:
+
+1. **HUD award toasts** — §4.3 specs resource-award toasts stacking above
+   the resource counter, each fading after 2.5 s. No resource economy
+   exists in TDM/KOTH to award from, so this waits on a mode that has
+   one rather than being faked.
+2. **Killfeed WALLBANG + THROUGH-SMOKE modifiers** — the other four
+   §4.5 glyphs ship; these two need the hitscan path to report whether
+   its ray crossed cover geometry / a live smoke volume. Real plumbing
+   through the projectile path, not a flag.
+3. **Numeric tunings** — the remaining screen-intrusion profiles and
+   spear FOV/speed values called out in THOR_LOG. Picked off one at a
+   time as work continues.
+
+### Closed 2026-08-04
+
+| Item | How it closed |
+|---|---|
+| §3.4 low-ready + ready-up | 22° up-and-in at 0.6 m; ready-up is a real ζ=0.7 spring (a lerp cannot overshoot at all), sub-stepped so it stays bounded at 10 fps. 3 tests. |
+| §4.1 vitals bars + armor cluster | 10-segment health bar + 4-pip armour cluster, `hud_vitals_style` setting. The pips read the SET's flat protection on foot and the power core in a chassis — `Fighter::armor` is zero for four of the five sets, so a pool-driven cluster would have sat empty all match. |
+| §4.3 minimap rotate/scale | Rotate-with-facing + 25–100% scale, both persisted and both on settings rows. |
+| §1.6 tests | Zero-instant-stop sweep (6 stop states × 4 entry paces), vertical-bob budget, lean-and-cut fuzz over 16 angles. |
+| §4.7 context progress bar | Generic — one resolver feeding mech entry, mech exit and the extraction hold. |
+| Killfeed rich formatting | Rebuilt as real rows (a single `Text` structurally cannot carry two name colours or a border). Side colours, 2px #B50000 local-player border, headshot/noscope/blind glyphs. |
+| `ElasticMove.return_efficiency` | Was declared and read nowhere, so "the mech should feel it" was a comment. Now normalised against human tendon: a human still gets Rule 2's exact ×1.35, a mech gets 0.209. |
+| counter-movement → jump | §C.3 names the jump and only the dodge had it. A crouch-jump now launches 6% harder through the same shared `counter_movement_bonus`. |
+
+Also landed the same day, from the owner's own notes rather than the
+backlog: team colour became **relative to the viewer** (allies white/gold,
+enemies red/orange — six call sites had hardcoded Blue/Red literals and
+would have shown your own team in enemy colours on a Red spawn), right-click
+focus reaches **every** weapon in both cameras (the pipeline was fully built
+and fenced off at one line), and **Shift walks** CS:GO-style with sprint
+moved to Alt. Movement noise gained a middle tier in the process — ordinary
+running was already silent, so a walk key would otherwise have bought
+nothing.
 
 ## 2. Large, multi-session architectural (do not rush — BACKLOG.md)
 

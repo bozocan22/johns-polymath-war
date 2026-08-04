@@ -21,8 +21,10 @@
 //!   the exact flight the sim will fly.
 //!
 //! Controls: WASD move - SPACE jump - Q dodge roll - V first/third person -
-//! mouse look - LEFT CLICK aim (zoom) - RIGHT CLICK / T fire - CTRL/C
-//! crouch - SHIFT sprint - R reload - TAB scoreboard - ESC menu
+//! mouse look - LEFT CLICK fire - RIGHT CLICK focus/aim (hold; a two-stage
+//! zoom cycle on scoped guns, a draw on bow/spear) - CTRL/C crouch -
+//! SHIFT walk (quiet + steady) - ALT sprint - R reload - TAB scoreboard -
+//! ESC menu. Mouse buttons swap in Settings.
 
 mod branding;
 mod sim;
@@ -232,6 +234,10 @@ fn settings_to_text(s: &GameSettings) -> String {
     format!(
         "# jk_tdm player settings - rewritten on every change\n\
          swap_mouse = {}\nminimap = {}\nsens_idx = {}\nfov_idx = {}\ninvert_y = {}\n\
+         # §4.1 vitals: 0 = numbers + bars, 1 = numbers only\n\
+         hud_vitals_style = {}\n\
+         # §4.3 minimap: rotate with facing, and scale as a percent\n\
+         minimap_rotate = {}\nminimap_scale = {}\n\
          # §4.6 crosshair - gap may be NEGATIVE (the arms cross the centre)\n\
          cross_size = {}\ncross_gap = {}\ncross_thickness = {}\n\
          cross_dot = {}\ncross_outline = {}\ncross_outline_px = {}\n\
@@ -242,6 +248,9 @@ fn settings_to_text(s: &GameSettings) -> String {
         s.sens_idx,
         s.fov_idx,
         s.invert_y as u8,
+        s.hud_vitals_style,
+        s.minimap_rotate as u8,
+        s.minimap_scale,
         s.cross_size,
         s.cross_gap,
         s.cross_thickness,
@@ -280,6 +289,12 @@ fn parse_settings(text: &str) -> GameSettings {
             "sens_idx" => s.sens_idx = (v.max(0) as usize).min(SENS_CHOICES.len() - 1),
             "fov_idx" => s.fov_idx = (v.max(0) as usize).min(FOV_CHOICES.len() - 1),
             "invert_y" => s.invert_y = v != 0,
+            // §4.1/§4.3: clamped on the way in, same rule as every other
+            // index here - the HUD must never have to defend itself
+            // against a hand-edited file.
+            "hud_vitals_style" => s.hud_vitals_style = v.clamp(0, 1) as u8,
+            "minimap_rotate" => s.minimap_rotate = v != 0,
+            "minimap_scale" => s.minimap_scale = clamp_setting_i32(v, MINIMAP_SCALE_RANGE),
             // §4.6: same rule as the indices above - every crosshair
             // number is CLAMPED into a drawable range on the way in, so
             // the renderer never has to defend itself against the file.
@@ -413,10 +428,29 @@ impl ElasticMove {
     }
     /// Rule 2: stored energy scales output - a fully loaded move is
     /// measurably (not just numerically) stronger.
+    ///
+    /// `return_efficiency` was DECLARED here and read nowhere, which made
+    /// §C.3's "steel springs are worse than tendons, and the mech should
+    /// feel it" a comment rather than a mechanic - a mech and a man got
+    /// identical output from identical load.
+    ///
+    /// It is normalised against the human tendon rather than applied
+    /// raw, so both halves of the brief hold at once: a human (0.92) gets
+    /// Rule 2's stated `× 1.35` EXACTLY, and a mech (0.55) gets
+    /// `0.35 × 0.55/0.92 = 0.209` - visibly less spring for the same
+    /// coil. Applying it raw would have quietly made the human 1.322 and
+    /// broken Rule 2's own worked number.
     fn release_velocity(&self, base: f32) -> f32 {
-        base * (1.0 + self.stored_energy.clamp(0.0, 1.0) * 0.35)
+        let eff = self.return_efficiency / HUMAN_RETURN_EFFICIENCY;
+        base * (1.0 + self.stored_energy.clamp(0.0, 1.0) * 0.35 * eff)
     }
 }
+
+/// §C.2: "tendons give back ~90-95%". The reference the elastic model
+/// normalises against - a human is the 1.0 case by definition.
+const HUMAN_RETURN_EFFICIENCY: f32 = 0.92;
+/// §C.3: "steel springs are worse than tendons, and the mech should feel it."
+const MECH_RETURN_EFFICIENCY: f32 = 0.55;
 
 // Rule 3 (`counter_movement_bonus`) GRADUATED from spec fixture to real
 // sim mechanic: it now lives in sim.rs, snapshotted at the dodge trigger
@@ -867,6 +901,21 @@ struct GameSettings {
     /// Invert the vertical look axis.
     invert_y: bool,
 
+    // ---- §4.1 / §4.3 (Brief VIII): HUD readout options -------------
+    /// §4.1 `hud_vitals_style`: 0 = numbers + bars (default), 1 = numbers
+    /// only. The brief names this setting explicitly; it existed in the
+    /// spec and nowhere in the code, because the bars it switches off had
+    /// never been built.
+    hud_vitals_style: u8,
+    /// §4.3: the minimap rotates with facing. Tunable per the brief -
+    /// a rotating map is easier for some players to read and actively
+    /// disorienting for others, which is exactly what a setting is for.
+    minimap_rotate: bool,
+    /// §4.3: minimap scale, PERCENT (25..=100, default 70). Stored as an
+    /// integer because the whole settings file is `key = <i64>` - a float
+    /// here would need a second parser for one value.
+    minimap_scale: i32,
+
     // ---- §4.6 (Brief VIII): the crosshair family -------------------
     // Every one of these is clamped on load (`parse_settings`) to the
     // range constants below, so a hand-edited or stale file can only
@@ -960,6 +1009,11 @@ impl Default for GameSettings {
             sens_idx: SENS_DEFAULT_IDX,
             fov_idx: FOV_DEFAULT_IDX,
             invert_y: false,
+            // §4.1/§4.3 defaults, verbatim from the brief: bars ON,
+            // rotate ON ("rotates with facing (tunable)"), scale 0.7.
+            hud_vitals_style: 0,
+            minimap_rotate: true,
+            minimap_scale: MINIMAP_SCALE_DEFAULT,
             // §4.6 defaults, verbatim from the brief: size 5, gap 0,
             // thickness 1, dot off, outline on at 1, green 50/250/50,
             // alpha 200, no T-shape, classic static.
@@ -992,6 +1046,22 @@ impl Default for GameSettings {
 
 /// Arm length, px. Lower bound is 1: a zero-length arm is not a
 /// preference, it is an invisible crosshair.
+/// §4.1: how many segments the health bar is cut into. Ten, so one
+/// segment is exactly 10 HP against a 100 HP pool and the player can
+/// count damage off the bar without reading the number.
+const VITALS_SEGMENTS: usize = 10;
+/// §4.1: armour pips. Four - enough granularity to separate the five
+/// sets, few enough to count without looking.
+const ARMOR_PIPS: usize = 4;
+/// §4.1: the flat-torso value a FULL pip cluster represents. Folk armour
+/// (45) is the heaviest set in `armor_spec`, so a full cluster means
+/// "the best protection in the game" rather than an invented ceiling.
+/// If a heavier set is ever added, this is the one number to raise.
+const ARMOR_PIP_REFERENCE: f32 = 45.0;
+/// §4.3: minimap scale as a PERCENT of the base size. The brief's
+/// 0.25-1.0 range and 0.7 default, in integer percent.
+const MINIMAP_SCALE_RANGE: (i32, i32) = (25, 100);
+const MINIMAP_SCALE_DEFAULT: i32 = 70;
 const CROSS_SIZE_RANGE: (i32, i32) = (1, 12);
 /// Centre-to-inner-edge gap, px. **The low bound is negative on
 /// purpose** (§4.6) - at gap < 0 the arms overlap through the centre.
@@ -1631,6 +1701,58 @@ const VM_RECEIVER_UP: f32 = 0.05;
 const VM_MAST_LEFT: f32 = 0.03;
 const VM_MAST_UP: f32 = 0.09;
 
+// ---- §3.4 low-ready / obstruction + ready-up ---------------------------
+// BRIEF VIII §3.4, verbatim: "approaching a wall within 0.6m rotates the
+// muzzle up-and-in 22° (rotation only) so the barrel never visually
+// enters geometry", and "Ready-up on stop: returns over 0.15s with one
+// small overshoot (ζ ≈ 0.7)".
+//
+// ROTATION ONLY, per C5 and the brief's own parenthesis - this must never
+// touch `carry_offset`, or the §1.4a screen-intrusion sweep above stops
+// bounding what the player actually sees.
+
+/// How close a wall has to be before the weapon comes up.
+const LOWREADY_RANGE_M: f32 = 0.6;
+/// The dip itself: 22°, muzzle UP (the brief says up-and-in, not down -
+/// pointing it at the floor trades a wall clip for a floor clip).
+const LOWREADY_PITCH: f32 = 22.0 * PI / 180.0;
+/// The "and-in" half. 8° inward, matching the sprint carry's own inward
+/// rotation, so the two stances rotate about the same body line.
+const LOWREADY_YAW: f32 = 8.0 * PI / 180.0;
+/// §3.4: ζ ≈ 0.7. Under-damped ON PURPOSE - ζ<1 is the only thing that
+/// produces the "one small overshoot" the brief asks for. No lerp, at
+/// any rate, can overshoot at all.
+const READY_UP_ZETA: f32 = 0.7;
+/// ω_n from the standard 2% settling-time rule t_s ≈ 4/(ζ·ω_n), solved
+/// at the brief's 0.15 s. Derived, never hand-typed, so the constant
+/// cannot drift away from the spec number it came from.
+const READY_UP_OMEGA: f32 = 4.0 / (READY_UP_ZETA * 0.15);
+
+/// §3.4: is the muzzle about to enter geometry? One ray from the eye
+/// along the look direction, capped at the obstruction range. Uses the
+/// sim's own `raycast_cover` - the same query the camera's wall-hug
+/// mirror and the cover system use, never a second approximation.
+fn muzzle_blocked(sim: &TdmSim, eye: [f32; 3], fwd: [f32; 3]) -> bool {
+    sim.raycast_cover(eye, fwd, LOWREADY_RANGE_M).is_some()
+}
+
+/// One step of the §3.4 ready-up spring, in place.
+///
+/// Sub-stepped because ω is ~38 rad/s: a single explicit step goes
+/// unstable around 20 fps, and an unstable spring here does not degrade
+/// gracefully - it throws the weapon off screen. Splitting the step
+/// keeps a slow frame merely inaccurate instead of catastrophic.
+fn ready_up_step(x: &mut f32, v: &mut f32, target: f32, dt: f32) {
+    let steps = ((dt * READY_UP_OMEGA / 0.25).ceil() as usize).clamp(1, 8);
+    let h = dt / steps as f32;
+    for _ in 0..steps {
+        let a = -2.0 * READY_UP_ZETA * READY_UP_OMEGA * *v
+            - READY_UP_OMEGA * READY_UP_OMEGA * (*x - target);
+        *v += a * h;
+        *x += *v * h;
+    }
+}
+
 /// §1.3 (Brief VI): the carry-motion CORE - pure. The viewmodel root's
 /// translation offset (camera space, meters) from bob/kick/sprint/dip.
 /// Shared verbatim by `fp_viewmodel` and the §1.4 no-bounce tests, so
@@ -1772,16 +1894,30 @@ fn ammo_is_low(ammo: u32, mag: u32) -> bool {
     mag > 0 && (ammo as f32) <= mag as f32 * 0.25
 }
 
-/// §3.5: killfeed modifier glyphs. Implemented: headshot (*). The other
-/// CS:GO glyphs (wallbang, noscope, through-smoke, blind, flash-assist)
-/// need sim events this game does not track yet - deferred, documented.
+/// §3.5/§4.5: killfeed modifier glyphs.
+///
+/// Implemented: headshot (`*`), noscope (`o`), blind (`?`). Each is read
+/// from state the sim ALREADY had at the kill site - none of the three
+/// needed a new system, only a new question.
+///
+/// Still deferred, and named rather than quietly dropped: WALLBANG needs
+/// the hitscan path to report whether it crossed cover geometry, and
+/// THROUGH-SMOKE needs the same ray tested against live smoke volumes.
+/// Both are real plumbing through the projectile path, not a flag.
+///
 /// §0 (Brief VII): ASCII only - the bundled font has no glyph for U+271B.
-fn feed_glyphs(headshot: bool) -> &'static str {
+fn feed_glyphs(headshot: bool, noscope: bool, blind: bool) -> String {
+    let mut s = String::new();
     if headshot {
-        " * "
-    } else {
-        "  "
+        s.push('*');
     }
+    if noscope {
+        s.push('o');
+    }
+    if blind {
+        s.push('?');
+    }
+    s
 }
 
 #[derive(Component)]
@@ -1894,8 +2030,11 @@ struct DecalPool(Vec<Entity>);
 #[derive(Resource)]
 struct FxAssets {
     tracer_mesh: Handle<Mesh>,
-    tracer_blue: Handle<StandardMaterial>,
-    tracer_red: Handle<StandardMaterial>,
+    /// Tracers are side-relative like every other team signal: a streak
+    /// coming at you must read hostile from the first frame, whichever
+    /// team the player drew.
+    tracer_ally: Handle<StandardMaterial>,
+    tracer_enemy: Handle<StandardMaterial>,
     missile_mesh: Handle<Mesh>,
     arrow_mat: Handle<StandardMaterial>,
     spear_mat: Handle<StandardMaterial>,
@@ -2170,6 +2309,20 @@ impl Default for SfxState {
 
 // ---- minimap -------------------------------------------------------------
 
+/// §4.1: one segment of the health bar, by index. Ten of these.
+#[derive(Component)]
+struct VitalsSeg(usize);
+
+/// §4.1: one armour pip, by index.
+#[derive(Component)]
+struct ArmorPip(usize);
+
+/// §4.1: the rows holding the above. Tagged so `hud_vitals_style = 1`
+/// (numbers only) can hide the whole visual language in one query
+/// instead of walking every segment.
+#[derive(Component)]
+struct VitalsBarRow;
+
 #[derive(Component)]
 struct MinimapRoot;
 
@@ -2235,6 +2388,23 @@ struct ScoreTimerText;
 
 #[derive(Component)]
 struct FeedText;
+
+/// §4.5: "Max 5 rows".
+const KILLFEED_ROWS: usize = 5;
+/// §4.5: "Local-player rows get a 2px #B50000 border".
+const KILLFEED_BORDER_PX: f32 = 2.0;
+/// §4.5, verbatim: #B50000 on rgba(0,0,0,0.5).
+const KILLFEED_MINE_BORDER: Color = Color::srgb(0.710, 0.0, 0.0);
+const KILLFEED_MINE_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.5);
+
+/// §4.5: one killfeed row. Carries the border and background.
+#[derive(Component)]
+struct KillfeedRow(usize);
+
+/// §4.5: one span within a row - `(row, part)` where part is
+/// 0 = killer (+assist), 1 = weapon/modifier glyphs, 2 = victim.
+#[derive(Component)]
+struct KillfeedCell(usize, usize);
 
 #[derive(Component)]
 struct HitFeedText;
@@ -2353,9 +2523,10 @@ const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "W A S D", action: "Move", essential: false },
     Bind { key: "MOUSE", action: "Look", essential: false },
     Bind { key: "LMB", action: "Fire", essential: false },
-    Bind { key: "RMB", action: "Alt: scope zoom (heavy rifle) / draw (bow, spear) - rifles have NO aim-down-sights", essential: false },
+    Bind { key: "RMB", action: "HOLD: focus/aim - scope zoom cycle (heavy rifle), draw (bow, spear)", essential: false },
     Bind { key: "T", action: "Inspect weapon", essential: false },
-    Bind { key: "SHIFT", action: "Sprint", essential: false },
+    Bind { key: "SHIFT", action: "Walk - slow, SILENT, steadier recoil", essential: true },
+    Bind { key: "ALT", action: "Sprint", essential: false },
     // §4.3 (Brief VI): mech FLIGHT IS DELETED in the sim - the chassis
     // never leaves the ground. These strings promised thrusters the
     // simulation has not had for two briefs.
@@ -2616,14 +2787,16 @@ const MAP_LAP_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((4.7124, 0.05)), snap: Some("04-west"), ..beat(2.4) },
     CapBeat {
         look: Some((0.7854, 0.02)),
-        press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
+        // §3.6: sprint is ALT now - Shift here would have walked the lap
+        // at half pace and silently changed what these frames show.
+        press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::AltLeft)],
         ..beat(2.8)
     },
     CapBeat { snap: Some("05-sprint-leg-1"), ..beat(4.2) },
     CapBeat { look: Some((2.3562, 0.02)), ..beat(4.4) },
     CapBeat { snap: Some("06-sprint-leg-2"), ..beat(5.8) },
     CapBeat {
-        release: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::ShiftLeft)],
+        release: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::AltLeft)],
         snap: Some("07-lap-end"),
         ..beat(6.2)
     },
@@ -3169,6 +3342,11 @@ enum SettingsButton {
     CrossAlpha,
     CrossTShape,
     CrossDynamic,
+    // §4.1/§4.3: same rule as the crosshair family above - a persisted
+    // setting with no control is a dead control.
+    VitalsStyle,
+    MinimapRotate,
+    MinimapScale,
     Back,
 }
 
@@ -3192,6 +3370,9 @@ enum SettingsButtonKind {
     CrossAlpha,
     CrossTShape,
     CrossDynamic,
+    VitalsStyle,
+    MinimapRotate,
+    MinimapScale,
 }
 
 /// Every value row on the settings page, in screen order, paired with
@@ -3199,12 +3380,17 @@ enum SettingsButtonKind {
 /// handler and the label text cannot disagree about what exists - the
 /// list used to be hand-written inline in `open_settings` only.
 /// (`Back` is not here: it has no value to show.)
-const SETTINGS_ROWS: [(SettingsButton, SettingsButtonKind); 14] = [
+const SETTINGS_ROWS: [(SettingsButton, SettingsButtonKind); 17] = [
     (SettingsButton::Sens, SettingsButtonKind::Sens),
     (SettingsButton::Fov, SettingsButtonKind::Fov),
     (SettingsButton::InvertY, SettingsButtonKind::InvertY),
     (SettingsButton::SwapMouse, SettingsButtonKind::SwapMouse),
     (SettingsButton::Minimap, SettingsButtonKind::Minimap),
+    // §4.3: the two minimap tunables sit directly under the on/off that
+    // governs them, so the group reads as one idea.
+    (SettingsButton::MinimapRotate, SettingsButtonKind::MinimapRotate),
+    (SettingsButton::MinimapScale, SettingsButtonKind::MinimapScale),
+    (SettingsButton::VitalsStyle, SettingsButtonKind::VitalsStyle),
     (SettingsButton::CrossSize, SettingsButtonKind::CrossSize),
     (SettingsButton::CrossGap, SettingsButtonKind::CrossGap),
     (SettingsButton::CrossThickness, SettingsButtonKind::CrossThickness),
@@ -3372,6 +3558,9 @@ fn main() {
                 crosshair_render,
                 ammo_bar_sync,
                 hud_colors,
+                vitals_bars,
+                killfeed_rows,
+                context_bar,
                 sync_rockets,
             )
                 .run_if(in_state(GameState::Playing)),
@@ -4445,9 +4634,22 @@ fn spawn_fighter_rigs(
     let mesh_upper = meshes.add(Capsule3d::new(0.055, 0.14));
     let mesh_fore = meshes.add(Capsule3d::new(0.048, 0.12));
     // §1.4 shared shell/joint materials - created ONCE per rebuild, cloned
-    // per fighter only for the accent slot
-    let shell = materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42));
-    let shell2 = materials.add(metal(Color::srgb_u8(0xDC, 0xDE, 0xE1), 0.0, 0.45));
+    // per fighter only for the accent slot.
+    //
+    // Team identity is carried by the WHOLE BODY, not just a trim band:
+    // allies are bright cold steel, enemies dark oxide. A band-only tell
+    // vanishes the moment a fighter is edge-on or backlit, which is
+    // exactly when you most need to know whether to shoot.
+    // The second shell tone is the first one stepped down, so the two
+    // never drift apart when a side's colour is retuned.
+    let shade = |c: Color, k: f32| {
+        let s = c.to_srgba();
+        Color::srgb(s.red * k, s.green * k, s.blue * k)
+    };
+    let shell_ally = materials.add(metal(branding::signal::ALLY, 0.0, 0.42));
+    let shell2_ally = materials.add(metal(shade(branding::signal::ALLY, 0.92), 0.0, 0.45));
+    let shell_enemy = materials.add(metal(branding::signal::ENEMY, 0.0, 0.42));
+    let shell2_enemy = materials.add(metal(shade(branding::signal::ENEMY, 0.82), 0.0, 0.45));
     let joint = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
     let knee = materials.add(metal(Color::srgb_u8(0x0E, 0x10, 0x13), 0.20, 0.08));
     let eye_mat = materials.add(StandardMaterial {
@@ -4457,29 +4659,39 @@ fn spawn_fighter_rigs(
         emissive: LinearRgba::new(0.016, 0.021, 0.028, 1.0),
         ..default()
     });
-    let accent_of = |team: Team| {
-        let (r, g, b) = match team {
-            Team::Blue => (0x3F as f32, 0x7B as f32, 0xD6 as f32),
-            Team::Red => (0xD6 as f32, 0x50 as f32, 0x3F as f32),
+    // The enemy accent glows harder than the ally one. Gold on a bright
+    // shell already separates itself by hue; orange on a dark shell has
+    // to do the work with light, and it is the tell that survives a
+    // muzzle flash washing the scene out.
+    let accent_of = |side: branding::signal::Side| {
+        let (r, g, b) = side.accent_rgb();
+        let e = match side {
+            branding::signal::Side::Ally => 0.40,
+            branding::signal::Side::Enemy => 0.85,
         };
-        let (r, g, b) = (r / 255.0, g / 255.0, b / 255.0);
         StandardMaterial {
-            base_color: Color::srgb(r, g, b),
+            base_color: side.accent(),
             perceptual_roughness: 0.35,
-            emissive: LinearRgba::new(r * 0.4, g * 0.4, b * 0.4, 1.0),
+            emissive: LinearRgba::new(r * e, g * e, b * e, 1.0),
             ..default()
         }
     };
-    let accent_blue = materials.add(accent_of(Team::Blue));
-    let accent_red = materials.add(accent_of(Team::Red));
+    let accent_ally = materials.add(accent_of(branding::signal::Side::Ally));
+    let accent_enemy = materials.add(accent_of(branding::signal::Side::Enemy));
+    // Whose side the viewer is on. Read once, not assumed to be Blue -
+    // the player takes whichever slot the sim gave them.
+    let p_team = sim.fighters[sim.player].team;
 
     for (i, f) in sim.fighters.iter().enumerate() {
         let is_player = i == sim.player;
         let slot = i % 5;
-        let accent = match f.team {
-            Team::Blue => accent_blue.clone(),
-            Team::Red => accent_red.clone(),
-        };
+        let side = branding::signal::side_of(f.team, p_team);
+        let ally = side == branding::signal::Side::Ally;
+        // Shadow the shared handles with this fighter's side, so every
+        // `shell`/`shell2` use below stays a one-word reference.
+        let shell = if ally { shell_ally.clone() } else { shell_enemy.clone() };
+        let shell2 = if ally { shell2_ally.clone() } else { shell2_enemy.clone() };
+        let accent = if ally { accent_ally.clone() } else { accent_enemy.clone() };
         // cosmetics: the player's tunic pick tints THEIR waist stripe;
         // team identity stays on the emblem ring + shoulder band
         let stripe = if is_player {
@@ -5135,15 +5347,18 @@ fn setup(
     // ---- shot / impact FX pools ----------------------------------------
     commands.insert_resource(FxAssets {
         tracer_mesh: meshes.add(Cuboid::new(0.02, 0.02, 1.0)),
-        tracer_blue: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.9, 1.0),
-            emissive: LinearRgba::new(2.0, 2.5, 4.0, 1.0),
+        // Ally fire: pale gold, cool-hot core. Bright but not alarming.
+        tracer_ally: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.95, 0.80),
+            emissive: LinearRgba::new(3.4, 2.9, 1.6, 1.0),
             unlit: true,
             ..default()
         }),
-        tracer_red: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.7),
-            emissive: LinearRgba::new(4.0, 2.2, 1.2, 1.0),
+        // Enemy fire: hot orange-red, pushed harder than the ally streak
+        // so incoming rounds are the loudest thing on screen.
+        tracer_enemy: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.55, 0.35),
+            emissive: LinearRgba::new(5.0, 1.7, 0.5, 1.0),
             unlit: true,
             ..default()
         }),
@@ -5652,21 +5867,108 @@ fn setup(
                 ScoreTimerText,
             ));
         });
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            right: Val::Percent(-HUD_ANCHORS[4].2[0] * 100.0),
-            top: Val::Percent(HUD_ANCHORS[4].2[1] * 100.0),
-            ..default()
-        },
-        FeedText,
-    ));
+    // §4.7: the context progress bar - centred, ~58% down.
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(CONTEXT_BAR_Y * 100.0),
+                margin: UiRect::left(Val::Px(-CONTEXT_BAR_W_PX * 0.5)),
+                width: Val::Px(CONTEXT_BAR_W_PX),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            Visibility::Hidden,
+            ContextBarRoot,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextFont { font_size: 15.0, ..default() },
+                TextColor(branding::palette::PARCHMENT),
+                ContextBarLabel,
+            ));
+            // track
+            p.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(CONTEXT_BAR_H_PX),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BorderRadius::all(Val::Px(2.0)),
+            ))
+            .with_children(|t| {
+                // fill - width is driven every frame by `context_bar`
+                t.spawn((
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(branding::palette::GOLD),
+                    BorderRadius::all(Val::Px(2.0)),
+                    ContextBarFill,
+                ));
+            });
+        });
+
+    // §4.5: the killfeed, as REAL ROWS.
+    //
+    // It used to be one flat `Text` with the whole feed newline-joined
+    // into it, which structurally cannot satisfy the spec: a single Text
+    // has ONE colour, so killer and victim names cannot take their own
+    // team colours, and it has no box, so a local-player row cannot take
+    // the 2px border the brief asks for. Five pre-spawned rows, each with
+    // three coloured spans, can do both - and pre-spawning keeps it
+    // allocation-free per frame, like every other pooled HUD element.
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Percent(-HUD_ANCHORS[4].2[0] * 100.0),
+                top: Val::Percent(HUD_ANCHORS[4].2[1] * 100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(3.0),
+                ..default()
+            },
+            FeedText,
+        ))
+        .with_children(|p| {
+            for i in 0..KILLFEED_ROWS {
+                p.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(5.0),
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                        border: UiRect::all(Val::Px(KILLFEED_BORDER_PX)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor(Color::NONE),
+                    BorderRadius::all(Val::Px(4.0)),
+                    Visibility::Hidden,
+                    KillfeedRow(i),
+                ))
+                .with_children(|r| {
+                    // killer | glyphs | victim - three spans so each
+                    // name can carry its own side colour
+                    for part in 0..3 {
+                        r.spawn((
+                            Text::new(""),
+                            TextFont { font_size: 16.0, ..default() },
+                            TextColor(branding::palette::PARCHMENT),
+                            KillfeedCell(i, part),
+                        ));
+                    }
+                });
+            }
+        });
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -5777,6 +6079,61 @@ fn setup(
                 TextColor(branding::palette::PARCHMENT),
                 PanelInfoText,
             ));
+            // §4.1: the depleting health bar, SEGMENTED. A solid bar
+            // shows a ratio; a segmented one shows a COUNT - at ten
+            // segments against a 100 HP pool each block is 10 HP, so a
+            // glance answers "how many more of those can I take" without
+            // reading, or trusting, the number beside it.
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(2.0),
+                    margin: UiRect::top(Val::Px(2.0)),
+                    ..default()
+                },
+                VitalsBarRow,
+            ))
+            .with_children(|b| {
+                for i in 0..VITALS_SEGMENTS {
+                    b.spawn((
+                        Node {
+                            width: Val::Px(14.0),
+                            height: Val::Px(7.0),
+                            ..default()
+                        },
+                        BackgroundColor(branding::palette::PARCHMENT),
+                        VitalsSeg(i),
+                    ));
+                }
+            });
+            // §4.1: the armour cluster, "to its right" in the brief's
+            // layout - pips rather than a second bar, so armour and
+            // health never read as the same quantity at a glance.
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(3.0),
+                    margin: UiRect::top(Val::Px(3.0)),
+                    ..default()
+                },
+                VitalsBarRow,
+            ))
+            .with_children(|b| {
+                for i in 0..ARMOR_PIPS {
+                    b.spawn((
+                        Node {
+                            width: Val::Px(11.0),
+                            height: Val::Px(11.0),
+                            border: UiRect::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BorderColor(branding::palette::BRONZE),
+                        BorderRadius::all(Val::Px(2.0)),
+                        BackgroundColor(Color::NONE),
+                        ArmorPip(i),
+                    ));
+                }
+            });
         });
     commands
         .spawn((
@@ -5931,7 +6288,7 @@ fn setup(
             MinimapRoot,
         ))
         .with_children(|p| {
-            // teammates (max 8) - blue squares
+            // teammates (max 8) - WHITE squares
             for i in 0..8 {
                 p.spawn((
                     Node {
@@ -5940,12 +6297,12 @@ fn setup(
                         height: Val::Px(7.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.3, 0.6, 1.0)),
+                    BackgroundColor(branding::signal::ALLY),
                     Visibility::Hidden,
                     MinimapDot(i),
                 ));
             }
-            // §4.3: spotted enemies - red dots, round (not square like
+            // §4.3: spotted enemies - hot dots, round (not square like
             // teammates/self) so a glance tells friend from foe by
             // shape alone, not just color
             for i in 0..MINIMAP_ENEMY_SLOTS {
@@ -5956,7 +6313,7 @@ fn setup(
                         height: Val::Px(7.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(1.0, 0.25, 0.2, 1.0)),
+                    BackgroundColor(branding::signal::ENEMY_ACCENT),
                     BorderRadius::all(Val::Px(3.5)),
                     Visibility::Hidden,
                     MinimapEnemyDot(i),
@@ -5997,7 +6354,7 @@ fn setup(
                     height: Val::Px(9.0),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.95, 0.8, 0.25)),
+                BackgroundColor(branding::signal::ALLY_ACCENT),
                 BorderRadius::MAX,
                 MinimapPlayer,
             ))
@@ -6011,7 +6368,7 @@ fn setup(
                         height: Val::Px(7.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.95, 0.8, 0.25)),
+                    BackgroundColor(branding::signal::ALLY_ACCENT),
                 ));
             });
         });
@@ -6326,10 +6683,26 @@ fn input_and_step(
     // sim step runs. (The v6 mapping this comment used to describe -
     // LEFT aim / RIGHT-or-T fire - has been dead since Brief VI; its
     // leftovers were still being printed to the player in three places.)
-    // §1 (Brief VI): CS:GO grammar - LEFT fires, always. RIGHT is an ALT
-    // function that only exists on scoped weapons (camera zoom, Rule 2)
-    // and projectile draws (bow/spear, Brief II grammar). Standard guns
-    // have NO aim-down-sights state of any kind. swap_mouse still swaps.
+    // §1 (Brief VI): CS:GO grammar - LEFT fires, always. RIGHT is the
+    // ALT function: a two-stage zoom CYCLE on scoped weapons (Rule 2), a
+    // draw on projectile weapons (bow/spear, Brief II grammar), and - as
+    // of the owner's 2026-08-04 note - a HOLD-TO-FOCUS on everything
+    // else. swap_mouse still swaps.
+    //
+    // WHY THIS OVERRIDES BRIEF VI. That brief gave standard guns no ADS
+    // state at all, on CS:GO's authority. But CS:GO is first-person only,
+    // and this game is THIRD-person primary: the hip camera sits 2.2 m
+    // back and off the shoulder, so a distant target is both small and
+    // parallaxed away from where the barrel points. CS:GO's grammar
+    // solves an aiming problem this game does not have, and leaves the
+    // one it does have - "which of those dots am I pointing at" -
+    // unanswered. Focus is that answer.
+    //
+    // Nothing new is invented for it: `zoom_deg` already exists on all 11
+    // guns, the third-person boom already eases in on `ads_t`
+    // (`tp_boom_aim`), and the sim already applies ADS_SPREAD_MULT /
+    // ADS_SPEED_MULT to any `cmd.ads`. The whole pipeline was built and
+    // then fenced off at this one line.
     let (aim_btn, fire_btn) = mouse_map(settings.swap_mouse);
     let p_gun = game.sim.fighters[game.sim.player].gun;
     let scoped_gun = gun(p_gun).scoped;
@@ -6348,10 +6721,14 @@ fn input_and_step(
         cam.zoom_stage = 0;
     }
     cam.prev_fire_cd = pf;
+    // Scoped guns keep the click-to-cycle stages; everything else is a
+    // plain hold. `alt_capable` no longer gates this - it only records
+    // which weapons have the RICHER alt behaviour (draw / scope), which
+    // the viewmodel and arc-preview systems still ask about.
     let ads = if scoped_gun {
         cam.zoom_stage > 0
     } else {
-        buttons.pressed(aim_btn) && alt_capable
+        buttons.pressed(aim_btn)
     };
     cam.ads = ads;
     // §3.4: ADS progress advances framerate-independently; the sim's ADS
@@ -6405,7 +6782,21 @@ fn input_and_step(
     }
     // lean: hold Z (left) / X (right) - Phantom-Forces peeking
     let lean = (keys.pressed(KeyCode::KeyX) as i32 - keys.pressed(KeyCode::KeyZ) as i32) as f32;
-    let sprinting = keys.pressed(KeyCode::ShiftLeft) && !ads;
+    // §3.6 (owner, 2026-08-04): SHIFT is the CS:GO WALK - slow, silent,
+    // steady on the trigger. Sprint moves to ALT.
+    //
+    // The two could not share Shift. Sprint is a commitment the game
+    // charges you for (the sprint-out fire gate, §3.4's carry) and walk
+    // is the opposite commitment; a modifier that means "more speed" and
+    // "less speed" depending on context is not a control, it is a coin
+    // toss. Alt is the free key with no chord risk here: the window runs
+    // with the cursor grabbed, and Alt is bound to nothing else in the
+    // game.
+    //
+    // Walk is NOT gated on `!ads` the way sprint is. Focus-and-creep is
+    // the exact combination the mechanic exists to enable.
+    let walking = keys.pressed(KeyCode::ShiftLeft);
+    let sprinting = keys.pressed(KeyCode::AltLeft) && !ads && !walking;
     if keys.just_pressed(KeyCode::KeyQ)
         || (sprinting && keys.just_pressed(KeyCode::ControlLeft))
     {
@@ -6415,6 +6806,7 @@ fn input_and_step(
         move_x: world.x,
         move_z: world.y,
         sprint: sprinting,
+        walk: walking,
         yaw: cam.yaw,
         aim: [aim.x, aim.y, aim.z],
         // §2.4 (Brief IV): T is INSPECT now - fire is the mouse alone
@@ -7499,7 +7891,9 @@ fn sync_tracers(
         let e = commands
             .spawn((
                 Mesh3d(assets.tracer_mesh.clone()),
-                MeshMaterial3d(assets.tracer_blue.clone()),
+                // placeholder - the per-tracer pass below assigns the
+                // real side material before this is ever made visible
+                MeshMaterial3d(assets.tracer_ally.clone()),
                 Transform::IDENTITY,
                 Visibility::Hidden,
                 TracerMarker,
@@ -7528,9 +7922,10 @@ fn sync_tracers(
                     .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir))
                     .with_scale(Vec3::new(1.0, 1.0, len));
                 *vis = Visibility::Visible;
-                let mat = match tr.team {
-                    Team::Blue => assets.tracer_blue.clone(),
-                    Team::Red => assets.tracer_red.clone(),
+                let p_team = game.sim.fighters[game.sim.player].team;
+                let mat = match branding::signal::side_of(tr.team, p_team) {
+                    branding::signal::Side::Ally => assets.tracer_ally.clone(),
+                    branding::signal::Side::Enemy => assets.tracer_enemy.clone(),
                 };
                 commands.entity(*e).insert(MeshMaterial3d(mat));
             }
@@ -8586,6 +8981,11 @@ struct VmState {
     prev_vy: f32,
     land_t: f32,
     sprint_t: f32,
+    /// §3.4 low-ready blend 0..1 and its spring velocity. Two fields, not
+    /// one, because the ready-up overshoot needs a second-order state -
+    /// position alone cannot remember which way it was travelling.
+    lowready: f32,
+    lowready_v: f32,
     inspect: bool,
     inspect_t: f32,
     /// §3.2: the spear windup fraction, EASED. `spear_wind_t` snaps from
@@ -8716,6 +9116,33 @@ fn fp_viewmodel(
         st.sprint_t = (st.sprint_t + dir * dt / rate).clamp(0.0, 1.0);
     }
     let sp = ease_out(st.sprint_t);
+    // §3.4 low-ready / obstruction. The ray runs from the EYE along the
+    // camera's look direction: that is the line the barrel is drawn
+    // along, so it is the line that can clip. Suppressed while scoped
+    // (no viewmodel exists to rotate) and while unarmed (no barrel).
+    {
+        let eye = [
+            p.pos[0],
+            p.pos[1] + EYE_REL.min(p.height() - 0.12),
+            p.pos[2],
+        ];
+        let (sy, cy) = cam_ctl.yaw.sin_cos();
+        let pitch = cam_ctl.pitch;
+        let fwd = [sy * pitch.cos(), -pitch.sin(), cy * pitch.cos()];
+        let blocked = p.armed()
+            && !vm_hidden_while_scoped(spec.scoped, cam_ctl.ads)
+            && muzzle_blocked(&game.sim, eye, fwd);
+        // Deref the Local ONCE - the borrow checker can split disjoint
+        // fields of a plain `&mut VmState`, but not two Deref calls.
+        let s = &mut *st;
+        ready_up_step(
+            &mut s.lowready,
+            &mut s.lowready_v,
+            if blocked { 1.0 } else { 0.0 },
+            dt,
+        );
+    }
+    let lr = st.lowready;
     let reloading = p.reload_t > 0.0;
     // §3: the spear windup reads in FIRST person too - the arm hauls
     // back and up through the wind, then the release whips through
@@ -8760,14 +9187,19 @@ fn fp_viewmodel(
     }
     let ie = ease_out(st.inspect_t);
     let drift = (time.elapsed_secs() * 0.7).sin() * 0.05 * ie;
-    // §0 (Brief VII) / Rule 1 (Brief VI): standard guns get ZERO aim-shift
-    // as a LOCAL guarantee, not an emergent side effect of `cam.ads` being
-    // gated elsewhere (input_and_step) - if that gate ever changes, this
-    // one still holds. Only scoped weapons (AWM - moot, hidden once
-    // scoped) and projectile weapons (bow/spear draw/raise, pending their
-    // real Sections 2/3 poses) ever see this ramp at all.
-    let ads_capable = spec.scoped || spec.projectile.is_some();
-    let ads_e = if ads_capable { ease_out(cam_ctl.ads_t) } else { 0.0 };
+    // §3.6: this used to be a LOCAL guarantee that standard guns get
+    // ZERO aim-shift, deliberately independent of `cam.ads` so that
+    // changing the input gate could not silently move the viewmodel.
+    // The input gate has now changed ON PURPOSE (see `input_and_step`:
+    // right-click focuses every weapon), so the guarantee has to go with
+    // it - otherwise focus would zoom the FOV and pull the third-person
+    // boom in while the first-person gun stayed at the hip, which reads
+    // as a bug rather than a stance.
+    //
+    // The guard's real intent is kept: the shift is still driven by
+    // `ads_t` alone, so the pose can never drift out of step with the
+    // zoom, and an unarmed player still gets nothing.
+    let ads_e = if p.armed() { ease_out(cam_ctl.ads_t) } else { 0.0 };
     let ads_shift = Vec3::new(-0.11, 0.052, 0.10) * ads_e;
     // §3 (Brief IV): the signature reload replaces the flat dip - the
     // hands and weapon do the acting, on the sim's own reload clock
@@ -8856,8 +9288,13 @@ fn fp_viewmodel(
             + mel_t
             + Vec3::new(0.03, 0.035, -0.05) * gr
             + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind);
+        // §3.4: low-ready is ROTATION ONLY - it appears in these three
+        // Quats and nowhere in `tf.translation` above. Muzzle UP is
+        // NEGATIVE pitch here (sprint's `+ sp * 0.61` is what lowers the
+        // weapon), and inward yaw shares sprint's positive sign.
         tf.rotation = Quat::from_rotation_y(
-            sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y,
+            sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y
+                + lr * LOWREADY_YAW,
         ) * Quat::from_rotation_x(
             kick_vm * 0.16
                 + breathe
@@ -8868,7 +9305,8 @@ fn fp_viewmodel(
                 - 0.12 * gr
                 + sp * 0.61
                 - wind * 0.55
-                + 0.22 * ie,
+                + 0.22 * ie
+                - lr * LOWREADY_PITCH,
         ) * Quat::from_rotation_z(kick_vm * 0.07 + rl_e.z + mel_e.z + 0.08 * gr);
     }
 }
@@ -9093,9 +9531,9 @@ fn checkpoint_rings(
             continue;
         };
         if let Some(m) = materials.get_mut(&mat.0) {
+            let p_team = game.sim.fighters[game.sim.player].team;
             let (r, g, b) = match cp.owner {
-                Some(Team::Blue) => (0.25, 0.5, 1.0),
-                Some(Team::Red) => (1.0, 0.3, 0.25),
+                Some(t) => branding::signal::side_of(t, p_team).accent_rgb(),
                 None => (0.85, 0.85, 0.9),
             };
             m.base_color = Color::srgba(r, g, b, 0.30);
@@ -9115,7 +9553,8 @@ fn minimap_system(
     mut spotted: ResMut<SpottedEnemies>,
     time: Res<Time>,
     mut qs: ParamSet<(
-        Query<&mut Visibility, With<MinimapRoot>>,
+        // §4.3: the root needs its Node too - `minimap_scale` resizes it
+        Query<(&mut Visibility, &mut Node), With<MinimapRoot>>,
         Query<(&MinimapDot, &mut Node, &mut Visibility)>,
         Query<(&MinimapCp, &mut Node, &mut BorderColor, &mut Visibility)>,
         Query<(&mut Node, &mut Visibility), With<MinimapHill>>,
@@ -9130,7 +9569,7 @@ fn minimap_system(
     }
     let in_match = matches!(state.get(), GameState::Playing | GameState::Paused);
     let show = settings.minimap && in_match;
-    for mut v in &mut qs.p0() {
+    for (mut v, _) in &mut qs.p0() {
         *v = if show {
             Visibility::Visible
         } else {
@@ -9142,14 +9581,50 @@ fn minimap_system(
     }
     let simr = &game.sim;
     let half = simr.half;
-    let px = MINIMAP_PX - 10.0;
+    // §4.3: scale 0.25-1.0, default 0.7. The ROOT panel and the
+    // projection extent are derived from the same number in the same
+    // place - sizing the panel without rescaling `px` would leave every
+    // marker plotted for the old size and spilling out of the frame.
+    let scale = (settings.minimap_scale as f32 / 100.0).clamp(0.25, 1.0);
+    let root_px = MINIMAP_PX * scale;
+    let px = root_px - 10.0 * scale;
+    for (_, mut node) in &mut qs.p0() {
+        node.width = Val::Px(root_px);
+        node.height = Val::Px(root_px);
+    }
     // §9: the horizontal axis is MIRRORED, because in this game's yaw
     // convention screen-right is -X when facing +Z (camera_system derives
     // `screen_right = -right`, and damage_indicator honours the same
     // rule). Mapping +X to map-right drew every teammate, enemy and
     // objective on the wrong side: glance down, see an ally on your left,
     // turn left, and they are actually on your right.
+    // §4.3: ROTATE WITH FACING (tunable). When on, the world is spun by
+    // -yaw about the PLAYER, so "up" on the map is always the direction
+    // the player is looking - the read becomes "that contact is on my
+    // left" instead of "that contact is north-west, and I am facing...".
+    //
+    // The rotation is applied to world coordinates BEFORE the existing
+    // mirror-and-project, deliberately: doing it after would have to
+    // undo and redo the §9 axis mirror, and that mirror is exactly the
+    // thing this file has already got wrong once.
+    let me_pos = simr.fighters[simr.player].pos;
+    let rotate = settings.minimap_rotate;
+    let (rs, rc) = if rotate {
+        let a = -simr.fighters[simr.player].yaw;
+        (a.sin(), a.cos())
+    } else {
+        (0.0, 1.0)
+    };
     let to_map = |x: f32, z: f32| {
+        let (x, z) = if rotate {
+            let (dx, dz) = (x - me_pos[0], z - me_pos[2]);
+            (
+                me_pos[0] + dx * rc - dz * rs,
+                me_pos[2] + dx * rs + dz * rc,
+            )
+        } else {
+            (x, z)
+        };
         (
             (half - x) / (half * 2.0) * px,
             (1.0 - (z + half) / (half * 2.0)) * px,
@@ -9216,7 +9691,8 @@ fn minimap_system(
             let (u, w) = to_map(slot.pos.x, slot.pos.y); // .y holds world Z
             node.left = Val::Px(u);
             node.top = Val::Px(w);
-            *bg = BackgroundColor(Color::srgba(1.0, 0.25, 0.2, slot.fade));
+            let (r, g, b) = branding::signal::Side::Enemy.accent_rgb();
+            *bg = BackgroundColor(Color::srgba(r, g, b, slot.fade));
             *v = Visibility::Inherited;
         } else {
             *v = Visibility::Hidden;
@@ -9230,8 +9706,7 @@ fn minimap_system(
                 node.left = Val::Px(u - 2.0);
                 node.top = Val::Px(w - 2.0);
                 *border = BorderColor(match c.owner {
-                    Some(Team::Blue) => Color::srgb(0.3, 0.6, 1.0),
-                    Some(Team::Red) => Color::srgb(1.0, 0.35, 0.3),
+                    Some(t) => branding::signal::side_of(t, p_team).accent(),
                     None => Color::WHITE,
                 });
                 *v = Visibility::Inherited;
@@ -9256,7 +9731,11 @@ fn minimap_system(
         let (u, w) = to_map(me.pos[0], me.pos[2]);
         node.left = Val::Px(u);
         node.top = Val::Px(w);
-        tfm.rotation = Quat::from_rotation_z(me.yaw);
+        // §4.3: in ROTATE mode the world spins under a fixed needle, so
+        // the needle itself must stop turning - otherwise the player's
+        // facing gets applied twice and the arrow counter-rotates against
+        // the map it is supposed to be leading.
+        tfm.rotation = Quat::from_rotation_z(if rotate { 0.0 } else { me.yaw });
     }
 }
 
@@ -9664,31 +10143,9 @@ fn hud_system(
         **t = format!("{head}\n{score}");
     }
 
-    if let Ok(mut t) = texts.p2().get_single_mut() {
-        let mut s = String::new();
-        // §3.5 (Brief VI): newest at the BOTTOM, max 5 rows, modifier
-        // glyphs, and rows involving the local player marked with a bar.
-        // §0 (Brief VII): ASCII only - U+25B6/U+258C had no font glyph.
-        let rows: Vec<_> = simr.kill_feed.iter().rev().take(5).collect();
-        for (ev, _) in rows.into_iter().rev() {
-            let me = ev.killer == simr.player || ev.victim == simr.player;
-            // §4.5: "Killer [+Assist] [glyph] Victim" - the assist tag
-            // only appears when there was one, never an empty bracket
-            let assist_tag = match ev.assist {
-                Some(a) => format!(" +{}", simr.fighters[a].name),
-                None => String::new(),
-            };
-            s += &format!(
-                "{}{}{} {}> {}\n",
-                if me { "| " } else { "" },
-                simr.fighters[ev.killer].name,
-                assist_tag,
-                feed_glyphs(ev.headshot),
-                simr.fighters[ev.victim].name,
-            );
-        }
-        **t = s;
-    }
+    // §4.5: the killfeed rows are their own system (`killfeed_rows`) -
+    // they need Node/BorderColor access this text-only ParamSet has not
+    // got, and cramming them in here is what kept the feed a flat string.
 
     if let Ok(mut t) = texts.p3().get_single_mut() {
         let mut s = String::new();
@@ -9848,6 +10305,251 @@ fn hud_system(
 
     // (the crosshair's colour + geometry moved to `crosshair_render`,
     // §4.6 - it is drawn now, so it is a Node/BackgroundColor job)
+}
+
+// ---- §4.7 context progress bar -------------------------------------------
+// "Context progress bar centred ~58% down, ALL-CAPS label, release
+// cancels."
+//
+// GENERIC on purpose. Three different systems in this game already run a
+// timed, interruptible channel - the extraction hold, mech entry, mech
+// exit - and each had shipped its own ad-hoc readout or none at all. One
+// bar, one resolver, so a fourth channel is a match arm rather than
+// another bespoke widget.
+
+/// §4.7: vertical position, as a fraction of screen height.
+const CONTEXT_BAR_Y: f32 = 0.58;
+const CONTEXT_BAR_W_PX: f32 = 260.0;
+const CONTEXT_BAR_H_PX: f32 = 9.0;
+
+#[derive(Component)]
+struct ContextBarRoot;
+#[derive(Component)]
+struct ContextBarFill;
+#[derive(Component)]
+struct ContextBarLabel;
+
+/// §4.7: what the player is currently channelling, if anything.
+/// `(label, progress 0..1)`. The label is returned in whatever case the
+/// caller wrote it; the renderer upper-cases it, so a future channel
+/// cannot forget to.
+fn context_channel(sim: &TdmSim) -> Option<(&'static str, f32)> {
+    let p = &sim.fighters[sim.player];
+    if !p.alive() {
+        return None;
+    }
+    // Mech entry/exit outranks the extraction hold: it is the shorter,
+    // more urgent window, and it is the one that has the player's hands.
+    if p.mech_transition_t > 0.0 {
+        let (label, total) = if p.mech_exiting {
+            ("dismounting", MECH_EXIT_S)
+        } else {
+            ("boarding", MECH_ENTER_S)
+        };
+        // the timer COUNTS DOWN, so progress is what has elapsed
+        return Some((label, 1.0 - (p.mech_transition_t / total).clamp(0.0, 1.0)));
+    }
+    if sim.mode == Mode::Extraction && sim.extract_hold > 0.0 {
+        return Some((
+            "extracting",
+            (sim.extract_hold / EXTRACT_HOLD_S).clamp(0.0, 1.0),
+        ));
+    }
+    None
+}
+
+/// §4.7: draw it. Hidden entirely when nothing is being channelled - a
+/// progress bar sitting at zero in the middle of the screen is clutter
+/// that teaches the player to stop looking there.
+fn context_bar(
+    game: Res<Game>,
+    mut root: Query<&mut Visibility, With<ContextBarRoot>>,
+    mut fill: Query<&mut Node, With<ContextBarFill>>,
+    mut label: Query<&mut Text, With<ContextBarLabel>>,
+) {
+    let ch = context_channel(&game.sim);
+    if let Ok(mut v) = root.get_single_mut() {
+        *v = match ch {
+            Some(_) => Visibility::Visible,
+            None => Visibility::Hidden,
+        };
+    }
+    let Some((text, t)) = ch else { return };
+    if let Ok(mut n) = fill.get_single_mut() {
+        n.width = Val::Percent(t.clamp(0.0, 1.0) * 100.0);
+    }
+    if let Ok(mut l) = label.get_single_mut() {
+        // §4.7: ALL-CAPS label, enforced here so no caller can forget
+        **l = text.to_uppercase();
+    }
+}
+
+/// §4.5: the killfeed, drawn as rows.
+///
+/// "Newest at bottom, right-aligned: `Killer [+Assist] [modifiers]
+/// Victim`. Names in team colour. Local-player rows get a 2px #B50000
+/// border on rgba(0,0,0,0.5), radius 4px. Max 5 rows."
+///
+/// Names take the SIDE colour, not a fixed blue/orange: the brief wrote
+/// its hexes back when teams were absolute, and a feed that calls the
+/// player's own kills "orange" because they happened to draw Red would
+/// undo the whole point of §3.6's relative palette.
+fn killfeed_rows(
+    game: Res<Game>,
+    mut rows: Query<(&KillfeedRow, &mut Visibility, &mut BorderColor, &mut BackgroundColor)>,
+    mut cells: Query<(&KillfeedCell, &mut Text, &mut TextColor)>,
+) {
+    let simr = &game.sim;
+    let p_team = simr.fighters[simr.player].team;
+    // newest at the BOTTOM: take the last N, keep chronological order
+    let feed: Vec<_> = {
+        let n = simr.kill_feed.len();
+        simr.kill_feed[n.saturating_sub(KILLFEED_ROWS)..].iter().collect()
+    };
+
+    for (row, mut vis, mut border, mut bg) in &mut rows {
+        match feed.get(row.0) {
+            Some((ev, _)) => {
+                *vis = Visibility::Inherited;
+                let mine = ev.killer == simr.player || ev.victim == simr.player;
+                *border = BorderColor(if mine { KILLFEED_MINE_BORDER } else { Color::NONE });
+                *bg = BackgroundColor(if mine {
+                    KILLFEED_MINE_BG
+                } else {
+                    Color::srgba(0.0, 0.0, 0.0, 0.28)
+                });
+            }
+            None => {
+                *vis = Visibility::Hidden;
+                *border = BorderColor(Color::NONE);
+                *bg = BackgroundColor(Color::NONE);
+            }
+        }
+    }
+
+    let side_color = |i: usize| {
+        branding::signal::side_of(simr.fighters[i].team, p_team).accent()
+    };
+    for (cell, mut text, mut color) in &mut cells {
+        let Some((ev, _)) = feed.get(cell.0) else {
+            **text = String::new();
+            continue;
+        };
+        match cell.1 {
+            0 => {
+                let assist = match ev.assist {
+                    Some(a) => format!(" +{}", simr.fighters[a].name),
+                    None => String::new(),
+                };
+                **text = format!("{}{assist}", simr.fighters[ev.killer].name);
+                *color = TextColor(side_color(ev.killer));
+            }
+            1 => {
+                // glyphs sit between the two names, in neutral parchment
+                // so they never compete with the side colours either side
+                **text = format!("{}>", feed_glyphs(ev.headshot, ev.noscope, ev.blind));
+                *color = TextColor(branding::palette::PARCHMENT_DIM);
+            }
+            _ => {
+                **text = simr.fighters[ev.victim].name.to_string();
+                *color = TextColor(side_color(ev.victim));
+            }
+        }
+    }
+}
+
+/// §4.1: drive the segmented health bar and the armour pip cluster.
+///
+/// The segments share `vitals_color` with the NUMBER above them, so the
+/// bar going red and the number going red can never disagree - they are
+/// one decision read twice, not two thresholds maintained separately.
+///
+/// A partly-drained segment dims rather than shrinking. Shrinking the
+/// last block would reintroduce exactly the continuous-ratio read the
+/// segmentation exists to replace.
+fn vitals_bars(
+    game: Res<Game>,
+    settings: Res<GameSettings>,
+    mut q: ParamSet<(
+        Query<(&VitalsSeg, &mut BackgroundColor)>,
+        Query<(&ArmorPip, &mut BackgroundColor, &mut BorderColor)>,
+        Query<&mut Visibility, With<VitalsBarRow>>,
+    )>,
+) {
+    // §4.1 `hud_vitals_style`: 1 = numbers only. Hide the rows and stop -
+    // no point computing fills nothing will show.
+    if settings.hud_vitals_style == 1 {
+        for mut v in &mut q.p2() {
+            *v = Visibility::Hidden;
+        }
+        return;
+    }
+    for mut v in &mut q.p2() {
+        *v = Visibility::Inherited;
+    }
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+
+    let hp = p.health.max(0.0);
+    let lit = vitals_color(hp, simr.t);
+    // How many whole segments are alive, and how far into the next one.
+    let filled = hp / (MAX_HEALTH / VITALS_SEGMENTS as f32);
+    for (seg, mut bg) in &mut q.p0() {
+        let i = seg.0 as f32;
+        let c = if filled >= i + 1.0 {
+            lit
+        } else if filled > i {
+            // the partial block: same hue, dimmed, so it still reads as
+            // "this one is going" rather than as empty
+            let s = lit.to_srgba();
+            Color::srgba(s.red, s.green, s.blue, 0.45)
+        } else {
+            Color::srgba(0.35, 0.32, 0.28, 0.55) // spent
+        };
+        *bg = BackgroundColor(c);
+    }
+
+    // Armour pips.
+    //
+    // This game has no infantry armour POOL - `Fighter::armor` is the
+    // Robot Suit's power core and is flat zero for every other set, so a
+    // pip cluster driven straight off it would sit empty for the entire
+    // match on four of the five sets. Infantry protection is instead the
+    // SET's flat damage reduction, which is a real, readable quantity
+    // and the one a player actually wants beside their health.
+    //
+    // So the cluster answers "how protected am I" from whichever model
+    // applies: the live power core in a chassis, the equipped set's
+    // torso plate on foot. Scaled against Folk's 45, the heaviest set,
+    // so a full cluster means "the best there is" rather than an
+    // arbitrary ceiling.
+    let in_mech = p.armor_set == ArmorSet::RobotSuit && p.hull > 0.0;
+    let pips = if in_mech {
+        p.armor.max(0.0) / (POWER_MAX / ARMOR_PIPS as f32)
+    } else {
+        let torso = armor_spec(p.armor_set).flat_torso;
+        torso / (ARMOR_PIP_REFERENCE / ARMOR_PIPS as f32)
+    };
+    for (pip, mut bg, mut border) in &mut q.p1() {
+        let full = pips >= pip.0 as f32 + 1.0;
+        let partial = !full && pips > pip.0 as f32;
+        *bg = BackgroundColor(if full {
+            branding::palette::GOLD
+        } else if partial {
+            let s = branding::palette::GOLD.to_srgba();
+            Color::srgba(s.red, s.green, s.blue, 0.40)
+        } else {
+            Color::NONE
+        });
+        // an empty pip keeps its outline: the cluster's SIZE is the tell
+        // for how much armour the set can hold, and that must not shrink
+        // as it drains
+        *border = BorderColor(if full || partial {
+            branding::palette::GOLD
+        } else {
+            branding::palette::BRONZE
+        });
+    }
 }
 
 /// §3 (Brief VI): the semantic color pass - vitals red at ≤25 / pulsing
@@ -11344,6 +12046,23 @@ fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
         SettingsButtonKind::Minimap => {
             format!("Minimap: {}  (M in game)", if s.minimap { "ON" } else { "OFF" })
         }
+        // §4.3
+        SettingsButtonKind::MinimapRotate => format!(
+            "Minimap rotates with facing: {}",
+            if s.minimap_rotate { "ON" } else { "OFF  (north-up)" }
+        ),
+        SettingsButtonKind::MinimapScale => {
+            format!("Minimap size: {}%", s.minimap_scale)
+        }
+        // §4.1
+        SettingsButtonKind::VitalsStyle => format!(
+            "Vitals readout: {}",
+            if s.hud_vitals_style == 0 {
+                "numbers + bars"
+            } else {
+                "numbers only"
+            }
+        ),
         SettingsButtonKind::Sens => {
             format!("Mouse sensitivity: {}", SENS_CHOICES[s.sens_idx].0)
         }
@@ -11417,6 +12136,24 @@ fn settings_buttons(
                 }
                 SettingsButton::Minimap => {
                     settings.minimap = !settings.minimap;
+                    dirty = true;
+                }
+                // §4.3
+                SettingsButton::MinimapRotate => {
+                    settings.minimap_rotate = !settings.minimap_rotate;
+                    dirty = true;
+                }
+                SettingsButton::MinimapScale => {
+                    // steps of 5%, wrapping at the brief's 25..100 range
+                    settings.minimap_scale += 5;
+                    if settings.minimap_scale > MINIMAP_SCALE_RANGE.1 {
+                        settings.minimap_scale = MINIMAP_SCALE_RANGE.0;
+                    }
+                    dirty = true;
+                }
+                // §4.1
+                SettingsButton::VitalsStyle => {
+                    settings.hud_vitals_style = 1 - settings.hud_vitals_style;
                     dirty = true;
                 }
                 // click cycles forward through the choice list and wraps
@@ -11807,10 +12544,24 @@ mod band_tests {
         assert!(ammo_is_low(7, 30)); // 23.3%
         assert!(ammo_is_low(5, 20)); // exactly 25%
         assert!(!ammo_is_low(0, 0)); // fists: never "low"
-        // killfeed glyphs from a scripted stream
-        let stream = [(true, " * "), (false, "  ")];
-        for (hs, want) in stream {
-            assert_eq!(feed_glyphs(hs), want);
+        // §4.5 killfeed glyphs from a scripted stream. Each modifier has
+        // its own mark, they COMPOSE (a blind noscope headshot earns all
+        // three), and a plain kill earns none - an empty string, not a
+        // pad, so the row does not reserve space for a badge it lacks.
+        let stream = [
+            ((false, false, false), ""),
+            ((true, false, false), "*"),
+            ((false, true, false), "o"),
+            ((false, false, true), "?"),
+            ((true, true, false), "*o"),
+            ((true, true, true), "*o?"),
+        ];
+        for ((hs, ns, bl), want) in stream {
+            assert_eq!(
+                feed_glyphs(hs, ns, bl),
+                want,
+                "glyphs for headshot={hs} noscope={ns} blind={bl}"
+            );
         }
     }
 
@@ -12593,6 +13344,120 @@ mod camera_v2_tests {
 
 /// R4 - config externalization's completion gate (camera-tuning slice).
 #[cfg(test)]
+mod lowready_tests {
+    use super::*;
+
+    /// Drive the spring the way the frame loop does: 60 fps, fixed step.
+    fn run(target: f32, frames: usize, from: (f32, f32)) -> Vec<f32> {
+        let (mut x, mut v) = from;
+        (0..frames)
+            .map(|_| {
+                ready_up_step(&mut x, &mut v, target, 1.0 / 60.0);
+                x
+            })
+            .collect()
+    }
+
+    /// §3.4: "returns over 0.15s with ONE SMALL OVERSHOOT (ζ ≈ 0.7)".
+    ///
+    /// The overshoot is the whole point of the spec line - a lerp would
+    /// satisfy "returns over 0.15s" and silently drop the character of
+    /// the motion. So assert the overshoot EXISTS, that it is small, and
+    /// that there is only one.
+    #[test]
+    fn ready_up_overshoots_once_and_settles_on_the_brief_s_clock() {
+        // hold at full low-ready, then clear the wall
+        let xs = run(0.0, 60, (1.0, 0.0));
+
+        let min = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(
+            min < -0.001,
+            "ζ=0.7 must overshoot PAST zero - got a minimum of {min}, \
+             which is a lerp wearing a spring's name"
+        );
+        assert!(
+            min > -0.15,
+            "the overshoot must be SMALL (brief: 'one small overshoot'), got {min}"
+        );
+
+        // Exactly one overshoot the eye can SEE. A ζ=0.7 step response
+        // rings analytically at 4.6%, then 0.2%, then 0.01% - counting
+        // raw zero-crossings would count that decay tail as a wobble and
+        // fail a spring that is behaving exactly as specified. So count
+        // excursions that clear 1% of the travel, which is the threshold
+        // below which nothing is visible on a 22 deg rotation (0.2 deg).
+        let visible = {
+            let mut n = 0;
+            let mut below = false;
+            for &x in &xs {
+                if x < -0.01 && !below {
+                    n += 1;
+                    below = true;
+                } else if x >= 0.0 {
+                    below = false;
+                }
+            }
+            n
+        };
+        assert_eq!(visible, 1, "one VISIBLE overshoot, not a wobble: {visible}");
+
+        // settled inside the 2% band by the spec's 0.15 s (9 frames at
+        // 60 fps), which is what READY_UP_OMEGA was derived to deliver
+        let at_spec = xs[(0.15 * 60.0) as usize];
+        assert!(
+            at_spec.abs() < 0.02,
+            "must be within the 2% band at 0.15s, got {at_spec}"
+        );
+    }
+
+    /// The dip must actually ARRIVE when a wall is close - a spring that
+    /// never reaches its target is a slow bug, not a stance.
+    #[test]
+    fn low_ready_reaches_full_dip_and_the_angles_match_the_brief() {
+        let xs = run(1.0, 60, (0.0, 0.0));
+        let settled = *xs.last().unwrap();
+        assert!(
+            (settled - 1.0).abs() < 0.02,
+            "the dip must arrive at full, got {settled}"
+        );
+        // the brief's numbers, not a re-typed approximation of them
+        assert!(
+            (LOWREADY_PITCH.to_degrees() - 22.0).abs() < 1e-3,
+            "§3.4 specifies 22 degrees"
+        );
+        assert!(
+            (LOWREADY_RANGE_M - 0.6).abs() < 1e-6,
+            "§3.4 specifies 0.6 m"
+        );
+        assert!(
+            LOWREADY_YAW > 0.0 && LOWREADY_PITCH > 0.0,
+            "'up-and-in' is two rotations, not one"
+        );
+    }
+
+    /// The spring must not explode on a slow frame. An unstable spring
+    /// here throws the weapon off screen rather than degrading, so the
+    /// sub-stepping is load-bearing and gets its own proof.
+    #[test]
+    fn the_spring_stays_bounded_at_terrible_framerates() {
+        for fps in [10.0_f32, 15.0, 20.0, 30.0, 144.0] {
+            let (mut x, mut v) = (1.0_f32, 0.0_f32);
+            for _ in 0..200 {
+                ready_up_step(&mut x, &mut v, 0.0, 1.0 / fps);
+                assert!(
+                    x.is_finite() && x.abs() < 2.0,
+                    "spring diverged at {fps} fps: x={x}"
+                );
+            }
+            assert!(
+                x.abs() < 0.02,
+                "must still settle at {fps} fps, ended at {x}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod config_tuning_tests {
     use super::*;
 
@@ -12911,6 +13776,11 @@ mod forge_tests {
         s.cross_alpha = 137;
         s.cross_t_shape = true;
         s.cross_dynamic = true;
+        // §4.1/§4.3: the HUD readout options ride the same file, same
+        // rule - every one set AWAY from its default.
+        s.hud_vitals_style = 1;
+        s.minimap_rotate = false;
+        s.minimap_scale = 45;
         let back = parse_settings(&settings_to_text(&s));
         assert_eq!(back.swap_mouse, s.swap_mouse);
         assert_eq!(back.minimap, s.minimap);
@@ -12928,6 +13798,23 @@ mod forge_tests {
         assert_eq!(back.cross_alpha, s.cross_alpha);
         assert_eq!(back.cross_t_shape, s.cross_t_shape);
         assert_eq!(back.cross_dynamic, s.cross_dynamic);
+        assert_eq!(back.hud_vitals_style, s.hud_vitals_style, "§4.1 vitals style must persist");
+        assert_eq!(back.minimap_rotate, s.minimap_rotate, "§4.3 rotate must persist");
+        assert_eq!(back.minimap_scale, s.minimap_scale, "§4.3 scale must persist");
+
+        // §4.1/§4.3 hostile: the same clamp rule as everything above.
+        let evil_hud = "hud_vitals_style = 88\nminimap_scale = 9999\n";
+        let h = parse_settings(evil_hud);
+        assert!(h.hud_vitals_style <= 1, "vitals style clamps to a real mode");
+        assert_eq!(
+            h.minimap_scale, MINIMAP_SCALE_RANGE.1,
+            "an oversize minimap clamps to the brief's 1.0 ceiling"
+        );
+        let tiny = parse_settings("minimap_scale = -400\n");
+        assert_eq!(
+            tiny.minimap_scale, MINIMAP_SCALE_RANGE.0,
+            "a negative minimap clamps to the brief's 0.25 floor, never to nothing"
+        );
 
         // hostile: out-of-range indices clamp instead of panicking later
         let evil = "sens_idx = 999\nfov_idx = -5\nswap_mouse = 7\n";
@@ -13509,6 +14396,32 @@ mod elastic_load_tests {
         assert!(
             (full.release_velocity(base) - base * 1.35).abs() < 1e-4,
             "full stored energy must be exactly base × 1.35"
+        );
+
+        // §C.3: `return_efficiency` was declared and never read, which
+        // made "steel springs are worse than tendons, and the mech
+        // should feel it" a comment rather than a mechanic. A mech coil
+        // must now give back measurably less than a human one from the
+        // identical load.
+        let mech = ElasticMove {
+            load_s: 0.4,
+            release_s: 0.18,
+            stored_energy: 1.0,
+            return_efficiency: MECH_RETURN_EFFICIENCY,
+        };
+        assert!(
+            mech.release_velocity(base) < full.release_velocity(base),
+            "steel must give back less than tendon: {} vs {}",
+            mech.release_velocity(base),
+            full.release_velocity(base)
+        );
+        // and by the exact ratio of the two efficiencies, so the number
+        // traces to the brief rather than to taste
+        let want = base * (1.0 + 0.35 * (MECH_RETURN_EFFICIENCY / HUMAN_RETURN_EFFICIENCY));
+        assert!(
+            (mech.release_velocity(base) - want).abs() < 1e-4,
+            "mech return must scale by 0.55/0.92, got {}",
+            mech.release_velocity(base)
         );
     }
 
