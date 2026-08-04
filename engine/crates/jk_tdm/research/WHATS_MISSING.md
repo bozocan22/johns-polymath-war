@@ -20,13 +20,25 @@ THOR_LOG's 97:
    the resource counter, each fading after 2.5 s. No resource economy
    exists in TDM/KOTH to award from, so this waits on a mode that has
    one rather than being faked.
-2. **Killfeed WALLBANG + THROUGH-SMOKE modifiers** — the other four
-   §4.5 glyphs ship; these two need the hitscan path to report whether
-   its ray crossed cover geometry / a live smoke volume. Real plumbing
-   through the projectile path, not a flag.
-3. **Numeric tunings** — the remaining screen-intrusion profiles and
-   spear FOV/speed values called out in THOR_LOG. Picked off one at a
-   time as work continues.
+2. **Killfeed WALLBANG modifier** — needs bullet penetration to exist
+   first; there is no wallbang mechanic to report. (THROUGH-SMOKE
+   shipped 2026-08-04: the hitscan ray now tests smoke crossings and
+   the killfeed marks them `~`.)
+3. **Numeric tunings** — the remaining screen-intrusion profiles called
+   out in THOR_LOG. Picked off one at a time as work continues.
+
+### Closed 2026-08-04 (second pass)
+
+- **ADS sight-alignment** — focus derives a per-gun shift from the
+  shared carry table so the iron pair lands on the eye line.
+- **Forge front door** — SAVE 1-3 / LOAD 1-3 / RANDOMIZE as real rows
+  on the soldier page. The full editor (category grid, turntable,
+  per-piece armour) is still the large open item below.
+- **Bow overdraw** — holding past full draw charges +15% to 1.6 s.
+- **Mech front rebalance** — hull 1000 -> 600, front x0.15 -> x0.525:
+  ten AWM or ~fourteen spears now open a chassis from the FRONT.
+- **Three mech pads per map**, scattered; up to three chassis walking.
+- **Zombie Extraction withdrawn from menus** (sim + tests intact).
 
 ### Closed 2026-08-04
 

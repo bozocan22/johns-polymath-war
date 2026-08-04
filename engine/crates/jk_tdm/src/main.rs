@@ -1849,6 +1849,40 @@ fn carry_offset(
     )
 }
 
+/// §2.1 (Brief IV) CS:GO placement: right +0.11, down -0.13, forward
+/// 0.32, yawed ~1.5 deg so the muzzle converges on screen center; long
+/// guns exit the frame bottom-right through the stock. PURE, because
+/// `fp_viewmodel`'s sight-alignment shift derives from the same numbers -
+/// two copies of this table would drift and the sights would land
+/// off-eye.
+fn vm_carry(wk: GunKind) -> (Vec3, f32) {
+    match wk {
+        GunKind::Bow => (Vec3::new(-0.10, -0.16, -0.36), 0.0),
+        GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
+        GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
+        _ => (Vec3::new(0.11, -0.13, -0.32), 0.0),
+    }
+}
+
+/// §owner: the SIGHT LINE - the weapon-local height of the rear notch /
+/// front post pair, for guns that have one. Focus brings THIS line to
+/// the eye, so the drawn sights and the crosshair agree. `None` = no
+/// iron sights to align (fists, the scoped AWM whose viewmodel hides,
+/// the draw-pose bow and spear, the hip-fired minigun) - those keep the
+/// generic focus shift.
+fn sight_line_y(wk: GunKind) -> Option<f32> {
+    match wk {
+        GunKind::Glock => Some(0.085),
+        GunKind::Deagle => Some(0.10),
+        GunKind::Mp5 => Some(0.088),
+        GunKind::Shotgun => Some(0.09),
+        GunKind::Ak47 => Some(0.0875),
+        GunKind::M4 => Some(0.105),
+        GunKind::M249 => Some(0.10),
+        _ => None,
+    }
+}
+
 /// §1.1 Rule 2 (Brief VI): while a scoped-class weapon is zoomed the
 /// viewmodel is NOT RENDERED at all - pure predicate, shared by the
 /// render path and the scope-hide test.
@@ -1971,7 +2005,7 @@ fn ammo_is_low(ammo: u32, mag: u32) -> bool {
 /// Both are real plumbing through the projectile path, not a flag.
 ///
 /// §0 (Brief VII): ASCII only - the bundled font has no glyph for U+271B.
-fn feed_glyphs(headshot: bool, noscope: bool, blind: bool) -> String {
+fn feed_glyphs(headshot: bool, noscope: bool, blind: bool, smoke: bool) -> String {
     let mut s = String::new();
     if headshot {
         s.push('*');
@@ -1981,6 +2015,9 @@ fn feed_glyphs(headshot: bool, noscope: bool, blind: bool) -> String {
     }
     if blind {
         s.push('?');
+    }
+    if smoke {
+        s.push('~');
     }
     s
 }
@@ -3582,6 +3619,19 @@ struct SizeButton(usize);
 #[derive(Component, Clone, Copy)]
 struct LoadoutButton(usize, GunKind);
 
+/// §7.2/§8.2: the Forge's first VISIBLE controls. The three profile
+/// slots and the dice existed only as hotkeys (Ctrl+1/2/3, 1/2/3) with a
+/// toast as their sole feedback - a save system nothing on screen
+/// admitted to having. These are the same `forge_save`/`forge_load`
+/// calls, clickable. The full specced editor (category grid, turntable,
+/// per-piece armour) remains open work; this is its front door.
+#[derive(Component, Clone, Copy)]
+enum ForgeUiButton {
+    Save(usize),
+    Load(usize),
+    Randomize,
+}
+
 /// Cosmetics: (0 = hat, 1 = tunic; choice index).
 #[derive(Component, Clone, Copy)]
 struct CosmeticButton(usize, usize);
@@ -3913,6 +3963,7 @@ fn main() {
             Update,
             (
                 intro_buttons,
+                intro_forge_buttons,
                 intro_map_buttons,
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
@@ -5925,15 +5976,7 @@ fn setup(
     let mut vm_weapons = [Entity::PLACEHOLDER; N_WEAPONS];
     for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
         let model = spawn_weapon_model(&mut commands, &kit, wk, true, true);
-        // §2.1 (Brief IV) CS:GO placement: right +0.11, down −0.13,
-        // forward 0.32, yawed ~1.5° so the muzzle converges on screen
-        // center; long guns exit the frame bottom-right through the stock
-        let (tr, extra_rx) = match wk {
-            GunKind::Bow => (Vec3::new(-0.10, -0.16, -0.36), 0.0),
-            GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
-            GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
-            _ => (Vec3::new(0.11, -0.13, -0.32), 0.0),
-        };
+        let (tr, extra_rx) = vm_carry(wk);
         commands
             .entity(model)
             .insert((
@@ -9746,7 +9789,18 @@ fn fp_viewmodel(
     // `ads_t` alone, so the pose can never drift out of step with the
     // zoom, and an unarmed player still gets nothing.
     let ads_e = if p.armed() { ease_out(cam_ctl.ads_t) } else { 0.0 };
-    let ads_shift = Vec3::new(-0.11, 0.052, 0.10) * ads_e;
+    // §owner: focus ALIGNS THE SIGHTS. For a gun with an iron pair the
+    // shift is derived per-gun: x cancels the carry's rightward offset
+    // exactly, y lifts the weapon until its sight line (scaled by the
+    // 0.9 model scale) sits on the eye line, z pulls it in. The old
+    // one-size Vec3(-0.11, 0.052, ..) centred nothing precisely - every
+    // gun landed near the middle and none ON it.
+    let ads_shift = if let Some(sy) = sight_line_y(p.gun) {
+        let (tr, _) = vm_carry(p.gun);
+        Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
+    } else {
+        Vec3::new(-0.11, 0.052, 0.10) * ads_e
+    };
     // §3 (Brief IV): the signature reload replaces the flat dip - the
     // hands and weapon do the acting, on the sim's own reload clock
     let (rl_t, rl_e) = if reloading && p.armed() {
@@ -11004,7 +11058,7 @@ fn killfeed_rows(
             1 => {
                 // glyphs sit between the two names, in neutral parchment
                 // so they never compete with the side colours either side
-                **text = format!("{}>", feed_glyphs(ev.headshot, ev.noscope, ev.blind));
+                **text = format!("{}>", feed_glyphs(ev.headshot, ev.noscope, ev.blind, ev.smoke));
                 *color = TextColor(branding::palette::PARCHMENT_DIM);
             }
             _ => {
@@ -11946,6 +12000,20 @@ fn open_intro(
                 .map(|(i, (n, _))| (*n, CosmeticButton(1, i)))
                 .collect();
             menu_ui::pill_row(b, "OUTFIT", &tunics, sold);
+            // §7.2: the Forge, on screen at last
+            let saves: Vec<(&str, ForgeUiButton)> = vec![
+                ("SAVE 1", ForgeUiButton::Save(1)),
+                ("SAVE 2", ForgeUiButton::Save(2)),
+                ("SAVE 3", ForgeUiButton::Save(3)),
+                ("RANDOMIZE", ForgeUiButton::Randomize),
+            ];
+            menu_ui::pill_row(b, "FORGE", &saves, sold);
+            let loads: Vec<(&str, ForgeUiButton)> = vec![
+                ("LOAD 1", ForgeUiButton::Load(1)),
+                ("LOAD 2", ForgeUiButton::Load(2)),
+                ("LOAD 3", ForgeUiButton::Load(3)),
+            ];
+            menu_ui::pill_row(b, "", &loads, sold);
             // the spec readout, in its own engraved sub-plate
             b.spawn((
                 Node {
@@ -12242,6 +12310,80 @@ fn paint(
     let (fill, keel, _) = menu_ui::row_colors(menu_ui::RowKind::Normal, state);
     *bg = BackgroundColor(fill);
     *border = BorderColor(keel);
+}
+
+/// §7.2: the Forge rows. Same paint as every row, same save/load the
+/// hotkeys use, same toast for feedback.
+fn intro_forge_buttons(
+    mut q: Query<
+        (
+            &Interaction,
+            &ForgeUiButton,
+            &menu_ui::PlateRow,
+            &Children,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut bosses: Query<
+        &mut BackgroundColor,
+        (With<menu_ui::RowBoss>, Without<menu_ui::PlateRow>),
+    >,
+    mut sel: ResMut<Selected>,
+    mut toast: ResMut<Toast>,
+) {
+    for (i, which, row, kids, mut bg, mut border) in &mut q {
+        menu_ui::paint_row(row.kind, false, *i, &mut bg, &mut border, Some(kids), &mut bosses);
+        if *i != Interaction::Pressed {
+            continue;
+        }
+        match *which {
+            ForgeUiButton::Save(slot) => {
+                let p = ForgeProfile::from_selected(&sel);
+                toast.text = match forge_save(slot, &p) {
+                    Ok(()) => format!("FORGE: saved to slot {slot}"),
+                    Err(_) => format!("FORGE: could not save slot {slot}"),
+                };
+                toast.t = 1.8;
+            }
+            ForgeUiButton::Load(slot) => {
+                toast.text = match forge_load(slot) {
+                    Some(p) => {
+                        p.apply_to(&mut sel);
+                        format!("FORGE: loaded slot {slot}")
+                    }
+                    None => format!("FORGE: slot {slot} is empty"),
+                };
+                toast.t = 1.8;
+            }
+            ForgeUiButton::Randomize => {
+                // Client-side cosmetic dice - deliberately NOT the sim's
+                // seeded RNG. Determinism governs the simulation; which
+                // hat fate hands you in the lobby is allowed to be fate.
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() ^ u64::from(d.subsec_nanos()))
+                    .unwrap_or(7);
+                let mut r = seed;
+                let mut roll = |n: usize| -> usize {
+                    r = r
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((r >> 33) as usize) % n.max(1)
+                };
+                sel.loadout[0] = PRIMARIES[roll(PRIMARIES.len())];
+                sel.loadout[1] = SECONDARIES[roll(SECONDARIES.len())];
+                sel.loadout[2] = SPECIALS[roll(SPECIALS.len())];
+                sel.melee_axe = roll(2) == 1;
+                sel.grenade_preset = roll(GRENADE_PRESETS.len());
+                sel.hat = roll(HAT_CHOICES.len());
+                sel.tunic = roll(TUNIC_CHOICES.len());
+                toast.text = "FORGE: fate rolled".to_string();
+                toast.t = 1.8;
+            }
+        }
+    }
 }
 
 fn intro_map_buttons(
@@ -13165,18 +13307,19 @@ mod band_tests {
         // three), and a plain kill earns none - an empty string, not a
         // pad, so the row does not reserve space for a badge it lacks.
         let stream = [
-            ((false, false, false), ""),
-            ((true, false, false), "*"),
-            ((false, true, false), "o"),
-            ((false, false, true), "?"),
-            ((true, true, false), "*o"),
-            ((true, true, true), "*o?"),
+            ((false, false, false, false), ""),
+            ((true, false, false, false), "*"),
+            ((false, true, false, false), "o"),
+            ((false, false, true, false), "?"),
+            ((false, false, false, true), "~"),
+            ((true, true, false, false), "*o"),
+            ((true, true, true, true), "*o?~"),
         ];
-        for ((hs, ns, bl), want) in stream {
+        for ((hs, ns, bl, sm), want) in stream {
             assert_eq!(
-                feed_glyphs(hs, ns, bl),
+                feed_glyphs(hs, ns, bl, sm),
                 want,
-                "glyphs for headshot={hs} noscope={ns} blind={bl}"
+                "glyphs for headshot={hs} noscope={ns} blind={bl} smoke={sm}"
             );
         }
     }

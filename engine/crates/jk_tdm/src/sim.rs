@@ -1412,6 +1412,9 @@ pub struct Fighter {
     /// is several calls downstream of the trigger and has no other way
     /// to know how the shot was taken.
     pub fired_ads: bool,
+    /// §4.5: did the last trigger pull's ray pass THROUGH a smoke bloom?
+    /// Same latch pattern as `fired_ads`, same reason.
+    pub fired_smoke: bool,
     pub switch_t: f32,
     pub pos: [f32; 3], // feet
     pub vel: [f32; 2], // xz
@@ -1778,6 +1781,8 @@ pub struct KillEvent {
     /// to not be looking through, so calling its shot a "noscope" would
     /// hand out the badge for nothing.
     pub noscope: bool,
+    /// §4.5 modifier: the killing ray passed through a smoke bloom.
+    pub smoke: bool,
     /// §4.5 (BRIEF VIII): the most recent OTHER fighter who damaged the
     /// victim within ASSIST_WINDOW_S of the kill. `None` if the killer
     /// landed every recent hit alone, or nobody else hit them recently
@@ -1879,6 +1884,13 @@ pub const BOW_MAX_PIERCES: u8 = 3;
 /// because the client's arc preview needs the same floor to draw the
 /// early-draw arc correctly.
 pub const BOW_POWER_MIN: f32 = 0.35;
+/// §4.1-B (owner): holding PAST full draw keeps charging. From full
+/// (0.7s) to overdraw-full (1.6s) the shot gains a further 15% launch
+/// speed and damage - the archer leaning into the string. It stacks
+/// with nothing else and tops out well before the 4s sway window, so
+/// the reward for patience arrives before the punishment for staring.
+pub const BOW_OVERDRAW_MAX: f32 = 1.15;
+pub const BOW_OVERDRAW_FULL_S: f32 = 1.6;
 
 /// §4.1: draw power fraction (35% -> 100%, linear) for a hold of
 /// `held_s` seconds; `None` means letdown (too short or forced at 10s).
@@ -1887,7 +1899,15 @@ pub fn bow_power_fraction(held_s: f32) -> Option<f32> {
         return None;
     }
     let t = ((held_s - BOW_DRAW_MIN_S) / (BOW_DRAW_FULL_S - BOW_DRAW_MIN_S)).clamp(0.0, 1.0);
-    Some(BOW_POWER_MIN + (1.0 - BOW_POWER_MIN) * t)
+    let base = BOW_POWER_MIN + (1.0 - BOW_POWER_MIN) * t;
+    if held_s <= BOW_DRAW_FULL_S {
+        return Some(base);
+    }
+    // §4.1-B overdraw: base is exactly 1.0 here, and the extra ramps in
+    // over the overdraw window
+    let over = ((held_s - BOW_DRAW_FULL_S) / (BOW_OVERDRAW_FULL_S - BOW_DRAW_FULL_S))
+        .clamp(0.0, 1.0);
+    Some(base * (1.0 + (BOW_OVERDRAW_MAX - 1.0) * over))
 }
 
 // ---- §4.1: full-draw hold sway --------------------------------------
@@ -2596,7 +2616,7 @@ pub const GATLING_TRIGGER_HOLD_S: f32 = 0.07;
 pub const GATLING_DAMAGE: f32 = 9.0; // near the minigun's 8.0 - high ROF, low per-round
 pub const GATLING_SPREAD_COLD: f32 = 0.018;
 pub const GATLING_SPREAD_HOT: f32 = 0.052;
-/// Autocannon: PRECISION. ~7 unarmoured hits through MECH_HULL (1000),
+/// Autocannon: PRECISION. A handful of unarmoured hits through MECH_HULL,
 /// on a slow cycle and a tight cone - the deliberate opposite of the
 /// gatling's spray.
 pub const AUTOCANNON_DAMAGE: f32 = 145.0;
@@ -2674,7 +2694,13 @@ pub const RECON_REGEN_DELAY: f32 = 5.0;
 pub const MECH_SCALE: f32 = 1.7;
 // §4.5 (Brief VI): hull 1000, and the sensor visor is a ×2.0 weak
 // point applied AFTER the angle multiplier (front-arc only).
-pub const MECH_HULL: f32 = 1000.0;
+/// §owner (rebalance): the chassis dies to sustained FRONTAL fire now.
+/// Targets, from the front arc: ~10 AWM body shots, ~14 spear hits
+/// (the owner's 15-20 band, hit at its floor because the spear also
+/// beats shields now), visor shots still twice as good. The old numbers
+/// (hull 1000, front x0.15) made the front a 58-shot wall that only a
+/// flank could realistically open.
+pub const MECH_HULL: f32 = 600.0;
 pub const MECH_VISOR_MULT: f32 = 2.0;
 pub const MECH_RADIUS: f32 = BODY_RADIUS * MECH_SCALE; // cannot fit doorways
 pub const MECH_EJECT_HP: f32 = 25.0;
@@ -2756,8 +2782,8 @@ pub const MECH_PLATE_40_PCT: f32 = 0.40;
 pub const MECH_PLATE_15_PCT: f32 = 0.15;
 pub const MECH_EXPOSED_DMG_MULT: f32 = 1.25;
 /// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
-pub const MECH_RED_FRONT: f32 = 0.85;
-pub const MECH_RED_SIDE: f32 = 0.70;
+pub const MECH_RED_FRONT: f32 = 0.475;
+pub const MECH_RED_SIDE: f32 = 0.30;
 /// §11.2 rule 2: explosives bypass HALF the reduction; fire bypasses ALL
 /// of it (it attacks cooling, not plating — Pyro's defined role).
 /// §11: the mech TURNS to face a threat — a real, visible, punishable
@@ -3121,11 +3147,21 @@ impl TdmSim {
         // (weapon pads are gone in v6 — you BRING your loadout; the map
         // now feeds you consumables and the armor)
         let mut pickups = Vec::new();
-        pickups.push(Pickup {
-            kind: PickupKind::RobotArmor,
-            pos: [0.0, center_top, 0.0],
-            respawn_t: 0.0,
-        });
+        // §owner: THREE chassis pads, scattered - one contested on the
+        // centre structure, two in opposite quadrants, so up to three
+        // mechs can be walking at once and the fight for them is not one
+        // fight.
+        for pos in [
+            [0.0, center_top, 0.0],
+            [-14.0, 0.0, -19.0],
+            [14.0, 0.0, 19.0],
+        ] {
+            pickups.push(Pickup {
+                kind: PickupKind::RobotArmor,
+                pos,
+                respawn_t: 0.0,
+            });
+        }
         for (kind, x, z) in [
             (PickupKind::Health, -19.0, 14.0),
             (PickupKind::Health, 19.0, -14.0),
@@ -3148,12 +3184,25 @@ impl TdmSim {
         // along the landmarks, the Mech deep by the mine, consumables
         // spread down the long axis
         if cfg.map == MapKind::Battlefield {
+            // the three chassis pads spread across the landmarks rather
+            // than stacking on one point - a `match` alone would have
+            // sent all three to the mine
+            let mut robot_i = 0usize;
             for pk in &mut pickups {
                 pk.pos = match pk.kind {
                     PickupKind::FolkArmor => [-58.0, 0.0, 56.0], // settlement
                     PickupKind::PyroArmor => [-100.0, 0.0, -95.0], // the forge
                     PickupKind::ReconWeave => [86.0, 0.0, 100.0], // cathedral
-                    PickupKind::RobotArmor => [166.0, 0.0, 152.0], // by the mine
+                    PickupKind::RobotArmor => {
+                        let spots = [
+                            [166.0, 0.0, 152.0],  // by the mine
+                            [-96.0, 0.0, -72.0],  // forge district edge
+                            [52.0, 0.0, 44.0],    // mid-field ruin
+                        ];
+                        let p = spots[robot_i.min(spots.len() - 1)];
+                        robot_i += 1;
+                        p
+                    }
                     _ => [pk.pos[0] * 3.0, 0.0, pk.pos[2] * 3.0],
                 };
             }
@@ -3222,6 +3271,7 @@ impl TdmSim {
                     crouch: false,
                     walking: false,
                     fired_ads: false,
+                    fired_smoke: false,
                     switch_t: 0.0,
                     pos,
                     vel: [0.0, 0.0],
@@ -5679,6 +5729,7 @@ impl TdmSim {
         damage: f32,
         pellets: u32,
     ) {
+        self.fighters[i].fired_smoke = false;
         for _pellet in 0..pellets.max(1) {
             let (ex, ey) = (
                 self.rng.range(-spread, spread),
@@ -5723,6 +5774,11 @@ impl TdmSim {
                 .unwrap_or(t_hit)
                 .min(victim.map(|(_, t, _)| t).unwrap_or(t_hit));
             let end = [o[0] + d[0] * end_t, o[1] + d[1] * end_t, o[2] + d[2] * end_t];
+            // §4.5: a kill whose ray crossed a bloom earns the killfeed's
+            // through-smoke mark
+            if self.segment_crosses_smoke(o, end) {
+                self.fighters[i].fired_smoke = true;
+            }
             self.tracers.push(Tracer {
                 from: o,
                 to: end,
@@ -6049,6 +6105,7 @@ impl TdmSim {
                     blind: self.fighters[j].blind_t > 0.0,
                     noscope: gun(self.fighters[i].gun).scoped
                         && !self.fighters[i].fired_ads,
+                    smoke: self.fighters[i].fired_smoke,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -6416,6 +6473,7 @@ impl TdmSim {
                         // no aimed shot to take unaimed.
                         blind: self.fighters[j].blind_t > 0.0,
                         noscope: false,
+                        smoke: false,
                         assist: assist_candidate,
                     },
                     5.0,
@@ -7485,6 +7543,7 @@ impl TdmSim {
                     // §4.5: same reasoning as the area-kill site above.
                     blind: self.fighters[victim].blind_t > 0.0,
                     noscope: false,
+                    smoke: false,
                     assist: assist_candidate,
                 },
                 5.0,
@@ -7515,6 +7574,39 @@ impl TdmSim {
     /// paths keep `los_clear` (shrapnel doesn't care about smoke).
     /// Occlusion accumulates by path length through each sphere; > 0.6
     /// blocks. The sphere test runs only on rays the walls left clear.
+    /// Does the segment cross a meaningful depth of smoke? Same
+    /// sphere-intersection arithmetic as `sight_clear`, but a boolean at
+    /// a 0.5 m floor - clipping a bloom's outermost wisp is not
+    /// "shooting through smoke".
+    fn segment_crosses_smoke(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        if self.smokes.is_empty() {
+            return false;
+        }
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-3 {
+            return false;
+        }
+        let dn = [d[0] / len, d[1] / len, d[2] / len];
+        let r = throw_spec(ThrowKind::Smoke).radius_m;
+        for s in &self.smokes {
+            let oc = [from[0] - s.pos[0], from[1] - s.pos[1], from[2] - s.pos[2]];
+            let b = oc[0] * dn[0] + oc[1] * dn[1] + oc[2] * dn[2];
+            let c2 = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - r * r;
+            let disc = b * b - c2;
+            if disc <= 0.0 {
+                continue;
+            }
+            let sq = disc.sqrt();
+            let t0 = (-b - sq).max(0.0);
+            let t1 = (-b + sq).min(len);
+            if t1 - t0 > 0.5 {
+                return true;
+            }
+        }
+        false
+    }
+
     fn sight_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         if !self.los_clear(from, to) {
             return false;
@@ -8536,6 +8628,65 @@ mod tests {
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
         );
+    }
+
+    /// §owner: the mech's FRONT is winnable now. Ten AWM body shots or
+    /// about fourteen spears through the front arc fell a chassis -
+    /// derived from the live constants so a retune moves this test.
+    #[test]
+    fn mech_front_falls_to_the_owner_targets() {
+        let awm = gun(GunKind::Awm).damage * (1.0 - MECH_RED_FRONT);
+        let awm_hits = (MECH_HULL / awm).ceil() as u32;
+        assert_eq!(awm_hits, 10, "AWM front shots to fell: {awm_hits}");
+        let spear = gun(GunKind::Spear).damage * (1.0 - MECH_RED_FRONT);
+        let spear_hits = (MECH_HULL / spear).ceil() as u32;
+        assert!(
+            (13..=20).contains(&spear_hits),
+            "spear front hits in the owner band: {spear_hits}"
+        );
+        // the arcs still ORDER: front > side > rear protection
+        assert!(MECH_RED_FRONT > MECH_RED_SIDE && MECH_RED_SIDE > 0.0);
+    }
+
+    /// §owner: three chassis pads, and genuinely scattered - not three
+    /// pickups stacked on one point.
+    #[test]
+    fn three_mech_pads_spawn_scattered_on_every_map() {
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(3, 1, Mode::Tdm, map));
+            let pads: Vec<[f32; 3]> = s
+                .pickups
+                .iter()
+                .filter(|p| p.kind == PickupKind::RobotArmor)
+                .map(|p| p.pos)
+                .collect();
+            assert_eq!(pads.len(), 3, "{map:?}: three pads");
+            for a in 0..pads.len() {
+                for b in a + 1..pads.len() {
+                    let d = ((pads[a][0] - pads[b][0]).powi(2)
+                        + (pads[a][2] - pads[b][2]).powi(2))
+                    .sqrt();
+                    assert!(d > 15.0, "{map:?}: pads {a},{b} only {d:.1}m apart");
+                }
+            }
+        }
+    }
+
+    /// §4.1-B: overdraw. Holding past full keeps charging to +15%, tops
+    /// out at the overdraw window, and never regresses below full.
+    #[test]
+    fn overdraw_rewards_holding_past_full() {
+        let full = bow_power_fraction(BOW_DRAW_FULL_S).unwrap();
+        assert!((full - 1.0).abs() < 1e-6, "full draw stays exactly 1.0");
+        let mid = bow_power_fraction((BOW_DRAW_FULL_S + BOW_OVERDRAW_FULL_S) * 0.5).unwrap();
+        assert!(mid > 1.0 && mid < BOW_OVERDRAW_MAX, "overdraw ramps, got {mid}");
+        let maxed = bow_power_fraction(BOW_OVERDRAW_FULL_S).unwrap();
+        assert!((maxed - BOW_OVERDRAW_MAX).abs() < 1e-5, "tops at max, got {maxed}");
+        let later = bow_power_fraction(BOW_OVERDRAW_FULL_S + 2.0).unwrap();
+        assert!((later - BOW_OVERDRAW_MAX).abs() < 1e-5, "holds, never regresses");
+        // and it finishes before the sway window opens - reward lands
+        // before punishment
+        assert!(BOW_OVERDRAW_FULL_S < BOW_DRAW_FULL_S + BOW_SWAY_HOLD_S);
     }
 
     /// §owner: THREE hits of either war projectile fell a shield-bearer,
@@ -12242,17 +12393,27 @@ mod tests {
         let mech_visor_y = BODY_HEIGHT * MECH_SCALE * 0.90;
         let h0 = s.fighters[1].hull;
         s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
+        // SUPERSEDED doctrine, moved not deleted: this used to assert the
+        // AWP "does NOT counter a mech frontally" at x0.15. The owner's
+        // rebalance makes the front WINNABLE - ten AWM body shots - so
+        // the pin now tracks the constant instead of the old number.
         assert!(
-            (h0 - s.fighters[1].hull - 115.0 * 0.15).abs() < 0.01,
-            "an AWP does NOT counter a mech frontally"
+            (h0 - s.fighters[1].hull - 115.0 * (1.0 - MECH_RED_FRONT)).abs() < 0.01,
+            "AWM front damage tracks MECH_RED_FRONT"
         );
         let h1 = s.fighters[1].hull;
         s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]); // visor band
         assert!(
-            (h1 - s.fighters[1].hull - 115.0 * 0.15 * 2.0).abs() < 0.01,
-            "front visor ≈ 34.5"
+            (h1 - s.fighters[1].hull - 115.0 * (1.0 - MECH_RED_FRONT) * MECH_VISOR_MULT).abs()
+                < 0.01,
+            "front visor = front x2, tracking the constant"
         );
         s.fighters[1].yaw = 0.0; // back turned
+        // Top the hull back up first. At the rebalanced 600 the two hits
+        // above cross the 70% plate-drop threshold, and the exposed
+        // frame's x1.25 would contaminate what is purely an ARC check.
+        s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_plates_dropped = 0;
         let h2 = s.fighters[1].hull;
         s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
         assert!(
@@ -12361,8 +12522,8 @@ mod tests {
         }
         assert!(s.rockets.is_empty(), "the missile resolves");
         assert!(
-            (h0 - s.fighters[1].hull - ROCKET_DMG * 0.15).abs() < 0.5,
-            "front hit ≈ 40.5 hull: took {}",
+            (h0 - s.fighters[1].hull - ROCKET_DMG * (1.0 - MECH_RED_FRONT)).abs() < 0.5,
+            "front rocket damage tracks MECH_RED_FRONT: took {}",
             h0 - s.fighters[1].hull
         );
         // 4) LOS break > 0.4 s → ballistic, forever
@@ -13760,8 +13921,12 @@ mod tests {
         assert!((p_mid - 0.675).abs() < 0.02, "linear midpoint ~67.5%: {p_mid}");
         let p_full = bow_power_fraction(BOW_DRAW_FULL_S).unwrap();
         assert!((p_full - 1.0).abs() < 0.001, "100% right at 0.7s: {p_full}");
+        // SUPERSEDED by §4.1-B (owner): holding past full now OVERDRAWS
+        // to BOW_OVERDRAW_MAX. The old assertion pinned "no overcharge";
+        // that was the design this change deliberately replaces, so the
+        // pin moves with it rather than being deleted.
         let p_held = bow_power_fraction(5.0).unwrap();
-        assert_eq!(p_held, 1.0, "holding past full draw doesn't overcharge");
+        assert_eq!(p_held, BOW_OVERDRAW_MAX, "a long hold sits at the overdraw cap");
         assert_eq!(bow_power_fraction(BOW_DRAW_FORCE_S), None, "10s = forced letdown");
         assert_eq!(bow_power_fraction(12.0), None, "well past 10s is still a letdown");
     }
