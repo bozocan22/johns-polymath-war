@@ -1580,6 +1580,27 @@ impl Fighter {
     pub fn set_crouch(&mut self, want: bool) {
         self.crouch = want && !self.in_mech();
     }
+    /// How tall a ledge this body can step onto.
+    ///
+    /// §A (VIII-B addendum) requires the mech's traversal envelope to
+    /// scale WITH the chassis, and this was missed when MECH_SCALE moved
+    /// to 1.7: `STEP_UP` was a flat global, so a 3-metre walker stepped
+    /// over exactly the same knee-high ledge a soldier does - and, worse,
+    /// was *blocked* by the same one. A machine that size being stopped
+    /// by a crate a man can stride over is the kind of detail that reads
+    /// instantly as fake.
+    ///
+    /// An accessor rather than a constant for the same reason `height()`
+    /// and `radius()` are: every consumer then scales for free, and a
+    /// future chassis size cannot leave one call site behind.
+    pub fn step_up(&self) -> f32 {
+        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
+            STEP_UP * MECH_SCALE
+        } else {
+            STEP_UP
+        }
+    }
+
     pub fn height(&self) -> f32 {
         if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
             BODY_HEIGHT * MECH_SCALE // §11: a 2.7 m powered exosuit
@@ -4797,7 +4818,7 @@ impl TdmSim {
             let mut pz = nz.clamp(-half + 0.5, half - 0.5);
             // walls you cannot step onto push you out; walkable tops don't
             for c in &self.cover {
-                if c.max[1] <= y + STEP_UP {
+                if c.max[1] <= y + self.fighters[i].step_up() {
                     continue; // climbable — handled by support
                 }
                 if y >= c.max[1] - 0.01 {
@@ -4818,7 +4839,10 @@ impl TdmSim {
                     }
                 }
             }
-            // vertical: stand on the tallest reachable support, else fall
+            // vertical: stand on the tallest reachable support, else fall.
+            // Read the step-up envelope BEFORE taking the mutable borrow -
+            // it depends only on chassis state, which nothing below moves.
+            let step_up = self.fighters[i].step_up();
             let f = &mut self.fighters[i];
             f.pos[0] = px;
             f.pos[2] = pz;
@@ -4830,7 +4854,7 @@ impl TdmSim {
                         && px < c.max[0] + BODY_RADIUS * 0.4
                         && pz > c.min[2] - BODY_RADIUS * 0.4
                         && pz < c.max[2] + BODY_RADIUS * 0.4
-                        && c.max[1] <= y0 + STEP_UP
+                        && c.max[1] <= y0 + step_up
                         && c.max[1] > s
                     {
                         s = c.max[1];
@@ -10083,6 +10107,46 @@ mod tests {
             s.fighters[0].spray_i < 4.0,
             "idle must decay the spray index: {}",
             s.fighters[0].spray_i
+        );
+    }
+
+    /// §A (VIII-B addendum): the mech's traversal envelope must scale
+    /// WITH the chassis. This was missed when MECH_SCALE moved to 1.7 -
+    /// `STEP_UP` stayed a flat global, so a 3-metre walker was stopped
+    /// by the same knee-high crate a soldier strides over.
+    #[test]
+    fn a_mech_steps_over_ledges_a_soldier_cannot() {
+        let mut s = range(0x57E9);
+
+        // on foot: the baseline envelope
+        s.fighters[0].armor_set = ArmorSet::None;
+        let man = s.fighters[0].step_up();
+        assert!(
+            (man - STEP_UP).abs() < 1e-6,
+            "an unarmoured fighter must use the plain STEP_UP"
+        );
+
+        // in a chassis: scaled by exactly MECH_SCALE, not a second
+        // hand-tuned constant that can drift from the scale it models
+        s.fighters[0].armor_set = ArmorSet::RobotSuit;
+        s.fighters[0].hull = MECH_HULL;
+        let mech = s.fighters[0].step_up();
+        assert!(
+            (mech - STEP_UP * MECH_SCALE).abs() < 1e-6,
+            "a mech's step-up must be STEP_UP x MECH_SCALE, got {mech}"
+        );
+        assert!(
+            mech > man,
+            "the whole point: a {MECH_SCALE}x chassis must clear ledges a \
+             soldier cannot ({mech} vs {man})"
+        );
+
+        // and it must follow the chassis DYING, not just being equipped -
+        // a blown-out hull is a pilot on foot, with a pilot's envelope
+        s.fighters[0].hull = 0.0;
+        assert!(
+            (s.fighters[0].step_up() - STEP_UP).abs() < 1e-6,
+            "a destroyed chassis must not keep the mech's traversal envelope"
         );
     }
 
