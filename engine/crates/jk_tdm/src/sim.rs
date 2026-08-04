@@ -1554,6 +1554,8 @@ pub struct Fighter {
     /// cooldown, the acquiring lock (target index, seconds held), and
     /// the VICTIM-side warning timer (set from lock START).
     pub pod_ammo: u8,
+    /// §owner: the hull gatling's belt (see MECH_ROUNDS).
+    pub mech_rounds: u32,
     pub pod_cd: f32,
     pub pod_lock_t: f32,
     pub pod_lock_id: i32,
@@ -2105,7 +2107,10 @@ pub const MECH_LAUNCHER_V_MULT: f32 = 1.35;
 // Locks on MECHS ONLY — never infantry (the anti-oppression rule).
 // The victim is warned from lock START; proportional navigation with a
 // hard turn cap and a TTL means cover and side-steps beat it.
-pub const POD_TUBES: u8 = 4;
+/// §owner: ten tubes per chassis (was 4), and ammo pads now resupply
+/// them - the mech has a real ammo economy instead of being a
+/// fire-and-scrap consumable.
+pub const POD_TUBES: u8 = 10;
 pub const POD_LOCK_S: f32 = 1.3;
 pub const POD_CONE_COS: f32 = 0.9945; // cos 6°
 pub const POD_RANGE_M: f32 = 250.0;
@@ -2115,7 +2120,16 @@ pub const ROCKET_ACCEL: f32 = 50.0;
 pub const ROCKET_TURN_CAP: f32 = 4.363; // 250°/s
 pub const ROCKET_TTL_S: f32 = 7.0;
 pub const ROCKET_LOS_BREAK_S: f32 = 0.4;
-pub const ROCKET_DMG: f32 = 270.0;
+/// §owner rocket table. One launcher, two very different targets:
+///   vs a CHASSIS (front arc): 290 x 0.525 = 152.25 -> 4 rockets fell it;
+///   BRACED the hull keeps 40%   ->  60.9 -> 10 rockets. Brace becomes
+///   the mech's answer to a rocket duel, at the cost of being planted.
+///   vs INFANTRY: 50 flat -> 2 rockets kill; a raised shield blocks at
+///   most half -> 25 -> 4 rockets. Same cap philosophy as the spear.
+pub const ROCKET_DMG: f32 = 290.0;
+pub const ROCKET_DMG_INFANTRY: f32 = 50.0;
+pub const ROCKET_SHIELD_BLOCK_CAP: f32 = 0.5;
+pub const MECH_BRACE_ROCKET_RESIST: f32 = 0.6;
 pub const ROCKET_PN_N: f32 = 3.0;
 pub const ROCKET_PROX_M: f32 = 1.2;
 pub const ROCKET_SOLDIER_KILL_M: f32 = 2.0;
@@ -2613,6 +2627,9 @@ pub const GATLING_FIRE_PERIOD: f32 = 0.07; // same ROF class as the minigun's 0.
 /// heat decay is suppressed while the trigger is DOWN, and the timer is
 /// what carries that intent across the ticks between rounds.
 pub const GATLING_TRIGGER_HOLD_S: f32 = 0.07;
+/// §owner: the hull gatling's belt. 300 rounds per chassis; ammo pads
+/// top it up. Zero rounds = a silent mount, exactly like a dry gun.
+pub const MECH_ROUNDS: u32 = 300;
 pub const GATLING_DAMAGE: f32 = 9.0; // near the minigun's 8.0 - high ROF, low per-round
 pub const GATLING_SPREAD_COLD: f32 = 0.018;
 pub const GATLING_SPREAD_HOT: f32 = 0.052;
@@ -3316,6 +3333,7 @@ impl TdmSim {
                     spray_i: 0.0,
                     last_shot_at: -100.0,
                     pod_ammo: 0,
+                    mech_rounds: 0,
                     pod_cd: 0.0,
                     pod_lock_t: 0.0,
                     pod_lock_id: -1,
@@ -3847,9 +3865,20 @@ impl TdmSim {
                         }
                         PickupKind::Ammo => {
                             let f = &mut self.fighters[i];
-                            if !f.armed() {
+                            // §owner: a mech resupplies from the same
+                            // pads - half a belt and three tubes a visit.
+                            if f.in_mech() {
+                                if f.mech_rounds >= MECH_ROUNDS
+                                    && f.pod_ammo >= POD_TUBES
+                                {
+                                    continue;
+                                }
+                                f.mech_rounds =
+                                    (f.mech_rounds + MECH_ROUNDS / 2).min(MECH_ROUNDS);
+                                f.pod_ammo = (f.pod_ammo + 3).min(POD_TUBES);
+                            } else if !f.armed() {
                                 continue;
-                            }
+                            } else
                             // §7: the minigun has no reserve to fill — a
                             // reserve it can never load would also trap
                             // bots in the "still has ammo" branch forever.
@@ -3870,6 +3899,7 @@ impl TdmSim {
                             f.armor_set = ArmorSet::RobotSuit;
                             f.armor = POWER_MAX;
                             f.hull = MECH_HULL;
+                            f.mech_rounds = MECH_ROUNDS;
                             f.fuel = 0.0;
                             // §6.2 (Brief VII v2): boarding is committed,
                             // not instant - the chassis seals for 1.6s
@@ -3887,9 +3917,12 @@ impl TdmSim {
                             f.gatling_cd = 0.0;
                             f.gatling_trigger_t = 0.0;
                             f.autocannon_cd = 0.0;
-                            // §5.3 (Brief VI): 4 tubes per chassis —
-                            // resupply is a fresh chassis, not a pickup
+                            // §owner: 10 tubes and a 300-round belt per
+                            // chassis - and ammo pads RESUPPLY them now,
+                            // so a walking mech can sustain instead of
+                            // being scrapped for a refill.
                             f.pod_ammo = POD_TUBES;
+                            f.mech_rounds = MECH_ROUNDS;
                         }
                         PickupKind::FolkArmor => {
                             let f = &mut self.fighters[i];
@@ -5545,6 +5578,11 @@ impl TdmSim {
                 // §3.4: the weapon is still coming up out of the sprint
                 // carry - the sprint-out beat is the whole point
                 || f.sprint_gate_t > 0.0
+                // §owner + §C.5: a pilot NEVER fires the carried gun.
+                // The input router already sends the trigger to the hull
+                // mounts, but that is one caller - this gate makes the
+                // guarantee local to the weapon itself.
+                || f.in_mech()
                 // §6.2: the chassis is still sealing up. Scoped to
                 // ACTUALLY being in a chassis: the timer is mech state,
                 // but this gate is not, so a pilot who dismounts (or is
@@ -5871,6 +5909,8 @@ impl TdmSim {
                 || !f.alive()
                 || f.gatling_cd > 0.0
                 || f.gatling_vent_t > 0.0
+                // §owner: a dry belt is a silent mount
+                || f.mech_rounds == 0
                 // §6.2: the chassis is still sealing up (or powering
                 // down) — the mounts are not live yet
                 || f.mech_transition_t > 0.0
@@ -5898,6 +5938,7 @@ impl TdmSim {
             // pilot's spray index for as long as the hull gun was firing,
             // so he dismounted into a fully-bloomed recoil pattern he
             // never fired a round to earn.
+            f.mech_rounds -= 1;
             f.gatling_heat += GATLING_HEAT_PER_SHOT;
             if f.gatling_heat >= 100.0 {
                 f.gatling_heat = 100.0;
@@ -7133,8 +7174,7 @@ impl TdmSim {
                 },
                 2.0,
             ));
-            // §5.3: 270 before angle armor (rear ≈27% of a hull, front
-            // ≈4%); a direct/2 m soldier hit is lethal
+            // §owner's rocket table - see ROCKET_DMG's doc
             let team = self.fighters[shooter].team;
             for j in 0..self.fighters.len() {
                 let g = &self.fighters[j];
@@ -7151,7 +7191,26 @@ impl TdmSim {
                 if dx * dx + dy * dy + dz * dz
                     < ROCKET_SOLDIER_KILL_M * ROCKET_SOLDIER_KILL_M
                 {
-                    self.apply_plain_damage(shooter, j, ROCKET_DMG, at, false, false);
+                    // §owner's rocket table (see ROCKET_DMG). A chassis
+                    // takes launcher-class damage through its arc model,
+                    // braced keeps 40%; a soldier takes a flat 50 that a
+                    // raised shield can at best halve.
+                    let is_mech = {
+                        let g = &self.fighters[j];
+                        g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0
+                    };
+                    if is_mech {
+                        let braced = self.fighters[j].mech_brace;
+                        let base = ROCKET_DMG
+                            * if braced { 1.0 - MECH_BRACE_ROCKET_RESIST } else { 1.0 };
+                        self.apply_plain_damage(shooter, j, base, at, false, false);
+                    } else {
+                        let mut d = ROCKET_DMG_INFANTRY;
+                        if let Some(block) = self.shield_block(j, at) {
+                            d *= 1.0 - block.min(ROCKET_SHIELD_BLOCK_CAP);
+                        }
+                        self.apply_plain_damage(shooter, j, d, at, false, false);
+                    }
                 }
             }
         }
@@ -8558,6 +8617,7 @@ mod tests {
         let bot = 1usize;
         s.fighters[bot].armor_set = ArmorSet::RobotSuit;
         s.fighters[bot].hull = MECH_HULL;
+        s.fighters[bot].mech_rounds = MECH_ROUNDS;
         s.fighters[bot].armor = POWER_MAX;
         s.fighters[bot].yaw = 0.0;
         // an enemy directly BEHIND, so the bot wants a 180 this tick
@@ -8628,6 +8688,22 @@ mod tests {
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
         );
+    }
+
+    /// §owner's rocket table, derived from the live constants.
+    #[test]
+    fn rocket_ttk_matches_the_owner_table() {
+        let inf = (MAX_HEALTH / ROCKET_DMG_INFANTRY).ceil() as u32;
+        assert_eq!(inf, 2, "2 rockets kill an unshielded soldier: {inf}");
+        let sh = (MAX_HEALTH / (ROCKET_DMG_INFANTRY * (1.0 - ROCKET_SHIELD_BLOCK_CAP)))
+            .ceil() as u32;
+        assert_eq!(sh, 4, "4 through a raised shield: {sh}");
+        let mech = (MECH_HULL / (ROCKET_DMG * (1.0 - MECH_RED_FRONT))).ceil() as u32;
+        assert_eq!(mech, 4, "4 fell a chassis from the front: {mech}");
+        let braced = (MECH_HULL
+            / (ROCKET_DMG * (1.0 - MECH_RED_FRONT) * (1.0 - MECH_BRACE_ROCKET_RESIST)))
+            .ceil() as u32;
+        assert_eq!(braced, 10, "10 against a braced hull: {braced}");
     }
 
     /// §owner: the mech's FRONT is winnable now. Ten AWM body shots or
@@ -9416,6 +9492,7 @@ mod tests {
         // boarded, the same intent is refused
         f.armor_set = ArmorSet::RobotSuit;
         f.hull = MECH_HULL;
+        f.mech_rounds = MECH_ROUNDS;
         f.set_crouch(true);
         assert!(!f.crouch, "a live chassis must never crouch");
         // and a destroyed chassis hands the pilot back their crouch
@@ -9467,6 +9544,7 @@ mod tests {
         s.fighters[0].pos = [0.0, 0.0, 0.0];
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].health = MAX_HEALTH;
         s.zombies.clear();
         s.next_zombie_id += 1;
@@ -9975,6 +10053,7 @@ mod tests {
         s.fighters[1].slot_ammo = [(0, 0); 3];
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         // FRONT: body faces the shooter → 15% lands
         s.fighters[1].yaw = std::f32::consts::PI;
         let h0 = s.fighters[1].hull;
@@ -10529,6 +10608,7 @@ mod tests {
             f.armor_set = ArmorSet::RobotSuit;
             f.armor = POWER_MAX;
             f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
         }
         let start = s.fighters[0].pos;
         let mut stepped = false;
@@ -10920,6 +11000,7 @@ mod tests {
         // hand-tuned constant that can drift from the scale it models
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         let mech = s.fighters[0].step_up();
         assert!(
             (mech - STEP_UP * MECH_SCALE).abs() < 1e-6,
@@ -10961,6 +11042,7 @@ mod tests {
         let mut s = range(0xB4CF);
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].grounded = false;
         s.step(PlayerCmd { crouch: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
         assert!(
@@ -10977,6 +11059,7 @@ mod tests {
             let mut s = range(0xB4D0);
             s.fighters[0].armor_set = ArmorSet::RobotSuit;
             s.fighters[0].hull = MECH_HULL;
+            s.fighters[0].mech_rounds = MECH_ROUNDS;
             // long enough for the §1.3 accel model to reach steady state
             for _ in 0..(SIM_HZ as usize) {
                 s.step(PlayerCmd {
@@ -11007,19 +11090,22 @@ mod tests {
         // (4) DAMPS RECOIL by exactly the damp constant. Both are plain
         // constants, so the ratio is exact - a typo'd damp or a flipped
         // inequality moves it immediately.
+        // Measured through the AUTOCANNON: the carried gun is dead inside
+        // a chassis now (owner), and the autocannon is the constant's §C
+        // consumer in any case - braced-vs-unbraced kick at its own call
+        // site.
         let kick_after_one_shot = |braced: bool| -> f32 {
             let mut s = range(0xB4D1);
             {
                 let f = &mut s.fighters[0];
                 f.armor_set = ArmorSet::RobotSuit;
                 f.hull = MECH_HULL;
+                f.mech_rounds = MECH_ROUNDS;
+                f.mech_weapon = MechWeapon::Autocannon;
                 f.mech_brace = braced;
-                f.gun = GunKind::Ak47;
-                f.inventory[0] = GunKind::Ak47;
-                f.ammo = 30;
                 f.protect_t = 0.0;
             }
-            assert!(s.try_fire(0, [0.0, 0.0, 1.0], false), "the shot must land");
+            assert!(s.try_fire_autocannon(0, [0.0, 0.0, 1.0]), "the shot must land");
             let f = &s.fighters[0];
             (f.punch_vel[0] * f.punch_vel[0] + f.punch_vel[1] * f.punch_vel[1]).sqrt()
         };
@@ -11041,6 +11127,7 @@ mod tests {
         let f = &mut s.fighters[0];
         f.armor_set = ArmorSet::RobotSuit;
         f.hull = MECH_HULL;
+        f.mech_rounds = MECH_ROUNDS;
         f.mech_transition_t = 0.0;
         f.mech_weapon = w;
         f.gatling_heat = 0.0;
@@ -11169,6 +11256,7 @@ mod tests {
         for n in 1..=cap {
             // the chassis is not what is under test here
             gat.fighters[0].hull = MECH_HULL;
+            gat.fighters[0].mech_rounds = MECH_ROUNDS;
             gat.fighters[1].health = MAX_HEALTH;
             gat.fighters[1].pos = [0.0, 0.0, 5.0];
             gat.step(hold);
@@ -11246,6 +11334,7 @@ mod tests {
         );
         for _ in 0..((GATLING_VENT_FORCED_S / DT) as usize + 2) {
             gat.fighters[0].hull = MECH_HULL;
+            gat.fighters[0].mech_rounds = MECH_ROUNDS;
             gat.step(PlayerCmd::default()); // trigger RELEASED
         }
         assert_eq!(
@@ -11303,6 +11392,7 @@ mod tests {
             // 3 s of held hull trigger; `spray_i` needs 2.5 s to unwind
             for _ in 0..(3 * SIM_HZ as usize) {
                 s.fighters[0].hull = MECH_HULL;
+                s.fighters[0].mech_rounds = MECH_ROUNDS;
                 s.fighters[1].health = MAX_HEALTH;
                 s.fighters[1].pos = [0.0, 0.0, 5.0];
                 s.step(hold);
@@ -11348,10 +11438,23 @@ mod tests {
             s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
             "the hull gatling must fire"
         );
+        // §owner: a pilot can no longer fire the carried gun AT ALL from
+        // inside the chassis, so the no-shared-cooldown property is
+        // proven across a dismount: the mount fired THIS tick, the pilot
+        // steps out, and the rifle is ready that instant.
+        assert!(
+            !s.try_fire(0, [0.0, 0.0, -1.0], false),
+            "the carried gun must be dead inside the chassis"
+        );
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::None;
+            f.hull = 0.0;
+        }
         assert!(
             s.try_fire(0, [0.0, 0.0, -1.0], false),
-            "the pilot's carried rifle was locked out by the hull gatling's \
-             round - the two triggers share a cooldown they must not share"
+            "the instant the pilot steps out, the rifle fires - the two \
+             triggers must not share a cooldown"
         );
     }
 
@@ -11369,6 +11472,7 @@ mod tests {
                 f.pos = [2.0, 0.0, -3.0]; // an off-origin muzzle to point at
                 f.armor_set = ArmorSet::RobotSuit;
                 f.hull = MECH_HULL;
+                f.mech_rounds = MECH_ROUNDS;
                 f.health = MAX_HEALTH;
                 f.mech_transition_t = 0.0;
                 f.mech_weapon = w;
@@ -11626,6 +11730,7 @@ mod tests {
                 t.pos = [0.0, 0.0, 5.0];
                 t.armor_set = ArmorSet::RobotSuit;
                 t.hull = MECH_HULL;
+                t.mech_rounds = MECH_ROUNDS;
                 t.armor = 0.0;
                 t.protect_t = 0.0;
                 t.yaw = 0.0; // facing away: one fixed angle multiplier
@@ -11688,6 +11793,7 @@ mod tests {
             b.armor_set = ArmorSet::RobotSuit;
             b.armor = POWER_MAX;
             b.hull = MECH_HULL;
+            b.mech_rounds = MECH_ROUNDS;
             b.mech_transition_t = 0.0; // sealed, mounts live
             b.mech_weapon = MechWeapon::Gatling; // a fresh chassis
             b.gatling_heat = 0.0;
@@ -11828,23 +11934,25 @@ mod tests {
             s.fighters[1].gatling_heat
         );
 
-        // (2) and it never REACHES that state. 150 rounds is 5 Ak47 mags;
-        // fired on the carried gun that is ~26 s of shooting and
-        // reloading, so 30 s of unbroken engagement is past the point
-        // where the shipped bot fell silent forever.
+        // (2) and sustained fire keeps coming while the BELT holds. The
+        // mount used to be infinite; the owner gave it a 300-round belt,
+        // so this leg now runs 20 s (about 220 rounds through the vent
+        // cycles) - long past the carried gun's relevance, comfortably
+        // inside the belt. Running the belt DRY is the economy working,
+        // not the old fell-silent bug, and the assertion below proves
+        // the belt was genuinely spending.
         let mut s = bot_mech(0xD03, 10.0, GunKind::Ak47, 30, 120);
-        assert!(
-            30 + 120 >= 150,
-            "the setup must carry the 150 rounds this test is about"
-        );
-        let early = bot_engagement(&mut s, 27.0);
+        let early = bot_engagement(&mut s, 17.0);
         let late = bot_engagement(&mut s, 3.0);
         assert!(early > 0.0, "the engagement never started");
         assert!(
             late > 0.0,
-            "after 30 s - long past the {} carried rounds - the mech had \
-             stopped dealing damage",
-            30 + 120
+            "after 20 s of engagement the mount had fallen silent with \
+             belt remaining"
+        );
+        assert!(
+            s.fighters[1].mech_rounds < MECH_ROUNDS,
+            "the belt must actually be spending"
         );
         assert_eq!(
             (s.fighters[1].ammo, s.fighters[1].reserve),
@@ -11902,6 +12010,7 @@ mod tests {
             p.armor_set = ArmorSet::RobotSuit;
             p.armor = POWER_MAX;
             p.hull = MECH_HULL;
+            p.mech_rounds = MECH_ROUNDS;
             p.mech_transition_t = 0.0;
             p.mech_plates_dropped = 0;
             p.yaw = std::f32::consts::PI;
@@ -12045,6 +12154,7 @@ mod tests {
                 p.armor_set = ArmorSet::RobotSuit;
                 p.armor = POWER_MAX;
                 p.hull = MECH_HULL;
+                p.mech_rounds = MECH_ROUNDS;
                 p.mech_transition_t = 0.0;
             }
             let mut path = 0.0;
@@ -12141,6 +12251,7 @@ mod tests {
             f.armor_set = ArmorSet::RobotSuit;
             f.armor = POWER_MAX;
             f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
         }
         // SCALE (Task 4, MISSION doc: A3 recommended, 1.7x - supersedes
         // Brief VI's 1.15x): MECH_SCALE x soldier, +/-2%
@@ -12218,6 +12329,7 @@ mod tests {
             f.armor_set = ArmorSet::RobotSuit;
             f.armor = POWER_MAX;
             f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
             f.pod_ammo = 4;
         }
         let sprint_cmd = PlayerCmd { sprint: true, move_z: 1.0, aim: [0.0, 0.0, 1.0], ..Default::default() };
@@ -12310,6 +12422,7 @@ mod tests {
         let mut s = range(0x6E7);
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].mech_transition_t = MECH_ENTER_S;
         assert_eq!(
             mech_enter_stage_for(&s.fighters[0]),
@@ -12339,6 +12452,7 @@ mod tests {
         assert_eq!(mech_enter_stage_for(&idle.fighters[0]), None, "not a mech at all");
         idle.fighters[0].armor_set = ArmorSet::RobotSuit;
         idle.fighters[0].hull = MECH_HULL;
+        idle.fighters[0].mech_rounds = MECH_ROUNDS;
         idle.fighters[0].mech_transition_t = MECH_EXIT_S;
         idle.fighters[0].mech_exiting = true;
         assert_eq!(
@@ -12387,6 +12501,7 @@ mod tests {
         arm_awp(&mut s);
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         s.fighters[1].yaw = std::f32::consts::PI; // facing the shooter
         // height-relative, not a magic number - survives Task 4's scale
         // change (or any future one) automatically
@@ -12413,6 +12528,7 @@ mod tests {
         // above cross the 70% plate-drop threshold, and the exposed
         // frame's x1.25 would contaminate what is purely an ARC check.
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         s.fighters[1].mech_plates_dropped = 0;
         let h2 = s.fighters[1].hull;
         s.apply_hit(0, 1, 1.0, [0.0, 1.0, 5.0]);
@@ -12438,6 +12554,7 @@ mod tests {
                 f.armor_set = ArmorSet::RobotSuit;
                 f.armor = POWER_MAX;
                 f.hull = MECH_HULL;
+                f.mech_rounds = MECH_ROUNDS;
                 f.pod_ammo = POD_TUBES;
             }
             s
@@ -12466,6 +12583,7 @@ mod tests {
         let mut s = setup();
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         let mut warned_early = false;
         for i in 0..((1.3 * SIM_HZ as f32) as usize + 4) {
             let aim = aim_at(&s);
@@ -12521,15 +12639,27 @@ mod tests {
             }
         }
         assert!(s.rockets.is_empty(), "the missile resolves");
+        // The victim BOT braced against the incoming rocket - the AI is
+        // already using the owner's new defence - so the pin reads the
+        // LIVE brace state instead of assuming an unbraced hull.
+        let brace_mult = if s.fighters[1].mech_brace {
+            1.0 - MECH_BRACE_ROCKET_RESIST
+        } else {
+            1.0
+        };
         assert!(
-            (h0 - s.fighters[1].hull - ROCKET_DMG * (1.0 - MECH_RED_FRONT)).abs() < 0.5,
-            "front rocket damage tracks MECH_RED_FRONT: took {}",
+            (h0 - s.fighters[1].hull
+                - ROCKET_DMG * (1.0 - MECH_RED_FRONT) * brace_mult)
+                .abs()
+                < 0.5,
+            "front rocket damage tracks the arc and the brace: took {}",
             h0 - s.fighters[1].hull
         );
         // 4) LOS break > 0.4 s → ballistic, forever
         let mut s = setup();
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         s.fighters[1].pos = [0.0, 0.0, 60.0];
         for _ in 0..((1.4 * SIM_HZ as f32) as usize) {
             let aim = aim_at(&s);
@@ -13429,6 +13559,7 @@ mod tests {
             let f = &mut s.fighters[1]; // the BOT - index 0 is the player
             f.armor_set = ArmorSet::RobotSuit;
             f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
             f.armor = POWER_MAX;
             f.mech_transition_t = 0.0;
             f.protect_t = 0.0;
@@ -13472,6 +13603,7 @@ mod tests {
             let f = &mut s.fighters[1];
             f.armor_set = ArmorSet::RobotSuit;
             f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
             f.armor = POWER_MAX;
             f.mech_transition_t = 0.0;
             f.protect_t = 0.0;
@@ -14005,6 +14137,7 @@ mod tests {
         let mut s = range(30);
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].mech_transition_t = MECH_ENTER_S;
         s.fighters[0].ammo = 30;
         assert!(
@@ -14029,6 +14162,7 @@ mod tests {
         let mut s = range(36);
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].mech_transition_t = MECH_ENTER_S;
         s.fighters[0].ammo = 30;
         assert!(
@@ -14051,6 +14185,7 @@ mod tests {
         let mut s = range(37);
         s.fighters[0].armor_set = ArmorSet::RobotSuit;
         s.fighters[0].hull = MECH_HULL;
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
         s.fighters[0].ammo = 30;
         s.step(PlayerCmd { exit_mech: true, ..Default::default() });
         assert!(
@@ -14145,6 +14280,7 @@ mod tests {
         let mut s = range(31);
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         s.fighters[1].yaw = std::f32::consts::PI; // face the shooter - front arc
         assert_eq!(s.fighters[1].mech_plates_dropped, 0, "starts fully plated");
         // front-arc hits land ~15% of raw damage; hammer it down in
@@ -14177,6 +14313,7 @@ mod tests {
         let mut s = range(32);
         s.fighters[1].armor_set = ArmorSet::RobotSuit;
         s.fighters[1].hull = MECH_HULL;
+        s.fighters[1].mech_rounds = MECH_ROUNDS;
         s.fighters[1].yaw = 0.0; // REAR arc - full damage, cleanest to compare
         let h0 = s.fighters[1].hull;
         s.apply_hit(0, 1, mech_visor_y, [0.0, mech_visor_y, 5.0]);

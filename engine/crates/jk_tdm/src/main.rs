@@ -1721,6 +1721,12 @@ struct ArcVis {
 /// §1 (Brief V): the grenade pre-aim preview - amber dots along the
 /// predicted flight, a fainter run after the first bounce (less certain),
 /// and a landing ring at the predicted end point.
+/// §owner: the missile pod's PRE-FIRE line - amber dots along the
+/// dumb-fire path while Y is held, out to the first cover hit. The
+/// locked shot steers itself; this is for the tap.
+#[derive(Resource)]
+struct RocketAimVis(Vec<Entity>);
+
 #[derive(Resource)]
 struct GrenadeArcVis {
     /// bright dots: launch → first bounce
@@ -4005,6 +4011,7 @@ fn main() {
                 update_casings,
                 spin_minigun_barrels,
                 grenade_arc,
+                rocket_aim_preview,
                 crosshair_render,
                 ammo_bar_sync,
                 hud_colors,
@@ -4023,6 +4030,49 @@ fn main() {
 /// never a reimplementation - so the dots trace exactly the flight the
 /// grenade will take, live, as the camera moves and the power charges.
 /// Dots after the first bounce render faint: less certain, by design.
+/// §owner: rockets get a pre-fire read too. While the pod is aimed (Y,
+/// in a chassis, tubes loaded) a dotted line runs from the mount along
+/// the crosshair to the first cover hit - the exact path a TAP would
+/// dumb-fire down. Purely client-side; the sim is never consulted about
+/// intent, only about geometry.
+fn rocket_aim_preview(
+    game: Res<Game>,
+    keys: Res<ButtonInput<KeyCode>>,
+    vis: Res<RocketAimVis>,
+    cam_q: Query<&Transform, With<MainCam>>,
+    mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let show =
+        p.alive() && p.in_mech() && p.pod_ammo > 0 && keys.pressed(KeyCode::KeyY);
+    if !show {
+        for e in &vis.0 {
+            if let Ok((_, mut v)) = q.get_mut(*e) {
+                *v = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+    let Ok(cam_tf) = cam_q.get_single() else { return };
+    let (d, _) = crosshair_aim_dir(&game.sim, cam_tf);
+    let o = game.sim.muzzle_origin(game.sim.player);
+    let dir = [d.x, d.y, d.z];
+    let t_end = game
+        .sim
+        .raycast_cover(o, dir, 90.0)
+        .map(|(t, _)| t)
+        .unwrap_or(90.0);
+    let n = vis.0.len() as f32;
+    for (k, e) in vis.0.iter().enumerate() {
+        let t = t_end * (k as f32 + 1.0) / n;
+        if let Ok((mut tf, mut v)) = q.get_mut(*e) {
+            tf.translation =
+                Vec3::new(o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t);
+            *v = Visibility::Visible;
+        }
+    }
+}
+
 fn grenade_arc(
     game: Res<Game>,
     arc: Res<GrenadeArcVis>,
@@ -4519,7 +4569,12 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.05, -0.01), 0.18, (0.042, 0.13, 0.06)));
             parts.push(wp(false, Tone::Black, (0.0, -0.018, 0.048), 0.0, (0.012, 0.012, 0.05)));
             parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.085, -0.03), 0.0, (0.014, 0.012, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.011, 0.085, -0.03), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.011, 0.085, -0.03), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.079, -0.03), 0.0, (0.026, 0.005, 0.01)));
         }
         GunKind::Deagle => {
             // the hand cannon: long light slide, heavy dark frame
@@ -4529,7 +4584,12 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
             push_muzzle(&mut parts, 0.055, 0.27, 0.055);
             parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.10, -0.04), 0.0, (0.016, 0.012, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.012, 0.1, -0.04), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.012, 0.1, -0.04), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.094, -0.04), 0.0, (0.028, 0.005, 0.01)));
         }
         GunKind::Mp5 => {
             // compact SMG: short everything - slab receiver, raked mag
@@ -4548,7 +4608,12 @@ fn spawn_weapon_model(
             // at all. Rear notch on the receiver, front post at the muzzle
             // end, both at the same height so they line up.
             parts.push(wp(false, Tone::Black, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.088, -0.02), 0.0, (0.014, 0.014, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.011, 0.088, -0.02), 0.0, (0.0045, 0.02, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.011, 0.088, -0.02), 0.0, (0.0045, 0.02, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.081, -0.02), 0.0, (0.026, 0.005, 0.01)));
         }
         GunKind::Shotgun => {
             // pump gun: barrel + tube pair over a light pump
@@ -4572,7 +4637,12 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.045);
             push_muzzle(&mut parts, 0.045, 0.635, 0.038);
-            parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.10), 0.0, (0.014, 0.02, 0.012)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.011, 0.085, 0.1), 0.0, (0.0045, 0.024, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.011, 0.085, 0.1), 0.0, (0.0045, 0.024, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.076, 0.1), 0.0, (0.026, 0.005, 0.01)));
             parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
         }
         GunKind::M4 => {
@@ -4588,7 +4658,12 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.05);
             parts.push(wp(false, Tone::Black, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.105, -0.02), 0.0, (0.014, 0.016, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.011, 0.105, -0.02), 0.0, (0.0045, 0.02, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.011, 0.105, -0.02), 0.0, (0.0045, 0.02, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.098, -0.02), 0.0, (0.026, 0.005, 0.01)));
         }
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
@@ -6158,6 +6233,21 @@ fn setup(
         post: gpost,
         ring: gring,
     });
+    // §owner: the pod's pre-fire aim dots
+    let mut rdots = Vec::new();
+    for _ in 0..14 {
+        rdots.push(
+            commands
+                .spawn((
+                    Mesh3d(dot_mesh.clone()),
+                    MeshMaterial3d(amber_faint.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id(),
+        );
+    }
+    commands.insert_resource(RocketAimVis(rdots));
     // §5.3 (Brief VI): pooled pod-missile visuals (≤ 8 in flight)
     for i in 0..8 {
         commands.spawn((
@@ -10840,8 +10930,8 @@ fn hud_system(
                             .map(|i| if i < p.pod_ammo { '#' } else { '.' })
                             .collect();
                         format!(
-                            "  MECH - HULL {:.0} - POWER {:.0} - POD {tubes} - U: dismount",
-                            p.hull, p.armor
+                            "  MECH - HULL {:.0} - POWER {:.0} - AMMO {} - POD {tubes} - U: dismount",
+                            p.hull, p.mech_rounds, p.armor
                         )
                     }
                     ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
