@@ -1388,6 +1388,15 @@ struct FighterRig {
     shield: Entity,
     bow_arrow: Entity,
     armor_rig: Entity,
+    /// D.1: mech leg armour roots, [left, right] x [thigh, shin, foot] -
+    /// parented to the REAL leg bones so the plating walks with the gait.
+    mech_leg_armor: [[Entity; 3]; 2],
+    /// D.6 detach stages, driven by the sim's `mech_plates_dropped` bits:
+    /// 70% = hip skirts + LEFT thigh plate; 40% = LEFT shin plate + rear
+    /// drum + whip antenna; 15% = a foot cleat row (the visible limp).
+    mech_detach_70: [Entity; 3],
+    mech_detach_40: [Entity; 3],
+    mech_detach_15: [Entity; 1],
 }
 
 /// §1.4: metres per full step. Phase advances by planar distance / stride
@@ -5007,123 +5016,215 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
     root
 }
 
-/// Spawn the wearable robot-armor rig (chest plate, power pack, pauldrons).
-fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> Entity {
-    // §11 (Brief IV): the Mech Armada read - khaki FACETED plates (each
-    // face slightly canted so light breaks across them), a single red
-    // sensor slit instead of eyes, boxy shoulder pods, exhaust stubs.
-    // Worn over the fighter rig; the sim's arcs/hull/eject are untouched.
+/// §6.3 / D.6: hull-side parts that visually shear off at HP thresholds.
+struct MechHullDetach {
+    skirt_l: Entity,
+    skirt_r: Entity,
+    drum_r: Entity,
+    antenna: Entity,
+}
+
+/// Leg-bone-parented mech armour for one side.
+struct MechLegArmor {
+    roots: [Entity; 3],
+    thigh_plate: Entity,
+    shin_plate: Entity,
+    cleat_front: Entity,
+}
+
+/// Spawn the mech hull rig - a WALKING WEAPONS PLATFORM: a slab hull
+/// cantilevered over an exposed hip/waist mechanism, a sensor-visor deck
+/// instead of a head, a 10-tube rocket pod on the left hardpoint and a
+/// gatling barrel cluster hung low on the right flank (Brief VIII-B
+/// D.1-D.5). Torso-local coordinates; the head hit band (>0.82 of
+/// height, torso-local y > 0.846) is filled by the sensor deck, and the
+/// emissive visor slit sits inside the visor-mult band - so the sim's
+/// damage model is untouched by construction.
+fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHullDetach) {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    let plates: [(Handle<StandardMaterial>, Vec3, Quat, Vec3); 33] = [
-        // chest: two canted khaki facets meeting on the centerline
-        (kit.mech_khaki.clone(), Vec3::new(0.13, 0.34, 0.10),
-         Quat::from_rotation_y(-0.22), Vec3::new(0.30, 0.46, 0.16)),
-        (kit.mech_khaki.clone(), Vec3::new(-0.13, 0.34, 0.10),
-         Quat::from_rotation_y(0.22), Vec3::new(0.30, 0.46, 0.16)),
-        // collar wedge above the chest facets
-        (kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.56, 0.06),
-         Quat::from_rotation_x(0.30), Vec3::new(0.34, 0.10, 0.16)),
-        // abdomen band - darker, recessed
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.10, 0.05),
-         Quat::IDENTITY, Vec3::new(0.40, 0.14, 0.22)),
-        // back: power pack + twin exhaust stubs
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.36, -0.20),
-         Quat::IDENTITY, Vec3::new(0.34, 0.40, 0.16)),
-        (kit.mech_metal.clone(), Vec3::new(0.10, 0.52, -0.26),
-         Quat::from_rotation_x(-0.20), Vec3::new(0.07, 0.16, 0.07)),
-        (kit.mech_metal.clone(), Vec3::new(-0.10, 0.52, -0.26),
-         Quat::from_rotation_x(-0.20), Vec3::new(0.07, 0.16, 0.07)),
-        // shoulder pods: boxy, khaki top over shadow underside
-        (kit.mech_khaki.clone(), Vec3::new(0.36, 0.60, 0.0),
-         Quat::from_rotation_z(-0.12), Vec3::new(0.22, 0.16, 0.24)),
-        (kit.mech_khaki.clone(), Vec3::new(-0.36, 0.60, 0.0),
-         Quat::from_rotation_z(0.12), Vec3::new(0.22, 0.16, 0.24)),
-        (kit.mech_shadow.clone(), Vec3::new(0.36, 0.50, 0.0),
-         Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
-        (kit.mech_shadow.clone(), Vec3::new(-0.36, 0.50, 0.0),
-         Quat::IDENTITY, Vec3::new(0.18, 0.08, 0.20)),
-        // §4.2 (Brief VI): NO head - an angular recessed SENSOR VISOR
-        // slit across the hull front, emissive red (Brief IV language)
-        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.90, -0.01),
-         Quat::from_rotation_x(0.08), Vec3::new(0.26, 0.16, 0.24)),
-        (kit.mech_red.clone(), Vec3::new(0.0, 0.885, 0.115),
-         Quat::IDENTITY, Vec3::new(0.16, 0.028, 0.03)),
-        // pelvis skirt plate
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.02, 0.10),
-         Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
-        // §4.2: hazard chevrons - pod cover + knee plates ONLY
-        (kit.mech_hazard.clone(), Vec3::new(-0.36, 0.685, 0.02),
-         Quat::from_rotation_z(0.12), Vec3::new(0.20, 0.02, 0.22)),
-        (kit.mech_hazard.clone(), Vec3::new(0.14, -0.32, 0.12),
-         Quat::from_rotation_x(-0.2), Vec3::new(0.10, 0.06, 0.02)),
-        (kit.mech_hazard.clone(), Vec3::new(-0.14, -0.32, 0.12),
-         Quat::from_rotation_x(-0.2), Vec3::new(0.10, 0.06, 0.02)),
-        // §4.2: knee plates under the chevrons
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.14, -0.36, 0.10),
-         Quat::from_rotation_x(-0.2), Vec3::new(0.12, 0.14, 0.06)),
-        (kit.mech_khaki_dk.clone(), Vec3::new(-0.14, -0.36, 0.10),
-         Quat::from_rotation_x(-0.2), Vec3::new(0.12, 0.14, 0.06)),
-        // §4.2/§5.3: LEFT-shoulder 4-tube missile pod - tube caps
-        // visible, one status light per tube
-        (kit.mech_khaki_dk.clone(), Vec3::new(-0.36, 0.62, 0.04),
-         Quat::IDENTITY, Vec3::new(0.18, 0.12, 0.20)),
-        (kit.mech_shadow.clone(), Vec3::new(-0.315, 0.645, 0.145),
-         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
-        (kit.mech_shadow.clone(), Vec3::new(-0.405, 0.645, 0.145),
-         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
-        (kit.mech_shadow.clone(), Vec3::new(-0.315, 0.595, 0.145),
-         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
-        (kit.mech_shadow.clone(), Vec3::new(-0.405, 0.595, 0.145),
-         Quat::IDENTITY, Vec3::new(0.055, 0.055, 0.02)),
-        (kit.mech_red.clone(), Vec3::new(-0.27, 0.62, 0.145),
-         Quat::IDENTITY, Vec3::new(0.015, 0.09, 0.01)),
-        // §4.2: antenna mast, rear-left
-        (kit.mech_metal.clone(), Vec3::new(-0.20, 0.86, -0.24),
-         Quat::from_rotation_x(-0.12), Vec3::new(0.015, 0.34, 0.015)),
-        // Task 5.4 (MISSION doc): knee and waist mechanisms stay EXPOSED
-        // - dark actuator/piston stubs poking past the plates, deliberately
-        // uncovered. This is what reads as "real machinery" rather than a
-        // smooth robot costume, per the doc's own explicit rule.
-        (kit.mech_metal.clone(), Vec3::new(0.155, -0.30, 0.16),
-         Quat::from_rotation_x(0.35), Vec3::new(0.035, 0.10, 0.035)),
-        (kit.mech_metal.clone(), Vec3::new(-0.155, -0.30, 0.16),
-         Quat::from_rotation_x(0.35), Vec3::new(0.035, 0.10, 0.035)),
-        // waist actuator block - the busiest area on the real art
-        // reference (Task 1 notes): visible linkage where the pelvis
-        // skirt doesn't reach
-        (kit.mech_metal.clone(), Vec3::new(0.0, 0.02, 0.18),
-         Quat::from_rotation_x(0.15), Vec3::new(0.14, 0.06, 0.06)),
-        (kit.mech_shadow.clone(), Vec3::new(0.09, -0.01, 0.19),
-         Quat::from_rotation_z(0.4), Vec3::new(0.03, 0.09, 0.03)),
-        // hazard/wear detail pass: the pod cover was the ONLY hazard
-        // stripe on the whole hull, so the right side read as an
-        // unfinished mirror. A matching stripe on the (pod-less) right
-        // shoulder pod restores the left/right read as one assembled
-        // machine, not "pod side gets details, other side doesn't."
-        (kit.mech_hazard.clone(), Vec3::new(0.36, 0.685, 0.02),
-         Quat::from_rotation_z(-0.12), Vec3::new(0.20, 0.02, 0.22)),
-        // power-pack warning band - a thin hazard strip across the top
-        // edge, where a real power unit would carry a stenciled warning
-        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.50, -0.135),
-         Quat::IDENTITY, Vec3::new(0.30, 0.02, 0.02)),
-        // scuffed metal patch on the abdomen - bare metal showing through
-        // worn khaki paint, the cheapest possible "this hull has seen use"
-        // cue without a real decal/stencil system
-        (kit.mech_metal.clone(), Vec3::new(0.09, 0.05, 0.16),
-         Quat::from_rotation_z(0.3), Vec3::new(0.08, 0.05, 0.01)),
+    let cube = || kit.cube.clone();
+    let cyl = || kit.cyl.clone();
+    // (mesh, material, translation, rotation, scale) - torso-local
+    let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 43] = [
+        // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
+        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.50, 0.08), Quat::IDENTITY, Vec3::new(1.06, 0.44, 0.92)),
+        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.665, 0.44), Quat::from_rotation_x(0.55), Vec3::new(0.94, 0.04, 0.30)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.52, 0.545), Quat::IDENTITY, Vec3::new(0.56, 0.18, 0.03)),
+        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.35, 0.55, 0.548), Quat::IDENTITY, Vec3::new(0.11, 0.15, 0.012)),
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.42, 0.745, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.03, 0.22)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.272, 0.08), Quat::IDENTITY, Vec3::new(1.00, 0.02, 0.86)),
+        // ---- SENSOR DECK: the "no head" head - fills the >0.82 band ----
+        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.88, 0.02), Quat::IDENTITY, Vec3::new(0.62, 0.32, 0.54)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.89, 0.297), Quat::IDENTITY, Vec3::new(0.48, 0.17, 0.012)),
+        // the SENSOR VISOR strip - a thin lens line, not a lightbar
+        (cube(), kit.mech_red.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
+        // ---- REAR: comms/cooling drum, LEFT (right one is 40%-tagged) --
+        (cyl(), kit.mech_khaki_dk.clone(), Vec3::new(-0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22)),
+        // ---- ANTENNAS: whip base; sensor stalk + ball tip, LEFT --------
+        (cube(), kit.mech_metal.clone(), Vec3::new(0.42, 0.76, -0.30), Quat::IDENTITY, Vec3::new(0.05, 0.08, 0.05)),
+        (cyl(), kit.mech_metal.clone(), Vec3::new(-0.24, 1.10, -0.18), Quat::IDENTITY, Vec3::new(0.016, 0.14, 0.016)),
+        (kit.ball.clone(), kit.mech_metal.clone(), Vec3::new(-0.24, 1.19, -0.18), Quat::IDENTITY, Vec3::new(0.05, 0.05, 0.05)),
+        // ---- HIP & WAIST: the mechanism stays EXPOSED (Task 5.4) -------
+        (cyl(), kit.mech_metal.clone(), Vec3::new(0.0, 0.005, 0.02), Quat::IDENTITY, Vec3::new(0.44, 0.05, 0.40)),
+        // kept from the old rig, verbatim:
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.10, 0.05), Quat::IDENTITY, Vec3::new(0.40, 0.14, 0.22)),
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.02, 0.10), Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
+        (cube(), kit.mech_metal.clone(), Vec3::new(0.0, 0.02, 0.18), Quat::from_rotation_x(0.15), Vec3::new(0.14, 0.06, 0.06)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.09, -0.01, 0.19), Quat::from_rotation_z(0.4), Vec3::new(0.03, 0.09, 0.03)),
+        (cube(), kit.mech_metal.clone(), Vec3::new(0.09, 0.05, 0.16), Quat::from_rotation_z(0.3), Vec3::new(0.08, 0.05, 0.01)),
+        // ---- SHOULDER HOUSINGS: low on the flanks, never shoulder-top --
+        (cube(), kit.mech_khaki.clone(), Vec3::new(-0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
+        (cube(), kit.mech_khaki.clone(), Vec3::new(0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(-0.60, 0.25, 0.06), Quat::IDENTITY, Vec3::new(0.16, 0.08, 0.36)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.60, 0.25, 0.06), Quat::IDENTITY, Vec3::new(0.16, 0.08, 0.36)),
+        // ---- ROCKET POD, left hardpoint: rail + box + 10-tube face -----
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.735, 0.02), Quat::IDENTITY, Vec3::new(0.28, 0.04, 0.34)),
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.855, 0.02), Quat::IDENTITY, Vec3::new(0.34, 0.23, 0.42)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.575, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.508, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.440, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.372, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.305, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.575, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.508, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.440, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.372, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.305, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
+        (cube(), kit.mech_red.clone(), Vec3::new(-0.44, 0.755, 0.235), Quat::IDENTITY, Vec3::new(0.30, 0.012, 0.01)),
+        (cube(), kit.mech_hazard.clone(), Vec3::new(-0.44, 0.965, 0.225), Quat::IDENTITY, Vec3::new(0.30, 0.016, 0.014)),
+        // ---- GATLING ARM, right flank: hangs LOW and FORWARD -----------
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.60, 0.24, 0.14), Quat::IDENTITY, Vec3::new(0.20, 0.20, 0.30)),
+        (cube(), kit.mech_metal.clone(), Vec3::new(0.60, 0.35, 0.10), Quat::IDENTITY, Vec3::new(0.09, 0.12, 0.09)),
+        (cyl(), kit.mech_metal.clone(), Vec3::new(0.60, 0.24, 0.40), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.19, 0.24, 0.19)),
+        (cyl(), kit.mech_metal.clone(), Vec3::new(0.60, 0.24, 0.83), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.14, 0.03, 0.14)),
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.60, 0.06, 0.12), Quat::IDENTITY, Vec3::new(0.15, 0.14, 0.24)),
+        (cube(), kit.mech_shadow.clone(), Vec3::new(0.51, 0.15, 0.05), Quat::from_rotation_z(0.55), Vec3::new(0.14, 0.06, 0.10)),
     ];
-    for (mat, tr, rot, sc) in plates {
+    for (mesh, mat, tr, rot, sc) in plates {
         commands
-            .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
-                translation: tr,
-                rotation: rot,
-                scale: sc,
-            }))
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
             .set_parent(root);
     }
-    root
+    // 6 gatling barrels in a hex ring about (0.60, 0.24), plus a hazard
+    // band - generated, not typed six times
+    for k in 0..6 {
+        let ang = k as f32 * std::f32::consts::TAU / 6.0;
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(
+                        0.60 + 0.052 * ang.cos(),
+                        0.24 + 0.045 * ang.sin(),
+                        0.64,
+                    ),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.03, 0.44, 0.03),
+                },
+            ))
+            .set_parent(root);
+    }
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.mech_hazard.clone()),
+            Transform {
+                translation: Vec3::new(0.60, 0.135, 0.245),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.13, 0.014, 0.012),
+            },
+        ))
+        .set_parent(root);
+    // D.6 stage-tagged hull parts - spawned by hand so their ids return.
+    let mut tag = |mesh: Handle<Mesh>, mat: Handle<StandardMaterial>, tr: Vec3, rot: Quat, sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(root)
+            .id()
+    };
+    let skirt_l = tag(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(-0.205, -0.02, 0.02), Quat::from_rotation_z(0.12), Vec3::new(0.05, 0.15, 0.22));
+    let skirt_r = tag(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.205, -0.02, 0.02), Quat::from_rotation_z(-0.12), Vec3::new(0.05, 0.15, 0.22));
+    let drum_r = tag(kit.cyl.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22));
+    let antenna = tag(kit.cyl.clone(), kit.mech_metal.clone(), Vec3::new(0.42, 1.12, -0.30), Quat::IDENTITY, Vec3::new(0.014, 0.72, 0.014));
+    (root, MechHullDetach { skirt_l, skirt_r, drum_r, antenna })
+}
+
+/// D.1: reverse-raked leg plating, parented to the REAL leg bones so it
+/// animates with the walk. The thigh plate leans back, the shin plate
+/// counter-rakes forward - together they fake the reverse-joint zigzag
+/// at silhouette range without touching the rig's joints. The knee dome
+/// and pistons stay exposed in the gap (Task 5.4: covering the
+/// mechanism kills the read). `side` = -1.0 left, +1.0 right.
+fn spawn_mech_leg_armor(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    thigh: Entity,
+    shin: Entity,
+    foot: Entity,
+    side: f32,
+) -> MechLegArmor {
+    let mut root_of = |commands: &mut Commands, bone: Entity| {
+        commands
+            .spawn((Transform::IDENTITY, Visibility::Hidden))
+            .set_parent(bone)
+            .id()
+    };
+    let t_root = root_of(commands, thigh);
+    let s_root = root_of(commands, shin);
+    let f_root = root_of(commands, foot);
+    let part = |commands: &mut Commands,
+                parent: Entity,
+                mesh: Handle<Mesh>,
+                mat: Handle<StandardMaterial>,
+                tr: Vec3,
+                rot: Quat,
+                sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(parent)
+            .id()
+    };
+    // THIGH: the single largest flat surface, outer face, reverse-raked
+    let thigh_plate = part(commands, t_root, kit.cube.clone(), kit.mech_khaki.clone(),
+        Vec3::new(side * 0.10, -0.13, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.045, 0.34, 0.24));
+    part(commands, t_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+        Vec3::new(side * 0.126, -0.13, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.012, 0.30, 0.03));
+    part(commands, t_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+        Vec3::new(0.0, -0.12, 0.095), Quat::from_rotation_x(-0.22), Vec3::new(0.15, 0.20, 0.03));
+    // SHIN: exposed knee pistons + counter-raked plate + ankle actuator
+    part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
+        Vec3::new(0.045, -0.03, 0.075), Quat::from_rotation_x(0.35), Vec3::new(0.03, 0.16, 0.03));
+    part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
+        Vec3::new(-0.045, -0.03, 0.075), Quat::from_rotation_x(0.35), Vec3::new(0.03, 0.16, 0.03));
+    let shin_plate = part(commands, s_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+        Vec3::new(0.0, -0.16, 0.06), Quat::from_rotation_x(0.30), Vec3::new(0.13, 0.20, 0.035));
+    part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
+        Vec3::new(0.0, -0.235, 0.045), Quat::from_rotation_x(0.25), Vec3::new(0.035, 0.10, 0.035));
+    // FOOT: wide pad, rear spur, and the cleat rows. Do NOT smooth them.
+    part(commands, f_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+        Vec3::new(0.0, -0.03, 0.05), Quat::IDENTITY, Vec3::new(0.17, 0.045, 0.30));
+    part(commands, f_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+        Vec3::new(0.0, -0.015, -0.115), Quat::from_rotation_x(0.45), Vec3::new(0.06, 0.035, 0.10));
+    let cleat_front = part(commands, f_root, kit.cube.clone(), kit.mech_metal.clone(),
+        Vec3::new(0.0, -0.055, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.018, 0.05));
+    part(commands, f_root, kit.cube.clone(), kit.mech_metal.clone(),
+        Vec3::new(0.0, -0.055, 0.00), Quat::IDENTITY, Vec3::new(0.16, 0.018, 0.05));
+    MechLegArmor { roots: [t_root, s_root, f_root], thigh_plate, shin_plate, cleat_front }
 }
 
 /// Spawn the floating model shown over a pickup pad.
@@ -5172,7 +5273,9 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
             root
         }
         PickupKind::RobotArmor => {
-            let e = spawn_armor_rig(commands, kit);
+            // the pad floats the hull kit alone - no leg armour on a
+            // totem, and its stage parts never hide (ids dropped)
+            let (e, _) = spawn_armor_rig(commands, kit);
             commands.entity(e).insert(
                 Transform::from_xyz(0.0, 0.75, 0.0).with_scale(Vec3::splat(0.9)),
             );
@@ -5707,8 +5810,10 @@ fn spawn_fighter_rigs(
             ))
             .set_parent(arm_l[2])
             .id();
-        // wearable robot armor
-        let armor_rig = spawn_armor_rig(commands, kit);
+        // the mech hull kit + leg armour (Brief VIII-B D.1-D.6)
+        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit);
+        let la_l = spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0);
+        let la_r = spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0);
         commands
             .entity(armor_rig)
             .insert((Transform::IDENTITY, Visibility::Hidden))
@@ -5733,6 +5838,10 @@ fn spawn_fighter_rigs(
             shield,
             bow_arrow,
             armor_rig,
+            mech_leg_armor: [la_l.roots, la_r.roots],
+            mech_detach_70: [hull_det.skirt_l, hull_det.skirt_r, la_l.thigh_plate],
+            mech_detach_40: [la_l.shin_plate, hull_det.drum_r, hull_det.antenna],
+            mech_detach_15: [la_l.cleat_front],
         });
     }
 }
@@ -8410,7 +8519,9 @@ fn sync_fighters(
                 // the bow shares the left hand with the shield - a raised
                 // shield stows it
                 let show = slot == Some(wi)
-                    && !(f.shield_up && ALL_WEAPONS[wi] == GunKind::Bow);
+                    && !(f.shield_up && ALL_WEAPONS[wi] == GunKind::Bow)
+                    // the hull mount IS the weapon; the rifle is stowed
+                    && !in_mech;
                 *v = if show {
                     Visibility::Inherited
                 } else {
@@ -8713,6 +8824,52 @@ fn sync_fighters(
             } else {
                 Visibility::Hidden
             };
+        }
+        // The mech is HEADLESS and ARMLESS - a walking weapons platform,
+        // not a big soldier (Brief VIII-B D.1). Transforms still animate;
+        // only visibility gates, so the band and connectivity tests are
+        // untouched. `neck` is the head pivot: head shell, eyes and hat
+        // are its descendants and inherit the hide.
+        let suit = f.armor_set == ArmorSet::RobotSuit;
+        let body_vis = if suit {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        for e in [rig.neck, rig.arm_l[0], rig.arm_r[0]] {
+            if let Ok((_, mut v)) = parts.get_mut(e) {
+                *v = body_vis;
+            }
+        }
+        for legs in rig.mech_leg_armor {
+            for e in legs {
+                if let Ok((_, mut v)) = parts.get_mut(e) {
+                    *v = if suit {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                }
+            }
+        }
+        // §6.3 / D.6: parts shear off as the sim's threshold bits latch.
+        // The bitmask is SIM truth (replay-identical); this is pure
+        // presentation - its first render-side consumer.
+        for (bit, list) in [
+            (0b001u8, &rig.mech_detach_70[..]),
+            (0b010u8, &rig.mech_detach_40[..]),
+            (0b100u8, &rig.mech_detach_15[..]),
+        ] {
+            let gone = suit && f.mech_plates_dropped & bit != 0;
+            for &e in list {
+                if let Ok((_, mut v)) = parts.get_mut(e) {
+                    *v = if gone {
+                        Visibility::Hidden
+                    } else {
+                        Visibility::Inherited
+                    };
+                }
+            }
         }
     }
 }
