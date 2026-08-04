@@ -3358,13 +3358,6 @@ fn lobby_toast(
 #[derive(Component)]
 struct TechReadout;
 
-/// Menu branding spawned by `open_intro` as TOP-LEVEL entities (key art,
-/// wordmark, emblem). Marked so `close_intro` can tear them down: the
-/// intro screen has already shipped this exact bug once with the tech
-/// readout, which then sat in the corner through every match.
-#[derive(Component)]
-struct IntroUi;
-
 // ---- the pre-game flow ----------------------------------------------
 // The intro used to be ONE screen carrying the title, ten pick-rows and
 // three deploy buttons. At the game's own 720p default that is a wall
@@ -3402,8 +3395,14 @@ impl IntroPage {
 
     pub fn subtitle(self) -> &'static str {
         match self.0 {
-            Self::TITLE => "ENTER to begin    -    ESC menu > RULES & MANUAL",
-            Self::MATCH => "the battlefield, the mode, and how hard it pushes back",
+            // "ENTER to begin" was a LIE. `intro_keyboard_paging` clamps
+            // Enter at IntroPage::LAST, so on the match page Enter does
+            // nothing and there has never been a keyboard path to start
+            // a match - deploying requires clicking a mode. Removing the
+            // false promise costs one string; adding a real keyboard
+            // deploy would need a fourth selection concept.
+            Self::TITLE => "ENTER - continue    -    ESC menu > RULES & MANUAL",
+            Self::MATCH => "the battlefield, the mode, and how hard it pushes back    -    CLICK A MODE TO DEPLOY",
             Self::SOLDIER => "the shield always rides in its own slot (E raises it)",
             _ => "",
         }
@@ -11590,280 +11589,210 @@ fn open_intro(
     brand: Option<Res<branding::BrandAssets>>,
     mut page: ResMut<IntroPage>,
 ) {
+    let aspect = windows
+        .get_single()
+        .map(|w| w.resolution.width() / w.resolution.height().max(1.0))
+        .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
     cam.ads = false;
     // Always open on the title. Touching the resource also marks it
-    // changed, which is what makes  run its first pass -
-    // without it every page would be visible at once on the first frame.
+    // CHANGED, which is what makes intro_paging run its first pass -
+    // without it every page would be visible at once on frame 1.
     page.0 = IntroPage::TITLE;
-    // The key art behind the menu. `Option<Res<..>>` so the menu still
-    // builds if branding is ever unplugged - and a missing PNG just
-    // draws nothing over the existing background, exactly as the splash
-    // degrades. Dimmed and pushed to the back so the mode buttons and
-    // the tech readout stay the things you actually read.
-    if let Some(brand) = brand.as_ref() {
-        commands.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            ImageNode {
-                image: brand.key_art.clone(),
-                color: Color::srgba(1.0, 1.0, 1.0, 0.45),
-                ..default()
-            },
-            GlobalZIndex(-10),
-            IntroUi,
-        ));
-        // The wordmark IS the title - no text heading competing with it.
-        commands.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Percent(7.0),
-                left: Val::Percent(24.0),
-                width: Val::Percent(52.0),
-                ..default()
-            },
-            ImageNode {
-                image: brand.wordmark.clone(),
-                color: Color::srgba(1.0, 1.0, 1.0, 0.96),
-                ..default()
-            },
-            GlobalZIndex(11),
-            IntroUi,
-        ));
-        // The mark, at its menu weight - the game signing the page it
-        // is asking you to choose from.
-        let place = branding::EmblemPlacement::MenuHeading;
-        commands.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(14.0),
-                right: Val::Px(16.0),
-                width: Val::Px(place.size_px()),
-                height: Val::Px(place.size_px()),
-                ..default()
-            },
-            ImageNode {
-                image: brand.emblem.clone(),
-                color: Color::srgba(1.0, 1.0, 1.0, place.alpha()),
-                ..default()
-            },
-            GlobalZIndex(place.z()),
-            IntroUi,
-        ));
-    }
-    // §14: the tech readout - real numbers, pulled from the live table
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 15.0,
-            ..default()
-        },
-        TextColor(branding::palette::PARCHMENT),
-        // capped width: the centered mode buttons are 620 wide, so on a
-        // 1280-wide window they start around x=330 - an unconstrained
-        // readout ran straight underneath them and the two texts
-        // overlapped illegibly.
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(18.0),
-            bottom: Val::Px(16.0),
-            max_width: Val::Px(300.0),
-            ..default()
-        },
-        GlobalZIndex(12),
-        TechReadout,
-    ));
-    // the Forge's save/load confirmations, where the Forge actually runs
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 19.0,
-            ..default()
-        },
-        TextColor(branding::palette::GOLD),
-        Node {
-            position_type: PositionType::Absolute,
-            right: Val::Px(18.0),
-            bottom: Val::Px(16.0),
-            max_width: Val::Px(340.0),
-            ..default()
-        },
-        GlobalZIndex(13),
-        LobbyToast,
-        IntroRoot, // despawns with the screen
-    ));
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.94)),
-            IntroRoot,
-        ))
-        .with_children(|p| {
-            // heading + subtitle are PAGE-DRIVEN: the title page names
-            // the game, the other two name the question they answer.
-            // `intro_paging` rewrites both on every page change.
+
+    let brand = brand.as_deref();
+    let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
+    commands.entity(root).insert(IntroRoot).with_children(|p| {
+        // THE WORDMARK IS THE TITLE. The old screen drew the key art at
+        // GlobalZIndex(-10) and then painted a 94%-opaque navy wash over
+        // it at implicit z 0 - at most 6% of the art could ever reach the
+        // eye, which is the real reason it never appeared. It also set a
+        // 40px gold text heading reading "JOHN KINGDOM - ARENA" directly
+        // beneath the wordmark PNG that says the same words.
+        if let Some(b) = brand {
             p.spawn((
-                Text::new("JOHN KINGDOM - ARENA"),
-                TextFont { font_size: 40.0, ..default() },
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(24.0),
+                    // width only - the image's own measure derives the
+                    // height from its aspect. Setting both stretches.
+                    width: Val::Percent(52.0),
+                    top: Val::Percent(7.0),
+                    ..default()
+                },
+                ImageNode {
+                    image: b.wordmark.clone(),
+                    color: Color::srgba(1.0, 1.0, 1.0, 0.96),
+                    ..default()
+                },
+                ZIndex(menu_ui::ZL_MARK),
+                OnIntroPage(IntroPage::TITLE),
+            ));
+        }
+
+        menu_ui::plate(p, menu_ui::PLATE_W_INTRO, |b| {
+            // heading + subtitle are PAGE-DRIVEN: the title page is named
+            // by the wordmark above, the other two by the question they
+            // answer. intro_paging rewrites both on every page change.
+            b.spawn((
+                Text::new(""),
+                TextFont { font_size: menu_ui::T_HEAD, ..default() },
                 TextColor(branding::palette::GOLD),
+                Node { display: Display::None, ..default() },
                 IntroHeading,
             ));
-            p.spawn((
+            menu_ui::rule_and_boss(b, true);
+            b.spawn((
                 Text::new(IntroPage(IntroPage::TITLE).subtitle()),
-                TextFont { font_size: 15.0, ..default() },
+                TextFont { font_size: menu_ui::T_MICRO, ..default() },
                 TextColor(branding::palette::PARCHMENT_DIM),
                 IntroSubtitle,
             ));
+
+            // ---- SOLDIER page ------------------------------------------
+            let sold = OnIntroPage(IntroPage::SOLDIER);
             let prim: Vec<(&str, LoadoutButton)> = PRIMARIES
                 .iter()
                 .map(|g| (gun(*g).name, LoadoutButton(0, *g)))
                 .collect();
-            pick_row(p, "PRIMARY", &prim, 128.0);
+            menu_ui::pill_row(b, "PRIMARY", &prim, sold);
             let sec: Vec<(&str, LoadoutButton)> = SECONDARIES
                 .iter()
                 .map(|g| (gun(*g).name, LoadoutButton(1, *g)))
                 .collect();
-            pick_row(p, "SECONDARY", &sec, 128.0);
+            menu_ui::pill_row(b, "SECONDARY", &sec, sold);
             let spc: Vec<(&str, LoadoutButton)> = SPECIALS
                 .iter()
                 .map(|g| (gun(*g).name, LoadoutButton(2, *g)))
                 .collect();
-            pick_row(p, "SPECIAL", &spc, 128.0);
+            menu_ui::pill_row(b, "SPECIAL", &spc, sold);
             // §6 (Brief IV): the melee slot is a CHOICE now
             let melee: Vec<(&str, MeleeButton)> = vec![
                 ("Combat Knife", MeleeButton(false)),
                 ("War Axe", MeleeButton(true)),
             ];
-            pick_row(p, "MELEE", &melee, 128.0);
+            menu_ui::pill_row(b, "MELEE", &melee, sold);
             // §8 (Brief IV): 6-point grenade budget presets
             let nades: Vec<(&str, NadeButton)> = GRENADE_PRESETS
                 .iter()
                 .enumerate()
                 .map(|(i, (_, n))| (*n, NadeButton(i)))
                 .collect();
-            pick_row(p, "GRENADES", &nades, 128.0);
+            menu_ui::pill_row(b, "GRENADES", &nades, sold);
             let hats: Vec<(&str, CosmeticButton)> = HAT_CHOICES
                 .iter()
                 .enumerate()
                 .map(|(i, (n, _))| (*n, CosmeticButton(0, i)))
                 .collect();
-            pick_row(p, "HAT", &hats, 90.0);
+            menu_ui::pill_row(b, "HAT", &hats, sold);
             let tunics: Vec<(&str, CosmeticButton)> = TUNIC_CHOICES
                 .iter()
                 .enumerate()
                 .map(|(i, (n, _))| (*n, CosmeticButton(1, i)))
                 .collect();
-            pick_row(p, "OUTFIT", &tunics, 90.0);
-            let maps: Vec<(&str, MapButton)> =
-                MapKind::ALL
-                    .iter()
-                    // §12: Battlefield left the PvP rotation - it is the
-                    // zombie-extraction adventure map now
-                    .filter(|m| **m != MapKind::Battlefield)
-                    .map(|m| (m.name(), MapButton(*m)))
-                    .collect();
-            pick_row_on(p, "BATTLEFIELD", &maps, 160.0, IntroPage::MATCH);
+            menu_ui::pill_row(b, "OUTFIT", &tunics, sold);
+            // the spec readout, in its own engraved sub-plate
+            b.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    border: UiRect::all(Val::Px(menu_ui::RULE_HAIR_PX)),
+                    padding: UiRect::all(Val::Px(menu_ui::U3)),
+                    margin: UiRect::top(Val::Px(menu_ui::U3)),
+                    ..default()
+                },
+                BorderColor(menu_ui::bronze_a(0.40)),
+                BackgroundColor(Color::NONE),
+                BorderRadius::ZERO,
+                sold,
+            ))
+            .with_children(|sp| {
+                sp.spawn((
+                    Text::new(""),
+                    TextFont { font_size: menu_ui::T_DATA, ..default() },
+                    TextColor(branding::palette::PARCHMENT),
+                    TechReadout,
+                ));
+            });
+
+            // ---- MATCH page --------------------------------------------
+            let mtch = OnIntroPage(IntroPage::MATCH);
+            let maps: Vec<(&str, MapButton)> = MapKind::ALL
+                .iter()
+                // §12: Battlefield left the PvP rotation - it is the
+                // zombie-extraction adventure map now
+                .filter(|m| **m != MapKind::Battlefield)
+                .map(|m| (m.name(), MapButton(*m)))
+                .collect();
+            menu_ui::pill_row(b, "BATTLEFIELD", &maps, mtch);
             let diffs: Vec<(&str, DiffButton)> = Difficulty::ALL
                 .iter()
                 .map(|d| (d.name(), DiffButton(*d)))
                 .collect();
-            pick_row_on(p, "DIFFICULTY", &diffs, 100.0, IntroPage::MATCH);
+            menu_ui::pill_row(b, "DIFFICULTY", &diffs, mtch);
             let sizes: Vec<(&str, SizeButton)> =
                 vec![("5 v 5", SizeButton(5)), ("8 v 8", SizeButton(8))];
-            pick_row_on(p, "BATTLE SIZE", &sizes, 100.0, IntroPage::MATCH);
-            p.spawn((
-                Text::new("\nPICK A MODE TO DEPLOY"),
-                TextFont { font_size: 22.0, ..default() },
-                TextColor(branding::palette::GOLD),
-                OnIntroPage(IntroPage::MATCH),
-            ));
-            for (label, which) in [
-                ("TEAM DEATHMATCH - first to 30", ModeButton::Tdm),
-                ("KING OF THE HILL - hold the center 90 s", ModeButton::Koth),
-                ("ZOMBIE EXTRACTION - survive, then hold the ring", ModeButton::Extraction),
+            menu_ui::pill_row(b, "BATTLE SIZE", &sizes, mtch);
+            // Name and objective are separate cells now. As one 46-char
+            // string they forced a 620px fixed width that wrapped and
+            // overlapped the row beneath it at any smaller size.
+            for (name, obj, which) in [
+                ("TEAM DEATHMATCH", "first to 30", ModeButton::Tdm),
+                ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
+                ("ZOMBIE EXTRACTION", "survive, then hold the ring", ModeButton::Extraction),
             ] {
-                p.spawn((
-                    Button,
-                    which,
-                    OnIntroPage(IntroPage::MATCH),
-                    // 620 wide / 18pt: the longest label ("ZOMBIE
-                    // EXTRACTION - survive, then hold the ring") is 46
-                    // chars, which WRAPPED inside the old 420x48 box and
-                    // overlapped the row beneath it. Sized so every label
-                    // stays on one line.
-                    Node {
-                        width: Val::Px(620.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-                ))
-                .with_children(|b| {
-                    b.spawn((
-                        Text::new(label),
-                        TextFont { font_size: 18.0, ..default() },
-                        TextColor(Color::WHITE),
-                    ));
-                });
+                menu_ui::menu_row(
+                    b,
+                    (which, mtch),
+                    menu_ui::RowKind::Normal,
+                    name,
+                    Some(obj),
+                    None,
+                );
             }
-            // page navigation, present on every page; the system below
-            // hides BACK on the first page and relabels NEXT on the last
-            p.spawn((
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(14.0),
-                    margin: UiRect::top(Val::Px(16.0)),
-                    ..default()
-                },
-                IntroNavRow,
-            ))
+
+            // ---- nav ---------------------------------------------------
+            // NO OnIntroPage here, deliberately: intro_paging's nav_vis
+            // query is filtered Without<OnIntroPage>, so tagging these
+            // would make it stop matching and the BACK/NEXT hide logic
+            // would die silently, with no error.
+            b.spawn(Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(menu_ui::U3),
+                margin: UiRect::top(Val::Px(menu_ui::U4)),
+                ..default()
+            })
             .with_children(|row| {
                 for (label, which) in
                     [("< BACK", IntroNav::Back), ("NEXT >", IntroNav::Next)]
                 {
-                    row.spawn((
-                        Button,
+                    menu_ui::menu_row(
+                        row,
                         which,
-                        Node {
-                            width: Val::Px(150.0),
-                            height: Val::Px(44.0),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.17, 0.14, 0.11)),
-                    ))
-                    .with_children(|b| {
-                        b.spawn((
-                            Text::new(label),
-                            TextFont { font_size: 17.0, ..default() },
-                            TextColor(branding::palette::GOLD),
-                            NavLabel(which),
-                        ));
-                    });
+                        menu_ui::RowKind::Normal,
+                        label,
+                        None,
+                        None,
+                    );
                 }
             });
-        });
-}
 
-/// Container for the page nav, so it can sit below whichever page is up.
-#[derive(Component)]
-struct IntroNavRow;
+            menu_ui::page_pips(b, IntroPage::LAST + 1);
+            menu_ui::seal_footer(b, brand, None);
+            b.spawn((
+                Text::new(""),
+                TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                TextColor(branding::palette::GOLD),
+                Node {
+                    margin: UiRect::top(Val::Px(menu_ui::U2)),
+                    ..default()
+                },
+                LobbyToast,
+            ));
+        });
+    });
+}
 
 /// The big heading — the game's name on the title page, the page's own
 /// question on the others.
@@ -11874,10 +11803,6 @@ struct IntroHeading;
 #[derive(Component)]
 struct IntroSubtitle;
 
-/// The nav button's own label, so page changes can relabel it.
-#[derive(Component)]
-struct NavLabel(IntroNav);
-
 /// Shows only the current page's rows, and keeps the nav honest.
 ///
 /// Everything on the intro screen is spawned ONCE, tagged with its page.
@@ -11887,21 +11812,25 @@ struct NavLabel(IntroNav);
 /// entity bug documented on `close_intro` would come back.
 fn intro_paging(
     page: Res<IntroPage>,
-    mut rows: Query<(&OnIntroPage, &mut Node), Without<NavLabel>>,
-    mut nav_vis: Query<(&IntroNav, &mut Node), (Without<OnIntroPage>, Without<NavLabel>)>,
-    mut heading: Query<&mut Text, (With<IntroHeading>, Without<NavLabel>, Without<IntroSubtitle>)>,
-    mut subtitle: Query<&mut Text, (With<IntroSubtitle>, Without<NavLabel>, Without<IntroHeading>)>,
+    mut rows: Query<(&OnIntroPage, &mut Node)>,
+    mut nav_vis: Query<(&IntroNav, &mut Node), Without<OnIntroPage>>,
+    mut heading: Query<(&mut Text, &mut Node), (With<IntroHeading>, Without<OnIntroPage>, Without<IntroNav>, Without<IntroSubtitle>)>,
+    mut subtitle: Query<&mut Text, (With<IntroSubtitle>, Without<IntroHeading>)>,
 ) {
     if !page.is_changed() {
         return;
     }
-    // the title page names the game; the others name their question
-    for mut t in &mut heading {
-        **t = if page.0 == IntroPage::TITLE {
-            "JOHN KINGDOM - ARENA".to_string()
+    // The title page is named by the WORDMARK PNG above the plate, so
+    // the text heading hides there entirely rather than repeating the
+    // same four words in a different typeface directly beneath it. The
+    // other two pages name the question they answer.
+    for (mut t, mut node) in &mut heading {
+        if page.0 == IntroPage::TITLE {
+            node.display = Display::None;
         } else {
-            page.heading().to_string()
-        };
+            node.display = Display::Flex;
+            **t = page.heading().to_string();
+        }
     }
     for mut t in &mut subtitle {
         **t = page.subtitle().to_string();
@@ -12025,51 +11954,79 @@ fn intro_buttons(
 ///
 /// One painter drives every pick-row on the loadout screen, which is
 /// why this is a three-line change rather than forty scattered ones.
-fn paint(bg: &mut BackgroundColor, selected: bool, hovered: bool) {
-    *bg = BackgroundColor(if selected {
-        // struck bronze, lifted so white label text still reads on it
-        Color::srgb(0.42, 0.31, 0.14)
-    } else if hovered {
-        Color::srgb(0.26, 0.21, 0.14)
-    } else {
-        // warm shadow, not the old cool slate
-        Color::srgb(0.15, 0.13, 0.11)
-    });
+/// Paint one intro pill from the design system.
+///
+/// Was three hand-picked literals - a "struck bronze" selected state, a
+/// hover, and a warm shadow - none of which came from the palette and
+/// none of which matched the pause menu's treatment of the same idea.
+/// Now it is the SAME `row_colors` every other interactive row uses, so
+/// the two screens cannot drift.
+///
+/// The keel moves with the fill. The boss is left at its idle colour
+/// here: reaching it needs a `Children` walk and a second query in all
+/// seven of these handlers, and the plume ground plus the gold keel are
+/// already two unmistakable signals for one binary state.
+fn paint(
+    bg: &mut BackgroundColor,
+    border: &mut BorderColor,
+    selected: bool,
+    hovered: bool,
+) {
+    let state = menu_ui::row_state(
+        selected,
+        if hovered {
+            Interaction::Hovered
+        } else {
+            Interaction::None
+        },
+    );
+    let (fill, keel, _) = menu_ui::row_colors(menu_ui::RowKind::Normal, state);
+    *bg = BackgroundColor(fill);
+    *border = BorderColor(keel);
 }
 
 fn intro_map_buttons(
-    mut q: Query<(&Interaction, &MapButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &MapButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, mb, _) in &mut q {
+    for (i, mb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.map = mb.0;
         }
     }
-    for (i, mb, mut bg) in &mut q {
-        paint(&mut bg, sel.map == mb.0, *i == Interaction::Hovered);
+    for (i, mb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.map == mb.0, *i == Interaction::Hovered);
     }
 }
 
 fn intro_loadout_buttons(
-    mut q: Query<(&Interaction, &LoadoutButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &LoadoutButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, lb, _) in &mut q {
+    for (i, lb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.loadout[lb.0] = lb.1;
         }
     }
-    for (i, lb, mut bg) in &mut q {
-        paint(&mut bg, sel.loadout[lb.0] == lb.1, *i == Interaction::Hovered);
+    for (i, lb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.loadout[lb.0] == lb.1, *i == Interaction::Hovered);
     }
 }
 
 fn intro_cosmetic_buttons(
-    mut q: Query<(&Interaction, &CosmeticButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &CosmeticButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, cb, _) in &mut q {
+    for (i, cb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             if cb.0 == 0 {
                 sel.hat = cb.1;
@@ -12078,69 +12035,81 @@ fn intro_cosmetic_buttons(
             }
         }
     }
-    for (i, cb, mut bg) in &mut q {
+    for (i, cb, mut bg, mut border) in &mut q {
         let selected = if cb.0 == 0 {
             sel.hat == cb.1
         } else {
             sel.tunic == cb.1
         };
-        paint(&mut bg, selected, *i == Interaction::Hovered);
+        paint(&mut bg, &mut border, selected, *i == Interaction::Hovered);
     }
 }
 
 fn intro_melee_buttons(
-    mut q: Query<(&Interaction, &MeleeButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &MeleeButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, mb, _) in &mut q {
+    for (i, mb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.melee_axe = mb.0;
         }
     }
-    for (i, mb, mut bg) in &mut q {
-        paint(&mut bg, sel.melee_axe == mb.0, *i == Interaction::Hovered);
+    for (i, mb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.melee_axe == mb.0, *i == Interaction::Hovered);
     }
 }
 
 fn intro_nade_buttons(
-    mut q: Query<(&Interaction, &NadeButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &NadeButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, nb, _) in &mut q {
+    for (i, nb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.grenade_preset = nb.0;
         }
     }
-    for (i, nb, mut bg) in &mut q {
-        paint(&mut bg, sel.grenade_preset == nb.0, *i == Interaction::Hovered);
+    for (i, nb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.grenade_preset == nb.0, *i == Interaction::Hovered);
     }
 }
 
 fn intro_diff_buttons(
-    mut q: Query<(&Interaction, &DiffButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &DiffButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, db, _) in &mut q {
+    for (i, db, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.difficulty = db.0;
         }
     }
-    for (i, db, mut bg) in &mut q {
-        paint(&mut bg, sel.difficulty == db.0, *i == Interaction::Hovered);
+    for (i, db, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.difficulty == db.0, *i == Interaction::Hovered);
     }
 }
 
 fn intro_size_buttons(
-    mut q: Query<(&Interaction, &SizeButton, &mut BackgroundColor), With<Button>>,
+    mut q: Query<
+        (&Interaction, &SizeButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
     mut sel: ResMut<Selected>,
 ) {
-    for (i, sb, _) in &mut q {
+    for (i, sb, _, _) in &mut q {
         if *i == Interaction::Pressed {
             sel.per_team = sb.0;
         }
     }
-    for (i, sb, mut bg) in &mut q {
-        paint(&mut bg, sel.per_team == sb.0, *i == Interaction::Hovered);
+    for (i, sb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.per_team == sb.0, *i == Interaction::Hovered);
     }
 }
 
@@ -12164,27 +12133,22 @@ fn release_cursor(cam: &mut CamCtl, windows: &mut Query<&mut Window, With<Primar
     }
 }
 
-fn close_intro(
-    mut commands: Commands,
-    intro: Query<Entity, With<IntroRoot>>,
-    // `open_intro` spawns these two as TOP-LEVEL entities, not children
-    // of IntroRoot, so despawning the root alone left them on screen for
-    // the whole match - the loadout spec sat in the corner during
-    // gameplay (visible in every committed mech capture).
-    readout: Query<Entity, With<TechReadout>>,
-    toast: Query<Entity, With<LobbyToast>>,
-    // The menu branding (key art, wordmark, emblem) is spawned top-level
-    // for the same reason and MUST be torn down here too - this is the
-    // exact bug the comment above records, and adding art to this screen
-    // is precisely how it would come back.
-    brand_ui: Query<Entity, With<IntroUi>>,
-) {
-    for e in intro
-        .iter()
-        .chain(readout.iter())
-        .chain(toast.iter())
-        .chain(brand_ui.iter())
-    {
+fn close_intro(mut commands: Commands, intro: Query<Entity, With<IntroRoot>>) {
+    // ONE query, ONE loop.
+    //
+    // This used to chain four - IntroRoot, TechReadout, LobbyToast and
+    // the branding - because `open_intro` spawned those as TOP-LEVEL
+    // entities rather than children, so despawning the root alone left
+    // the loadout spec sitting in the corner for the whole match (visible
+    // in every committed mech capture). The fix then was to despawn them
+    // all here, which introduced a SECOND bug: the toast carried both
+    // `LobbyToast` and `IntroRoot`, so `despawn_recursive` ran on it
+    // twice and Bevy logged B0003 on every exit from the lobby.
+    //
+    // Everything is now a child of the surface root, so one recursive
+    // despawn is both necessary and sufficient. The history stays because
+    // re-parenting anything to the top level would bring both bugs back.
+    for e in &intro {
         commands.entity(e).despawn_recursive();
     }
 }

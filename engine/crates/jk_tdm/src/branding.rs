@@ -461,8 +461,26 @@ pub struct BrandingPlugin;
 
 impl Plugin for BrandingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SplashState>()
-            .add_systems(Startup, (load_brand_assets, spawn_brand_ui).chain())
+        // LOADED AT BUILD TIME, not from a schedule.
+        //
+        // The app boots into `GameState::Intro`, and Bevy runs that
+        // initial `OnEnter` inside `PreStartup` - the same schedule any
+        // asset-loading system would sit in. So `open_intro` asked for
+        // `Res<BrandAssets>`, raced it, lost, and silently built the
+        // title page with no key art, no wordmark and no seal. The pause
+        // menu looked correct throughout, because it is only ever entered
+        // long after startup, which is exactly what made this look like a
+        // layout bug rather than an ordering one.
+        //
+        // Doing it here removes the ordering question instead of answering
+        // it: the resource exists before any schedule runs at all.
+        // `Option<Res<..>>` at the call sites still stands - that is the
+        // branding contract's promise that missing art can never stop the
+        // game, and it is a different concern from when the handles exist.
+        let assets = BrandAssets::load(app.world().resource::<AssetServer>());
+        app.insert_resource(assets)
+            .init_resource::<SplashState>()
+            .add_systems(Startup, spawn_brand_ui)
             .add_systems(Update, drive_splash);
     }
 }

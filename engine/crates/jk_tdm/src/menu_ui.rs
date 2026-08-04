@@ -133,6 +133,10 @@ pub const BOSS_PX: f32 = 10.0; // the heading rule's boss
 pub const BOSS_PIP_PX: f32 = 8.0; // the intro page pips
 pub const BOSS_GUTTER_PX: f32 = 24.0; // fixed gutter the row boss sits in
 pub const ROW_H: f32 = 36.0; // 9U
+/// Option pills are shorter than action rows. The soldier page stacks
+/// SEVEN of them plus a spec readout, a nav row, pips and a seal, and
+/// at 36 each that column overran the plate.
+pub const PILL_H: f32 = 28.0; // 7U
 pub const BIND_ROW_H: f32 = 28.0; // 7U
 pub const KEYCAP_MIN_W: f32 = 44.0;
 pub const KEYCAP_H: f32 = 22.0;
@@ -496,6 +500,19 @@ pub fn plate(p: &mut ChildBuilder, max_w: f32, body: impl FnOnce(&mut ChildBuild
                     flex_direction: FlexDirection::Column,
                     border: UiRect::all(Val::Px(RULE_HAIR_PX)),
                     padding: UiRect::axes(Val::Px(U6), Val::Px(U5)),
+                    // Clip the Y axis only.
+                    //
+                    // `max_height` caps the plate, but `UiScale` grows the
+                    // CONTENT with the window while that cap stays a fixed
+                    // percentage - so past about 900px tall the densest
+                    // page overran its own frame and the seal footer drew
+                    // OUTSIDE the plate border. Clipping vertically makes
+                    // the frame a real boundary instead of a suggestion.
+                    //
+                    // X stays visible on purpose: the standard overhangs
+                    // by RULE_OVERHANG_PX and clipping both axes would
+                    // guillotine it.
+                    overflow: Overflow::clip_y(),
                     ..default()
                 },
                 BorderColor(gold_a(FRAME_INNER_A)),
@@ -729,6 +746,130 @@ pub fn menu_row(
 /// unscoped, and a label on both would write the same string into both.
 #[derive(Component)]
 pub struct ValueCell;
+
+/// A row of option pills: a fixed label gutter followed by N pills that
+/// each grow, so a row of two options and a row of six both fill the
+/// plate exactly.
+///
+/// Replaces the old `pick_row`, whose `w: f32` width argument every call
+/// site had to guess at, and whose spawn-time colour was a cool blue-grey
+/// overwritten on frame 1 - misleading anyone who read the spawn site to
+/// find the row's real colour.
+///
+/// The label is PARCHMENT_DIM, not BRONZE: bronze ink measures 3.3:1 on a
+/// plate, below AA (R3). That was the old colour for every one of these.
+pub fn pill_row<C: Component + Copy>(
+    p: &mut ChildBuilder,
+    label: &str,
+    items: &[(&str, C)],
+    page_tag: impl Bundle,
+) {
+    p.spawn((
+        Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(U2),
+            margin: UiRect::bottom(Val::Px(U2)),
+            width: Val::Percent(100.0),
+            ..default()
+        },
+        page_tag,
+    ))
+    .with_children(|r| {
+        r.spawn((
+            Text::new(label.to_string()),
+            TextFont {
+                font_size: T_MICRO,
+                ..default()
+            },
+            TextColor(branding::palette::PARCHMENT_DIM),
+            Node {
+                width: Val::Px(ROW_LABEL_W),
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ));
+        for (name, comp) in items {
+            r.spawn((
+                Button,
+                *comp,
+                PlateRow { kind: RowKind::Normal },
+                Node {
+                    flex_grow: 1.0,
+                    // flex_basis 0 so every pill in the row is the same
+                    // width regardless of its label's length
+                    flex_basis: Val::Px(0.0),
+                    height: Val::Px(PILL_H),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(U2),
+                    border: UiRect::left(Val::Px(RULE_KEEL_PX)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor(branding::palette::BRONZE),
+                BorderRadius::ZERO,
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Node {
+                        width: Val::Px(BOSS_PIP_PX),
+                        height: Val::Px(BOSS_PIP_PX),
+                        border: UiRect::all(Val::Px(RULE_HAIR_PX)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    BorderColor(branding::palette::BRONZE),
+                    BackgroundColor(Color::NONE),
+                    BorderRadius::ZERO,
+                    RowBoss,
+                ));
+                b.spawn((
+                    Text::new(name.to_string()),
+                    TextFont {
+                        font_size: T_DATA,
+                        ..default()
+                    },
+                    TextColor(branding::palette::PARCHMENT),
+                ));
+            });
+        }
+    });
+}
+
+/// The page pips: the row boss again, smaller, filled on the current
+/// page. A progress indicator for free, in a vocabulary the player has
+/// already been taught by the heading rule.
+#[derive(Component)]
+pub struct PagePip(pub u8);
+
+pub fn page_pips(p: &mut ChildBuilder, count: u8) {
+    p.spawn(Node {
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(U2),
+        margin: UiRect::top(Val::Px(U4)),
+        ..default()
+    })
+    .with_children(|r| {
+        for i in 0..count {
+            r.spawn((
+                Node {
+                    width: Val::Px(BOSS_PIP_PX),
+                    height: Val::Px(BOSS_PIP_PX),
+                    border: UiRect::all(Val::Px(RULE_HAIR_PX)),
+                    ..default()
+                },
+                BorderColor(branding::palette::BRONZE),
+                BackgroundColor(Color::NONE),
+                BorderRadius::ZERO,
+                PagePip(i),
+            ));
+        }
+    });
+}
 
 // ---- 5. the seal ---------------------------------------------------------
 
