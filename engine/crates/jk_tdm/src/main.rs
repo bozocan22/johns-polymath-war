@@ -3486,6 +3486,40 @@ const CASING_TTL_S: f32 = 10.0;
 ///
 /// One shared helper rather than the same `if in_mech` at five call
 /// sites: five copies of a rule drift, one cannot.
+// ---- §4.7: death -> killer-cam -> spectate --------------------------
+
+/// How long the camera lingers on the corpse-to-killer look before
+/// handing off to the spectate framing.
+const KILLER_CAM_S: f32 = 1.4;
+
+/// What the dead player's camera should be doing, as a pure function of
+/// sim state - shared by the camera and the HUD so the two can never
+/// disagree about which phase the death is in.
+///
+/// Returns `None` when there is nothing to spectate: the fighter is
+/// alive, killed themself (a cooked frag has no killer worth watching),
+/// or the killer index is out of range. `Some((killer, spectating))`
+/// otherwise, where `spectating=false` is the brief killer-cam and
+/// `true` is the follow framing.
+///
+/// The phase clock derives from `respawn_t` counting DOWN from its known
+/// initial value (RESPAWN_S, or the Extraction no-respawn sentinel), so
+/// no new state exists anywhere - a replay reproduces the exact same
+/// camera phases for free.
+fn death_phase(sim: &TdmSim, me: usize) -> Option<(usize, bool)> {
+    let p = &sim.fighters[me];
+    if p.alive() {
+        return None;
+    }
+    let (killer, _) = p.last_hit_by?;
+    if killer == me || killer >= sim.fighters.len() {
+        return None;
+    }
+    let total = if sim.mode == Mode::Extraction { 9999.0 } else { RESPAWN_S };
+    let elapsed_dead = (total - p.respawn_t).max(0.0);
+    Some((killer, elapsed_dead >= KILLER_CAM_S))
+}
+
 fn shot_clock(f: &Fighter) -> f32 {
     if f.in_mech() {
         match f.mech_weapon {
@@ -8336,6 +8370,29 @@ fn camera_system(
     tf.rotate_local_x(tremor_x * (1.0 - pe));
     tf.rotate_local_z(tremor_z * (1.0 - pe));
 
+    // §4.7: death -> killer-cam -> spectate. Overrides the composed
+    // transform LAST, so every death reuses the same camera plumbing
+    // (FOV, projection, shake) and only the framing changes. Suicides
+    // and missing killers fall through to the ordinary corpse view -
+    // there is nobody worth watching.
+    if let Some((k, spectating)) = death_phase(&game.sim, game.sim.player) {
+        let kf = &game.sim.fighters[k];
+        let khead = Vec3::new(kf.pos[0], kf.pos[1] + kf.height() * 0.8, kf.pos[2]);
+        if !spectating {
+            // killer-cam: stay AT the corpse, turn to face who did it.
+            // The translation composed above is already the corpse eye.
+            tf.look_at(khead, Vec3::Y);
+        } else {
+            // spectate: a third-person boom on the killer, behind their
+            // facing - "SPECTATING <name>" in the HUD names them. Scale
+            // the boom with their height so a mech is framed, not filled.
+            let back = Vec3::new(kf.yaw.sin(), 0.0, kf.yaw.cos());
+            let boom = 2.6 * (kf.height() / BODY_HEIGHT);
+            tf.translation = khead - back * boom + Vec3::Y * (0.4 * boom);
+            tf.look_at(khead, Vec3::Y);
+        }
+    }
+
     // §3.4: FOV rides ads_t (ease-out, framerate-independent) - never the
     // `+= (target-fov)*k` exponential that stalls and never arrives
     if let Projection::Perspective(persp) = &mut *proj {
@@ -9647,7 +9704,16 @@ fn hud_system(
     // status panel: loadout slots, weapon, ammo kind, HP/armor numbers
     if let Ok(mut t) = texts.p5().get_single_mut() {
         **t = if !p.alive() {
-            format!("DOWN - respawn in {:.1}s", p.respawn_t.max(0.0))
+            // §4.7: the HUD names the phase the camera is in - same
+            // `death_phase` the camera reads, so they cannot disagree.
+            match death_phase(&game.sim, game.sim.player) {
+                Some((k, true)) => format!(
+                    "SPECTATING {}\nrespawn in {:.1}s",
+                    game.sim.fighters[k].name,
+                    p.respawn_t.max(0.0)
+                ),
+                _ => format!("DOWN - respawn in {:.1}s", p.respawn_t.max(0.0)),
+            }
         } else {
             // §9.2 (Brief IV): the regen box - countdown while the 12 s
             // clock runs, a pulsing + while healing, hidden at full
@@ -12182,6 +12248,53 @@ mod camera_v2_tests {
             "an idle hull mount must read idle - a hot carried gun must \
              not make the mech look like it is shooting"
         );
+    }
+
+    /// §4.7: the death camera's phase logic. Pure, and shared by the
+    /// camera and the HUD - this is the function that decides whether
+    /// you are watching your killer or following them, so its edges are
+    /// exactly the cases that would put a live player in a spectate cam
+    /// or point a corpse camera at nobody.
+    #[test]
+    fn death_phase_knows_when_to_watch_and_when_to_follow() {
+        let mut s = sim::TdmSim::new(sim::MatchConfig {
+            seed: 0xDEAD,
+            per_team: 1,
+            ..Default::default()
+        });
+
+        // alive: no death camera, full stop
+        assert_eq!(death_phase(&s, 0), None, "a live fighter has no death cam");
+
+        // freshly killed by the enemy: killer-cam first
+        s.fighters[0].health = 0.0;
+        s.fighters[0].respawn_t = sim::RESPAWN_S;
+        s.fighters[0].last_hit_by = Some((1, 0.0));
+        assert_eq!(
+            death_phase(&s, 0),
+            Some((1, false)),
+            "a fresh death looks AT the killer before following them"
+        );
+
+        // past the killer-cam window: spectate
+        s.fighters[0].respawn_t = sim::RESPAWN_S - KILLER_CAM_S - 0.1;
+        assert_eq!(
+            death_phase(&s, 0),
+            Some((1, true)),
+            "after the killer-cam beat the camera follows the killer"
+        );
+
+        // suicide: nobody worth watching - ordinary corpse view
+        s.fighters[0].last_hit_by = Some((0, 0.0));
+        assert_eq!(
+            death_phase(&s, 0),
+            None,
+            "a cooked frag has no killer-cam - you did this to yourself"
+        );
+
+        // no recorded attacker at all (fell, or state cleared)
+        s.fighters[0].last_hit_by = None;
+        assert_eq!(death_phase(&s, 0), None, "no killer, no spectate target");
     }
 
     /// §B.1: `visor_ready` must distinguish "fully entered" from "never
