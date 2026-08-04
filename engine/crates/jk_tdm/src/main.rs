@@ -2904,6 +2904,27 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
     }
 }
 
+/// Where a capture script writes its frames.
+///
+/// Anchored to the CRATE, not the working directory. These paths used to
+/// be bare relative strings, so a capture landed wherever the binary
+/// happened to be launched from - and since a Bevy release binary is
+/// normally launched from `engine/` while the handback tree lives under
+/// `engine/crates/jk_tdm/`, a perfectly successful run would write four
+/// PNGs into a directory nobody looks in and report exit 0. That is how
+/// `02-soldier-page` and `03-match-page` went missing from the menus
+/// capture: the run worked, the files were simply somewhere else.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time and always points at
+/// this crate's root, so the frames land in the tracked tree no matter
+/// where the process was started.
+fn capture_dir(script: &str) -> String {
+    format!(
+        "{}/handback/brief-vii/{script}",
+        env!("CARGO_MANIFEST_DIR").replace('\\', "/")
+    )
+}
+
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
@@ -3137,7 +3158,7 @@ fn capture_screenshot_driver(
     // a frame that passed several fires all of them
     let due: Vec<&'static str> = cap.pending_snaps.drain(..).collect();
     for label in due {
-        let dir = format!("handback/brief-vii/{name}");
+        let dir = capture_dir(&name);
         let _ = std::fs::create_dir_all(&dir);
         let path = format!("{dir}/{label}.png");
         if let Ok(win) = window.get_single() {
@@ -3180,7 +3201,7 @@ fn capture_menus(
     }
     *t += time.delta_secs();
     let snap = |commands: &mut Commands, label: &str| {
-        let dir = "handback/brief-vii/menus".to_string();
+        let dir = capture_dir("menus");
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(win) = window.get_single() {
             commands
@@ -3233,6 +3254,66 @@ fn capture_menus(
 /// regen tint as though it were live; it has not been since Brief VI.)
 #[derive(Component)]
 struct HealthVignette;
+
+// ---- the gameplay HUD's on/off switch ------------------------------------
+//
+// THE BUG THIS EXISTS FOR. Nothing hid the HUD when a menu opened. Every
+// menu root and every HUD root sat at implicit z 0, and the tie-break is
+// Bevy's root query order, which this crate never pinned - so the HUD
+// won. Captures of the Intro and Settings screens show the match timer,
+// the score line, the K/D counter, the weapon strip, the loadout panel,
+// the vitals cluster and the ammo block drawn over the menu, with the
+// Settings panel physically colliding with "30 / 120 FRAG x2", plus
+// world-space health bars floating over NPCs behind it all.
+//
+// Fixed by VISIBILITY, not by z-order. A z bump would put the menu on
+// top while leaving the HUD alive, still updating, and still leaking at
+// the frame edges. Not `Camera.is_active` either: MainCam carries
+// `IsDefaultUiCamera` and the menus render through it, so disabling it
+// blanks the menus too. Not `RenderLayers`: Bevy 0.15 does not propagate
+// those to children and the HUD has ~90 of them.
+
+/// Every top-level gameplay-HUD entity carries this.
+///
+/// Only the ROOTS need it. Bevy propagates `Visibility::Hidden` down to
+/// descendants, which this crate already relies on for `ScoreboardRoot`,
+/// `ScopeRoot`, `ContextBarRoot` and the killfeed rows - so the ~90
+/// children need nothing.
+#[derive(Component)]
+struct HudRoot;
+
+/// THE predicate for whether the gameplay HUD is on screen.
+///
+/// Pure, so it is testable without standing up Bevy, and so no system can
+/// keep a second drifting copy of the answer - `minimap_system` had
+/// exactly that, and it disagreed (it counted Paused as in-match).
+fn hud_visible(state: &GameState) -> bool {
+    matches!(state, GameState::Playing)
+}
+
+/// Drive HUD visibility off the state. Registered on BOTH
+/// `OnEnter(Playing)` and `OnExit(Playing)`, and it READS the state
+/// rather than assuming a direction, so the two registrations cannot
+/// disagree with each other.
+///
+/// It writes `Inherited`, never `Visible`. `ScoreboardRoot`, `ScopeRoot`
+/// and `ContextBarRoot` own their own visibility; forcing `Visible` here
+/// would pop the scoreboard for a frame on every resume. `Inherited` on
+/// a root resolves to visible, and their own systems re-assert within the
+/// same frame because state transitions run before `Update`.
+fn hud_visibility(
+    state: Res<State<GameState>>,
+    mut q: Query<&mut Visibility, Or<(With<HudRoot>, With<branding::EmblemWatermark>)>>,
+) {
+    let v = if hud_visible(state.get()) {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut q {
+        *vis = v;
+    }
+}
 
 /// The lobby's toast line. The Forge (Ctrl+1/2/3 save, 1/2/3 load) runs
 /// ONLY in the Intro state and its sole feedback is the shared `Toast`
@@ -3568,6 +3649,15 @@ fn main() {
             )
                 .chain(),
         )
+        // HUD WRITERS - Playing only. Hiding the roots is not enough on
+        // its own: several of these force their own entity back to
+        // `Visible` every frame and would undo `hud_visibility` on the
+        // very next tick. `stability_bracket` re-shows both brackets
+        // whenever the player is alive and armed, in ANY state;
+        // `scoreboard_system` re-shows the scoreboard on Tab or a
+        // finished round, in ANY state, so a match that ended before you
+        // paused popped the scoreboard over the menu; `scope_overlay`
+        // re-shows the scope whenever `cam_ctl.ads` is still set.
         .add_systems(
             Update,
             (
@@ -3575,18 +3665,29 @@ fn main() {
                 hud_fade,
                 scoreboard_system,
                 damage_indicator,
+                scope_overlay,
+                compass_system,
+                stability_bracket,
+                health_vignette,
+                weapon_strip,
+            )
+                .run_if(in_state(GameState::Playing)),
+        )
+        // NOT HUD - audio, world-space visuals and debug. These are
+        // correct to run in every state and are deliberately left alone.
+        // `minimap_system` stays here too: it owns the M hotkey and does
+        // its own state check, now routed through `hud_visible` so the
+        // crate has exactly one answer to "is the HUD up".
+        .add_systems(
+            Update,
+            (
                 sfx_system,
                 distant_gunfire,
-                scope_overlay,
                 ads_detail,
                 checkpoint_rings,
                 minimap_system,
                 zone_overlay,
                 tag_viewmodel_layer,
-                compass_system,
-                stability_bracket,
-                health_vignette,
-                weapon_strip,
             ),
         )
         .init_resource::<DebugZones>()
@@ -3594,6 +3695,22 @@ fn main() {
         .init_resource::<Toast>()
         .add_systems(Update, esc_toggle)
         .add_systems(OnEnter(GameState::Playing), grab_cursor)
+        // The HUD's on/off switch. Both edges, one system - it reads the
+        // state rather than assuming a direction, so the two
+        // registrations cannot drift apart.
+        //
+        // PostStartup is NOT redundant with those two. The app boots
+        // straight into `GameState::Intro`, so neither Playing edge has
+        // fired yet and nothing has ever hidden the HUD - the very first
+        // screen a player sees was showing it. That was invisible for the
+        // text elements (their writers are Playing-gated, so they simply
+        // render empty) and glaring for anything that carries its own
+        // colour: the vitals bar, the armour pips and the emblem
+        // watermark all sat on top of the title page. PostStartup rather
+        // than Startup so `setup` has already spawned them.
+        .add_systems(PostStartup, hud_visibility)
+        .add_systems(OnEnter(GameState::Playing), hud_visibility)
+        .add_systems(OnExit(GameState::Playing), hud_visibility)
         .add_systems(OnEnter(GameState::Intro), open_intro)
         .add_systems(
             Update,
@@ -5536,6 +5653,7 @@ fn setup(
         BackgroundColor(Color::srgba(0.5, 0.02, 0.02, 0.0)),
         GlobalZIndex(20),
         HealthVignette,
+        HudRoot,
     ));
     // §5.3 flash whiteout overlay (UI, quantised alpha steps)
     commands.spawn((
@@ -5548,6 +5666,7 @@ fn setup(
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
         GlobalZIndex(40),
         FlashOverlay,
+        HudRoot,
     ));
 
     // ---- camera ---------------------------------------------------------
@@ -5823,6 +5942,7 @@ fn setup(
                 ..default()
             },
             CrosshairRoot,
+            HudRoot,
         ))
         .with_children(|c| {
             for outline in [true, false] {
@@ -5852,6 +5972,7 @@ fn setup(
             ..default()
         },
         RangeText,
+        HudRoot,
     ));
     // §1.2 (Brief III) contextual prompt line, bottom-center
     commands.spawn((
@@ -5868,6 +5989,7 @@ fn setup(
             ..default()
         },
         PromptText,
+        HudRoot,
     ));
     // §9.1 (Brief IV): vertical weapon strip, right screen edge
     for slot in 0..3usize {
@@ -5885,6 +6007,7 @@ fn setup(
                 ..default()
             },
             WeaponStripCell(slot),
+            HudRoot,
         ));
     }
     // §7 compass strip
@@ -5902,6 +6025,7 @@ fn setup(
             ..default()
         },
         CompassText,
+        HudRoot,
     ));
     // §7 stability bracket: two glyphs that ride the live spread
     for (i, ch) in ["[", "]"].into_iter().enumerate() {
@@ -5919,6 +6043,7 @@ fn setup(
                 ..default()
             },
             StabilityBracket(i as u8),
+            HudRoot,
         ));
     }
     commands.spawn((
@@ -5935,18 +6060,25 @@ fn setup(
             ..default()
         },
         HudText,
+        HudRoot,
     ));
     // §3.4: timer + score - TRUE top-center via a full-width centering
     // rail (data-driven top offset from HUD_ANCHORS)
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            top: Val::Percent(HUD_ANCHORS[3].2[1] * 100.0 - 1.5),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        // Was a BARE `spawn(Node)` with no component of its own, so
+        // nothing in the crate could query it - which is why the "5:00 /
+        // BLUE 0-0 RED" line survived onto every menu screen.
+        .spawn((
+            HudRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Percent(HUD_ANCHORS[3].2[1] * 100.0 - 1.5),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
         .with_children(|p| {
             p.spawn((
                 Text::new(""),
@@ -5974,6 +6106,7 @@ fn setup(
             },
             Visibility::Hidden,
             ContextBarRoot,
+            HudRoot,
         ))
         .with_children(|p| {
             p.spawn((
@@ -6028,6 +6161,7 @@ fn setup(
                 ..default()
             },
             FeedText,
+            HudRoot,
         ))
         .with_children(|p| {
             for i in 0..KILLFEED_ROWS {
@@ -6074,6 +6208,7 @@ fn setup(
             ..default()
         },
         HitFeedText,
+        HudRoot,
     ));
     commands.spawn((
         Text::new(""),
@@ -6089,6 +6224,7 @@ fn setup(
             ..default()
         },
         BannerText,
+        HudRoot,
     ));
     // damage-direction strips
     for (idx, node) in [
@@ -6141,6 +6277,7 @@ fn setup(
             node,
             BackgroundColor(Color::srgba(0.85, 0.08, 0.08, 0.0)),
             DmgEdge(idx),
+            HudRoot,
         ));
     }
     // §3 (Brief VI): the four-corner anatomy. BOTTOM-LEFT = vitals
@@ -6159,6 +6296,7 @@ fn setup(
                 ..default()
             },
             BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.55)),
+            HudRoot,
         ))
         .with_children(|p| {
             p.spawn((
@@ -6239,6 +6377,9 @@ fn setup(
                 ..default()
             },
             BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.55)),
+            // the "30 / 120  FRAG x2" block the Settings panel collides
+            // with in handback/brief-vii/menus/04-settings.png
+            HudRoot,
         ))
         .with_children(|p| {
             p.spawn((
@@ -6266,6 +6407,7 @@ fn setup(
             BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.90)),
             Visibility::Hidden,
             ScoreboardRoot,
+            HudRoot,
         ))
         .with_children(|p| {
             p.spawn((
@@ -6294,6 +6436,7 @@ fn setup(
             },
             Visibility::Hidden,
             ScopeRoot,
+            HudRoot,
         ))
         .with_children(|p| {
             // black curtains left/right of the lens
@@ -6377,6 +6520,7 @@ fn setup(
             },
             BackgroundColor(Color::srgba(0.10, 0.08, 0.06, 0.76)),
             MinimapRoot,
+            HudRoot,
         ))
         .with_children(|p| {
             // teammates (max 8) - WHITE squares
@@ -8449,12 +8593,19 @@ fn sync_health_bars(
     game: Res<Game>,
     cam: Res<CamCtl>,
     bars: Res<BarAssets>,
+    state: Res<State<GameState>>,
     mut roots: Query<(&HealthBarVis, &mut Transform, &mut Visibility), Without<BarFill>>,
     mut fills: Query<
         (&mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
         (With<BarFill>, Without<HealthBarVis>),
     >,
 ) {
+    // These are WORLD-space bars, so `HudRoot` cannot reach them - they
+    // are not UI nodes. They are why green bars floated over the NPCs
+    // behind the Intro and Settings screens. Gated here rather than by
+    // pulling the system out of its `.chain()`, because its ordering
+    // against the other sync systems is load-bearing.
+    let show_bars = hud_visible(state.get());
     for (hb, mut tf, mut vis) in &mut roots {
         // same deploy-frame safety as the rigs: stale bars must not panic
         let Some(f) = game.sim.fighters.get(hb.index) else {
@@ -8463,9 +8614,10 @@ fn sync_health_bars(
         };
         let self_view =
             cam.person_t < 0.5 || (cam.ads && gun(f.gun).scoped && !f.shield_up);
-        if !f.alive() || (hb.index == game.sim.player && self_view) {
+        if !show_bars || !f.alive() || (hb.index == game.sim.player && self_view) {
             // dead men carry no bar; in first person (or scoped glass)
-            // neither do YOU - the HUD panel already shows your numbers
+            // neither do YOU - the HUD panel already shows your numbers;
+            // and nobody does while a menu is up
             *vis = Visibility::Hidden;
             continue;
         }
@@ -9691,7 +9843,10 @@ fn minimap_system(
     if keys.just_pressed(KeyCode::KeyM) && *state.get() == GameState::Playing {
         settings.minimap = !settings.minimap;
     }
-    let in_match = matches!(state.get(), GameState::Playing | GameState::Paused);
+    // Was a second, drifting copy of the "is the HUD up" question, and it
+    // gave a different answer (it counted Paused as in-match, so the
+    // minimap survived onto the pause menu). One predicate now.
+    let in_match = hud_visible(state.get());
     let show = settings.minimap && in_match;
     for (mut v, _) in &mut qs.p0() {
         *v = if show {
@@ -11095,7 +11250,8 @@ fn esc_toggle(
 
 /// §1.2: the Controls screen - GENERATED from the keybind registry, so it
 /// can never drift from what the game actually binds.
-fn open_controls(mut commands: Commands) {
+fn open_controls(mut commands: Commands, mut cam: ResMut<CamCtl>) {
+    cam.ads = false; // no stale scope glass over the menu
     commands
         .spawn((
             Node {
@@ -11174,6 +11330,7 @@ fn first_run_card(
                 BackgroundColor(Color::srgba(0.05, 0.07, 0.10, 0.85)),
                 GlobalZIndex(25),
                 FirstRunRoot,
+                HudRoot,
             ))
             .with_children(|p| {
                 p.spawn((
@@ -12066,6 +12223,10 @@ fn open_settings(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     release_cursor(&mut cam, &mut windows);
+    // no stale scope glass over the menu. `open_menu` and `open_intro`
+    // always did this; the other three openers did not, so entering
+    // Settings/Manual/Controls while scoped left the overlay up.
+    cam.ads = false;
     commands
         .spawn((
             Node {
@@ -12365,6 +12526,7 @@ fn open_manual(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     release_cursor(&mut cam, &mut windows);
+    cam.ads = false; // no stale scope glass over the menu
     // from the shared mapping - this block had it inverted, and also
     // still listed T as a fire key (T is INSPECT) and C as crouch (C is
     // the armor ability; a player following it fired the flamethrower
@@ -13635,6 +13797,46 @@ mod bow_draw_visual_tests {
 }
 
 /// R4 - config externalization's completion gate (camera-tuning slice).
+#[cfg(test)]
+mod capture_path_tests {
+    use super::*;
+
+    /// A capture that writes its frames somewhere nobody looks is worse
+    /// than one that fails: it reports success. This is the regression
+    /// guard for exactly that - two frames of the menus capture were
+    /// silently written outside the tracked tree because the path was
+    /// relative to the working directory.
+    #[test]
+    fn capture_frames_land_in_the_tracked_tree_not_the_working_directory() {
+        let dir = capture_dir("menus");
+        assert!(
+            std::path::Path::new(&dir).is_absolute(),
+            "capture dir must be absolute so the launch directory cannot move it, got {dir:?}"
+        );
+        assert!(
+            dir.ends_with("/handback/brief-vii/menus"),
+            "must land in the handback tree, got {dir:?}"
+        );
+        assert!(
+            dir.contains("jk_tdm"),
+            "must be anchored inside this crate, got {dir:?}"
+        );
+        assert!(
+            !dir.contains('\\'),
+            "separators must be normalised - a mixed path breaks the ends_with checks \
+             callers and tests do, got {dir:?}"
+        );
+        // the crate root it anchors to must actually be the crate root
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            root.join("Cargo.toml").exists(),
+            "CARGO_MANIFEST_DIR must point at this crate's root"
+        );
+        // and every script name gets its own directory, never a shared one
+        assert_ne!(capture_dir("menus"), capture_dir("baseline"));
+    }
+}
+
 #[cfg(test)]
 mod lowready_tests {
     use super::*;

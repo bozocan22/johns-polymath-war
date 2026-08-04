@@ -416,7 +416,12 @@ fn drive_splash(
 // ---- the recurring mark ---------------------------------------------
 
 #[derive(Component)]
-struct EmblemWatermark;
+/// Public so `main.rs`'s HUD visibility pass can reach it. The watermark
+/// is brand rather than HUD, but it shares the lifecycle rule: it is
+/// spawned once at startup and never despawned, so without this it
+/// floated over every menu plate - and over the Intro it put the crest
+/// on screen twice, once as the watermark and once as the page's own.
+pub struct EmblemWatermark;
 
 /// The emblem as a persistent corner mark.
 ///
