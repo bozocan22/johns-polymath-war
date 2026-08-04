@@ -1531,6 +1531,12 @@ pub struct Fighter {
     pub kills: u32,
     pub deaths: u32,
     pub assists: u32,
+    /// §4.8: career damage dealt to ENEMIES this match. Team damage and
+    /// self damage deliberately do not count - crediting a player's DMG
+    /// column for shooting their own team would reward the exact thing
+    /// the team-kill scoring gate exists to punish. Never reset on
+    /// respawn (a career stat, like kills/deaths).
+    pub dmg_dealt: f32,
     pub hits_dealt: u32,
     /// §4.5 (BRIEF VIII): assist tracking. The most recent OTHER
     /// fighter to damage this one, with the sim time it happened - not
@@ -3174,6 +3180,7 @@ impl TdmSim {
                     kills: 0,
                     deaths: 0,
                     assists: 0,
+                    dmg_dealt: 0.0,
                     hits_dealt: 0,
                     last_hit_by: None,
                     ammo_full_t: 0.0,
@@ -5832,6 +5839,7 @@ impl TdmSim {
         // §6.1: set armor applies AFTER the zone multiplier, with a floor
         dmg = self.apply_armor(j, dmg, base_dmg, zone, Some(from));
         let assist_candidate = self.record_hit_get_assist(i, j);
+        self.credit_damage(i, j, dmg);
         self.fighters[j].health -= dmg;
         self.fighters[i].hits_dealt += 1;
         let fatal = self.fighters[j].health <= 0.0;
@@ -6182,6 +6190,7 @@ impl TdmSim {
             // §6.1 flats + floor (projectiles are flat-torso damage)
             d = self.apply_armor(j, d, dmg * zone_mult, HitZone::Torso, Some(from_dir));
             let assist_candidate = self.record_hit_get_assist(i, j);
+            self.credit_damage(i, j, d);
             self.fighters[j].health -= d;
             self.fighters[i].hits_dealt += 1;
             let fatal = self.fighters[j].health <= 0.0;
@@ -7046,6 +7055,17 @@ impl TdmSim {
     /// the slot - a fighter cannot get assist credit on their own
     /// death, and self-damage must not erase a real prior attacker's
     /// claim to it.
+    /// §4.8: credit `dmg` to the attacker's DMG column - enemies only.
+    /// One helper for all three damage sites so the team/self rule
+    /// cannot drift between them (sites 1 and 2 filter teams upstream,
+    /// apply_plain_damage does not - a frag CAN hit a teammate, and that
+    /// damage must not pad the thrower's column).
+    fn credit_damage(&mut self, attacker: usize, victim: usize, dmg: f32) {
+        if attacker != victim && self.fighters[attacker].team != self.fighters[victim].team {
+            self.fighters[attacker].dmg_dealt += dmg;
+        }
+    }
+
     fn record_hit_get_assist(&mut self, attacker: usize, victim: usize) -> Option<usize> {
         if attacker == victim {
             let f = &self.fighters[victim];
@@ -7226,6 +7246,7 @@ impl TdmSim {
         // the blast position; fire and explosives use their bypass rules
         d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire);
         let assist_candidate = self.record_hit_get_assist(src, victim);
+        self.credit_damage(src, victim, d);
         self.fighters[victim].health -= d;
         let fatal = self.fighters[victim].health <= 0.0;
         // the BLAST origin, not the source fighter's current position:
@@ -12792,6 +12813,56 @@ mod tests {
         // rather than overshooting and oscillating around it
         let landed = approach_velocity([0.001, 0.0], [0.0, 0.0], DT);
         assert_eq!(landed, [0.0, 0.0], "a sub-step remainder must land exactly on target");
+    }
+
+    /// §4.8: the DMG column's source of truth. Damage credits ENEMIES
+    /// only - a frag that catches a teammate must not pad the thrower's
+    /// column (the blast path has no upstream team filter, unlike the
+    /// bullet paths, so the rule lives in credit_damage itself and this
+    /// exercises exactly that path).
+    #[test]
+    fn damage_dealt_credits_enemies_never_teammates_or_self() {
+        let mut s = TdmSim::new(cfg(0xD316, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        // 0,1 = Blue; 2,3 = Red. Blast damage (the unfiltered path):
+        s.apply_plain_damage(0, 2, 30.0, [0.0, 1.0, 0.0], false, false);
+        let vs_enemy = s.fighters[0].dmg_dealt;
+        assert!(
+            vs_enemy > 0.0,
+            "damage to an enemy must credit the attacker's DMG column"
+        );
+        // note: armor/floor may reduce the applied amount - assert the
+        // RELATIONSHIP (credited == what the victim actually lost)
+        let lost = MAX_HEALTH - s.fighters[2].health;
+        assert!(
+            (vs_enemy - lost).abs() < 1e-3,
+            "credited {vs_enemy} must equal the health the enemy lost ({lost})"
+        );
+
+        // teammate splash: no credit, though the damage itself lands
+        let before = s.fighters[0].dmg_dealt;
+        let mate_hp = s.fighters[1].health;
+        s.apply_plain_damage(0, 1, 30.0, [0.0, 1.0, 0.0], false, false);
+        assert!(
+            s.fighters[1].health < mate_hp,
+            "the teammate must still take the damage - only the CREDIT is gated"
+        );
+        assert_eq!(
+            s.fighters[0].dmg_dealt, before,
+            "team damage must not pad the DMG column"
+        );
+
+        // self damage: same rule
+        s.apply_plain_damage(0, 0, 30.0, [0.0, 1.0, 0.0], false, false);
+        assert_eq!(
+            s.fighters[0].dmg_dealt, before,
+            "cooking yourself with your own frag is not damage output"
+        );
     }
 
     /// §4.5 (BRIEF VIII): assist tracking - previously entirely

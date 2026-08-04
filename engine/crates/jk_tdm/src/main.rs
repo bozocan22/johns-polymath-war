@@ -10055,8 +10055,13 @@ fn scoreboard_system(
     if let Ok(mut t) = text.get_single_mut() {
         let mut s = String::new();
         for (team, label) in [(Team::Blue, "BLUE"), (Team::Red, "RED")] {
+            // §4.8 columns: K/A/D/DMG per spec. Ping is deliberately
+            // absent - this build has zero netcode, and a fabricated
+            // "0ms" column would be decoration pretending to be data.
+            // Per-player Score is likewise skipped: only team score
+            // exists, and K already IS the per-player scoring stat.
             s += &format!(
-                "{label}  -  {} pts\n{:<12}{:>4}{:>4}{:>6}   {}\n",
+                "{label}  -  {} pts\n  {:<12}{:>4}{:>4}{:>4}{:>7}   {}\n",
                 match game.sim.mode {
                     Mode::Tdm => format!("{:.0}", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Koth => format!("{:.0}s", game.sim.score[TdmSim::team_idx(team)]),
@@ -10064,24 +10069,35 @@ fn scoreboard_system(
                 },
                 "NAME",
                 "K",
+                "A",
                 "D",
-                "HITS",
+                "DMG",
                 "WEAPON"
             );
-            let mut rows: Vec<&Fighter> = game
+            let mut rows: Vec<(usize, &Fighter)> = game
                 .sim
                 .fighters
                 .iter()
-                .filter(|f| f.team == team)
+                .enumerate()
+                .filter(|(_, f)| f.team == team)
                 .collect();
-            rows.sort_by(|a, b| b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths)));
-            for f in rows {
+            rows.sort_by(|(_, a), (_, b)| {
+                b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths))
+            });
+            let me = game.sim.player;
+            for (idx, f) in rows {
+                // §4.8 "local row highlighted": a text scoreboard cannot
+                // draw the spec's bordered row, so the local player gets
+                // the same `> ` marker the weapon strip already uses -
+                // one convention for "this is you" across the whole HUD.
                 s += &format!(
-                    "{:<12}{:>4}{:>4}{:>6}   {}\n",
+                    "{} {:<12}{:>4}{:>4}{:>4}{:>7.0}   {}\n",
+                    if idx == me { ">" } else { " " },
                     f.name,
                     f.kills,
+                    f.assists,
                     f.deaths,
-                    f.hits_dealt,
+                    f.dmg_dealt,
                     gun(f.gun).name
                 );
             }
