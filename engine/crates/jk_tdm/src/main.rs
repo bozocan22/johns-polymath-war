@@ -873,6 +873,8 @@ struct Selected {
     loadout: Loadout,
     /// §owner: the standing CLASS pick - who you are for the match.
     class: sim::Class,
+    /// §owner: kills to win a TDM - a quick 30 or a long 60.
+    tdm_target: u32,
     /// cosmetic only: hat + tunic colors picked before the match
     hat: usize,
     tunic: usize,
@@ -950,6 +952,7 @@ impl Default for Selected {
             per_team: 5,
             loadout: DEFAULT_LOADOUT,
             class: sim::Class::Line,
+            tdm_target: sim::TDM_TARGET,
             hat: 0,
             tunic: 0,
             melee_axe: false,
@@ -4242,6 +4245,8 @@ enum ModeButton {
     Koth,
     /// §8: co-op zombie extraction.
     Extraction,
+    /// §owner: the practice range.
+    Training,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -4252,6 +4257,10 @@ struct DiffButton(Difficulty);
 
 #[derive(Component, Clone, Copy)]
 struct SizeButton(usize);
+
+/// §owner: the TDM score target pick - a quick match or a long one.
+#[derive(Component, Clone, Copy)]
+struct ScoreButton(u32);
 
 /// Loadout pick: (slot index, weapon).
 #[derive(Component, Clone, Copy)]
@@ -4615,6 +4624,7 @@ fn main() {
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
                 intro_class_buttons,
+                intro_score_buttons,
                 intro_melee_buttons,
                 intro_nade_buttons,
                 intro_diff_buttons,
@@ -12896,12 +12906,16 @@ fn hud_system(
         let score = match simr.mode {
             Mode::Tdm => format!(
                 "BLUE {:>2} - {:<2} RED   (first to {})",
-                simr.score[0] as u32, simr.score[1] as u32, TDM_TARGET
+                simr.score[0] as u32, simr.score[1] as u32, simr.cfg.tdm_target
             ),
             Mode::Koth => format!(
                 "HILL   BLUE {:>3.0}s - {:<3.0}s RED   (hold {:.0}s)",
                 simr.score[0], simr.score[1], KOTH_TARGET_S
             ),
+            Mode::Training => {
+                "TRAINING RANGE   targets reset themselves - nothing shoots back"
+                    .to_string()
+            }
             Mode::Extraction => {
                 // §8: the run readout - horde count, pressure, objective
                 let obj = match simr.extract_point() {
@@ -13689,6 +13703,8 @@ fn scoreboard_system(
                     Mode::Tdm => format!("{:.0}", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Koth => format!("{:.0}s", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Extraction => format!("{} horde", game.sim.zombies.len()),
+                    // no team score on the range - kills are the readout
+                    Mode::Training => "range".to_string(),
                 },
                 "NAME",
                 "K",
@@ -14298,9 +14314,17 @@ fn open_intro(
                 .map(|d| (d.name(), DiffButton(*d)))
                 .collect();
             menu_ui::pill_row(b, "DIFFICULTY", &diffs, mtch);
-            let sizes: Vec<(&str, SizeButton)> =
-                vec![("5 v 5", SizeButton(5)), ("8 v 8", SizeButton(8))];
+            // §owner: 8v8 withdrawn. The battle-size row keeps its
+            // shape for whatever replaces it rather than being deleted
+            // outright - a one-option row still tells the player the
+            // axis exists.
+            let sizes: Vec<(&str, SizeButton)> = vec![("5 v 5", SizeButton(5))];
             menu_ui::pill_row(b, "BATTLE SIZE", &sizes, mtch);
+            let targets: Vec<(&str, ScoreButton)> = vec![
+                ("30 KILLS", ScoreButton(30)),
+                ("60 KILLS", ScoreButton(60)),
+            ];
+            menu_ui::pill_row(b, "TDM SCORE", &targets, mtch);
             // Name and objective are separate cells now. As one 46-char
             // string they forced a 620px fixed width that wrapped and
             // overlapped the row beneath it at any smaller size.
@@ -14310,8 +14334,13 @@ fn open_intro(
             // is the whole change; the handler dispatches on the variant
             // and dead variants dispatch nothing.
             for (name, obj, which) in [
-                ("TEAM DEATHMATCH", "first to 30", ModeButton::Tdm),
+                ("TEAM DEATHMATCH", "first to your chosen score", ModeButton::Tdm),
                 ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
+                (
+                    "TRAINING RANGE",
+                    "still targets, nothing shoots back - learn the spray",
+                    ModeButton::Training,
+                ),
             ] {
                 menu_ui::menu_row(
                     b,
@@ -14483,6 +14512,7 @@ fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState
         map,
         difficulty: sel.difficulty,
         loadout: sel.loadout,
+        tdm_target: sel.tdm_target,
         class: sel.class,
         melee_axe: sel.melee_axe,
         grenade_preset: sel.grenade_preset,
@@ -14511,6 +14541,7 @@ fn intro_buttons(
                     ModeButton::Tdm => Mode::Tdm,
                     ModeButton::Koth => Mode::Koth,
                     ModeButton::Extraction => Mode::Extraction,
+                    ModeButton::Training => Mode::Training,
                 };
                 start_match(&sel, mode, &mut game, &mut next);
             }
@@ -14689,6 +14720,23 @@ fn intro_cosmetic_buttons(
             sel.tunic == cb.1
         };
         paint(&mut bg, &mut border, selected, *i == Interaction::Hovered);
+    }
+}
+
+fn intro_score_buttons(
+    mut q: Query<
+        (&Interaction, &ScoreButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
+    mut sel: ResMut<Selected>,
+) {
+    for (i, sb, _, _) in &mut q {
+        if *i == Interaction::Pressed {
+            sel.tdm_target = sb.0;
+        }
+    }
+    for (i, sb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.tdm_target == sb.0, *i == Interaction::Hovered);
     }
 }
 

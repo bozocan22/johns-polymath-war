@@ -306,7 +306,15 @@ pub const LEAN_SHIFT: f32 = 0.30;
 pub const LEAN_RECOIL_MULT: f32 = 0.8;
 pub const MATCH_LEN_S: f32 = 300.0;
 pub const OVERTIME_S: f32 = 80.0;
+/// Default TDM score target. The match now CARRIES its own target
+/// (`MatchConfig::tdm_target`) so a short game and a long game are the
+/// same mode at different lengths rather than two modes; this stays as
+/// the default and as the value the rules screen quotes.
 pub const TDM_TARGET: u32 = 30;
+/// The selectable TDM lengths: a quick match and a long one.
+pub const TDM_TARGET_CHOICES: [u32; 2] = [30, 60];
+/// How fast a training target is back on its feet.
+pub const TRAINING_RESPAWN_S: f32 = 1.2;
 pub const KOTH_TARGET_S: f32 = 90.0;
 pub const HILL_RADIUS: f32 = 4.5;
 pub const PICKUP_RADIUS: f32 = 1.1;
@@ -1445,6 +1453,8 @@ pub struct MatchConfig {
     pub map: MapKind,
     pub difficulty: Difficulty,
     pub loadout: Loadout,
+    /// §owner: kills needed to win a TDM. Selectable per match.
+    pub tdm_target: u32,
     /// §owner: the player's chosen class. Bots pick their own.
     pub class: Class,
     /// §6 (Brief IV): the player's melee slot carries the axe.
@@ -1463,6 +1473,7 @@ impl Default for MatchConfig {
             map: MapKind::Arena,
             difficulty: Difficulty::Normal,
             loadout: DEFAULT_LOADOUT,
+            tdm_target: TDM_TARGET,
             class: Class::Line,
             melee_axe: false,
             grenade_preset: 0,
@@ -3305,6 +3316,12 @@ pub enum Mode {
     /// §8: co-op survival — insert, fight the horde, extract with what
     /// you carry. Gear is lost on death.
     Extraction,
+    /// §owner: TRAINING. A range, not a match: the other side stands
+    /// still, never shoots back, and pops straight back up when killed.
+    /// There is no score target and no way to lose - it exists so a
+    /// player can learn a spray pattern and a sight picture without
+    /// dying to someone mid-lesson.
+    Training,
 }
 
 pub struct TdmSim {
@@ -5784,10 +5801,12 @@ impl TdmSim {
     /// a free heal. The claw path had already been special-cased for
     /// exactly this reason; the explosive paths had not.
     fn death_respawn_t(&self) -> f32 {
-        if self.mode == Mode::Extraction {
-            9999.0
-        } else {
-            RESPAWN_S
+        match self.mode {
+            Mode::Extraction => 9999.0,
+            // a target you have to wait five seconds for is a target you
+            // stop practising against
+            Mode::Training => TRAINING_RESPAWN_S,
+            _ => RESPAWN_S,
         }
     }
 
@@ -6642,7 +6661,7 @@ impl TdmSim {
             if self.mode == Mode::Tdm {
                 let s = Self::team_idx(self.fighters[i].team);
                 self.score[s] += 1.0;
-                if self.overtime || self.score[s] >= TDM_TARGET as f32 {
+                if self.overtime || self.score[s] >= self.cfg.tdm_target as f32 {
                     self.finish(self.fighters[i].team);
                 }
             }
@@ -7014,7 +7033,7 @@ impl TdmSim {
                 if self.mode == Mode::Tdm {
                     let s = Self::team_idx(self.fighters[i].team);
                     self.score[s] += 1.0;
-                    if self.overtime || self.score[s] >= TDM_TARGET as f32 {
+                    if self.overtime || self.score[s] >= self.cfg.tdm_target as f32 {
                         self.finish(self.fighters[i].team);
                     }
                 }
@@ -8116,7 +8135,7 @@ impl TdmSim {
                 if self.mode == Mode::Tdm {
                     let s = Self::team_idx(self.fighters[src].team);
                     self.score[s] += 1.0;
-                    if self.overtime || self.score[s] >= TDM_TARGET as f32 {
+                    if self.overtime || self.score[s] >= self.cfg.tdm_target as f32 {
                         self.finish(self.fighters[src].team);
                     }
                 }
@@ -8292,6 +8311,14 @@ impl TdmSim {
     }
 
     fn bot_think(&mut self, i: usize) {
+        // §owner: on the RANGE the targets are targets. They hold their
+        // ground and they never fire, so the only thing being tested is
+        // the player's own aim. Returning here skips the whole think -
+        // pathing, target selection and the fire decision alike - rather
+        // than muting the trigger and leaving them jogging around.
+        if self.mode == Mode::Training && i != self.player {
+            return;
+        }
         let half = self.half;
         let f = &self.fighters[i];
         let team = f.team;
@@ -8337,6 +8364,13 @@ impl TdmSim {
     }
 
     fn bot_act(&mut self, i: usize) {
+        // §owner: the range's promise lives here too. `bot_think` plans
+        // and `bot_act` pulls the trigger - gating only the planner left
+        // the targets standing still and still shooting, which the
+        // range test caught.
+        if self.mode == Mode::Training && i != self.player {
+            return;
+        }
         // difficulty shapes the whole brain: aim, reflexes, range, push.
         // §5.3: a flashed bot eats the SAME penalty a flashed human does —
         // aim spread ×4, reaction ×3, deterministically.
@@ -9461,6 +9495,48 @@ mod tests {
                 "the ramp must never go backwards at round {i}"
             );
         }
+    }
+
+    /// §owner: the RANGE's promise is "nothing shoots back". A training
+    /// mode where you can still be killed mid-lesson is not a training
+    /// mode, so this pins it through the real step loop rather than
+    /// trusting the early-return in `bot_think` to stay there.
+    #[test]
+    fn the_training_range_never_shoots_back() {
+        let mut cfg = cfg(0x713A, 3, Mode::Tdm, MapKind::Arena);
+        cfg.mode = Mode::Training;
+        let mut s = TdmSim::new(cfg);
+        s.mode = Mode::Training;
+        // stand the player in the open, in everyone's line of sight
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[0].protect_t = 0.0;
+        let hp0 = s.fighters[0].health;
+        for _ in 0..(SIM_HZ as usize * 8) {
+            s.step(PlayerCmd::default());
+            s.fighters[0].pos = [0.0, 0.0, 0.0];
+            s.fighters[0].protect_t = 0.0;
+        }
+        assert_eq!(
+            s.fighters[0].health, hp0,
+            "a training target drew blood - the range must be safe"
+        );
+        assert!(
+            s.missiles.is_empty() && s.tracers.is_empty(),
+            "nothing on the range may fire a shot"
+        );
+        // and the targets hold their ground rather than roaming
+        for (i, f) in s.fighters.iter().enumerate().skip(1) {
+            let speed = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
+            assert!(
+                speed < 0.01,
+                "target {i} is wandering at {speed} m/s - targets stand still"
+            );
+        }
+        // a killed target comes back fast enough to keep practising
+        assert!(
+            TRAINING_RESPAWN_S < RESPAWN_S,
+            "range targets must reset faster than a match respawn"
+        );
     }
 
     /// Climb checklist test 1+2: grip drains under hold, recovers under
