@@ -1728,6 +1728,15 @@ struct VmRig {
 #[derive(Component)]
 struct AdsDetail;
 
+/// The illuminated dot inside a 1x optic. Carries its own rest position
+/// because recoil FLOATS it about that point instead of kicking the
+/// whole weapon - so the drift has to be applied as an offset from a
+/// remembered origin, not accumulated onto wherever it currently is.
+#[derive(Component)]
+struct ReticleDot {
+    rest: Vec3,
+}
+
 /// The predicted-arc preview for bow/spear aiming (§4.2 Brief II):
 /// arc-length-spaced dots, a landing ring + drop-line, and a ±spread
 /// cone of two fainter arcs that widens as stability degrades.
@@ -2479,6 +2488,17 @@ const OPTIC_HALF: f32 = 0.023;
 /// Frame bar thickness, and the housing's fore-aft depth.
 const OPTIC_FRAME: f32 = 0.005;
 const OPTIC_DEPTH: f32 = 0.032;
+/// Side of the emissive dot. Small on purpose: the aiming mark must not
+/// cover the thing being aimed at, which is exactly how the old cross
+/// failed.
+const OPTIC_DOT_M: f32 = 0.0062;
+/// §owner: how far the dot floats inside its window at full recoil.
+///
+/// This is the whole trick behind "the gun stays still and the DOT
+/// moves". Bounded well inside `OPTIC_HALF` so the dot can never leave
+/// the glass - a reticle that slid behind the housing would read as a
+/// rendering bug, not as recoil.
+const RETICLE_DRIFT_M: f32 = 0.0075;
 
 /// §owner: the 1x RED DOT every firearm carries.
 ///
@@ -2519,12 +2539,24 @@ fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
             (0.016, gap, OPTIC_DEPTH * 0.7),
         ));
     }
-    // THE CROSS - two thin emissive bars, dead centre. Kept clear of the
-    // frame (x1.55, not x2) so the arms float rather than touch, which
-    // is what makes it read as projected light instead of painted-on.
-    let arm = OPTIC_HALF * 1.55;
-    parts.push(wp(false, Tone::Reticle, (0.0, y, z), 0.0, (arm, 0.0024, 0.004)));
-    parts.push(wp(false, Tone::Reticle, (0.0, y, z), 0.0, (0.0024, arm, 0.004)));
+    // THE DOT - one small emissive square, dead centre.
+    //
+    // §owner: this was a CROSS of two long bars and it read badly - the
+    // arms reached most of the way across the window, so the thing you
+    // were supposed to aim WITH was also the thing covering what you
+    // were aiming AT. A dot occludes almost nothing and is what a 1x
+    // optic actually projects.
+    //
+    // It is spawned tagged rather than baked in with the housing,
+    // because the dot MOVES: recoil floats it inside the window while
+    // the gun body stays still (see `RETICLE_DRIFT_M` / `fp_viewmodel`).
+    parts.push(wp(
+        false,
+        Tone::Reticle,
+        (0.0, y, z),
+        0.0,
+        (OPTIC_DOT_M, OPTIC_DOT_M, 0.004),
+    ));
 }
 
 /// §1.3: hand placements per weapon - (position, yaw, curl, mirrored) in
@@ -5398,6 +5430,11 @@ fn spawn_weapon_model(
         if p.detail {
             // aiming-only greebles (§5: weapon detail steps up on ADS)
             e.insert((Visibility::Hidden, AdsDetail));
+        }
+        if p.tone == Tone::Reticle {
+            // the dot is driven per-frame, so it needs to be findable
+            // and it needs its rest pose remembered
+            e.insert(ReticleDot { rest: p.pos });
         }
         e.set_parent(root);
     }
@@ -9210,8 +9247,22 @@ fn input_and_step(
             } else {
                 1.0
             };
-            cam.pitch =
-                recoil_kicked_pitch(cam.pitch, kick * scoped_scale, p.bloom, brace);
+            // §owner: the aim only starts climbing once the burst has
+            // earned it. Same `spray_ramp` the sim's punch and bloom
+            // read, so tapping three rounds walks the crosshair
+            // essentially nowhere and holding the trigger does.
+            //
+            // `spray_i` has ALREADY been advanced by the shot being
+            // reacted to here, so step back one to score the round that
+            // actually fired rather than the next one.
+            let fired_i = (p.spray_i.max(1.0) as usize).saturating_sub(1);
+            let ramp = sim::spray_ramp(fired_i);
+            cam.pitch = recoil_kicked_pitch(
+                cam.pitch,
+                kick * scoped_scale * ramp,
+                p.bloom * ramp,
+                brace,
+            );
             cam.recoil = (cam.recoil + 0.6).min(1.0);
         }
     }
@@ -11589,8 +11640,21 @@ fn fp_viewmodel(
     mut motion: EventReader<MouseMotion>,
     mut st: Local<VmState>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut q: Query<(&mut Transform, &mut Visibility), (Without<MainCam>, Without<TriggerFinger>)>,
-    mut trig: Query<(&mut Transform, &TriggerFinger), Without<MainCam>>,
+    mut q: Query<
+        (&mut Transform, &mut Visibility),
+        (Without<MainCam>, Without<TriggerFinger>, Without<ReticleDot>),
+    >,
+    mut trig: Query<(&mut Transform, &TriggerFinger), (Without<MainCam>, Without<ReticleDot>)>,
+    // Every &mut Transform query here must be provably disjoint from
+    // every other or Bevy panics B0001 at startup - and "no entity would
+    // ever have both" is not proof, it has to be in the FILTER. Hence
+    // Without<TriggerFinger> here and Without<ReticleDot> on the other
+    // two, rather than relying on the archetypes happening not to
+    // overlap.
+    mut dots: Query<
+        (&mut Transform, &ReticleDot),
+        (Without<MainCam>, Without<TriggerFinger>),
+    >,
 ) {
     let dt = time.delta_secs().max(1e-5);
     let p = &game.sim.fighters[game.sim.player];
@@ -11797,17 +11861,36 @@ fn fp_viewmodel(
     } else {
         (p.fire_cd, spec.fire_period)
     };
-    let kick_vm = if (p.armed() || p.in_mech()) && cycle_cd > 0.0 {
-        ((VM_KICK_RETURN_S - (cycle_period - cycle_cd)) / VM_KICK_RETURN_S)
-            .clamp(0.0, 1.0)
-            // §owner: while focused, the gun visibly kicks at a QUARTER
-            // strength - "guns stay stable while aiming". Cosmetic only:
-            // the sim's punch (which decides where bullets go) is not
-            // read from here.
-            * (1.0 - 0.75 * ease_out(cam_ctl.ads_t))
+    // How far through this shot's kick-return window we are, 1 at the
+    // instant of firing and decaying to 0. Shared by the hip-fire weapon
+    // kick and the aimed reticle drift below - one shot, one curve.
+    let kick_phase = if (p.armed() || p.in_mech()) && cycle_cd > 0.0 {
+        ((VM_KICK_RETURN_S - (cycle_period - cycle_cd)) / VM_KICK_RETURN_S).clamp(0.0, 1.0)
     } else {
         0.0
     };
+    // §owner: AIMED, THE WEAPON DOES NOT MOVE. Not "moves less" - does
+    // not move. Focus is the stance you take to make a precise shot, and
+    // a sight picture that jumps is one you have to re-acquire between
+    // every round, which is the opposite of what aiming is for.
+    //
+    // The recoil still has to be VISIBLE or the shot has no weight, so
+    // it moves to the one place that costs no readability: the dot
+    // floats inside the glass (`reticle_drift`), the housing does not.
+    // Hip fire keeps the full weapon kick - that is where the gun
+    // bucking is the point.
+    let aim_e = ease_out(cam_ctl.ads_t);
+    let kick_vm = kick_phase * (1.0 - aim_e);
+    // The aimed half of that trade: the dot rides the same shot curve
+    // the weapon no longer does. Up and slightly right, because that is
+    // the direction the sim's own punch throws the bullet - the mark
+    // moving WITH the shot is a readout, not decoration.
+    {
+        let drift = kick_phase * aim_e * RETICLE_DRIFT_M;
+        for (mut t, dot) in &mut dots {
+            t.translation = dot.rest + Vec3::new(drift * 0.35, drift, 0.0);
+        }
+    }
     // §2.4: the inspect pose (T) - image-3 angled presentation with a
     // slow idle drift; any combat input cancels instantly
     if keys.just_pressed(KeyCode::KeyT) {
@@ -15565,19 +15648,20 @@ mod band_tests {
         push_red_dot(&mut parts, 0.10, 0.0, 0.06);
         let reticles: Vec<&WPart> =
             parts.iter().filter(|p| p.tone == Tone::Reticle).collect();
-        assert_eq!(reticles.len(), 2, "the cross is two bars");
-        for r in &reticles {
-            let half_x = r.size.x * 0.5;
-            let half_y = r.size.y * 0.5;
-            assert!(
-                half_x < OPTIC_HALF && half_y < OPTIC_HALF,
-                "a cross arm reaches the frame: {half_x} / {half_y} vs                  the {OPTIC_HALF} aperture"
-            );
-            assert!(
-                (r.pos.y - 0.10).abs() < 1e-6 && r.pos.x.abs() < 1e-6,
-                "the cross must be centred on the sight line"
-            );
-        }
+        assert_eq!(reticles.len(), 1, "the reticle is ONE dot");
+        let dot = reticles[0];
+        assert!(
+            (dot.pos.y - 0.10).abs() < 1e-6 && dot.pos.x.abs() < 1e-6,
+            "the dot must be centred on the sight line"
+        );
+        // and it must stay inside the glass even at FULL recoil drift -
+        // a dot that slid behind the housing would read as a rendering
+        // bug rather than as recoil
+        let farthest = dot.size.y * 0.5 + RETICLE_DRIFT_M;
+        assert!(
+            farthest < OPTIC_HALF,
+            "the dot leaves the window at full drift: {farthest} vs the              {OPTIC_HALF} aperture"
+        );
         // every frame bar clears the aperture
         for b in parts.iter().filter(|p| p.tone == Tone::Black) {
             let dx = b.pos.x.abs() - b.size.x * 0.5;
