@@ -1422,6 +1422,12 @@ pub struct Fighter {
     pub stagger_t: f32,
     /// Melee v1: successful parries, for the scoreboard-adjacent toast.
     pub parries: u32,
+    /// Hull climbing: `Some` while gripping a mech (DESIGN.md). Both
+    /// hands are on the hull - no ranged weapon until release.
+    pub climbing: Option<ClimbState>,
+    /// Grip stamina carried BETWEEN climbs (rest-only recovery needs a
+    /// meter that persists when `climbing` is `None`).
+    pub grip_pool: f32,
     pub switch_t: f32,
     pub pos: [f32; 3], // feet
     pub vel: [f32; 2], // xz
@@ -2815,6 +2821,70 @@ pub fn mech_enter_stage_for(f: &Fighter) -> Option<MechEnterStage> {
 pub const MECH_PLATE_70_PCT: f32 = 0.70;
 pub const MECH_PLATE_40_PCT: f32 = 0.40;
 pub const MECH_PLATE_15_PCT: f32 = 0.15;
+
+// ---- infantry-vs-mech: HULL CLIMBING (research/mech-climb/DESIGN.md) ----
+// Attach points ARE the dropped-plate zones - climbing is the PAYOFF for
+// stripping a mech, not a free action from full health. SIM-authoritative
+// and deterministic: fixed drain rates, nearest-valid-zone selection, no
+// randomness, so the replay guarantee is untouched by construction.
+
+/// The three plate-detach zones, NAMED - the bitmask bits finally get
+/// identities (bit0 = 70% skirts, bit1 = 40% drum/antenna, bit2 = 15%
+/// cleats). Checklist item 1.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlateZone {
+    /// 70%: the hip skirts - right flank grip.
+    Skirts,
+    /// 40%: the rear drum - back grip.
+    Drum,
+    /// 15%: the foot cleats - low front grip.
+    Cleats,
+}
+
+impl PlateZone {
+    pub const ALL: [PlateZone; 3] = [Self::Skirts, Self::Drum, Self::Cleats];
+    /// The `mech_plates_dropped` bit that must be SET before this zone
+    /// is climbable.
+    pub fn bit(self) -> u8 {
+        match self {
+            Self::Skirts => 0b001,
+            Self::Drum => 0b010,
+            Self::Cleats => 0b100,
+        }
+    }
+    /// Grip-point offset in the mech's LOCAL frame (metres, world scale),
+    /// rotated by its yaw when resolved.
+    pub fn offset(self) -> [f32; 3] {
+        match self {
+            Self::Skirts => [1.15, 0.95, 0.15],
+            Self::Drum => [0.0, 1.45, -1.15],
+            Self::Cleats => [0.0, 0.55, 1.15],
+        }
+    }
+}
+
+/// Checklist item 2: the grip, `None` for everyone not hanging on.
+#[derive(Clone, Debug)]
+pub struct ClimbState {
+    pub mech_target: usize,
+    pub attach_zone: PlateZone,
+    /// 0..100. Drains while attached; recovers ONLY while released -
+    /// [S-02]'s rest-only recovery, so release-regrip beats one long
+    /// hold of equal total duration.
+    pub grip_stamina: f32,
+}
+
+/// Reach from which a grab can start.
+pub const CLIMB_ATTACH_RANGE_M: f32 = 2.9;
+pub const CLIMB_GRIP_MAX: f32 = 100.0;
+/// ~8.3 s of continuous hold from full.
+pub const CLIMB_GRIP_DRAIN_PER_S: f32 = 12.0;
+/// Rest-only, and SLOWER than the drain - the asymmetry is the [S-02]
+/// finding, not a tuning accident.
+pub const CLIMB_GRIP_RECOVER_PER_S: f32 = 9.0;
+/// A strike landed AT the stripped zone, reachable only by being there.
+/// Stacks ON TOP of angle armor and the exposed-frame x1.25.
+pub const CLIMB_STRIKE_MULT: f32 = 1.6;
 pub const MECH_EXPOSED_DMG_MULT: f32 = 1.25;
 /// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
 pub const MECH_RED_FRONT: f32 = 0.475;
@@ -3324,6 +3394,8 @@ impl TdmSim {
                     fired_wallbang: false,
                     stagger_t: 0.0,
                     parries: 0,
+                    climbing: None,
+                    grip_pool: CLIMB_GRIP_MAX,
                     switch_t: 0.0,
                     pos,
                     vel: [0.0, 0.0],
@@ -3586,6 +3658,10 @@ impl TdmSim {
                     f.hull = 0.0;
                     f.fuel = 0.0;
                     f.mech_plates_dropped = 0;
+                    // hull climbing resets with the same discipline as
+                    // every other optional combat state
+                    f.climbing = None;
+                    f.grip_pool = CLIMB_GRIP_MAX;
                 }
             } else {
                 f.mech_exiting = false;
@@ -4390,6 +4466,54 @@ impl TdmSim {
             // teardown itself runs in the timer loop; pressing exit only
             // STARTS it, and cannot be started while a transition (in
             // either direction) is already running.
+            // Checklist item 3: U is the context INTERACT for the hull
+            // too - grab a stripped zone when adjacent, release when
+            // holding. Mirrors the pilot's own board/exit verb.
+            if cmd.exit_mech && self.fighters[p].climbing.is_some() {
+                self.fighters[p].climbing = None; // voluntary release
+            } else if cmd.exit_mech
+                && !self.fighters[p].in_mech()
+                && self.fighters[p].climbing.is_none()
+                && self.fighters[p].grip_pool > 5.0
+            {
+                // nearest EXPOSED zone in reach - deterministic: fixed
+                // iteration order, no randomness
+                let ppos = self.fighters[p].pos;
+                let mut best: Option<(usize, PlateZone, f32)> = None;
+                for (mi, m) in self.fighters.iter().enumerate() {
+                    if mi == p || !m.in_mech() || !m.alive() {
+                        continue;
+                    }
+                    for zone in PlateZone::ALL {
+                        if m.mech_plates_dropped & zone.bit() == 0 {
+                            continue; // covered - climbing is the payoff
+                        }
+                        let o = zone.offset();
+                        let (sy, cy) = m.yaw.sin_cos();
+                        let gp = [
+                            m.pos[0] + o[0] * cy + o[2] * sy,
+                            m.pos[1] + o[1],
+                            m.pos[2] - o[0] * sy + o[2] * cy,
+                        ];
+                        let dx = gp[0] - ppos[0];
+                        let dz = gp[2] - ppos[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d < CLIMB_ATTACH_RANGE_M
+                            && best.map_or(true, |(_, _, bd)| d < bd)
+                        {
+                            best = Some((mi, zone, d));
+                        }
+                    }
+                }
+                if let Some((mi, zone, _)) = best {
+                    let pool = self.fighters[p].grip_pool;
+                    self.fighters[p].climbing = Some(ClimbState {
+                        mech_target: mi,
+                        attach_zone: zone,
+                        grip_stamina: pool,
+                    });
+                }
+            }
             if cmd.exit_mech
                 && self.fighters[p].armor_set == ArmorSet::RobotSuit
                 && self.fighters[p].hull > 0.0
@@ -4901,7 +5025,19 @@ impl TdmSim {
                             self.fighters[j].parries += 1;
                             continue;
                         }
-                        let d_out = if behind { backstab } else { dmg };
+                        let mut d_out = if behind { backstab } else { dmg };
+                        // Checklist item 6: a strike landed AT the zone
+                        // the climber is hanging from - reachable only by
+                        // being there. Stacks ON TOP of the angle-armor
+                        // and exposed-frame math downstream.
+                        if self
+                            .fighters[p]
+                            .climbing
+                            .as_ref()
+                            .is_some_and(|cs| cs.mech_target == j)
+                        {
+                            d_out *= CLIMB_STRIKE_MULT;
+                        }
                         // attacker's position - the arc model measures
                         // where the blow came FROM, and the victim's own
                         // position degenerates it to a zero vector
@@ -4966,17 +5102,35 @@ impl TdmSim {
                     }
                     if let Some((j, _)) = best {
                         self.fighters[p].knife_struck = true;
-                        // back-stab: the victim faces AWAY from the blade
-                        let v = &self.fighters[j];
-                        let dxv = v.pos[0] - ppos[0];
-                        let dzv = v.pos[2] - ppos[2];
-                        let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
-                        let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
-                        let d_out = if behind { backstab } else { dmg };
-                        // attacker's position - the arc model measures
-                        // where the blow came FROM, and the victim's own
-                        // position degenerates it to a zero vector
-                        self.apply_plain_damage(p, j, d_out, ppos, false, false);
+                        // Melee v1: the knife and the thrust can be
+                        // parried too - same rule as the axe sweep and
+                        // the claws, one facing law for the whole game.
+                        if self.is_parrying(j, ppos) {
+                            self.fighters[p].stagger_t = PARRY_STAGGER_S;
+                            self.fighters[j].parries += 1;
+                        } else {
+                            // back-stab: the victim faces AWAY from the blade
+                            let v = &self.fighters[j];
+                            let dxv = v.pos[0] - ppos[0];
+                            let dzv = v.pos[2] - ppos[2];
+                            let dl = (dxv * dxv + dzv * dzv).sqrt().max(0.05);
+                            let behind =
+                                (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
+                            let mut d_out = if behind { backstab } else { dmg };
+                            // hull climbing: a strike landed AT the zone
+                            // the climber hangs from (checklist item 6)
+                            if self
+                                .fighters[p]
+                                .climbing
+                                .as_ref()
+                                .is_some_and(|cs| cs.mech_target == j)
+                            {
+                                d_out *= CLIMB_STRIKE_MULT;
+                            }
+                            // attacker's position - the arc model measures
+                            // where the blow came FROM
+                            self.apply_plain_damage(p, j, d_out, ppos, false, false);
+                        }
                     } else {
                         // the horde is knife-work too (silent = correct)
                         let mut bz: Option<(usize, f32)> = None;
@@ -5011,6 +5165,55 @@ impl TdmSim {
             }
         } else {
             self.fighters[p].vel = [0.0, 0.0];
+        }
+
+        // ---- hull climbing: parent riders, drain grips (items 4+5) ----
+        // Runs for EVERY fighter, every tick, deterministically. The
+        // rider moves WITH the mech - power-stride and pivots included,
+        // which is the free counterplay the design names.
+        for i in 0..self.fighters.len() {
+            let Some(cs) = self.fighters[i].climbing.clone() else {
+                // rest-only recovery ([S-02]): the pool climbs back only
+                // while NOT hanging on
+                let f = &mut self.fighters[i];
+                f.grip_pool = (f.grip_pool + CLIMB_GRIP_RECOVER_PER_S * DT)
+                    .min(CLIMB_GRIP_MAX);
+                continue;
+            };
+            let detach = {
+                let m = &self.fighters[cs.mech_target];
+                !self.fighters[i].alive() || !m.in_mech() || !m.alive()
+            };
+            let drained = cs.grip_stamina - CLIMB_GRIP_DRAIN_PER_S * DT;
+            if detach || drained <= 0.0 {
+                // involuntary: the wreck fell, or the grip did. Gravity
+                // takes over from the rider's current height - the
+                // no-instant-stop landing rules already handle the rest.
+                let f = &mut self.fighters[i];
+                f.grip_pool = drained.max(0.0);
+                f.climbing = None;
+                f.grounded = false;
+                continue;
+            }
+            let (mp, myaw, mvel) = {
+                let m = &self.fighters[cs.mech_target];
+                (m.pos, m.yaw, m.vel)
+            };
+            let o = cs.attach_zone.offset();
+            let (sy, cy) = myaw.sin_cos();
+            let f = &mut self.fighters[i];
+            f.pos = [
+                mp[0] + o[0] * cy + o[2] * sy,
+                mp[1] + o[1],
+                mp[2] - o[0] * sy + o[2] * cy,
+            ];
+            f.vel = mvel;
+            f.vy = 0.0;
+            f.grounded = false;
+            f.grip_pool = drained;
+            if let Some(cs_mut) = f.climbing.as_mut() {
+                cs_mut.grip_stamina = drained;
+            }
         }
 
         // §8.2: moving is noise (Recon Weave runs quiet). Three tiers, so
@@ -5634,6 +5837,8 @@ impl TdmSim {
                 || f.in_mech()
                 // Melee v1: a parried attacker is staggered - no firing
                 || f.stagger_t > 0.0
+                // hull climbing: both hands are on the mech - melee only
+                || f.climbing.is_some()
                 // §6.2: the chassis is still sealing up. Scoped to
                 // ACTUALLY being in a chassis: the timer is mech state,
                 // but this gate is not, so a pilot who dismounts (or is
@@ -8809,6 +9014,191 @@ mod tests {
         assert!(
             (flat - JUMP_SPEED).abs() <= GRAVITY * DT + 1e-4,
             "an uncoiled jump must still launch at JUMP_SPEED, got {flat}"
+        );
+    }
+
+
+    /// Climb checklist test 1+2: grip drains under hold, recovers under
+    /// release - ASYMMETRICALLY, per [S-02] - and zero grip detaches
+    /// involuntarily.
+    #[test]
+    fn grip_drains_holding_recovers_resting_and_zero_detaches() {
+        let mut s = range(0xC1);
+        // a stripped mech to hang from
+        {
+            let m = &mut s.fighters[1];
+            m.armor_set = ArmorSet::RobotSuit;
+            m.hull = MECH_HULL;
+            m.mech_rounds = MECH_ROUNDS;
+            m.mech_plates_dropped = 0b001;
+            m.pos = [0.0, 0.0, 2.0];
+        }
+        // the victim is a LIVE BOT - pin it every tick or it wanders,
+        // fires, and turns a grip test into a brawl test
+        let pin = |s: &mut TdmSim| {
+            s.fighters[1].pos = [0.0, 0.0, 2.0];
+            s.fighters[1].yaw = 0.0;
+            s.fighters[1].mech_rounds = 0;
+            s.fighters[1].pod_ammo = 0;
+        };
+        pin(&mut s);
+        s.fighters[0].pos = [1.2, 0.0, 2.2]; // beside the skirts zone
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(s.fighters[0].climbing.is_some(), "the grab must take");
+        let g0 = s.fighters[0].grip_pool;
+        for _ in 0..(SIM_HZ as usize) {
+            pin(&mut s);
+            s.step(PlayerCmd::default());
+        }
+        let g1 = s.fighters[0].grip_pool;
+        assert!(
+            (g0 - g1 - CLIMB_GRIP_DRAIN_PER_S).abs() < 0.5,
+            "one second of hold drains one second of grip: {g0} -> {g1}"
+        );
+        // release, rest one second: recovers, and SLOWER than it drained
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(s.fighters[0].climbing.is_none(), "U releases");
+        let r0 = s.fighters[0].grip_pool;
+        for _ in 0..(SIM_HZ as usize) {
+            pin(&mut s);
+            s.step(PlayerCmd::default());
+        }
+        let r1 = s.fighters[0].grip_pool;
+        assert!(r1 > r0, "rest recovers");
+        assert!(
+            CLIMB_GRIP_RECOVER_PER_S < CLIMB_GRIP_DRAIN_PER_S,
+            "recovery is slower than drain - the [S-02] asymmetry"
+        );
+        // re-grab and hold to zero: involuntary detach
+        pin(&mut s);
+        s.fighters[0].pos = [1.2, 0.0, 2.2];
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(s.fighters[0].climbing.is_some());
+        for _ in 0..(SIM_HZ as usize * 12) {
+            pin(&mut s);
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.fighters[0].climbing.is_none(),
+            "zero grip must detach involuntarily"
+        );
+    }
+
+    /// Climb checklist test 3: the rider tracks the mech - through a
+    /// power-stride burst included.
+    #[test]
+    fn a_rider_tracks_the_mech_through_a_power_stride() {
+        let mut s = range(0xC2);
+        {
+            let m = &mut s.fighters[1];
+            m.armor_set = ArmorSet::RobotSuit;
+            m.hull = MECH_HULL;
+            m.mech_rounds = MECH_ROUNDS;
+            m.mech_plates_dropped = 0b010; // drum zone
+            m.pos = [0.0, 0.0, 2.0];
+        }
+        s.fighters[0].pos = [0.0, 0.0, 0.8]; // behind, at the drum
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(s.fighters[0].climbing.is_some(), "grab the drum");
+        // shove the mech and step - the rider must stay at the zone
+        for _ in 0..(SIM_HZ as usize) {
+            s.fighters[1].pos[0] += 4.0 * DT; // external drag, stride-fast
+            s.step(PlayerCmd::default());
+        }
+        let m = s.fighters[1].pos;
+        let r = s.fighters[0].pos;
+        let o = PlateZone::Drum.offset();
+        let (sy, cy) = s.fighters[1].yaw.sin_cos();
+        let want = [m[0] + o[0] * cy + o[2] * sy, m[2] - o[0] * sy + o[2] * cy];
+        let err = ((r[0] - want[0]).powi(2) + (r[2] - want[1]).powi(2)).sqrt();
+        // parenting runs before the bots move within a tick, so a rider
+        // trails its mech by AT MOST one tick of travel (~6 cm at stride
+        // pace) - constant, never accumulating. The assert allows exactly
+        // that and no more.
+        assert!(err < 0.12, "the rider must ride the hull, {err} m adrift");
+    }
+
+    /// Climb checklist test 4: the climbing strike carries the combined
+    /// multiplier - climb bonus INTO the angle-armor pipeline.
+    #[test]
+    fn a_climbing_strike_lands_the_combined_multiplier() {
+        let strike = |climbing: bool| -> f32 {
+            let mut s = range(0xC3);
+            let pin = |s: &mut TdmSim| {
+                let m = &mut s.fighters[1];
+                m.armor_set = ArmorSet::RobotSuit;
+                m.hull = m.hull.max(1.0);
+                m.mech_plates_dropped = 0b001;
+                m.pos = [0.0, 0.0, 0.0];
+                m.yaw = 0.0;
+                m.mech_rounds = 0; // a dry mount cannot shoot the striker
+                m.pod_ammo = 0;
+            };
+            pin(&mut s);
+            s.fighters[1].hull = MECH_HULL;
+            // the striker stands AT the skirts grip point either way, so
+            // the two cases share identical strike geometry - the only
+            // variable is the grip itself
+            s.fighters[0].pos = [1.15, 0.0, 0.15];
+            // face the hull: the sweep arc is the striker's own facing
+            s.fighters[0].yaw = (-1.15_f32).atan2(-0.15);
+            s.fighters[0].protect_t = 0.0;
+            if climbing {
+                s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+                assert!(s.fighters[0].climbing.is_some(), "must be attached");
+            }
+            let h0 = s.fighters[1].hull;
+            // TAP the knife - holding through the wind COMMITS to the
+            // 0.55s lunge and the quick strike never fires. Three held
+            // ticks start the swing; the phase then advances on its own
+            // through the quick wind into the strike tick. The mech is
+            // pinned throughout so its own AI cannot turn the geometry.
+            //
+            // The yaw rides in the COMMAND: the sim overwrites the
+            // fighter's yaw from cmd.yaw every step, so a yaw set on the
+            // struct before the loop lasts exactly one tick - the first
+            // draft of this test faced +z and swung at nothing.
+            let face_hull = (-1.15_f32).atan2(-0.15);
+            for k in 0..((KNIFE_QUICK_WIND_S / DT) as usize + 8) {
+                pin(&mut s);
+                s.step(PlayerCmd {
+                    knife_hold: k < 3,
+                    yaw: face_hull,
+                    ..Default::default()
+                });
+            }
+            h0 - s.fighters[1].hull
+        };
+        let base = strike(false);
+        let climbed = strike(true);
+        assert!(base > 0.0, "the grounded strike must land");
+        assert!(climbed > 0.0, "the climbing strike must land");
+        assert!(
+            (climbed / base - CLIMB_STRIKE_MULT).abs() < 0.05,
+            "the climb bonus must multiply the same pipeline: {climbed} vs {base}"
+        );
+    }
+
+    /// Climb checklist test 5: an UN-stripped zone refuses the grab -
+    /// climbing is the payoff for stripping a mech, not a free action.
+    #[test]
+    fn attach_fails_on_an_unstripped_zone() {
+        let mut s = range(0xC4);
+        {
+            let m = &mut s.fighters[1];
+            m.armor_set = ArmorSet::RobotSuit;
+            m.hull = MECH_HULL;
+            m.mech_rounds = MECH_ROUNDS;
+            m.mech_plates_dropped = 0; // pristine
+            m.pos = [0.0, 0.0, 2.0];
+            m.mech_rounds = 0;
+            m.pod_ammo = 0;
+        }
+        s.fighters[0].pos = [1.2, 0.0, 2.2];
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(
+            s.fighters[0].climbing.is_none(),
+            "a covered zone must refuse the grip"
         );
     }
 
