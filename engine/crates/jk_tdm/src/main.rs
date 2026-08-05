@@ -2188,8 +2188,18 @@ struct MainCam;
 #[derive(Resource, Default)]
 struct TracerPool(Vec<Entity>);
 
+/// One pooled projectile: a root that carries BOTH models, so a slot
+/// can serve an arrow this life and a spear the next without respawning
+/// geometry. `spin` is the arrow's fletching group.
+struct MissileSlot {
+    root: Entity,
+    arrow: Entity,
+    spear: Entity,
+    spin: Entity,
+}
+
 #[derive(Resource, Default)]
-struct MissilePool(Vec<Entity>);
+struct MissilePool(Vec<MissileSlot>);
 
 #[derive(Resource, Default)]
 struct DecalPool(Vec<Entity>);
@@ -2357,6 +2367,98 @@ fn push_muzzle(parts: &mut Vec<WPart>, y: f32, z: f32, w: f32) {
     parts.push(wp(false, Tone::Dark, (0.0, y, z), 0.0, (w, w, 0.07)));
     parts.push(wp(true, Tone::Black, (0.0, y, z + 0.028), FRAC_PI_2, (w * 0.45, 0.03, w * 0.45)));
 }
+
+/// §owner: a real ARROW in flight - forged head, tapered shaft, three
+/// fletching vanes. It replaced a featureless 5 cm box, which at the
+/// speeds this game looses arrows at read as a grey dash and told the
+/// player nothing about which way it was going or where it would bite.
+///
+/// Built nose-forward along +Z in a UNIT-LENGTH envelope, so the
+/// caller's `scale.z` sets the real length and the proportions hold.
+/// The `spin` child carries the fletching alone - vanes rotate about
+/// the shaft, a shaft that rolled as a whole would look like a drill.
+fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity) {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    // shaft, then the bodkin head: a tapered point, not a blunt end
+    for (mat, z, sc) in [
+        (kit.wood.clone(), 0.02, Vec3::new(0.020, 0.020, 0.72)),
+        (kit.steel.clone(), 0.40, Vec3::new(0.030, 0.030, 0.10)),
+        (kit.grey_black.clone(), 0.465, Vec3::new(0.012, 0.012, 0.05)),
+        // the nock, so the tail reads as an arrow and not a cut stick
+        (kit.grey_black.clone(), -0.345, Vec3::new(0.024, 0.024, 0.03)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(mat),
+                Transform::from_xyz(0.0, 0.0, z).with_scale(sc),
+            ))
+            .set_parent(root);
+    }
+    // three fletching vanes on their own spinner
+    let spin = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .set_parent(root)
+        .id();
+    for i in 0..3 {
+        let a = i as f32 * std::f32::consts::TAU / 3.0;
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.white.clone()),
+                Transform {
+                    translation: Vec3::new(a.cos() * 0.026, a.sin() * 0.026, -0.28),
+                    rotation: Quat::from_rotation_z(a),
+                    scale: Vec3::new(0.006, 0.048, 0.13),
+                },
+            ))
+            .set_parent(spin);
+    }
+    (root, spin)
+}
+
+/// §owner: a real SPEAR - leaf blade, collar, shaft, butt spike. Same
+/// unit-length envelope as the arrow.
+fn spawn_spear_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    for (cyl, mat, z, sc) in [
+        (true, kit.wood.clone(), -0.02, Vec3::new(0.030, 0.86, 0.030)),
+        // leaf blade: wide, flat, and long enough to read at range
+        (false, kit.steel.clone(), 0.435, Vec3::new(0.055, 0.016, 0.20)),
+        (false, kit.grey_light.clone(), 0.520, Vec3::new(0.022, 0.014, 0.06)),
+        // collar where blade meets shaft, and the butt spike
+        (true, kit.grey_black.clone(), 0.330, Vec3::new(0.044, 0.05, 0.044)),
+        (true, kit.grey_black.clone(), -0.455, Vec3::new(0.034, 0.07, 0.034)),
+    ] {
+        let mesh = if cyl { kit.cyl.clone() } else { kit.cube.clone() };
+        let rot = if cyl {
+            Quat::from_rotation_x(FRAC_PI_2)
+        } else {
+            Quat::IDENTITY
+        };
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform {
+                    translation: Vec3::new(0.0, 0.0, z),
+                    rotation: rot,
+                    scale: sc,
+                },
+            ))
+            .set_parent(root);
+    }
+    root
+}
+
+/// Fletching roll rate. Fast enough to read as spin-stabilised at the
+/// speeds arrows fly here, slow enough not to strobe against the frame
+/// rate. Cosmetic: the sim knows nothing about it.
+const ARROW_SPIN_RAD_S: f32 = 24.0;
 
 /// Inner half-width of a red-dot window. At the ADS distance every
 /// firearm settles to, this subtends roughly a ninth of screen height -
@@ -3234,6 +3336,36 @@ const IRON_SIGHTS_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(6.4) },
 ];
 
+/// A shaft actually IN FLIGHT. Every existing projectile script snaps
+/// on the draw and the release, by which point the arrow is already off
+/// the frame at 82 m/s - so the thing that flies had never been
+/// photographed, only the bow that launched it. These beats fire and
+/// then snap on a tight cadence to catch it downrange, from third
+/// person so the shaft is side-on rather than receding to a dot.
+///
+/// Aimed slightly UP so the arc, and the nose following it down, both
+/// read across the frames.
+const PROJECTILE_FLIGHT_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.5) },
+    // Aimed DOWN at the dirt a few metres out, not up. A shaft loosed
+    // level recedes end-on at 82 m/s and is a two-pixel dot by the time
+    // any beat can fire; angled into the ground it stays broadside,
+    // close, and then STAYS there stuck for the last frame - which also
+    // proves the impact angle survives (the sim keeps `vel` on stick so
+    // the render can read it).
+    CapBeat { look: Some((0.0, 0.42)), ..beat(0.8) },
+    // draw to full, then loose
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.0) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(2.0) },
+    CapBeat { snap: Some("01-launch"), ..beat(2.03) },
+    CapBeat { snap: Some("02-early-flight"), ..beat(2.06) },
+    CapBeat { snap: Some("03-mid-flight"), ..beat(2.10) },
+    CapBeat { snap: Some("04-descending"), ..beat(2.16) },
+    CapBeat { snap: Some("05-landed"), ..beat(2.9) },
+    CapBeat { end: true, ..beat(3.3) },
+];
+
 /// The guard plate in first person. It used to be an opaque black slab
 /// that blinded the player it was protecting; it must now read as
 /// smoked glass with the world legible through it. On foot, because the
@@ -3344,6 +3476,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "mech_fp" => MECH_FP_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
+        "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
@@ -3375,7 +3508,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 15] = [
+const CAPTURE_SCRIPTS: [&str; 17] = [
     "baseline",
     "idle_life",
     "bow_draw",
@@ -3386,6 +3519,8 @@ const CAPTURE_SCRIPTS: [&str; 15] = [
     "sights_a",
     "sights_b",
     "sights_c",
+    "arrow_flight",
+    "spear_flight",
     "minigun_check",
     "menus",
     "traversal",
@@ -3505,6 +3640,8 @@ fn capture_quick_deploy(
         Some("sights_c") => {
             sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Ak47];
         }
+        Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
+        Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
@@ -9989,41 +10126,57 @@ fn sync_tracers(
 
 fn sync_missiles(
     mut commands: Commands,
+    time: Res<Time>,
     game: Res<Game>,
-    assets: Res<FxAssets>,
+    kit: Res<ModelKit>,
     mut pool: ResMut<MissilePool>,
     mut q: Query<(&mut Transform, &mut Visibility), With<MissileMarker>>,
+    mut q2: Query<(&mut Transform, &mut Visibility), Without<MissileMarker>>,
 ) {
     while pool.0.len() < game.sim.missiles.len() {
-        let e = commands
-            .spawn((
-                Mesh3d(assets.missile_mesh.clone()),
-                MeshMaterial3d(assets.arrow_mat.clone()),
-                Transform::IDENTITY,
-                Visibility::Hidden,
-                MissileMarker,
-            ))
+        let root = commands
+            .spawn((Transform::IDENTITY, Visibility::Hidden, MissileMarker))
             .id();
-        pool.0.push(e);
+        let (arrow, spin) = spawn_arrow_model(&mut commands, &kit);
+        commands.entity(arrow).set_parent(root);
+        let spear = spawn_spear_model(&mut commands, &kit);
+        commands.entity(spear).set_parent(root);
+        pool.0.push(MissileSlot { root, arrow, spear, spin });
     }
-    for (idx, e) in pool.0.iter().enumerate() {
-        let Ok((mut tf, mut vis)) = q.get_mut(*e) else {
+    let dt = time.delta_secs().min(0.05);
+    for (idx, slot) in pool.0.iter().enumerate() {
+        let Ok((mut tf, mut vis)) = q.get_mut(slot.root) else {
             continue;
         };
         match game.sim.missiles.get(idx) {
             Some(m) => {
                 let dir = Vec3::from_array(m.vel).normalize_or(Vec3::Z);
-                let (len, thick) = if m.is_spear { (1.9, 1.6) } else { (0.8, 1.0) };
+                // §owner: a shaft in flight points where it is GOING, and
+                // a stuck one keeps the angle it bit at (the sim leaves
+                // `vel` intact on impact precisely so this still reads).
+                let (len, thick) = if m.is_spear { (1.9, 1.0) } else { (0.85, 1.0) };
                 *tf = Transform::from_translation(Vec3::from_array(m.pos))
                     .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir))
                     .with_scale(Vec3::new(thick, thick, len));
                 *vis = Visibility::Visible;
-                let mat = if m.is_spear {
-                    assets.spear_mat.clone()
-                } else {
-                    assets.arrow_mat.clone()
-                };
-                commands.entity(*e).insert(MeshMaterial3d(mat));
+                // one slot, two shapes
+                for (e, on) in [(slot.arrow, !m.is_spear), (slot.spear, m.is_spear)] {
+                    if let Ok((_, mut v)) = q2.get_mut(e) {
+                        *v = if on {
+                            Visibility::Inherited
+                        } else {
+                            Visibility::Hidden
+                        };
+                    }
+                }
+                // fletching spin - vanes bite the air and roll the shaft,
+                // which is what makes an arrow FLY instead of drift. It
+                // stops the moment the shaft does.
+                if !m.is_spear && m.stuck_t.is_none() {
+                    if let Ok((mut st, _)) = q2.get_mut(slot.spin) {
+                        st.rotation *= Quat::from_rotation_z(ARROW_SPIN_RAD_S * dt);
+                    }
+                }
             }
             None => {
                 *vis = Visibility::Hidden;
