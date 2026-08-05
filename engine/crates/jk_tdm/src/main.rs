@@ -27,6 +27,12 @@
 //! stays on when you release right click - R reload - TAB scoreboard -
 //! ESC menu. Mouse buttons swap in Settings.
 
+// A release build is what the desktop shortcut launches - it should look
+// like a game, not a dev tool with a terminal parked behind it. Debug
+// builds (`cargo build`, `cargo test`) keep the console, since that is
+// where panics and eprintln diagnostics still need to land.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod branding;
 mod menu_ui;
 mod sim;

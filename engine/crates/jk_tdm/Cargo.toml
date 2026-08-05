@@ -30,3 +30,6 @@ bevy = { version = "0.15", default-features = false, features = [
     "tonemapping_luts",
     "default_font",
 ] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
