@@ -1709,6 +1709,10 @@ struct VmRig {
     root: Entity,
     weapons: [Entity; N_WEAPONS],
     shield: Entity,
+    /// §C.7: the two hull-mount viewmodels - shown instead of the
+    /// (stowed) carried arsenal while piloting
+    mech_turret: Entity,
+    mech_pod: Entity,
 }
 
 /// Extra weapon greebles that only show while aiming - the ADS detail pass.
@@ -1777,6 +1781,11 @@ struct ForgePreview {
     weapons: [Entity; N_WEAPONS],
     hat_mat: Handle<StandardMaterial>,
     tunic_mat: Handle<StandardMaterial>,
+    /// the preview rig's pose handles - the sync system statically
+    /// solves the same carry the live rig runs
+    weapon_root: Entity,
+    arm_l: [Entity; 3],
+    arm_r: [Entity; 3],
 }
 /// Viewmodel camera FOV. §1.2 (Brief VI): CS:GO Classic preset = 68°.
 const VM_FOV_DEG: f32 = 68.0;
@@ -1924,6 +1933,15 @@ fn sight_line_y(wk: GunKind) -> Option<f32> {
 /// render path and the scope-hide test.
 fn vm_hidden_while_scoped(gun_is_scoped: bool, ads: bool) -> bool {
     gun_is_scoped && ads
+}
+
+/// The first-person viewmodel renders only while the HUD does (no menu
+/// up) AND in first person, alive, not mid-roll. The vm camera draws
+/// AFTER MainCam (order 1, no clear), so a visible gun composites over
+/// the Paused plate - the menu gate is load-bearing, not cosmetic.
+/// Pure, shared by `fp_viewmodel` and the menu-hide test.
+fn vm_rendered(state: &GameState, person_t: f32, alive: bool, roll_t: f32) -> bool {
+    hud_visible(state) && person_t < 0.5 && alive && roll_t <= 0.0
 }
 
 /// §1.2 (Brief VI): one segment of the on-weapon ammo bar - an emissive
@@ -2231,6 +2249,14 @@ struct ModelKit {
     mech_red: Handle<StandardMaterial>,
     /// §4.2 (Brief VI): yellow-black hazard accents.
     mech_hazard: Handle<StandardMaterial>,
+    /// FP-only translucent shield set - the raised plate must not blind
+    /// the player. Third-person shields keep the opaque materials above.
+    vm_shield_dark: Handle<StandardMaterial>,
+    vm_shield_steel: Handle<StandardMaterial>,
+    vm_shield_gold: Handle<StandardMaterial>,
+    /// Faded unit-stencil paint for the mech ident plates - decorative
+    /// parchment, deliberately dimmer than the ally signal white.
+    mech_stencil: Handle<StandardMaterial>,
 }
 
 /// §2.1 tone slots of the weapon palette.
@@ -2726,6 +2752,8 @@ fn weapon_strip(
             sim::MechWeapon::Rockets => 1,
             _ => 0,
         }
+    } else if p.shield_up {
+        3 // raising the plate un-fades the strip and moves the accent
     } else {
         p.active
     };
@@ -2746,6 +2774,11 @@ fn weapon_strip(
                     continue;
                 }
             }
+        } else if cell.0 == 3 {
+            // the shield is an ESSENTIAL slot: always listed, lit while
+            // raised. MUST branch before the inventory index - the
+            // carried array is only 3 wide.
+            ("SHIELD".to_string(), p.shield_up)
         } else {
             let g = p.inventory[cell.0];
             let n = if g == GunKind::Fists {
@@ -2753,7 +2786,7 @@ fn weapon_strip(
             } else {
                 gun(g).name.to_string()
             };
-            (n, cell.0 == p.active)
+            (n, cell.0 == p.active && !p.shield_up)
         };
         **t = if active {
             // §0 (Brief VII): ASCII only - U+25B8 had no font glyph.
@@ -2854,7 +2887,7 @@ const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "G", action: "Grenade to hand (again: cycle type) - RMB aims the arc, LMB throws", essential: true, group: BindGroup::Fight },
     Bind { key: "H / Mouse4", action: "Legacy: hold to cook, release to throw", essential: false, group: BindGroup::Fight },
     Bind { key: "B", action: "Stow the grenade / cancel an aimed throw (keeps it)", essential: false, group: BindGroup::Fight },
-    Bind { key: "E", action: "Shield stance (throwables only while up)", essential: true, group: BindGroup::Fight },
+    Bind { key: "4", action: "Shield stance - essential slot (throwables only while up)", essential: true, group: BindGroup::Fight },
     Bind { key: "1 2 3", action: "Weapon slots", essential: false, group: BindGroup::Fight },
     Bind { key: "R", action: "Reload", essential: false, group: BindGroup::Fight },
     Bind { key: "U", action: "Dismount the mech (chassis is scrapped; the pad respawns)", essential: false, group: BindGroup::Gear },
@@ -2890,7 +2923,7 @@ fn equip_hint(set: ArmorSet) -> &'static str {
         ArmorSet::None => "",
         ArmorSet::Folk => "FOLK ARMOR EQUIPPED - hold C to BRACE the shieldwall",
         ArmorSet::Pyro => "PYRO ARMOR EQUIPPED - hold C: FLAME PROJECTOR - fireproof",
-        ArmorSet::RobotSuit => "MECH BOARDED - Q: SIDE-STEP - C: REPULSOR - protect your REAR",
+        ArmorSet::RobotSuit => "MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
     }
 }
@@ -3729,7 +3762,7 @@ impl IntroPage {
             // deploy would need a fourth selection concept.
             Self::TITLE => "ENTER - continue    -    ESC menu > RULES & MANUAL",
             Self::MATCH => "the battlefield, the mode, and how hard it pushes back    -    CLICK A MODE TO DEPLOY",
-            Self::SOLDIER => "the shield always rides in its own slot (E raises it)",
+            Self::SOLDIER => "the shield always rides in its own slot (4 raises it)",
             _ => "",
         }
     }
@@ -4197,6 +4230,7 @@ fn main() {
                 spawn_casings,
                 update_casings,
                 spin_minigun_barrels,
+                spin_mech_turret_barrels,
                 grenade_arc,
                 rocket_aim_preview,
                 crosshair_render,
@@ -5018,8 +5052,26 @@ fn spawn_weapon_model(
 }
 
 /// The always-carried tower shield: rounded plate, boss, sight slit,
-/// gold trim - held on the left arm when raised (E).
-fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
+/// gold trim - held on the left arm when raised (slot 4).
+/// `see_through` = the FIRST-PERSON copy: translucent materials so the
+/// raised plate guards without blinding - the world reads through it.
+/// Third-person shields (yours and every enemy's) stay opaque.
+fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit, see_through: bool) -> Entity {
+    let plate = if see_through {
+        kit.vm_shield_dark.clone()
+    } else {
+        kit.armor_dark.clone()
+    };
+    let metal_m = if see_through {
+        kit.vm_shield_steel.clone()
+    } else {
+        kit.steel.clone()
+    };
+    let trim = if see_through {
+        kit.vm_shield_gold.clone()
+    } else {
+        kit.gold.clone()
+    };
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
@@ -5028,7 +5080,7 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.armor_dark.clone()),
+                MeshMaterial3d(plate.clone()),
                 Transform::from_xyz(x, 0.0, 0.0)
                     .with_rotation(Quat::from_rotation_y(ry))
                     .with_scale(Vec3::new(0.20, 0.72, 0.045)),
@@ -5039,7 +5091,7 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
     commands
         .spawn((
             Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(kit.steel.clone()),
+            MeshMaterial3d(metal_m.clone()),
             Transform::from_xyz(0.0, 0.05, 0.04)
                 .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
                 .with_scale(Vec3::new(0.18, 0.05, 0.18)),
@@ -5058,7 +5110,7 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.gold.clone()),
+                MeshMaterial3d(trim.clone()),
                 Transform::from_xyz(0.0, y, 0.0).with_scale(Vec3::new(0.46, 0.035, 0.05)),
             ))
             .set_parent(root);
@@ -5067,7 +5119,7 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
     commands
         .spawn((
             Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(kit.steel.clone()),
+            MeshMaterial3d(metal_m),
             Transform::from_xyz(0.0, 0.0, -0.06)
                 .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
                 .with_scale(Vec3::new(0.03, 0.16, 0.03)),
@@ -5079,6 +5131,137 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
         .insert(Transform::from_xyz(0.0, -0.02, -0.08))
         .set_parent(root);
     root
+}
+
+/// §C: the TURRET mount's viewmodel barrel cluster - spun by the mount's
+/// own trigger/vent state (`spin_mech_turret_barrels`), never the
+/// carried minigun's `spin_t`.
+#[derive(Component)]
+struct MechTurretSpinner;
+
+/// §C.7: the TURRET hull-mount viewmodel - a gatling barrel cluster in
+/// the mech palette. No hands, no forearms, no ammo bar: a hull mount is
+/// STRUCTURAL, never held (sim.rs MechWeapon doctrine).
+fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let spinner = commands
+        .spawn((Transform::IDENTITY, Visibility::default(), MechTurretSpinner))
+        .set_parent(root)
+        .id();
+    let mut cluster: Vec<(Handle<StandardMaterial>, Vec3, Vec3)> = vec![
+        // central spine + two collar discs
+        (kit.mech_metal.clone(), Vec3::new(0.0, 0.0, 0.30), Vec3::new(0.030, 0.62, 0.030)),
+        (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.60), Vec3::new(0.100, 0.06, 0.100)),
+        (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.20), Vec3::new(0.105, 0.06, 0.105)),
+    ];
+    for i in 0..6 {
+        let a = i as f32 * std::f32::consts::TAU / 6.0;
+        cluster.push((
+            kit.grey_dark.clone(),
+            Vec3::new(a.cos() * 0.064, a.sin() * 0.064, 0.32),
+            Vec3::new(0.022, 0.68, 0.022),
+        ));
+    }
+    for (mat, pos, size) in cluster {
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(mat),
+                Transform {
+                    translation: pos,
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: size,
+                },
+            ))
+            .set_parent(spinner);
+    }
+    // hull housing: khaki plate + dark cradle + one hazard strip
+    for (mat, pos, size) in [
+        (kit.mech_khaki.clone(), Vec3::new(0.0, -0.02, -0.10), Vec3::new(0.20, 0.16, 0.26)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.11, 0.06), Vec3::new(0.14, 0.05, 0.30)),
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.075, -0.10), Vec3::new(0.20, 0.012, 0.26)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(mat),
+                Transform {
+                    translation: pos,
+                    scale: size,
+                    ..default()
+                },
+            ))
+            .set_parent(root);
+    }
+    root
+}
+
+/// §C.7: the ROCKETS hull-mount viewmodel - a boxy launch pod with a
+/// 3x2 face of bored black tubes. Same structural doctrine as the turret.
+fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    for (mat, pos, size) in [
+        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.10), Vec3::new(0.26, 0.20, 0.42)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, 0.315), Vec3::new(0.24, 0.18, 0.02)),
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.105, 0.10), Vec3::new(0.26, 0.012, 0.42)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(mat),
+                Transform {
+                    translation: pos,
+                    scale: size,
+                    ..default()
+                },
+            ))
+            .set_parent(root);
+    }
+    // 3x2 black launch bores on the face
+    for x in [-0.065_f32, 0.0, 0.065] {
+        for y in [-0.045_f32, 0.045] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.grey_black.clone()),
+                    Transform {
+                        translation: Vec3::new(x, y, 0.33),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.045, 0.05, 0.045),
+                    },
+                ))
+                .set_parent(root);
+        }
+    }
+    root
+}
+
+/// §C: the turret viewmodel's barrels spin with the MOUNT's own state -
+/// crawl at idle, spin-up while the trigger is held, dead while venting.
+fn spin_mech_turret_barrels(
+    game: Res<Game>,
+    time: Res<Time>,
+    mut q: Query<&mut Transform, With<MechTurretSpinner>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let rate = if !p.in_mech() || p.gatling_vent_t > 0.0 {
+        0.0
+    } else if p.gatling_trigger_t > 0.0 {
+        MINIGUN_SPIN_FULL_RAD_S * 0.75
+    } else {
+        MINIGUN_IDLE_CRAWL_RAD_S
+    };
+    if rate <= 0.0 {
+        return;
+    }
+    let dt = time.delta_secs().min(0.05);
+    for mut tf in &mut q {
+        tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+    }
 }
 
 /// §6.3 / D.6: hull-side parts that visually shear off at HP thresholds.
@@ -5112,7 +5295,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
     let cube = || kit.cube.clone();
     let cyl = || kit.cyl.clone();
     // (mesh, material, translation, rotation, scale) - torso-local
-    let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 43] = [
+    let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 53] = [
         // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
         (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.50, 0.08), Quat::IDENTITY, Vec3::new(1.06, 0.44, 0.92)),
         (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.665, 0.44), Quat::from_rotation_x(0.55), Vec3::new(0.94, 0.04, 0.30)),
@@ -5120,13 +5303,24 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.35, 0.55, 0.548), Quat::IDENTITY, Vec3::new(0.11, 0.15, 0.012)),
         (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.42, 0.745, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.03, 0.22)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.272, 0.08), Quat::IDENTITY, Vec3::new(1.00, 0.02, 0.86)),
+        // two-tone break-up: a lighter deck plate + a dark chin line -
+        // paint, not geometry, is what stops the slab reading flat
+        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.723, -0.06), Quat::IDENTITY, Vec3::new(0.58, 0.010, 0.50)),
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.315, 0.548), Quat::IDENTITY, Vec3::new(1.00, 0.07, 0.010)),
         // ---- SENSOR DECK: the "no head" head - fills the >0.82 band ----
         (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.88, 0.02), Quat::IDENTITY, Vec3::new(0.62, 0.32, 0.54)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.89, 0.297), Quat::IDENTITY, Vec3::new(0.48, 0.17, 0.012)),
         // the SENSOR VISOR strip - a thin lens line, not a lightbar
         (cube(), kit.mech_red.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
+        // brow hood over the slit + cheek blocks framing the recess -
+        // NO extra mech_red anywhere: one slit is the x2 weak-point read
+        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.99, 0.30), Quat::from_rotation_x(-0.20), Vec3::new(0.50, 0.025, 0.12)),
+        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(-0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
+        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
         // ---- REAR: comms/cooling drum, LEFT (right one is 40%-tagged) --
         (cyl(), kit.mech_khaki_dk.clone(), Vec3::new(-0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22)),
+        (cyl(), kit.mech_metal.clone(), Vec3::new(-0.28, 0.86, -0.30), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.235, 0.02, 0.235)),
+        (cyl(), kit.mech_metal.clone(), Vec3::new(-0.28, 0.86, -0.46), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.235, 0.02, 0.235)),
         // ---- ANTENNAS: whip base; sensor stalk + ball tip, LEFT --------
         (cube(), kit.mech_metal.clone(), Vec3::new(0.42, 0.76, -0.30), Quat::IDENTITY, Vec3::new(0.05, 0.08, 0.05)),
         (cyl(), kit.mech_metal.clone(), Vec3::new(-0.24, 1.10, -0.18), Quat::IDENTITY, Vec3::new(0.016, 0.14, 0.016)),
@@ -5147,6 +5341,8 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         // ---- ROCKET POD, left hardpoint: rail + box + 10-tube face -----
         (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.735, 0.02), Quat::IDENTITY, Vec3::new(0.28, 0.04, 0.34)),
         (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.855, 0.02), Quat::IDENTITY, Vec3::new(0.34, 0.23, 0.42)),
+        // recessed dark face so the tubes read as BORED openings
+        (cube(), kit.mech_shadow.clone(), Vec3::new(-0.44, 0.855, 0.232), Quat::IDENTITY, Vec3::new(0.32, 0.20, 0.008)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.575, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.508, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.440, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
@@ -5166,6 +5362,9 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         (cyl(), kit.mech_metal.clone(), Vec3::new(0.60, 0.24, 0.83), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.14, 0.03, 0.14)),
         (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.60, 0.06, 0.12), Quat::IDENTITY, Vec3::new(0.15, 0.14, 0.24)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.51, 0.15, 0.05), Quat::from_rotation_z(0.55), Vec3::new(0.14, 0.06, 0.10)),
+        // ---- UNIT STENCILS: faded parchment ident plates ---------------
+        (cube(), kit.mech_stencil.clone(), Vec3::new(-0.40, 0.62, 0.548), Quat::IDENTITY, Vec3::new(0.10, 0.045, 0.008)),
+        (cube(), kit.mech_stencil.clone(), Vec3::new(-0.615, 0.80, 0.10), Quat::IDENTITY, Vec3::new(0.008, 0.05, 0.12)),
     ];
     for (mesh, mat, tr, rot, sc) in plates {
         commands
@@ -5207,21 +5406,199 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             },
         ))
         .set_parent(root);
-    // D.6 stage-tagged hull parts - spawned by hand so their ids return.
-    let mut tag = |mesh: Handle<Mesh>, mat: Handle<StandardMaterial>, tr: Vec3, rot: Quat, sc: Vec3| {
+    // spine heat-sink fins between the drums - the rear deck gets a
+    // machine read of its own instead of a bare khaki roof
+    for k in -2i32..=2 {
         commands
             .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-                Transform { translation: tr, rotation: rot, scale: sc },
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(k as f32 * 0.055, 0.78, -0.36),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(0.018, 0.14, 0.14),
+                },
+            ))
+            .set_parent(root);
+    }
+    // per-side dressing: exhaust stack sunk into each shoulder top,
+    // pauldron edge trim + corner bolts, and the waist support pistons
+    // that sell the hull's cantilever over the hip ring
+    for sd in [-1.0_f32, 1.0] {
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(sd * 0.60, 0.60, -0.14)
+                    .with_scale(Vec3::new(0.075, 0.18, 0.075)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform::from_xyz(sd * 0.60, 0.695, -0.14)
+                    .with_scale(Vec3::new(0.055, 0.012, 0.055)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                Transform::from_xyz(sd * 0.705, 0.535, 0.06)
+                    .with_scale(Vec3::new(0.012, 0.035, 0.38)),
+            ))
+            .set_parent(root);
+        for by in [0.30_f32, 0.53] {
+            for bz in [0.24_f32, -0.12] {
+                commands
+                    .spawn((
+                        Mesh3d(kit.cube.clone()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform::from_xyz(sd * 0.705, by, bz)
+                            .with_scale(Vec3::new(0.015, 0.03, 0.03)),
+                    ))
+                    .set_parent(root);
+            }
+        }
+        for (px, py, sc) in [
+            (0.30, 0.15, Vec3::new(0.035, 0.30, 0.035)),
+            (0.24, 0.22, Vec3::new(0.055, 0.16, 0.055)),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * px, py, -0.08),
+                        rotation: Quat::from_rotation_z(sd * -0.45),
+                        scale: sc,
+                    },
+                ))
+                .set_parent(root);
+        }
+    }
+    // gatling dressing: two clamp rings around the barrel cluster and a
+    // gold feed-link chute arcing from the ammo box into the housing
+    // (gold matches the ammo-pickup vocabulary)
+    for (rz, sc) in [
+        (0.55, Vec3::new(0.135, 0.025, 0.135)),
+        (0.74, Vec3::new(0.125, 0.02, 0.125)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform {
+                    translation: Vec3::new(0.60, 0.24, rz),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: sc,
+                },
+            ))
+            .set_parent(root);
+    }
+    for (lx, ly, lz) in [(0.545, 0.155, 0.03), (0.525, 0.205, 0.00), (0.545, 0.255, -0.02)] {
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.gold.clone()),
+                Transform::from_xyz(lx, ly, lz).with_scale(Vec3::new(0.035, 0.035, 0.05)),
+            ))
+            .set_parent(root);
+    }
+    // D.6 stage-tagged hull parts - GROUP NODES (unit scale, so children
+    // never inherit a squash); `sync_fighters` flips the GROUP's
+    // Visibility and the cluster inherits the stage hide.
+    // hip skirts: the original plate plus fore/aft lamellae - stage-70
+    // then strips the whole hip line, matching the Skirts climb zone
+    let skirt = |commands: &mut Commands, sd: f32| -> Entity {
+        let g = commands
+            .spawn((
+                Transform::from_xyz(0.205 * sd, -0.02, 0.02)
+                    .with_rotation(Quat::from_rotation_z(-0.12 * sd)),
+                Visibility::Inherited,
             ))
             .set_parent(root)
-            .id()
+            .id();
+        for (tr, rx, sc) in [
+            (Vec3::ZERO, 0.0, Vec3::new(0.05, 0.15, 0.22)),
+            (Vec3::new(0.0, -0.01, 0.205), -0.10, Vec3::new(0.045, 0.12, 0.13)),
+            (Vec3::new(0.0, -0.01, -0.185), 0.10, Vec3::new(0.045, 0.12, 0.13)),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: tr,
+                        rotation: Quat::from_rotation_x(rx),
+                        scale: sc,
+                    },
+                ))
+                .set_parent(g);
+        }
+        g
     };
-    let skirt_l = tag(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(-0.205, -0.02, 0.02), Quat::from_rotation_z(0.12), Vec3::new(0.05, 0.15, 0.22));
-    let skirt_r = tag(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.205, -0.02, 0.02), Quat::from_rotation_z(-0.12), Vec3::new(0.05, 0.15, 0.22));
-    let drum_r = tag(kit.cyl.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22));
-    let antenna = tag(kit.cyl.clone(), kit.mech_metal.clone(), Vec3::new(0.42, 1.12, -0.30), Quat::IDENTITY, Vec3::new(0.014, 0.72, 0.014));
+    let skirt_l = skirt(commands, -1.0);
+    let skirt_r = skirt(commands, 1.0);
+    // right drum: the drum plus two rib rings, one stage-40 cluster
+    let drum_r = {
+        let g = commands
+            .spawn((
+                Transform::from_xyz(0.28, 0.86, -0.38)
+                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
+                Visibility::Inherited,
+            ))
+            .set_parent(root)
+            .id();
+        for (ty, mat, sc) in [
+            (0.0, kit.mech_khaki_dk.clone(), Vec3::new(0.22, 0.34, 0.22)),
+            (0.08, kit.mech_metal.clone(), Vec3::new(0.235, 0.02, 0.235)),
+            (-0.08, kit.mech_metal.clone(), Vec3::new(0.235, 0.02, 0.235)),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(mat),
+                    Transform::from_xyz(0.0, ty, 0.0).with_scale(sc),
+                ))
+                .set_parent(g);
+        }
+        g
+    };
+    // antenna: whip + ball tip + a raked second whip - stage-40 sheds a
+    // believable comms cluster, matching the Drum zone
+    let antenna = {
+        let g = commands
+            .spawn((Transform::from_xyz(0.42, 0.76, -0.30), Visibility::Inherited))
+            .set_parent(root)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(0.0, 0.36, 0.0)
+                    .with_scale(Vec3::new(0.014, 0.72, 0.014)),
+            ))
+            .set_parent(g);
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(0.0, 0.735, 0.0).with_scale(Vec3::splat(0.035)),
+            ))
+            .set_parent(g);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(-0.05, 0.26, -0.04)
+                    .with_rotation(Quat::from_rotation_z(0.18))
+                    .with_scale(Vec3::new(0.010, 0.50, 0.010)),
+            ))
+            .set_parent(g);
+        g
+    };
     (root, MechHullDetach { skirt_l, skirt_r, drum_r, antenna })
 }
 
@@ -5278,6 +5655,9 @@ fn spawn_mech_leg_armor(
         Vec3::new(-0.045, -0.03, 0.075), Quat::from_rotation_x(0.35), Vec3::new(0.03, 0.16, 0.03));
     let shin_plate = part(commands, s_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
         Vec3::new(0.0, -0.16, 0.06), Quat::from_rotation_x(0.30), Vec3::new(0.13, 0.20, 0.035));
+    // knee hazard strip - within the §4.2 knee-plate allowance
+    part(commands, s_root, kit.cube.clone(), kit.mech_hazard.clone(),
+        Vec3::new(0.0, -0.075, 0.082), Quat::from_rotation_x(0.30), Vec3::new(0.10, 0.016, 0.012));
     part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
         Vec3::new(0.0, -0.235, 0.045), Quat::from_rotation_x(0.25), Vec3::new(0.035, 0.10, 0.035));
     // FOOT: wide pad, rear spur, and the cleat rows. Do NOT smooth them.
@@ -5289,6 +5669,12 @@ fn spawn_mech_leg_armor(
         Vec3::new(0.0, -0.055, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.018, 0.05));
     part(commands, f_root, kit.cube.clone(), kit.mech_metal.clone(),
         Vec3::new(0.0, -0.055, 0.00), Quat::IDENTITY, Vec3::new(0.16, 0.018, 0.05));
+    // toe teeth - NOT part of `cleat_front`: they survive the stage-15
+    // shed so the Cleats grip zone still has geometry to grab
+    for tx in [-1.0_f32, 1.0] {
+        part(commands, f_root, kit.cube.clone(), kit.mech_metal.clone(),
+            Vec3::new(tx * 0.055, -0.045, 0.205), Quat::from_rotation_x(0.35), Vec3::new(0.035, 0.025, 0.045));
+    }
     MechLegArmor { roots: [t_root, s_root, f_root], thigh_plate, shin_plate, cleat_front }
 }
 
@@ -5430,6 +5816,374 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
 
 // ------------------------------------------- match-scoped world builders --
 
+/// Handles to one soldier's skeleton - what `FighterRig` wraps for
+/// gameplay and the Forge turntable poses statically.
+struct SoldierParts {
+    root: Entity,
+    leg_l: [Entity; 3],
+    leg_r: [Entity; 3],
+    torso: Entity,
+    head: Entity,
+    arm_l: [Entity; 3],
+    arm_r: [Entity; 3],
+    weapon_root: Entity,
+    weapons: [Entity; N_WEAPONS],
+}
+
+/// The four limb capsules, created once per rig batch.
+struct LimbMeshes {
+    thigh: Handle<Mesh>,
+    shin: Handle<Mesh>,
+    upper: Handle<Mesh>,
+    fore: Handle<Mesh>,
+}
+
+/// One soldier's full material set. `emblem_center` is gold for the
+/// player, the dark joint gloss for everyone else.
+struct SoldierLook {
+    shell: Handle<StandardMaterial>,
+    shell2: Handle<StandardMaterial>,
+    accent: Handle<StandardMaterial>,
+    stripe: Handle<StandardMaterial>,
+    hat: Handle<StandardMaterial>,
+    joint: Handle<StandardMaterial>,
+    knee: Handle<StandardMaterial>,
+    eye: Handle<StandardMaterial>,
+    emblem_center: Handle<StandardMaterial>,
+}
+
+/// Build ONE soldier body - root through the spine-mounted weapon set.
+/// Shared by `spawn_fighter_rigs` (which adds FighterVis/FighterRig,
+/// shield, arrow, and mech armour on top) and the Forge turntable
+/// (which adds NEITHER, so `sync_fighters` and `rebuild_world` can
+/// never touch the preview). Extracted rather than copied so the
+/// geometry cannot drift from the gap/band constants the rig tests pin
+/// (`NECK_*`, `YOKE_HALF_W`, `SHOULDER_X`, `ELBOW_*`, `WRIST_*`).
+/// The caller inserts the root transform and any marker components.
+fn spawn_soldier_body(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    limbs: &LimbMeshes,
+    look: &SoldierLook,
+    weapon_detail: bool,
+) -> SoldierParts {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    // LEGS fill the 0.00–0.63 budget: thigh 0.29, shin 0.28, foot 0.06.
+    // Every joint is a visible dark gap; the KNEE is the signature - a
+    // glossy dark dome sitting proud of the shin.
+    let mut legs = [[Entity::PLACEHOLDER; 3]; 2];
+    for (li, lx) in [(-0.11_f32), 0.11].into_iter().enumerate() {
+        let thigh = commands
+            .spawn((Transform::from_xyz(lx, 0.63, 0.0), Visibility::default()))
+            .set_parent(root)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::new(0.13, 0.11, 0.13)),
+            ))
+            .set_parent(thigh);
+        commands
+            .spawn((
+                Mesh3d(limbs.thigh.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, -0.145, 0.0),
+            ))
+            .set_parent(thigh);
+        let shin = commands
+            .spawn((Transform::from_xyz(0.0, -0.29, 0.0), Visibility::default()))
+            .set_parent(thigh)
+            .id();
+        // the glossy knee dome, clearly larger than the other joints
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.knee.clone()),
+                Transform::from_xyz(0.0, -0.005, 0.045)
+                    .with_scale(Vec3::new(0.13, 0.13, 0.13)),
+            ))
+            .set_parent(shin);
+        commands
+            .spawn((
+                Mesh3d(limbs.shin.clone()),
+                MeshMaterial3d(look.shell2.clone()),
+                Transform::from_xyz(0.0, -0.14, 0.0),
+            ))
+            .set_parent(shin);
+        let foot = commands
+            .spawn((Transform::from_xyz(0.0, -0.28, 0.0), Visibility::default()))
+            .set_parent(shin)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::new(0.09, 0.07, 0.09)),
+            ))
+            .set_parent(foot);
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, -0.025, 0.05)
+                    .with_scale(Vec3::new(0.14, 0.09, 0.22)),
+            ))
+            .set_parent(foot);
+        legs[li] = [thigh, shin, foot];
+    }
+    let [leg_l, leg_r] = legs;
+    // TORSO: pelvis → abdomen → chest shells (0.63 → 1.19 world),
+    // shoulder yoke 1.19 → 1.476, all under one animated pivot
+    let torso = commands
+        .spawn((Transform::from_xyz(0.0, 0.63, 0.0), Visibility::default()))
+        .set_parent(root)
+        .id();
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.09, 0.0).with_scale(Vec3::new(0.34, 0.16, 0.26)),
+        ))
+        .set_parent(torso);
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell2.clone()),
+            Transform::from_xyz(0.0, 0.235, 0.0).with_scale(Vec3::new(0.30, 0.24, 0.24)),
+        ))
+        .set_parent(torso);
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.455, 0.0).with_scale(Vec3::new(0.40, 0.30, 0.30)),
+        ))
+        .set_parent(torso);
+    // §1.4 accent 1/3: the thin waist stripe (player: tunic pick)
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.stripe.clone()),
+            Transform::from_xyz(0.0, 0.155, 0.0).with_scale(Vec3::new(0.345, 0.03, 0.27)),
+        ))
+        .set_parent(torso);
+    // §1.4 accent 2/3: the chest emblem - a small ring inset on the
+    // upper-left chest, dark center (the player's is gold)
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.accent.clone()),
+            Transform::from_xyz(-0.09, 0.52, 0.145)
+                .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                .with_scale(Vec3::new(0.075, 0.012, 0.075)),
+        ))
+        .set_parent(torso);
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.emblem_center.clone()),
+            Transform::from_xyz(-0.09, 0.52, 0.152)
+                .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                .with_scale(Vec3::new(0.04, 0.012, 0.04)),
+        ))
+        .set_parent(torso);
+    // shoulder yoke + §1.4 accent 3/3: the band across it - visible
+    // from front, back, and both sides. §1 (Brief IV): wide enough
+    // to reach past the shoulder pivots - no daylight at the arms.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.625, 0.0)
+                .with_scale(Vec3::new(YOKE_HALF_W * 2.0, 0.14, 0.24)),
+        ))
+        .set_parent(torso);
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.accent.clone()),
+            Transform::from_xyz(0.0, 0.625, 0.0)
+                .with_scale(Vec3::new(YOKE_HALF_W * 2.0 + 0.01, 0.032, 0.245)),
+        ))
+        .set_parent(torso);
+    // §1.2 (Brief IV) THE NECK: a dark cylinder BRIDGING yoke → head -
+    // sunk into the shoulders below, piercing past the head pivot
+    // above, so the head-to-body connection survives the full look
+    // range. A joint fills its gap; background never shows through.
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.joint.clone()),
+            Transform::from_xyz(0.0, (NECK_BOT + NECK_TOP) * 0.5, 0.0)
+                .with_scale(Vec3::new(NECK_R * 2.0, NECK_TOP - NECK_BOT, NECK_R * 2.0)),
+        ))
+        .set_parent(torso);
+    // HEAD: the focal mass - a rounded ellipsoid, wider than tall,
+    // matte white, two big black oval eyes set wide and low. Its BASE
+    // sits exactly on the 0.82 hit-band line (world 1.476): every
+    // pixel of face you can see is a real ×4 headshot.
+    let head = commands
+        .spawn((Transform::from_xyz(0.0, 0.846, 0.0), Visibility::default()))
+        .set_parent(torso)
+        .id();
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.162, 0.01).with_scale(Vec3::new(0.38, 0.324, 0.35)),
+        ))
+        .set_parent(head);
+    for ex in [-0.075_f32, 0.075] {
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.eye.clone()),
+                Transform::from_xyz(ex, 0.135, 0.155)
+                    .with_scale(Vec3::new(0.065, 0.092, 0.024)),
+            ))
+            .set_parent(head);
+    }
+    // §1.3 HatSocket: the hat is FROZEN - same meshes, same materials,
+    // same local values. The socket sits where the old torso pivot was
+    // (world 0.62 standing: 0.63 hip + 0.846 head − 0.856), so every
+    // hat piece lands at its exact pre-rebuild world transform.
+    let hat_socket = commands
+        .spawn((Transform::from_xyz(0.0, -0.856, 0.0), Visibility::default()))
+        .set_parent(head)
+        .id();
+    // hat: brim, crown, band - plus the little antenna
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.hat.clone()),
+            Transform::from_xyz(0.0, 1.02, 0.0).with_scale(Vec3::new(0.72, 0.028, 0.72)),
+        ))
+        .set_parent(hat_socket);
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.hat.clone()),
+            Transform::from_xyz(0.0, 1.11, 0.0).with_scale(Vec3::new(0.36, 0.18, 0.36)),
+        ))
+        .set_parent(hat_socket);
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(kit.gunmetal.clone()),
+            Transform::from_xyz(0.0, 1.045, 0.0).with_scale(Vec3::new(0.365, 0.04, 0.365)),
+        ))
+        .set_parent(hat_socket);
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(kit.steel.clone()),
+            Transform::from_xyz(0.13, 1.22, 0.0).with_scale(Vec3::new(0.015, 0.13, 0.015)),
+        ))
+        .set_parent(hat_socket);
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.core_glow.clone()),
+            Transform::from_xyz(0.13, 1.30, 0.0).with_scale(Vec3::splat(0.035)),
+        ))
+        .set_parent(hat_socket);
+    // ARMS: shoulder → elbow → wrist off the yoke, every joint a dark
+    // ball in a visible gap, white shell segments, mitten hands
+    let mut arms = [[Entity::PLACEHOLDER; 3]; 2];
+    for (ai, ax) in [(-SHOULDER_X), SHOULDER_X].into_iter().enumerate() {
+        let upper = commands
+            .spawn((Transform::from_xyz(ax, 0.62, 0.02), Visibility::default()))
+            .set_parent(torso)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::new(0.11, 0.10, 0.11)),
+            ))
+            .set_parent(upper);
+        commands
+            .spawn((
+                Mesh3d(limbs.upper.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, UPPER_CENTER, 0.0),
+            ))
+            .set_parent(upper);
+        let fore = commands
+            .spawn((Transform::from_xyz(0.0, ELBOW_Y, 0.0), Visibility::default()))
+            .set_parent(upper)
+            .id();
+        // §1: the elbow ball is BIG enough to be the bridge
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::splat(ELBOW_R * 2.0)),
+            ))
+            .set_parent(fore);
+        commands
+            .spawn((
+                Mesh3d(limbs.fore.clone()),
+                MeshMaterial3d(look.shell2.clone()),
+                Transform::from_xyz(0.0, FORE_CENTER, 0.0),
+            ))
+            .set_parent(fore);
+        let hand = commands
+            .spawn((Transform::from_xyz(0.0, WRIST_Y, 0.0), Visibility::default()))
+            .set_parent(fore)
+            .id();
+        // §1: a dark wrist ball closes the forearm → mitten seam
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::splat(WRIST_R * 2.0)),
+            ))
+            .set_parent(hand);
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, -0.02, 0.0)
+                    .with_scale(Vec3::new(0.13, 0.10, 0.15)),
+            ))
+            .set_parent(hand);
+        arms[ai] = [upper, fore, hand];
+    }
+    let [arm_l, arm_r] = arms;
+    // §1.3: the WEAPON ROOT on the spine - the gun is parented here
+    // (muzzle already +Z = body forward) and BOTH hands IK onto its
+    // grip sockets. Parenting the gun to a hand is what produces the
+    // floating-weapon look; this is the correct dependency direction.
+    let weapon_root = commands
+        .spawn((Transform::from_xyz(0.10, 0.50, 0.14), Visibility::default()))
+        .set_parent(torso)
+        .id();
+    let mut weapons = [Entity::PLACEHOLDER; N_WEAPONS];
+    for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
+        let model = spawn_weapon_model(commands, kit, wk, weapon_detail, false);
+        commands
+            .entity(model)
+            .insert((Transform::IDENTITY, Visibility::Hidden))
+            .set_parent(weapon_root);
+        weapons[wi] = model;
+    }
+    SoldierParts {
+        root,
+        leg_l,
+        leg_r,
+        torso,
+        head,
+        arm_l,
+        arm_r,
+        weapon_root,
+        weapons,
+    }
+}
+
 /// Build every fighter's rig. §1 art direction: the WHITE SERVICE ROBOT -
 /// matte white shell panels over exposed dark gloss joints, an oversized
 /// rounded head with two big black oval eyes (no mouth, no visor), glossy
@@ -5462,6 +6216,12 @@ fn spawn_fighter_rigs(
     // zero daylight, in every pose, by construction
     let mesh_upper = meshes.add(Capsule3d::new(0.055, 0.14));
     let mesh_fore = meshes.add(Capsule3d::new(0.048, 0.12));
+    let limbs = LimbMeshes {
+        thigh: mesh_thigh,
+        shin: mesh_shin,
+        upper: mesh_upper,
+        fore: mesh_fore,
+    };
     // §1.4 shared shell/joint materials - created ONCE per rebuild, cloned
     // per fighter only for the accent slot.
     //
@@ -5541,320 +6301,39 @@ fn spawn_fighter_rigs(
             hat_color(slot, false)
         };
         let hat = materials.add(metal(hat_c, 0.05, 0.85));
-        let root = commands
-            .spawn((
-                Transform::from_xyz(f.pos[0], f.pos[1], f.pos[2]),
-                Visibility::default(),
-                FighterVis { index: i },
-            ))
-            .id();
-        // LEGS fill the 0.00–0.63 budget: thigh 0.29, shin 0.28, foot 0.06.
-        // Every joint is a visible dark gap; the KNEE is the signature - a
-        // glossy dark dome sitting proud of the shin.
-        let mut legs = [[Entity::PLACEHOLDER; 3]; 2];
-        for (li, lx) in [(-0.11_f32), 0.11].into_iter().enumerate() {
-            let thigh = commands
-                .spawn((Transform::from_xyz(lx, 0.63, 0.0), Visibility::default()))
-                .set_parent(root)
-                .id();
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(joint.clone()),
-                    Transform::from_scale(Vec3::new(0.13, 0.11, 0.13)),
-                ))
-                .set_parent(thigh);
-            commands
-                .spawn((
-                    Mesh3d(mesh_thigh.clone()),
-                    MeshMaterial3d(shell.clone()),
-                    Transform::from_xyz(0.0, -0.145, 0.0),
-                ))
-                .set_parent(thigh);
-            let shin = commands
-                .spawn((Transform::from_xyz(0.0, -0.29, 0.0), Visibility::default()))
-                .set_parent(thigh)
-                .id();
-            // the glossy knee dome, clearly larger than the other joints
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(knee.clone()),
-                    Transform::from_xyz(0.0, -0.005, 0.045)
-                        .with_scale(Vec3::new(0.13, 0.13, 0.13)),
-                ))
-                .set_parent(shin);
-            commands
-                .spawn((
-                    Mesh3d(mesh_shin.clone()),
-                    MeshMaterial3d(shell2.clone()),
-                    Transform::from_xyz(0.0, -0.14, 0.0),
-                ))
-                .set_parent(shin);
-            let foot = commands
-                .spawn((Transform::from_xyz(0.0, -0.28, 0.0), Visibility::default()))
-                .set_parent(shin)
-                .id();
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(joint.clone()),
-                    Transform::from_scale(Vec3::new(0.09, 0.07, 0.09)),
-                ))
-                .set_parent(foot);
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(shell.clone()),
-                    Transform::from_xyz(0.0, -0.025, 0.05)
-                        .with_scale(Vec3::new(0.14, 0.09, 0.22)),
-                ))
-                .set_parent(foot);
-            legs[li] = [thigh, shin, foot];
-        }
-        let [leg_l, leg_r] = legs;
-        // TORSO: pelvis → abdomen → chest shells (0.63 → 1.19 world),
-        // shoulder yoke 1.19 → 1.476, all under one animated pivot
-        let torso = commands
-            .spawn((Transform::from_xyz(0.0, 0.63, 0.0), Visibility::default()))
-            .set_parent(root)
-            .id();
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(shell.clone()),
-                Transform::from_xyz(0.0, 0.09, 0.0).with_scale(Vec3::new(0.34, 0.16, 0.26)),
-            ))
-            .set_parent(torso);
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(shell2.clone()),
-                Transform::from_xyz(0.0, 0.235, 0.0).with_scale(Vec3::new(0.30, 0.24, 0.24)),
-            ))
-            .set_parent(torso);
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(shell.clone()),
-                Transform::from_xyz(0.0, 0.455, 0.0).with_scale(Vec3::new(0.40, 0.30, 0.30)),
-            ))
-            .set_parent(torso);
-        // §1.4 accent 1/3: the thin waist stripe (player: tunic pick)
-        commands
-            .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(stripe),
-                Transform::from_xyz(0.0, 0.155, 0.0).with_scale(Vec3::new(0.345, 0.03, 0.27)),
-            ))
-            .set_parent(torso);
-        // §1.4 accent 2/3: the chest emblem - a small ring inset on the
-        // upper-left chest, dark center (the player's is gold)
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(accent.clone()),
-                Transform::from_xyz(-0.09, 0.52, 0.145)
-                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
-                    .with_scale(Vec3::new(0.075, 0.012, 0.075)),
-            ))
-            .set_parent(torso);
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(if is_player {
-                    kit.gold.clone()
-                } else {
-                    joint.clone()
-                }),
-                Transform::from_xyz(-0.09, 0.52, 0.152)
-                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
-                    .with_scale(Vec3::new(0.04, 0.012, 0.04)),
-            ))
-            .set_parent(torso);
-        // shoulder yoke + §1.4 accent 3/3: the band across it - visible
-        // from front, back, and both sides. §1 (Brief IV): wide enough
-        // to reach past the shoulder pivots - no daylight at the arms.
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(shell.clone()),
-                Transform::from_xyz(0.0, 0.625, 0.0)
-                    .with_scale(Vec3::new(YOKE_HALF_W * 2.0, 0.14, 0.24)),
-            ))
-            .set_parent(torso);
-        commands
-            .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(accent.clone()),
-                Transform::from_xyz(0.0, 0.625, 0.0)
-                    .with_scale(Vec3::new(YOKE_HALF_W * 2.0 + 0.01, 0.032, 0.245)),
-            ))
-            .set_parent(torso);
-        // §1.2 (Brief IV) THE NECK: a dark cylinder BRIDGING yoke → head -
-        // sunk into the shoulders below, piercing past the head pivot
-        // above, so the head-to-body connection survives the full look
-        // range. A joint fills its gap; background never shows through.
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(joint.clone()),
-                Transform::from_xyz(0.0, (NECK_BOT + NECK_TOP) * 0.5, 0.0)
-                    .with_scale(Vec3::new(NECK_R * 2.0, NECK_TOP - NECK_BOT, NECK_R * 2.0)),
-            ))
-            .set_parent(torso);
-        // HEAD: the focal mass - a rounded ellipsoid, wider than tall,
-        // matte white, two big black oval eyes set wide and low. Its BASE
-        // sits exactly on the 0.82 hit-band line (world 1.476): every
-        // pixel of face you can see is a real ×4 headshot.
-        let head = commands
-            .spawn((Transform::from_xyz(0.0, 0.846, 0.0), Visibility::default()))
-            .set_parent(torso)
-            .id();
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(shell.clone()),
-                Transform::from_xyz(0.0, 0.162, 0.01).with_scale(Vec3::new(0.38, 0.324, 0.35)),
-            ))
-            .set_parent(head);
-        for ex in [-0.075_f32, 0.075] {
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(eye_mat.clone()),
-                    Transform::from_xyz(ex, 0.135, 0.155)
-                        .with_scale(Vec3::new(0.065, 0.092, 0.024)),
-                ))
-                .set_parent(head);
-        }
-        // §1.3 HatSocket: the hat is FROZEN - same meshes, same materials,
-        // same local values. The socket sits where the old torso pivot was
-        // (world 0.62 standing: 0.63 hip + 0.846 head − 0.856), so every
-        // hat piece lands at its exact pre-rebuild world transform.
-        let hat_socket = commands
-            .spawn((Transform::from_xyz(0.0, -0.856, 0.0), Visibility::default()))
-            .set_parent(head)
-            .id();
-        // hat: brim, crown, band - plus the little antenna
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(hat.clone()),
-                Transform::from_xyz(0.0, 1.02, 0.0).with_scale(Vec3::new(0.72, 0.028, 0.72)),
-            ))
-            .set_parent(hat_socket);
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(hat.clone()),
-                Transform::from_xyz(0.0, 1.11, 0.0).with_scale(Vec3::new(0.36, 0.18, 0.36)),
-            ))
-            .set_parent(hat_socket);
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(kit.gunmetal.clone()),
-                Transform::from_xyz(0.0, 1.045, 0.0).with_scale(Vec3::new(0.365, 0.04, 0.365)),
-            ))
-            .set_parent(hat_socket);
-        commands
-            .spawn((
-                Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(kit.steel.clone()),
-                Transform::from_xyz(0.13, 1.22, 0.0).with_scale(Vec3::new(0.015, 0.13, 0.015)),
-            ))
-            .set_parent(hat_socket);
-        commands
-            .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.core_glow.clone()),
-                Transform::from_xyz(0.13, 1.30, 0.0).with_scale(Vec3::splat(0.035)),
-            ))
-            .set_parent(hat_socket);
-        // ARMS: shoulder → elbow → wrist off the yoke, every joint a dark
-        // ball in a visible gap, white shell segments, mitten hands
-        let mut arms = [[Entity::PLACEHOLDER; 3]; 2];
-        for (ai, ax) in [(-SHOULDER_X), SHOULDER_X].into_iter().enumerate() {
-            let upper = commands
-                .spawn((Transform::from_xyz(ax, 0.62, 0.02), Visibility::default()))
-                .set_parent(torso)
-                .id();
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(joint.clone()),
-                    Transform::from_scale(Vec3::new(0.11, 0.10, 0.11)),
-                ))
-                .set_parent(upper);
-            commands
-                .spawn((
-                    Mesh3d(mesh_upper.clone()),
-                    MeshMaterial3d(shell.clone()),
-                    Transform::from_xyz(0.0, UPPER_CENTER, 0.0),
-                ))
-                .set_parent(upper);
-            let fore = commands
-                .spawn((Transform::from_xyz(0.0, ELBOW_Y, 0.0), Visibility::default()))
-                .set_parent(upper)
-                .id();
-            // §1: the elbow ball is BIG enough to be the bridge
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(joint.clone()),
-                    Transform::from_scale(Vec3::splat(ELBOW_R * 2.0)),
-                ))
-                .set_parent(fore);
-            commands
-                .spawn((
-                    Mesh3d(mesh_fore.clone()),
-                    MeshMaterial3d(shell2.clone()),
-                    Transform::from_xyz(0.0, FORE_CENTER, 0.0),
-                ))
-                .set_parent(fore);
-            let hand = commands
-                .spawn((Transform::from_xyz(0.0, WRIST_Y, 0.0), Visibility::default()))
-                .set_parent(fore)
-                .id();
-            // §1: a dark wrist ball closes the forearm → mitten seam
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(joint.clone()),
-                    Transform::from_scale(Vec3::splat(WRIST_R * 2.0)),
-                ))
-                .set_parent(hand);
-            commands
-                .spawn((
-                    Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(shell.clone()),
-                    Transform::from_xyz(0.0, -0.02, 0.0)
-                        .with_scale(Vec3::new(0.13, 0.10, 0.15)),
-                ))
-                .set_parent(hand);
-            arms[ai] = [upper, fore, hand];
-        }
-        let [arm_l, arm_r] = arms;
-        // §1.3: the WEAPON ROOT on the spine - the gun is parented here
-        // (muzzle already +Z = body forward) and BOTH hands IK onto its
-        // grip sockets. Parenting the gun to a hand is what produces the
-        // floating-weapon look; this is the correct dependency direction.
-        let weapon_root = commands
-            .spawn((Transform::from_xyz(0.10, 0.50, 0.14), Visibility::default()))
-            .set_parent(torso)
-            .id();
-        let mut weapons = [Entity::PLACEHOLDER; N_WEAPONS];
-        for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
-            let model = spawn_weapon_model(commands, kit, wk, is_player, false);
-            commands
-                .entity(model)
-                .insert((Transform::IDENTITY, Visibility::Hidden))
-                .set_parent(weapon_root);
-            weapons[wi] = model;
-        }
+        let look = SoldierLook {
+            shell: shell.clone(),
+            shell2: shell2.clone(),
+            accent: accent.clone(),
+            stripe,
+            hat,
+            joint: joint.clone(),
+            knee: knee.clone(),
+            eye: eye_mat.clone(),
+            emblem_center: if is_player {
+                kit.gold.clone()
+            } else {
+                joint.clone()
+            },
+        };
+        let parts = spawn_soldier_body(commands, kit, &limbs, &look, is_player);
+        commands.entity(parts.root).insert((
+            Transform::from_xyz(f.pos[0], f.pos[1], f.pos[2]),
+            FighterVis { index: i },
+        ));
+        let SoldierParts {
+            root,
+            leg_l,
+            leg_r,
+            torso,
+            head,
+            arm_l,
+            arm_r,
+            weapon_root,
+            weapons,
+        } = parts;
         // the always-carried shield, on the left forearm
-        let shield = spawn_shield_model(commands, kit);
+        let shield = spawn_shield_model(commands, kit, false);
         commands
             .entity(shield)
             .insert((
@@ -6166,6 +6645,35 @@ fn setup(
             unlit: true,
             ..default()
         }),
+        // FP-only translucent shield set. Metallic stays LOW: metallic
+        // 1.0 + Blend reads as near-invisible smoked glass. Alpha 0.28
+        // per slat because the three angled slats overlap and
+        // double-blend at their edges (~0.3 net).
+        vm_shield_dark: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.14, 0.15, 0.18, 0.28),
+            metallic: 0.1,
+            perceptual_roughness: 0.35,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        vm_shield_steel: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.62, 0.64, 0.68, 0.35),
+            metallic: 0.2,
+            perceptual_roughness: 0.30,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        vm_shield_gold: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.95, 0.80, 0.30, 0.45),
+            metallic: 0.3,
+            perceptual_roughness: 0.25,
+            emissive: LinearRgba::new(0.18, 0.14, 0.03, 1.0),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        // decorative parchment (branding::palette::PARCHMENT_DIM), never
+        // the ally signal white
+        mech_stencil: materials.add(metal(Color::srgb(0.68, 0.63, 0.55), 0.0, 0.8)),
     };
 
     // Fighter rigs, health bars, and pickup pads are match-scoped now
@@ -6223,8 +6731,8 @@ fn setup(
                 clear_color: ClearColorConfig::Custom(Color::srgb(0.07, 0.055, 0.04)),
                 ..default()
             },
-            Transform::from_translation(FORGE_STAGE_POS + Vec3::new(1.5, 1.35, 2.1))
-                .looking_at(FORGE_STAGE_POS + Vec3::new(0.0, 0.85, 0.0), Vec3::Y),
+            Transform::from_translation(FORGE_STAGE_POS + Vec3::new(1.7, 1.6, 2.4))
+                .looking_at(FORGE_STAGE_POS + Vec3::new(0.0, 0.98, 0.0), Vec3::Y),
             RenderLayers::layer(FORGE_PREVIEW_LAYER),
         ));
         commands.spawn((
@@ -6237,11 +6745,19 @@ fn setup(
             RenderLayers::layer(FORGE_PREVIEW_LAYER),
         ));
 
-        // unique cosmetic materials the sync system recolours in place
-        let hat_mat = materials.add(metal(Color::srgb(0.92, 0.90, 0.85), 0.0, 0.5));
-        let tunic_mat = materials.add(metal(Color::srgb(0.80, 0.65, 0.26), 0.0, 0.55));
-        let shell = materials.add(metal(Color::srgb_u8(0xED, 0xEE, 0xF0), 0.0, 0.42));
-        let dark = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
+        // unique cosmetic materials the sync system recolours in place -
+        // SAME surface params as the gameplay rig, so the card matches
+        // the field (the old mannequin used flatter ones)
+        let hat_mat = materials.add(metal(Color::srgb(0.92, 0.90, 0.85), 0.05, 0.85));
+        let tunic_mat = {
+            let (_, (r, g, b)) = TUNIC_CHOICES[0];
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(r, g, b),
+                perceptual_roughness: 0.35,
+                emissive: LinearRgba::new(r * 0.4, g * 0.4, b * 0.4, 1.0),
+                ..default()
+            })
+        };
         let bronze_ped = materials.add(metal(Color::srgb(0.55, 0.42, 0.22), 0.3, 0.5));
 
         // the STAND - everything on it rotates together
@@ -6251,60 +6767,69 @@ fn setup(
                 Visibility::default(),
             ))
             .id();
-        let part = |commands: &mut Commands,
-                    mesh: Handle<Mesh>,
-                    mat: Handle<StandardMaterial>,
-                    tr: Vec3,
-                    sc: Vec3| {
-            let e = commands
-                .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(mat),
-                    Transform {
-                        translation: tr,
-                        rotation: Quat::IDENTITY,
-                        scale: sc,
-                    },
-                ))
-                .set_parent(stand)
-                .id();
-            e
-        };
         // pedestal
-        part(&mut commands, kit.cyl.clone(), bronze_ped, Vec3::new(0.0, 0.03, 0.0), Vec3::new(0.95, 0.06, 0.95));
-        // mannequin: legs / torso in TUNIC / head / HAT crown + brim
-        part(&mut commands, kit.cyl.clone(), dark.clone(), Vec3::new(-0.09, 0.42, 0.0), Vec3::new(0.11, 0.72, 0.11));
-        part(&mut commands, kit.cyl.clone(), dark.clone(), Vec3::new(0.09, 0.42, 0.0), Vec3::new(0.11, 0.72, 0.11));
-        part(&mut commands, kit.cyl.clone(), tunic_mat.clone(), Vec3::new(0.0, 1.02, 0.0), Vec3::new(0.36, 0.52, 0.26));
-        part(&mut commands, kit.ball.clone(), shell, Vec3::new(0.0, 1.44, 0.0), Vec3::new(0.24, 0.26, 0.24));
-        part(&mut commands, kit.cyl.clone(), hat_mat.clone(), Vec3::new(0.0, 1.60, 0.0), Vec3::new(0.22, 0.12, 0.22));
-        part(&mut commands, kit.cyl.clone(), hat_mat.clone(), Vec3::new(0.0, 1.545, 0.0), Vec3::new(0.40, 0.02, 0.40));
-        // one weapon model per kind, held out beside the mannequin; the
-        // sync system shows the selected primary and hides the rest
-        let mut weapons = [Entity::PLACEHOLDER; N_WEAPONS];
-        for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
-            let model = spawn_weapon_model(&mut commands, &kit, wk, true, false);
-            commands
-                .entity(model)
-                .insert((
-                    Transform {
-                        translation: Vec3::new(0.44, 1.02, 0.0),
-                        // side-on, slightly raked - a display pose
-                        rotation: Quat::from_rotation_y(FRAC_PI_2)
-                            * Quat::from_rotation_x(-0.06),
-                        scale: Vec3::splat(1.15),
-                    },
-                    Visibility::Hidden,
-                ))
-                .set_parent(stand);
-            weapons[wi] = model;
-        }
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(bronze_ped),
+                Transform::from_xyz(0.0, 0.03, 0.0)
+                    .with_scale(Vec3::new(0.95, 0.06, 0.95)),
+            ))
+            .set_parent(stand);
+        // THE SOLDIER - the REAL gameplay rig (ally colours, player
+        // detail), not a mannequin: the card shows the character the
+        // player actually fields, gun in hand. It carries NEITHER
+        // FighterVis NOR FighterRig, so `sync_fighters` never animates
+        // it and `rebuild_world` never despawns it.
+        let shade = |c: Color, k: f32| {
+            let sc = c.to_srgba();
+            Color::srgb(sc.red * k, sc.green * k, sc.blue * k)
+        };
+        let limbs = LimbMeshes {
+            thigh: meshes.add(Capsule3d::new(0.072, 0.15)),
+            shin: meshes.add(Capsule3d::new(0.060, 0.15)),
+            upper: meshes.add(Capsule3d::new(0.055, 0.14)),
+            fore: meshes.add(Capsule3d::new(0.048, 0.12)),
+        };
+        let joint = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
+        let look = SoldierLook {
+            shell: materials.add(metal(branding::signal::ALLY, 0.0, 0.42)),
+            shell2: materials.add(metal(shade(branding::signal::ALLY, 0.92), 0.0, 0.45)),
+            accent: {
+                let (r, g, b) = branding::signal::Side::Ally.accent_rgb();
+                materials.add(StandardMaterial {
+                    base_color: branding::signal::Side::Ally.accent(),
+                    perceptual_roughness: 0.35,
+                    emissive: LinearRgba::new(r * 0.40, g * 0.40, b * 0.40, 1.0),
+                    ..default()
+                })
+            },
+            stripe: tunic_mat.clone(),
+            hat: hat_mat.clone(),
+            joint: joint.clone(),
+            knee: materials.add(metal(Color::srgb_u8(0x0E, 0x10, 0x13), 0.20, 0.08)),
+            eye: materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0x0A, 0x0B, 0x0D),
+                perceptual_roughness: 0.15,
+                emissive: LinearRgba::new(0.016, 0.021, 0.028, 1.0),
+                ..default()
+            }),
+            emblem_center: kit.gold.clone(),
+        };
+        let parts = spawn_soldier_body(&mut commands, &kit, &limbs, &look, true);
+        commands
+            .entity(parts.root)
+            .insert(Transform::from_xyz(0.0, 0.06, 0.0)) // feet on the pedestal
+            .set_parent(stand);
         commands.insert_resource(ForgePreview {
             image,
             stand,
-            weapons,
+            weapons: parts.weapons,
             hat_mat,
             tunic_mat,
+            weapon_root: parts.weapon_root,
+            arm_l: parts.arm_l,
+            arm_r: parts.arm_r,
         });
     }
 
@@ -6514,8 +7039,9 @@ fn setup(
         }
         vm_weapons[wi] = model;
     }
-    // the raised shield fills the view when it's up
-    let vm_shield = spawn_shield_model(&mut commands, &kit);
+    // the raised shield fills the view when it's up - the TRANSLUCENT
+    // copy: it guards without blinding
+    let vm_shield = spawn_shield_model(&mut commands, &kit, true);
     commands
         .entity(vm_shield)
         .insert((
@@ -6523,10 +7049,39 @@ fn setup(
             Visibility::Hidden,
         ))
         .set_parent(vm_root);
+    // §C.7: the two hull-mount viewmodels. MUST spawn here in setup -
+    // `tag_viewmodel_layer` latches after its first sweep and would
+    // never stamp a late spawn onto the vm camera's layer.
+    let mech_turret = spawn_mech_turret_vm(&mut commands, &kit);
+    commands
+        .entity(mech_turret)
+        .insert((
+            Transform {
+                translation: Vec3::new(0.16, -0.15, -0.34),
+                rotation: Quat::from_rotation_y(PI + 0.026),
+                scale: Vec3::splat(0.9),
+            },
+            Visibility::Hidden,
+        ))
+        .set_parent(vm_root);
+    let mech_pod = spawn_mech_pod_vm(&mut commands, &kit);
+    commands
+        .entity(mech_pod)
+        .insert((
+            Transform {
+                translation: Vec3::new(0.15, -0.14, -0.36),
+                rotation: Quat::from_rotation_y(PI + 0.026),
+                scale: Vec3::splat(0.9),
+            },
+            Visibility::Hidden,
+        ))
+        .set_parent(vm_root);
     commands.insert_resource(VmRig {
         root: vm_root,
         weapons: vm_weapons,
         shield: vm_shield,
+        mech_turret,
+        mech_pod,
     });
 
     // ---- §4.2 projectile arc preview: pixel squares spaced by ARC
@@ -6754,8 +7309,9 @@ fn setup(
         PromptText,
         HudRoot,
     ));
-    // §9.1 (Brief IV): vertical weapon strip, right screen edge
-    for slot in 0..3usize {
+    // §9.1 (Brief IV): vertical weapon strip, right screen edge -
+    // three guns plus the SHIELD essential on [4]
+    for slot in 0..4usize {
         commands.spawn((
             Text::new(""),
             TextFont {
@@ -6967,7 +7523,9 @@ fn setup(
         Node {
             position_type: PositionType::Absolute,
             left: Val::Percent(40.0),
-            top: Val::Percent(58.0),
+            // 62%, one step below the context bar's 58% row - "BOARDING"
+            // and a hit confirm used to overprint each other
+            top: Val::Percent(62.0),
             ..default()
         },
         HitFeedText,
@@ -7069,6 +7627,12 @@ fn setup(
                     ..default()
                 },
                 TextColor(branding::palette::PARCHMENT),
+                // hard cap so no future status string can span the
+                // screen and fold into the ammo corner again
+                Node {
+                    max_width: Val::Px(600.0),
+                    ..default()
+                },
                 PanelInfoText,
             ));
             // §4.1: the depleting health bar, SEGMENTED. A solid bar
@@ -7745,7 +8309,7 @@ fn input_and_step(
         Vec3::Z
     };
 
-    // SPACE jump, Q roll (or tap crouch at a sprint), E shield,
+    // SPACE jump, Q roll (or tap crouch at a sprint), 4 shield,
     // O or V first/third person, Z/X lean, 1-3 weapon slots, M minimap.
     // CTRL crouch, C armor ability, T inspect. Edge inputs latch until a
     // sim step runs. (The v6 mapping this comment used to describe -
@@ -7775,13 +8339,21 @@ fn input_and_step(
     let p_gun = game.sim.fighters[game.sim.player].gun;
     let scoped_gun = gun(p_gun).scoped;
     let alt_capable = scoped_gun || gun(p_gun).projectile.is_some();
+    // §C.7 addendum: in FIRST person with the ROCKETS mount selected,
+    // the aim hold IS the missile pre-aim (cmd.pod_aim below) - it must
+    // not double as ADS, or targeting drags the visor into a zoom.
+    // Third person keeps the normal focus pull-in unchanged. Gate on
+    // `first_person` (the TARGET), not person_t: mid-blend flicker.
+    let pod_aim_owns_rmb = cam.first_person
+        && game.sim.fighters[game.sim.player].in_mech()
+        && game.sim.fighters[game.sim.player].mech_weapon == sim::MechWeapon::Rockets;
     // §5.2 (Brief VI): scoped-class zoom is a two-stage CYCLE (40° →
     // 10° → out), and EVERY shot auto-unscopes - the bolt is cycled
     // out of the glass
-    if scoped_gun && buttons.just_pressed(aim_btn) {
+    if scoped_gun && !pod_aim_owns_rmb && buttons.just_pressed(aim_btn) {
         cam.zoom_stage = (cam.zoom_stage + 1) % 3;
     }
-    if !scoped_gun {
+    if !scoped_gun || pod_aim_owns_rmb {
         cam.zoom_stage = 0;
     }
     let pf = game.sim.fighters[game.sim.player].fire_cd;
@@ -7793,7 +8365,9 @@ fn input_and_step(
     // plain hold. `alt_capable` no longer gates this - it only records
     // which weapons have the RICHER alt behaviour (draw / scope), which
     // the viewmodel and arc-preview systems still ask about.
-    let ads = if scoped_gun {
+    let ads = if pod_aim_owns_rmb {
+        false
+    } else if scoped_gun {
         cam.zoom_stage > 0
     } else {
         buttons.pressed(aim_btn)
@@ -7833,7 +8407,10 @@ fn input_and_step(
     if keys.just_pressed(KeyCode::KeyR) {
         game.pending_reload = true;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
+    // the shield is inventory slot 4 now - an essential item beside the
+    // three guns, not a verb key. Same toggle cmd downstream, so the
+    // sim's contract (and its tests) never move.
+    if keys.just_pressed(KeyCode::Digit4) {
         game.pending_shield = true;
     }
     // §5 (owner, revised): G PUTS THE GRENADE IN YOUR HAND.
@@ -10167,6 +10744,7 @@ fn forge_preview_sync(
     fp: Res<ForgePreview>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut vis: Query<&mut Visibility>,
+    mut tfs: Query<&mut Transform>,
 ) {
     if !sel.is_changed() {
         return;
@@ -10178,6 +10756,9 @@ fn forge_preview_sync(
     let (_, (tr, tg, tb)) = TUNIC_CHOICES[sel.tunic % TUNIC_CHOICES.len()];
     if let Some(mat) = materials.get_mut(&fp.tunic_mat) {
         mat.base_color = Color::srgb(tr, tg, tb);
+        // emissive parity with the live rig's stripe (x0.4), so the
+        // card's tunic glows exactly like the field one
+        mat.emissive = LinearRgba::new(tr * 0.4, tg * 0.4, tb * 0.4, 1.0);
     }
     let show = ALL_WEAPONS.iter().position(|w| *w == sel.loadout[0]);
     for (wi, e) in fp.weapons.iter().enumerate() {
@@ -10187,6 +10768,39 @@ fn forge_preview_sync(
             } else {
                 Visibility::Hidden
             };
+        }
+    }
+    // one-shot static carry pose: the weapon root takes the patrol
+    // carry and both hands IK onto the selected gun's own grip sockets
+    // - the same solver `sync_fighters` runs live, frozen mid-stride
+    let kind = sel.loadout[0];
+    let (wr_pos, wr_rot) = match kind {
+        GunKind::Bow => (Vec3::new(-0.04, 0.48, 0.16), Quat::from_rotation_x(0.28)),
+        GunKind::Spear => (Vec3::new(0.16, 0.72, 0.02), Quat::from_rotation_x(-1.35)),
+        _ => (Vec3::new(WR_X, 0.50, WR_Z_HIP), Quat::from_rotation_x(0.31)),
+    };
+    if let Ok(mut t) = tfs.get_mut(fp.weapon_root) {
+        t.translation = wr_pos;
+        t.rotation = wr_rot;
+    }
+    let sockets = weapon_hand_specs(kind);
+    let sh_l = Vec3::new(-SHOULDER_X, 0.62, 0.02);
+    let sh_r = Vec3::new(SHOULDER_X, 0.62, 0.02);
+    let (pole_l, pole_r) = (Vec3::new(-0.574, -0.80, 0.15), Vec3::new(0.574, -0.80, 0.15));
+    let mut left = (Quat::from_rotation_x(0.08), 0.15_f32);
+    let mut right = (Quat::from_rotation_x(-0.08), 0.15_f32);
+    if let Some((p, ..)) = sockets.first() {
+        right = solve_arm_ik(sh_r, wr_pos + wr_rot * *p, pole_r);
+    }
+    if let Some((p, ..)) = sockets.get(1) {
+        left = solve_arm_ik(sh_l, wr_pos + wr_rot * *p, pole_l);
+    }
+    for (arm, (sh, elbow)) in [(fp.arm_l, left), (fp.arm_r, right)] {
+        if let Ok(mut t) = tfs.get_mut(arm[0]) {
+            t.rotation = sh;
+        }
+        if let Ok(mut t) = tfs.get_mut(arm[1]) {
+            t.rotation = Quat::from_rotation_x(-elbow.max(0.0));
         }
     }
 }
@@ -10351,6 +10965,7 @@ struct VmState {
 #[allow(clippy::too_many_arguments)]
 fn fp_viewmodel(
     time: Res<Time>,
+    state: Res<State<GameState>>,
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
     vm: Res<VmRig>,
@@ -10386,7 +11001,7 @@ fn fp_viewmodel(
         let rest = -0.12 + (tf_.rest + 0.12) * on_trigger;
         t.rotation = Quat::from_rotation_x(rest - press * 0.38);
     }
-    let show = cam_ctl.person_t < 0.5 && p.alive() && p.roll_t <= 0.0;
+    let show = vm_rendered(state.get(), cam_ctl.person_t, p.alive(), p.roll_t);
     if let Ok((_, mut v)) = q.get_mut(vm.root) {
         *v = if show {
             Visibility::Visible
@@ -10397,8 +11012,10 @@ fn fp_viewmodel(
     if !show {
         return;
     }
-    let slot = weapon_slot(p.gun);
-    let scoped = cam_ctl.ads && spec.scoped;
+    // §C: in a chassis the rifle is STOWED (same rule the body rig
+    // applies) - the mount viewmodels below own the frame instead
+    let slot = if p.in_mech() { None } else { weapon_slot(p.gun) };
+    let scoped = cam_ctl.ads && spec.scoped && !p.in_mech();
     for (wi, we) in vm.weapons.iter().enumerate() {
         if let Ok((_, mut v)) = q.get_mut(*we) {
             // the raised shield replaces the gun view; a scoped AWM view
@@ -10411,7 +11028,25 @@ fn fp_viewmodel(
         }
     }
     if let Ok((_, mut v)) = q.get_mut(vm.shield) {
-        *v = if p.shield_up {
+        *v = if p.shield_up && !p.in_mech() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // §C.7: the two hull-mount viewmodels - TURRET (gatling cluster,
+    // also stands in for the bot-only autocannon) and the ROCKETS pod,
+    // swapped by the selected mount exactly as the weapon strip maps it
+    let pod_sel = p.in_mech() && p.mech_weapon == sim::MechWeapon::Rockets;
+    if let Ok((_, mut v)) = q.get_mut(vm.mech_turret) {
+        *v = if p.in_mech() && !pod_sel {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if let Ok((_, mut v)) = q.get_mut(vm.mech_pod) {
+        *v = if pod_sel {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -10506,7 +11141,8 @@ fn fp_viewmodel(
         );
     }
     let lr = st.lowready;
-    let reloading = p.reload_t > 0.0;
+    // §C: a hull mount never plays the rifle's reload theatre
+    let reloading = p.reload_t > 0.0 && !p.in_mech();
     // §3: the spear windup reads in FIRST person too - the arm hauls
     // back and up through the wind, then the release whips through
     // §3.2: the windup fraction drives ~30 cm of viewmodel translation
@@ -10530,8 +11166,22 @@ fn fp_viewmodel(
     // 30% roll, recovered inside 140 ms regardless of the gun's cadence;
     // translation kick capped at 1.5 cm. The gun never wanders.
     // §1.3 (Brief VI): return window tightened to 120 ms
-    let kick_vm = if p.armed() && p.fire_cd > 0.0 {
-        ((VM_KICK_RETURN_S - (spec.fire_period - p.fire_cd)) / VM_KICK_RETURN_S)
+    // §C.7: a piloted mount kicks on ITS OWN cycle (shot_clock), never
+    // the stowed rifle's fire_cd - same rule every other FX site obeys.
+    let (cycle_cd, cycle_period) = if p.in_mech() {
+        (
+            shot_clock(p),
+            match p.mech_weapon {
+                sim::MechWeapon::Gatling => sim::GATLING_FIRE_PERIOD,
+                sim::MechWeapon::Autocannon => sim::AUTOCANNON_CYCLE_S,
+                sim::MechWeapon::Rockets => sim::POD_RELAUNCH_S,
+            },
+        )
+    } else {
+        (p.fire_cd, spec.fire_period)
+    };
+    let kick_vm = if (p.armed() || p.in_mech()) && cycle_cd > 0.0 {
+        ((VM_KICK_RETURN_S - (cycle_period - cycle_cd)) / VM_KICK_RETURN_S)
             .clamp(0.0, 1.0)
             // §owner: while focused, the gun visibly kicks at a QUARTER
             // strength - "guns stay stable while aiming". Cosmetic only:
@@ -10574,7 +11224,11 @@ fn fp_viewmodel(
     // 0.9 model scale) sits on the eye line, z pulls it in. The old
     // one-size Vec3(-0.11, 0.052, ..) centred nothing precisely - every
     // gun landed near the middle and none ON it.
-    let ads_shift = if let Some(sy) = sight_line_y(p.gun) {
+    let ads_shift = if p.in_mech() {
+        // a hull mount has no iron pair - `sight_line_y` reads the
+        // STOWED rifle; the mount gets a small generic pull-in
+        Vec3::new(-0.03, 0.015, 0.05) * ads_e
+    } else if let Some(sy) = sight_line_y(p.gun) {
         let (tr, _) = vm_carry(p.gun);
         Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
     } else {
@@ -10655,8 +11309,9 @@ fn fp_viewmodel(
     };
     if let Ok((mut tf, mut vmvis)) = q.get_mut(vm.root) {
         // §1.1 Rule 2 (Brief VI): zoomed scoped-class weapon → the
-        // viewmodel is not rendered at all; unscope restores next frame
-        *vmvis = if vm_hidden_while_scoped(spec.scoped, cam_ctl.ads) {
+        // viewmodel is not rendered at all; unscope restores next frame.
+        // In a mech the glass is stowed - the mount stays on screen.
+        *vmvis = if vm_hidden_while_scoped(spec.scoped && !p.in_mech(), cam_ctl.ads) {
             Visibility::Hidden
         } else {
             Visibility::Inherited
@@ -11483,7 +12138,7 @@ fn hud_system(
             p.hits_dealt,
             if p.roll_t > 0.0 {
                 "   [ROLLING]"
-            } else if p.shield_up {
+            } else if p.shield_up && !p.in_mech() {
                 "   [SHIELD UP]"
             } else if p.crouch {
                 "   [crouched]"
@@ -11608,20 +12263,18 @@ fn hud_system(
             format!(
                 "+ {:.0}{regen}{}{}",
                 p.health.max(0.0),
-                if p.shield_up { "  [SHIELD]" } else { "" },
+                if p.shield_up && !p.in_mech() { "  [SHIELD]" } else { "" },
                 match p.armor_set {
                     ArmorSet::None => String::new(),
                     ArmorSet::RobotSuit => {
-                        // §4.6/§5.3: hull, power, the 4-tube indicator,
-                        // and the dismount hint. §0 (Brief VII): ASCII
-                        // only - U+25AE/U+25AF had no font glyph.
-                        let tubes: String = (0..POD_TUBES)
-                            .map(|i| if i < p.pod_ammo { '#' } else { '.' })
-                            .collect();
-                        format!(
-                            "  MECH - HULL {:.0} - POWER {:.0} - AMMO {} - POD {tubes} - U: dismount",
-                            p.hull, p.mech_rounds, p.armor
-                        )
+                        // §4.6: chassis VITALS only - the mounts own the
+                        // bottom-right corner, the dismount bind lives on
+                        // the equip hint. The old one-liner spanned the
+                        // whole screen and folded into the ammo panel.
+                        // (Also un-swaps the old args: POWER is p.armor,
+                        // the 0..100 core - p.mech_rounds is turret belt.)
+                        format!("
+MECH  HULL {:.0}  PWR {:.0}", p.hull, p.armor)
                     }
                     ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
@@ -11641,6 +12294,28 @@ fn hud_system(
     if let Ok(mut t) = texts.p6().get_single_mut() {
         **t = if !p.alive() {
             String::new()
+        } else if p.in_mech() {
+            // §C.7: the corner shows the MOUNT, never the stowed rifle -
+            // this branch must precede every infantry-flavored one or a
+            // stale shield/reload/cook state paints over the belt.
+            match p.mech_weapon {
+                sim::MechWeapon::Rockets => {
+                    let tubes: String = (0..POD_TUBES)
+                        .map(|i| if i < p.pod_ammo { '#' } else { '.' })
+                        .collect();
+                    format!("POD {} / {}
+[{tubes}]", p.pod_ammo, POD_TUBES)
+                }
+                _ => {
+                    if p.gatling_vent_t > 0.0 {
+                        format!("TURRET {}
+VENTING {:.1}s", p.mech_rounds, p.gatling_vent_t)
+                    } else {
+                        format!("TURRET {}
+HEAT {:.0}%", p.mech_rounds, p.gatling_heat)
+                    }
+                }
+            }
         } else if p.shield_up {
             "SHIELD".to_string()
         } else if p.reload_t > 0.0 {
@@ -11960,7 +12635,17 @@ fn hud_colors(
         *c = TextColor(vitals_color(p.health.max(0.0), simr.t));
     }
     if let Ok(mut c) = q.p1().get_single_mut() {
-        *c = TextColor(if ammo_is_low(p.ammo, gun(p.gun).mag) {
+        // §C.7: while piloting, "low" means the MOUNT's own pool, not
+        // the stowed rifle's magazine
+        let (a, m) = if p.in_mech() {
+            match p.mech_weapon {
+                sim::MechWeapon::Rockets => (p.pod_ammo as u32, POD_TUBES as u32),
+                _ => (p.mech_rounds, MECH_ROUNDS),
+            }
+        } else {
+            (p.ammo, gun(p.gun).mag)
+        };
+        *c = TextColor(if ammo_is_low(a, m) {
             Color::srgb(1.0, 0.18, 0.15)
         } else {
             Color::WHITE
@@ -12044,8 +12729,9 @@ fn crosshair_render(
         .rev()
         .any(|(ev, ttl)| ev.killer == simr.player && *ttl > 4.5);
     // §5.2 (Brief VI): scoped-class weapons draw NO crosshair while
-    // unscoped - the no-scope prayer is the tradeoff. Unchanged.
-    let noscope_hidden = gun(p.gun).scoped && !cam.ads;
+    // unscoped - the no-scope prayer is the tradeoff. A mech fires hull
+    // mounts, never the stowed glass - the pilot keeps a crosshair.
+    let noscope_hidden = gun(p.gun).scoped && !cam.ads && !p.in_mech();
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
@@ -12190,7 +12876,7 @@ fn stability_bracket(
 fn hud_fade(
     time: Res<Time>,
     game: Res<Game>,
-    mut last: Local<(u32, u32, i32, u8)>,
+    mut last: Local<(u32, u32, i32, u8, u32, u8, i32)>,
     mut idle_t: Local<f32>,
     mut q: Query<
         &mut TextColor,
@@ -12198,11 +12884,17 @@ fn hud_fade(
     >,
 ) {
     let p = &game.sim.fighters[game.sim.player];
+    // the mech trio (belt, tubes, hull) joins the snapshot - none of the
+    // infantry fields move in a chassis, so the HUD used to fade to 45%
+    // mid-firefight while piloting
     let snap = (
         p.ammo,
         p.reserve,
         p.health as i32,
         p.throw_sel + if p.shield_up { 100 } else { 0 },
+        p.mech_rounds,
+        p.pod_ammo,
+        p.hull as i32,
     );
     if snap != *last {
         *last = snap;
@@ -14111,6 +14803,27 @@ mod band_tests {
         assert!(!vm_hidden_while_scoped(true, false));
         assert!(!vm_hidden_while_scoped(false, true));
         assert!(!vm_hidden_while_scoped(false, false));
+    }
+
+    /// The vm camera draws AFTER the UI camera, so a rendered gun would
+    /// composite over every menu plate. The gate must close in every
+    /// non-Playing state and open again in Playing.
+    #[test]
+    fn vm_hides_while_menu_open() {
+        for s in [
+            GameState::Intro,
+            GameState::Paused,
+            GameState::Settings,
+            GameState::Manual,
+            GameState::Controls,
+        ] {
+            assert!(!vm_rendered(&s, 0.0, true, 0.0), "hidden in {s:?}");
+        }
+        assert!(vm_rendered(&GameState::Playing, 0.0, true, 0.0));
+        // the pre-existing gates still hold in Playing
+        assert!(!vm_rendered(&GameState::Playing, 1.0, true, 0.0), "third person");
+        assert!(!vm_rendered(&GameState::Playing, 0.0, false, 0.0), "dead");
+        assert!(!vm_rendered(&GameState::Playing, 0.0, true, 0.5), "mid-roll");
     }
 
     /// §5 (Brief IV): the interpenetration sweep - for every weapon in
