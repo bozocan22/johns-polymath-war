@@ -865,6 +865,8 @@ struct Selected {
     difficulty: Difficulty,
     per_team: usize,
     loadout: Loadout,
+    /// §owner: the standing CLASS pick - who you are for the match.
+    class: sim::Class,
     /// cosmetic only: hat + tunic colors picked before the match
     hat: usize,
     tunic: usize,
@@ -941,6 +943,7 @@ impl Default for Selected {
             difficulty: Difficulty::Normal,
             per_team: 5,
             loadout: DEFAULT_LOADOUT,
+            class: sim::Class::Line,
             hat: 0,
             tunic: 0,
             melee_axe: false,
@@ -1786,6 +1789,8 @@ struct ForgePreview {
     weapon_root: Entity,
     arm_l: [Entity; 3],
     arm_r: [Entity; 3],
+    /// one silhouette group per class, indexed by `Class::ALL`
+    class_rigs: [Entity; 4],
 }
 /// Viewmodel camera FOV. §1.2 (Brief VI): CS:GO Classic preset = 68°.
 const VM_FOV_DEG: f32 = 68.0;
@@ -3313,6 +3318,21 @@ const MECH_FP_BEATS: &[CapBeat] = &[
 ///
 /// Slot 1 is the primary, 2 the secondary, 3 the special; the harness
 /// sets loadout slots per-run (see `capture_quick_deploy`).
+/// The four class silhouettes, third person, one run each. The system
+/// is only worth having if you can name the class at the range you
+/// decide to shoot from, so this photographs the thing that has to
+/// carry that: the shape at shoulder height.
+const CLASS_LOOK_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.02)), ..beat(0.4) },
+    CapBeat { snap: Some("01-behind"), ..beat(1.2) },
+    // walk a step so the shape reads in motion too, then turn to profile
+    CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(1.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(2.0) },
+    CapBeat { look: Some((1.55, 0.02)), ..beat(2.2) },
+    CapBeat { snap: Some("02-profile"), ..beat(3.0) },
+    CapBeat { end: true, ..beat(3.4) },
+];
+
 const IRON_SIGHTS_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
@@ -3477,6 +3497,9 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "shield_fp" => SHIELD_FP_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
+        "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
+            CLASS_LOOK_BEATS
+        }
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
@@ -3508,7 +3531,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 17] = [
+const CAPTURE_SCRIPTS: [&str; 21] = [
     "baseline",
     "idle_life",
     "bow_draw",
@@ -3521,6 +3544,10 @@ const CAPTURE_SCRIPTS: [&str; 17] = [
     "sights_c",
     "arrow_flight",
     "spear_flight",
+    "class_line",
+    "class_skirmisher",
+    "class_warden",
+    "class_marksman",
     "minigun_check",
     "menus",
     "traversal",
@@ -3640,6 +3667,10 @@ fn capture_quick_deploy(
         Some("sights_c") => {
             sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Ak47];
         }
+        Some("class_line") => sel.class = sim::Class::Line,
+        Some("class_skirmisher") => sel.class = sim::Class::Skirmisher,
+        Some("class_warden") => sel.class = sim::Class::Warden,
+        Some("class_marksman") => sel.class = sim::Class::Marksman,
         Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
@@ -4094,6 +4125,43 @@ fn tech_readout(sel: Res<Selected>, mut q: Query<&mut Text, With<TechReadout>>) 
         return;
     };
     let mut s = String::from("- LOADOUT SPEC -\n");
+    // §owner: the CLASS line first - it is the only pick on this page
+    // that changes how the soldier PLAYS rather than what he carries, so
+    // the trade has to be readable before you commit to it. Percentages
+    // are deltas from LINE (1.0 across the board); anything at parity is
+    // omitted, so the line reads as "what is different about me".
+    {
+        let cs = sim::class_spec(sel.class);
+        let mut deltas: Vec<String> = Vec::new();
+        for (label, mult, higher_is_better) in [
+            ("hp", cs.health_mult, true),
+            ("speed", cs.move_mult, true),
+            ("aim", cs.spread_mult, false),
+            ("swap", cs.switch_mult, false),
+        ] {
+            if (mult - 1.0).abs() < 1e-3 {
+                continue;
+            }
+            // a spread/switch multiplier BELOW 1.0 is an IMPROVEMENT, so
+            // the sign the player should read is not the sign of the
+            // number - mark the ones that cost you.
+            let pct = (mult - 1.0) * 100.0;
+            let good = if higher_is_better { pct > 0.0 } else { pct < 0.0 };
+            deltas.push(format!(
+                "{label} {}{:.0}%{}",
+                if pct > 0.0 { "+" } else { "" },
+                pct,
+                if good { "" } else { " cost" }
+            ));
+        }
+        let line = if deltas.is_empty() {
+            "baseline across the board".to_string()
+        } else {
+            deltas.join("  ")
+        };
+        s += &format!("{:<14} {line}\n", cs.name);
+        s += &format!("{:<14} {}\n", "", cs.blurb);
+    }
     for g in sel.loadout.iter() {
         let spec = gun(*g);
         s += &match spec.projectile {
@@ -4171,6 +4239,10 @@ struct CosmeticButton(usize, usize);
 /// §6 (Brief IV): melee slot pick - false = knife, true = axe.
 #[derive(Component, Clone, Copy)]
 struct MeleeButton(bool);
+
+/// §owner: the CLASS pick - the standing choice of who you fight as.
+#[derive(Component, Clone, Copy)]
+struct ClassButton(sim::Class);
 
 /// §8 (Brief IV): grenade budget preset pick (GRENADE_PRESETS index).
 #[derive(Component, Clone, Copy)]
@@ -4504,6 +4576,7 @@ fn main() {
                 intro_map_buttons,
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
+                intro_class_buttons,
                 intro_melee_buttons,
                 intro_nade_buttons,
                 intro_diff_buttons,
@@ -6153,6 +6226,92 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
 
 // ------------------------------------------- match-scoped world builders --
 
+/// §owner: the CLASS SILHOUETTE - the shape that tells you, at the
+/// range you decide to shoot from, which of the four you are looking
+/// at. Four classes that PLAY differently have to LOOK different, or
+/// the system is invisible in the only moment it matters.
+///
+/// Deliberately shape, not colour: the palette is spoken for. Team side
+/// owns body colour (`branding::signal`) and the tunic stripe is the
+/// player's own pick - a class hue would fight both.
+///
+/// Returns the group root, so a caller that needs to SWAP classes (the
+/// Forge turntable) can build all four and toggle visibility instead of
+/// rebuilding the whole rig on every click.
+fn spawn_class_silhouette(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    look: &SoldierLook,
+    parent: Entity,
+    class: sim::Class,
+) -> Entity {
+    let group = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .set_parent(parent)
+        .id();
+    match class {
+        // the baseline wears nothing extra, on purpose: it is the shape
+        // every other class reads as a deviation FROM
+        sim::Class::Line => {}
+        sim::Class::Skirmisher => {
+            // a short scarf streaming off one shoulder - light, fast
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(look.accent.clone()),
+                    Transform::from_xyz(-0.10, 0.60, -0.13)
+                        .with_rotation(Quat::from_rotation_x(-0.35))
+                        .with_scale(Vec3::new(0.10, 0.26, 0.03)),
+                ))
+                .set_parent(group);
+        }
+        sim::Class::Warden => {
+            // heavy pauldrons: the widest silhouette on the field
+            for sx in [-1.0_f32, 1.0] {
+                commands
+                    .spawn((
+                        Mesh3d(kit.ball.clone()),
+                        MeshMaterial3d(look.shell2.clone()),
+                        Transform::from_xyz(sx * 0.285, 0.655, 0.0)
+                            .with_scale(Vec3::new(0.19, 0.13, 0.24)),
+                    ))
+                    .set_parent(group);
+                commands
+                    .spawn((
+                        Mesh3d(kit.cube.clone()),
+                        MeshMaterial3d(look.joint.clone()),
+                        Transform::from_xyz(sx * 0.285, 0.700, 0.0)
+                            .with_scale(Vec3::new(0.175, 0.022, 0.225)),
+                    ))
+                    .set_parent(group);
+            }
+        }
+        sim::Class::Marksman => {
+            // a single spotter's mantle over the off shoulder, and a
+            // tall aerial - reads as "the one who is watching"
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(look.shell2.clone()),
+                    Transform::from_xyz(-0.20, 0.575, 0.0)
+                        .with_rotation(Quat::from_rotation_z(0.30))
+                        .with_scale(Vec3::new(0.16, 0.20, 0.26)),
+                ))
+                .set_parent(group);
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.steel.clone()),
+                    Transform::from_xyz(-0.16, 0.80, -0.08)
+                        .with_rotation(Quat::from_rotation_z(-0.18))
+                        .with_scale(Vec3::new(0.012, 0.34, 0.012)),
+                ))
+                .set_parent(group);
+        }
+    }
+    group
+}
+
 /// Handles to one soldier's skeleton - what `FighterRig` wraps for
 /// gameplay and the Forge turntable poses statically.
 struct SoldierParts {
@@ -6203,6 +6362,7 @@ fn spawn_soldier_body(
     limbs: &LimbMeshes,
     look: &SoldierLook,
     weapon_detail: bool,
+    class: sim::Class,
 ) -> SoldierParts {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
@@ -6508,6 +6668,7 @@ fn spawn_soldier_body(
             .set_parent(weapon_root);
         weapons[wi] = model;
     }
+    spawn_class_silhouette(commands, kit, look, torso, class);
     SoldierParts {
         root,
         leg_l,
@@ -6653,7 +6814,7 @@ fn spawn_fighter_rigs(
                 joint.clone()
             },
         };
-        let parts = spawn_soldier_body(commands, kit, &limbs, &look, is_player);
+        let parts = spawn_soldier_body(commands, kit, &limbs, &look, is_player, f.class);
         commands.entity(parts.root).insert((
             Transform::from_xyz(f.pos[0], f.pos[1], f.pos[2]),
             FighterVis { index: i },
@@ -7161,7 +7322,18 @@ fn setup(
             }),
             emblem_center: kit.gold.clone(),
         };
-        let parts = spawn_soldier_body(&mut commands, &kit, &limbs, &look, true);
+        // Class::Line adds nothing, so the body is built bare and each
+        // class's shape is hung beside it; `forge_preview_sync` shows
+        // the picked one. Rebuilding the rig per click would fight the
+        // layer-tagging latch (`tag_forge_preview_layer` stamps once).
+        let parts =
+            spawn_soldier_body(&mut commands, &kit, &limbs, &look, true, sim::Class::Line);
+        let mut class_rigs = [Entity::PLACEHOLDER; 4];
+        for (i, c) in sim::Class::ALL.into_iter().enumerate() {
+            let g = spawn_class_silhouette(&mut commands, &kit, &look, parts.torso, c);
+            commands.entity(g).insert(Visibility::Hidden);
+            class_rigs[i] = g;
+        }
         commands
             .entity(parts.root)
             .insert(Transform::from_xyz(0.0, 0.06, 0.0)) // feet on the pedestal
@@ -7175,6 +7347,7 @@ fn setup(
             weapon_root: parts.weapon_root,
             arm_l: parts.arm_l,
             arm_r: parts.arm_r,
+            class_rigs,
         });
     }
 
@@ -11188,6 +11361,16 @@ fn forge_preview_sync(
         // card's tunic glows exactly like the field one
         mat.emissive = LinearRgba::new(tr * 0.4, tg * 0.4, tb * 0.4, 1.0);
     }
+    // the picked class's shape, and only that one
+    for (i, e) in fp.class_rigs.iter().enumerate() {
+        if let Ok(mut v) = vis.get_mut(*e) {
+            *v = if sim::Class::ALL[i] == sel.class {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
     let show = ALL_WEAPONS.iter().position(|w| *w == sel.loadout[0]);
     for (wi, e) in fp.weapons.iter().enumerate() {
         if let Ok(mut v) = vis.get_mut(*e) {
@@ -13925,6 +14108,14 @@ fn open_intro(
 
             // ---- SOLDIER page ------------------------------------------
             let sold = OnIntroPage(IntroPage::SOLDIER);
+            // §owner: CLASS leads the page - it is the choice that
+            // frames every one below it, and the only one that changes
+            // how the soldier plays rather than what he carries.
+            let classes: Vec<(&str, ClassButton)> = sim::Class::ALL
+                .iter()
+                .map(|c| (sim::class_spec(*c).name, ClassButton(*c)))
+                .collect();
+            menu_ui::pill_row(b, "CLASS", &classes, sold);
             let prim: Vec<(&str, LoadoutButton)> = PRIMARIES
                 .iter()
                 .map(|g| (gun(*g).name, LoadoutButton(0, *g)))
@@ -14203,6 +14394,7 @@ fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState
         map,
         difficulty: sel.difficulty,
         loadout: sel.loadout,
+        class: sel.class,
         melee_axe: sel.melee_axe,
         grenade_preset: sel.grenade_preset,
     });
@@ -14408,6 +14600,23 @@ fn intro_cosmetic_buttons(
             sel.tunic == cb.1
         };
         paint(&mut bg, &mut border, selected, *i == Interaction::Hovered);
+    }
+}
+
+fn intro_class_buttons(
+    mut q: Query<
+        (&Interaction, &ClassButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
+    mut sel: ResMut<Selected>,
+) {
+    for (i, cb, _, _) in &mut q {
+        if *i == Interaction::Pressed {
+            sel.class = cb.0;
+        }
+    }
+    for (i, cb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, sel.class == cb.0, *i == Interaction::Hovered);
     }
 }
 

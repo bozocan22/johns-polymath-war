@@ -1342,6 +1342,97 @@ pub fn bot_params(d: Difficulty) -> BotParams {
 
 /// Player-picked loadout: [primary, secondary, special]. The SHIELD is
 /// always carried in its own dedicated slot — it cannot be dropped.
+/// §owner: the FOUR CLASSES - a standing choice made in the Forge, not
+/// a pickup found on the floor.
+///
+/// This is deliberately a different axis from `ArmorSet`. Armour is
+/// found mid-match, covers the whole body, and can be lost; a class is
+/// who you ARE for the match and shapes the four things a player feels
+/// every second: how much killing you take, how fast you cross ground,
+/// how tight your shots land, and how quickly a weapon comes up.
+///
+/// Every multiplier is relative to `Line`, which is exactly 1.0 across
+/// the board on purpose - a baseline you can read the others against,
+/// and a class that is never the wrong answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Class {
+    /// The baseline. No bonus, no penalty, no learning curve.
+    #[default]
+    Line,
+    /// Fast and light: crosses ground and swaps weapons quickest, pays
+    /// for it in health and in shots that land looser.
+    Skirmisher,
+    /// The anchor: soaks the most and shoots steadily, but is slow to
+    /// arrive and slow to bring a weapon up.
+    Warden,
+    /// The precision answer: by far the tightest shots, slightly frail,
+    /// and deliberately clumsy at swapping - it wants the FIRST shot.
+    Marksman,
+}
+
+/// What a class actually changes. Four multipliers, each hooked to a
+/// system that already existed - no new subsystem, so no new place for
+/// the numbers to drift out of sync with what the player feels.
+pub struct ClassSpec {
+    pub name: &'static str,
+    /// Scales spawn and respawn health off `MAX_HEALTH`.
+    pub health_mult: f32,
+    /// Multiplies the movement ladder, ALONGSIDE the armour set's own
+    /// `move_mult` - a Warden in a mech is slow twice over, correctly.
+    pub move_mult: f32,
+    /// Scales the fired cone. BELOW 1.0 is tighter (better).
+    pub spread_mult: f32,
+    /// Scales `SWITCH_S`. BELOW 1.0 is a faster weapon swap.
+    pub switch_mult: f32,
+    /// One line, shown on the class picker.
+    pub blurb: &'static str,
+}
+
+impl Class {
+    pub const ALL: [Class; 4] =
+        [Class::Line, Class::Skirmisher, Class::Warden, Class::Marksman];
+}
+
+/// The class table. Read it as a row of trades: nobody is strictly
+/// better than `Line`, and each of the other three pays for its edge in
+/// a currency the player can name.
+pub fn class_spec(c: Class) -> ClassSpec {
+    match c {
+        Class::Line => ClassSpec {
+            name: "LINE",
+            health_mult: 1.0,
+            move_mult: 1.0,
+            spread_mult: 1.0,
+            switch_mult: 1.0,
+            blurb: "the baseline - no bonus, no penalty, never wrong",
+        },
+        Class::Skirmisher => ClassSpec {
+            name: "SKIRMISHER",
+            health_mult: 0.85,
+            move_mult: 1.12,
+            spread_mult: 1.15,
+            switch_mult: 0.72,
+            blurb: "fastest on foot and to the trigger - thin, and sprays",
+        },
+        Class::Warden => ClassSpec {
+            name: "WARDEN",
+            health_mult: 1.28,
+            move_mult: 0.90,
+            spread_mult: 0.92,
+            switch_mult: 1.28,
+            blurb: "soaks the most and shoots steady - slow to arrive",
+        },
+        Class::Marksman => ClassSpec {
+            name: "MARKSMAN",
+            health_mult: 0.92,
+            move_mult: 0.96,
+            spread_mult: 0.70,
+            switch_mult: 1.15,
+            blurb: "the tightest shot in the game - wants the FIRST one",
+        },
+    }
+}
+
 pub type Loadout = [GunKind; 3];
 
 pub const DEFAULT_LOADOUT: Loadout = [GunKind::M4, GunKind::Glock, GunKind::Awm];
@@ -1354,6 +1445,8 @@ pub struct MatchConfig {
     pub map: MapKind,
     pub difficulty: Difficulty,
     pub loadout: Loadout,
+    /// §owner: the player's chosen class. Bots pick their own.
+    pub class: Class,
     /// §6 (Brief IV): the player's melee slot carries the axe.
     pub melee_axe: bool,
     /// §8 (Brief IV): index into GRENADE_PRESETS for the player's
@@ -1370,6 +1463,7 @@ impl Default for MatchConfig {
             map: MapKind::Arena,
             difficulty: Difficulty::Normal,
             loadout: DEFAULT_LOADOUT,
+            class: Class::Line,
             melee_axe: false,
             grenade_preset: 0,
         }
@@ -1424,6 +1518,10 @@ pub struct Fighter {
     pub parries: u32,
     /// Hull climbing: `Some` while gripping a mech (DESIGN.md). Both
     /// hands are on the hull - no ranged weapon until release.
+    /// §owner: which of the four classes this fighter is fighting as.
+    /// Set at spawn and kept for the match - `class_spec` turns it into
+    /// the four multipliers that actually bite.
+    pub class: Class,
     pub climbing: Option<ClimbState>,
     /// Grip stamina carried BETWEEN climbs (rest-only recovery needs a
     /// meter that persists when `climbing` is `None`).
@@ -3401,6 +3499,7 @@ impl TdmSim {
                     fired_wallbang: false,
                     stagger_t: 0.0,
                     parries: 0,
+                    class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
                     switch_t: 0.0,
@@ -3500,6 +3599,22 @@ impl TdmSim {
         // grenade budget preset. Bots keep the knife and standard pouch.
         fighters[0].melee_axe = cfg.melee_axe;
         fighters[0].grenades = GRENADE_PRESETS[cfg.grenade_preset % GRENADE_PRESETS.len()].0;
+        // §owner: CLASSES. The player fights as whatever the Forge said;
+        // every bot takes a class too, cycled by index rather than
+        // rolled, so a squad is a MIX (you meet a Warden and a
+        // Skirmisher in the same fight) and the assignment stays
+        // bit-identical across a replay - drawing from `rng` here would
+        // desync every existing seeded test.
+        fighters[0].class = cfg.class;
+        for (i, f) in fighters.iter_mut().enumerate().skip(1) {
+            f.class = Class::ALL[i % Class::ALL.len()];
+        }
+        // health follows the class from the very first frame - a Warden
+        // that spawned on 100 and only became tough on RESPAWN would be
+        // a bug the player would feel exactly once.
+        for f in fighters.iter_mut() {
+            f.health = MAX_HEALTH * class_spec(f.class).health_mult;
+        }
         TdmSim {
             cfg,
             mode: cfg.mode,
@@ -3844,7 +3959,7 @@ impl TdmSim {
                     f.prev_yaw = yaw; // no phantom whip-turn on the spawn tick
                     f.vy = 0.0;
                     f.grounded = true;
-                    f.health = MAX_HEALTH;
+                    f.health = MAX_HEALTH * class_spec(f.class).health_mult;
                     f.armor = 0.0;
                     f.armor_set = ArmorSet::None; // §6: gear is lost on death
                     f.hull = 0.0;
@@ -4084,7 +4199,7 @@ impl TdmSim {
                             f.heat = 0.0;
                             f.spin_t = 0.0;
                             f.vent_t = 0.0;
-                            f.switch_t = SWITCH_S;
+                            f.switch_t = SWITCH_S * class_spec(f.class).switch_mult;
                         }
                     }
                     taken = true;
@@ -4280,6 +4395,10 @@ impl TdmSim {
                 let f = &self.fighters[p];
                 let aspec = armor_spec(f.armor_set);
                 speed *= aspec.move_mult;
+                // §owner: the class multiplies the SAME ladder armour
+                // does, so a Warden in a chassis is slow twice over -
+                // which is correct: both facts are true about him.
+                speed *= class_spec(f.class).move_mult;
                 // §7.4: power stride OVERRIDES the walk pace outright -
                 // 110% of soldier run speed is the point, not 110% ON
                 // TOP of the 85% walk multiplier just applied above.
@@ -5467,7 +5586,7 @@ impl TdmSim {
         f.ammo = a;
         f.reserve = r;
         f.reload_t = 0.0;
-        f.switch_t = SWITCH_S;
+        f.switch_t = SWITCH_S * class_spec(f.class).switch_mult;
         f.shield_up = false; // both hands on the new weapon
     }
 
@@ -5692,7 +5811,11 @@ impl TdmSim {
             .clamp(AIM_STABILITY_MIN, 1.0);
             spread /= stability;
         }
-        spread
+        // §owner: the class's steadiness, applied LAST so it scales the
+        // whole cone - stance, movement and bloom included - rather than
+        // just the base. A Marksman is tighter in every state, not only
+        // when standing still.
+        spread * class_spec(f.class).spread_mult
     }
 
     fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], held: bool) {
@@ -8399,7 +8522,11 @@ impl TdmSim {
         // everyone except the human.
         {
             let aspec = armor_spec(fm.armor_set);
-            vel = [vel[0] * aspec.move_mult, vel[1] * aspec.move_mult];
+            let cmul = class_spec(fm.class).move_mult;
+            vel = [
+                vel[0] * aspec.move_mult * cmul,
+                vel[1] * aspec.move_mult * cmul,
+            ];
             if fm.armor_set == ArmorSet::RobotSuit && fm.armor <= 0.0 {
                 vel = [vel[0] * ROBOT_DRAINED_MOVE, vel[1] * ROBOT_DRAINED_MOVE];
             }
@@ -8567,6 +8694,19 @@ mod tests {
         s.rebuild_grid();
         s.pickups.clear();
         s.checkpoints.clear();
+        // §owner: the RANGE is for measuring WEAPONS, so it pins the
+        // class variable it is not testing. A live match cycles bots
+        // through all four classes, which scales their health and
+        // steadiness - correct there, but it would turn every "two body
+        // shots and a head" assertion in this file into a function of
+        // which index the victim happened to spawn at.
+        //
+        // Class-specific behaviour is proved by the tests that SET a
+        // class deliberately (see `the_four_classes_trade_real_stats`).
+        for f in s.fighters.iter_mut() {
+            f.class = Class::Line;
+            f.health = MAX_HEALTH;
+        }
         s.fighters[0].pos = [0.0, 0.0, -5.0];
         s.fighters[1].pos = [0.0, 0.0, 5.0];
         s.fighters[1].protect_t = 0.0;
@@ -9113,6 +9253,111 @@ mod tests {
             s.climb_target(0).is_none(),
             "out of reach must withdraw the offer"
         );
+    }
+
+    /// §owner: the four classes must actually TRADE - each one better
+    /// than LINE at something and worse at something else. A class table
+    /// where one row dominates is not a choice, it is a correct answer,
+    /// and the whole feature collapses to "everyone plays Warden".
+    ///
+    /// This measures the four multipliers where they BITE, not where
+    /// they are declared: spawn health off the real spawn path, spread
+    /// off `aim_spread`, swap off `switch_t` after a real slot change.
+    #[test]
+    fn the_four_classes_trade_real_stats() {
+        // LINE is the baseline by definition - all four at parity.
+        let line = class_spec(Class::Line);
+        for m in [
+            line.health_mult,
+            line.move_mult,
+            line.spread_mult,
+            line.switch_mult,
+        ] {
+            assert!((m - 1.0).abs() < 1e-6, "LINE must be 1.0 across the board");
+        }
+        // every other class is better at something AND worse at
+        // something, reading spread/switch inverted (lower is better)
+        for c in Class::ALL {
+            if c == Class::Line {
+                continue;
+            }
+            let s = class_spec(c);
+            let better = s.health_mult > 1.0
+                || s.move_mult > 1.0
+                || s.spread_mult < 1.0
+                || s.switch_mult < 1.0;
+            let worse = s.health_mult < 1.0
+                || s.move_mult < 1.0
+                || s.spread_mult > 1.0
+                || s.switch_mult > 1.0;
+            assert!(better, "{:?} has no advantage over LINE", c);
+            assert!(worse, "{:?} pays nothing for its advantage", c);
+        }
+
+        // ---- the multipliers reach the systems they claim to ----------
+        let spawn_hp = |c: Class| -> f32 {
+            let mut cfg = cfg(0xC1A5, 1, Mode::Tdm, MapKind::Arena);
+            cfg.class = c;
+            TdmSim::new(cfg).fighters[0].health
+        };
+        let warden = spawn_hp(Class::Warden);
+        let skirm = spawn_hp(Class::Skirmisher);
+        assert!(
+            warden > spawn_hp(Class::Line) && spawn_hp(Class::Line) > skirm,
+            "spawn health must follow the class: warden {warden}, skirmisher {skirm}"
+        );
+
+        // steadiness, measured off the real cone in an identical stance
+        let cone = |c: Class| -> f32 {
+            let mut s = range(0xC1A6);
+            s.fighters[0].class = c;
+            s.aim_spread(0, false)
+        };
+        assert!(
+            cone(Class::Marksman) < cone(Class::Line),
+            "the marksman must shoot tighter than the line"
+        );
+        assert!(
+            cone(Class::Skirmisher) > cone(Class::Line),
+            "the skirmisher must pay for its speed in accuracy"
+        );
+
+        // weapon handling, measured off a real slot swap
+        let swap = |c: Class| -> f32 {
+            let mut s = range(0xC1A7);
+            s.fighters[0].class = c;
+            s.step(PlayerCmd { slot: Some(1), ..Default::default() });
+            s.fighters[0].switch_t
+        };
+        assert!(
+            swap(Class::Skirmisher) < swap(Class::Line),
+            "the skirmisher must bring a weapon up fastest"
+        );
+        assert!(
+            swap(Class::Warden) > swap(Class::Line),
+            "the warden must be slowest to swap"
+        );
+    }
+
+    /// A live match must field a MIX - meeting four Wardens in a row
+    /// would make the system invisible. The assignment is index-cycled
+    /// rather than rolled, so it also stays bit-identical on replay.
+    #[test]
+    fn a_squad_fields_every_class_and_stays_deterministic() {
+        let build = || TdmSim::new(cfg(0xC1A8, 4, Mode::Tdm, MapKind::Arena));
+        let s = build();
+        let mut seen = [false; 4];
+        for f in s.fighters.iter().skip(1) {
+            seen[Class::ALL.iter().position(|c| *c == f.class).unwrap()] = true;
+        }
+        assert!(
+            seen.iter().all(|x| *x),
+            "an 8-strong field must contain all four classes"
+        );
+        // determinism: same config, same assignment, every time
+        let a: Vec<Class> = s.fighters.iter().map(|f| f.class).collect();
+        let b: Vec<Class> = build().fighters.iter().map(|f| f.class).collect();
+        assert_eq!(a, b, "class assignment must not vary between builds");
     }
 
     /// Climb checklist test 1+2: grip drains under hold, recovers under
@@ -11003,6 +11248,12 @@ mod tests {
         s.rebuild_grid();
         s.pickups.clear();
         s.checkpoints.clear();
+        // same reason `range` pins it: this measures an AXE ARC, not a
+        // class, and bot health varies by class in a live match
+        for f in s.fighters.iter_mut() {
+            f.class = Class::Line;
+            f.health = MAX_HEALTH;
+        }
         s.fighters[0].melee_axe = true;
         s.fighters[0].pos = [0.0, 0.0, -5.0];
         s.fighters[0].yaw = 0.0;
@@ -14499,6 +14750,11 @@ mod tests {
             f.protect_t = 0.0;
         }
         // 0,1 = Blue; 2,3 = Red. Blast damage (the unfiltered path):
+        // Read the victim's health BEFORE the blast rather than assuming
+        // MAX_HEALTH: a live match gives each bot a class, and a Warden
+        // spawns above the baseline. This test is about the CREDIT rule,
+        // so it should measure the delta it actually caused.
+        let before = s.fighters[2].health;
         s.apply_plain_damage(0, 2, 30.0, [0.0, 1.0, 0.0], false, false);
         let vs_enemy = s.fighters[0].dmg_dealt;
         assert!(
@@ -14507,7 +14763,7 @@ mod tests {
         );
         // note: armor/floor may reduce the applied amount - assert the
         // RELATIONSHIP (credited == what the victim actually lost)
-        let lost = MAX_HEALTH - s.fighters[2].health;
+        let lost = before - s.fighters[2].health;
         assert!(
             (vs_enemy - lost).abs() < 1e-3,
             "credited {vs_enemy} must equal the health the enemy lost ({lost})"
