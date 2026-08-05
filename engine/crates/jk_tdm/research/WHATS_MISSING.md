@@ -1,99 +1,81 @@
-# What is missing / not built yet — 2026-08-04
+# What is missing / not built yet — 2026-08-05
 
-Compiled for the user from `BACKLOG.md`, `THOR_LOG.md`'s ranked findings,
-and session knowledge. Ordering inside each tier is Thor's ranking rule:
-an item moves up when its blocker clears, not when it becomes interesting.
+Compiled from `BACKLOG.md`, `THOR_LOG.md`'s ranked findings, and session
+knowledge. Ordering inside each tier is Thor's ranking rule: an item
+moves up when its blocker clears, not when it becomes interesting.
 
 ## 0. Needs the USER (nothing code-side can proceed)
 
-| What | Where it goes | What happens today |
-|---|---|---|
-| The 3 branding PNGs (key art, wordmark, emblem) | `engine/assets/branding/` as `key_art.png`, `wordmark.png`, `emblem.png` | All branding code ships and degrades gracefully — splash, menu art, emblem placements simply don't render until the files exist. See `engine/assets/branding/README.md` |
+Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
+emblem) and are wired through the splash, menus, and seal footers.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-**All seven of the items that stood here on 2026-08-04 are now BUILT** —
-see "Closed 2026-08-04" below. What remains of this tier is the tail of
-THOR_LOG's 97:
-
-1. **HUD award toasts** — §4.3 specs resource-award toasts stacking above
-   the resource counter, each fading after 2.5 s. No resource economy
-   exists in TDM/KOTH to award from, so this waits on a mode that has
-   one rather than being faked.
-2. **Killfeed WALLBANG modifier** — needs bullet penetration to exist
-   first; there is no wallbang mechanic to report. (THROUGH-SMOKE
-   shipped 2026-08-04: the hitscan ray now tests smoke crossings and
-   the killfeed marks them `~`.)
+1. **Grip HUD for hull climbing** — the climb ships with a grip pool
+   that drains and drops you, and no readout for it. A pilot can feel
+   it; a climber cannot see it. Also the contextual prompt ("U - GRAB
+   THE HULL") when a stripped zone is in range.
+2. **Mech mount audio** — `own_shot` audio reads `p.fire_cd`, not
+   `shot_clock`, so a piloted turret/pod fires SILENT for the pilot.
+   Pre-existing gap, isolated to one condition.
 3. **Numeric tunings** — the remaining screen-intrusion profiles called
    out in THOR_LOG. Picked off one at a time as work continues.
+4. **HUD award toasts for a resource economy** — the toast system
+   itself shipped (kills/assists/parries/streaks). §4.3's *resource*
+   awards still have no economy in TDM/KOTH to award from, so this
+   waits on a mode that has one rather than being faked.
 
-### Closed 2026-08-04 (second pass)
-
-- **ADS sight-alignment** — focus derives a per-gun shift from the
-  shared carry table so the iron pair lands on the eye line.
-- **Forge front door** — SAVE 1-3 / LOAD 1-3 / RANDOMIZE as real rows
-  on the soldier page. The full editor (category grid, turntable,
-  per-piece armour) is still the large open item below.
-- **Bow overdraw** — holding past full draw charges +15% to 1.6 s.
-- **Mech front rebalance** — hull 1000 -> 600, front x0.15 -> x0.525:
-  ten AWM or ~fourteen spears now open a chassis from the FRONT.
-- **Three mech pads per map**, scattered; up to three chassis walking.
-- **Zombie Extraction withdrawn from menus** (sim + tests intact).
-
-### Closed 2026-08-04
+### Closed 2026-08-05
 
 | Item | How it closed |
 |---|---|
-| §3.4 low-ready + ready-up | 22° up-and-in at 0.6 m; ready-up is a real ζ=0.7 spring (a lerp cannot overshoot at all), sub-stepped so it stays bounded at 10 fps. 3 tests. |
-| §4.1 vitals bars + armor cluster | 10-segment health bar + 4-pip armour cluster, `hud_vitals_style` setting. The pips read the SET's flat protection on foot and the power core in a chassis — `Fighter::armor` is zero for four of the five sets, so a pool-driven cluster would have sat empty all match. |
-| §4.3 minimap rotate/scale | Rotate-with-facing + 25–100% scale, both persisted and both on settings rows. |
-| §1.6 tests | Zero-instant-stop sweep (6 stop states × 4 entry paces), vertical-bob budget, lean-and-cut fuzz over 16 angles. |
-| §4.7 context progress bar | Generic — one resolver feeding mech entry, mech exit and the extraction hold. |
-| Killfeed rich formatting | Rebuilt as real rows (a single `Text` structurally cannot carry two name colours or a border). Side colours, 2px #B50000 local-player border, headshot/noscope/blind glyphs. |
-| `ElasticMove.return_efficiency` | Was declared and read nowhere, so "the mech should feel it" was a comment. Now normalised against human tendon: a human still gets Rule 2's exact ×1.35, a mech gets 0.209. |
-| counter-movement → jump | §C.3 names the jump and only the dodge had it. A crouch-jump now launches 6% harder through the same shared `counter_movement_bonus`. |
-
-Also landed the same day, from the owner's own notes rather than the
-backlog: team colour became **relative to the viewer** (allies white/gold,
-enemies red/orange — six call sites had hardcoded Blue/Red literals and
-would have shown your own team in enemy colours on a Red spawn), right-click
-focus reaches **every** weapon in both cameras (the pipeline was fully built
-and fenced off at one line), and **Shift walks** CS:GO-style with sprint
-moved to Alt. Movement noise gained a middle tier in the process — ordinary
-running was already silent, so a walk key would otherwise have bought
-nothing.
+| Viewmodel drew over every menu | The vm camera renders after MainCam (order 1, no clear). New `vm_rendered` predicate gates on the same `hud_visible` the HUD uses. Proven by a capture that pauses from live first-person play — the old `menus` script could not reach the case. |
+| Pilot held his stowed rifle in a mech | Two hull-mount viewmodels: a spinning gatling cluster and a launch tube. Punch rides the mount's own cycle via `shot_clock`; rifle reload/sight/scope poses gated out in a chassis. |
+| RMB zoomed while pre-aiming rockets | `pod_aim_owns_rmb` gate in `input_and_step`. Also dropped an accidental `ADS_SPEED_MULT` slow that Y-targeting never paid. |
+| Guard plate blinded its own holder | FP-only translucent material set; third-person and enemy shields stay opaque. |
+| Shield bound to E | Now inventory slot 4, an essential beside the three guns. E is dead. |
+| Mech HUD garbled / overlapping | Bottom-left is chassis vitals only; the mounts own the bottom-right. Fixed a real argument swap — POWER printed the turret belt and AMMO printed the energy core. |
+| Turntable showed a placeholder mannequin | `spawn_soldier_body` extracted from `spawn_fighter_rigs`, so the card and the field share one geometry source. Verified a pure move: all 183 geometry constants byte-identical. |
+| Mech read as a plain slab | Detail pass — visor brow/cheeks, spine fins, exhaust stacks, pauldron trim and bolts, waist pistons, gatling clamp rings and feed chute, drum ribs, recessed pod face, two-tone paint, stencils, knee hazard, toe teeth. Detach parts became group nodes so a damage stage sheds a whole cluster. |
+| Mech hull-climbing | Full 7-item checklist: zone grabs on stripped plates, position parenting, asymmetric grip drain, involuntary detach, 1.6x climbing strike on both melee paths, 4 tests. |
+| Mech inventory / rocket controls | Strip shows TURRET/ROCKETS only while piloting; RMB pre-aims, LMB fires through `try_fire_rocket`. |
+| Killfeed WALLBANG modifier | Bullet penetration shipped (`PEN_WINDOW_M`, 0.5x damage), killfeed marks it `#`. |
+| Melee parry + stagger | Parry window on both the axe arc-sweep and knife/thrust line paths; attacker takes `PARRY_STAGGER_S`. |
 
 ## 2. Large, multi-session architectural (do not rush — BACKLOG.md)
 
+Ranked by value, blockers first:
+
+- **26-piece armour + 4-class system**: no existing code to extend;
+  currently 5 whole-body presets. The biggest single feature left, and
+  it multiplies the melee and AI work that follows it.
+- **Melee depth v2**: directional attacks and deflection. Parry and
+  stagger are built; direction and deflection are not.
+- **AI squad coordination** (#5): flanking, suppression, bounding
+  overwatch; `jk_wall` morale exists to hook into.
 - **20-segment mass-bearing rig** (Steps 0, 2–7 remain): real
   pelvis→lumbar→thorax trunk, clavicles, toe segments, mass-fraction /
   CoM / radius-of-gyration data driving spring stiffness. Touches every
   posing system in main.rs.
-- **Mech visual + weapon-kit rebuild D.1–D.7**: "walking weapons
-  platform" silhouette (today: scaled humanoid), 20 named swappable
-  parts, part-by-part damage states. The gatling+autocannon CORE kit is
-  built (§C); the silhouette isn't.
-- **Mech hull-climbing** (#2): design + 6-item build checklist done
-  (`research/mech-climb/DESIGN.md`); the build itself not started.
-- **Forge editor UI**: today Forge is 3 hotkey save/load slots to a text
-  file — the specced category grid / turntable / randomize UI is absent.
-- **26-piece armour + 4-class system**: no existing code to extend;
-  currently 5 whole-body presets.
 - **Castle map**: content work (geometry), not code. The intro's CASTLE
   BAILEY / CASTLE GARDENS entries select layouts of the existing arena
   blockout, not a real castle.
-- **Melee depth** (#4): parry, deflection, directional attack, stagger.
-- **AI squad coordination** (#5): flanking, suppression, bounding
-  overwatch; `jk_wall` morale exists to hook into.
+- **Forge editor UI**: the turntable and SAVE/LOAD/RANDOMIZE rows are
+  built; the specced per-piece category grid is not (and is really the
+  front end of the 26-piece armour item above).
+- **Mech weapon-kit D.7**: 20 named swappable parts with part-by-part
+  damage states. The silhouette, the core kit, and three damage stages
+  are built; per-part swapping is not.
 - **Traversal** (#7): climb/vault/mantle — blocked on map metrics.
+  Hull climbing proved the attach/parent/stamina mechanic.
 - **Full character customization** (§8.1): sliders, cosmetic variants —
-  currently 2 flat color fields.
+  currently 2 flat colour fields.
 
 ## 3. Blocked, with the named unblocker
 
 | System | Blocker |
 |---|---|
-| Weapon material stack, wear maps, decals, image import | Zero texture pipeline beyond branding UI images — every world surface is flat color. Unblocker: mesh/material texture loading. |
+| Weapon material stack, wear maps, decals, image import | Zero texture pipeline beyond branding UI images — every world surface is flat colour. Unblocker: mesh/material texture loading. |
 | Advanced rendering | Depends on the above. |
 | **Networking** (rollback/prediction/lag comp) | Zero networking deps; local-only. The deterministic sim + bit-identical replay is the right foundation, but no netcode exists. Scoreboard deliberately has no Ping column for this reason. |
 | Swimming / ropes / ladders / fluids | No water volumes, no ropes, no muscle layer. |
@@ -101,8 +83,13 @@ nothing.
 
 ## What is NOT missing (commonly assumed otherwise)
 
-- Mech presentation plan §A–§C: **done** (brace stance, entry/exit
-  presentation, idle-life, visor view, gatling+autocannon).
+- Mech presentation §A–§C: **done** (brace, entry/exit, idle-life, visor
+  view, gatling + autocannon, and now first-person mounts).
+- Mech silhouette D.1–D.6: **done** (43-plate hull, leg armour, three
+  detach stages, detail pass).
+- Hull climbing: **done and tested**.
 - Assists, K/A/D/DMG scoreboard, death→killer-cam→spectate: **done**.
-- Paged intro flow with branding: **done** (this session).
+- Paged intro flow with branding + real-rig turntable: **done**.
 - Determinism/replay guarantee incl. bot mechs: **done and tested**.
+- Capture coverage for first-person mounts, the guard plate, and the
+  pause menu: **done** (`mech_fp`, `shield_fp`).
