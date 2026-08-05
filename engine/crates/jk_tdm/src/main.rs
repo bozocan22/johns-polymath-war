@@ -1918,13 +1918,14 @@ fn vm_carry(wk: GunKind) -> (Vec3, f32) {
 /// generic focus shift.
 fn sight_line_y(wk: GunKind) -> Option<f32> {
     match wk {
-        GunKind::Glock => Some(0.0877),
-        GunKind::Deagle => Some(0.1028),
-        GunKind::Mp5 => Some(0.0907),
-        GunKind::Shotgun => Some(0.0928),
-        GunKind::Ak47 => Some(0.0877),
-        GunKind::M4 => Some(0.1077),
-        GunKind::M249 => Some(0.1228),
+        GunKind::Glock => Some(0.1075),
+        GunKind::Deagle => Some(0.1300),
+        GunKind::Mp5 => Some(0.1160),
+        GunKind::Shotgun => Some(0.0950),
+        GunKind::Ak47 => Some(0.1060),
+        GunKind::M4 => Some(0.1120),
+        GunKind::M249 => Some(0.1265),
+        GunKind::Minigun => Some(0.1120),
         _ => None,
     }
 }
@@ -2258,6 +2259,9 @@ struct ModelKit {
     /// Faded unit-stencil paint for the mech ident plates - decorative
     /// parchment, deliberately dimmer than the ally signal white.
     mech_stencil: Handle<StandardMaterial>,
+    /// The 1x optic reticle - unlit so it holds its glow in shadow, the
+    /// way a real illuminated dot does.
+    optic_red: Handle<StandardMaterial>,
 }
 
 /// §2.1 tone slots of the weapon palette.
@@ -2267,6 +2271,12 @@ enum Tone {
     Mid,
     Dark,
     Black,
+    /// The red-dot RETICLE - unlit emissive red, the only non-grey in
+    /// the weapon palette. Deliberately its own slot rather than a
+    /// reuse of `mech_red`: that one is a gameplay PROMISE (the visor
+    /// weak point carries MECH_VISOR_MULT), and a reticle that shared
+    /// its handle would start reading as a hit marker.
+    Reticle,
 }
 
 impl ModelKit {
@@ -2276,6 +2286,7 @@ impl ModelKit {
             Tone::Mid => self.grey_mid.clone(),
             Tone::Dark => self.grey_dark.clone(),
             Tone::Black => self.grey_black.clone(),
+            Tone::Reticle => self.optic_red.clone(),
         }
     }
 }
@@ -2345,6 +2356,62 @@ fn push_stock(parts: &mut Vec<WPart>, z_rear: f32, drop: f32) {
 fn push_muzzle(parts: &mut Vec<WPart>, y: f32, z: f32, w: f32) {
     parts.push(wp(false, Tone::Dark, (0.0, y, z), 0.0, (w, w, 0.07)));
     parts.push(wp(true, Tone::Black, (0.0, y, z + 0.028), FRAC_PI_2, (w * 0.45, 0.03, w * 0.45)));
+}
+
+/// Inner half-width of a red-dot window. At the ADS distance every
+/// firearm settles to, this subtends roughly a ninth of screen height -
+/// a real optic's proportion, big enough to aim through and small
+/// enough to leave peripheral vision intact.
+const OPTIC_HALF: f32 = 0.023;
+/// Frame bar thickness, and the housing's fore-aft depth.
+const OPTIC_FRAME: f32 = 0.005;
+const OPTIC_DEPTH: f32 = 0.032;
+
+/// §owner: the 1x RED DOT every firearm carries.
+///
+/// An open square housing you look THROUGH - four bars around a window,
+/// never a solid block - with a thin emissive red CROSS floating at the
+/// exact centre. This replaced the goalpost irons, which asked the
+/// player to line up two pieces of dark grey against a dark grey world.
+///
+/// `y` is the reticle centre and MUST equal the gun's `sight_line_y`:
+/// focus aligns that height to the eye, so any disagreement puts the
+/// cross off the crosshair and the optic becomes decoration. The pairing
+/// is asserted for every gun in `every_firearm_carries_an_aligned_optic`.
+///
+/// The cross is 1x - it moves the AIM POINT nowhere. It is a sight
+/// picture, not a zoom: magnification stays whatever `zoom_deg` says.
+fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
+    let outer = OPTIC_HALF + OPTIC_FRAME * 0.5;
+    let span = OPTIC_HALF * 2.0 + OPTIC_FRAME * 2.0;
+    debug_assert!(
+        y - outer >= mount_top - 1e-4,
+        "the optic's lower frame is inside the gun: window bottom {} vs          receiver top {mount_top}",
+        y - outer
+    );
+    // housing: left / right posts, then the top and bottom bars
+    parts.push(wp(false, Tone::Black, (-outer, y, z), 0.0, (OPTIC_FRAME, span, OPTIC_DEPTH)));
+    parts.push(wp(false, Tone::Black, (outer, y, z), 0.0, (OPTIC_FRAME, span, OPTIC_DEPTH)));
+    parts.push(wp(false, Tone::Black, (0.0, y + outer, z), 0.0, (span, OPTIC_FRAME, OPTIC_DEPTH)));
+    parts.push(wp(false, Tone::Black, (0.0, y - outer, z), 0.0, (span, OPTIC_FRAME, OPTIC_DEPTH)));
+    // the mount BRIDGES housing to receiver. Sized from the real gap so
+    // the optic never floats and never sinks into the slide.
+    let gap = (y - outer - mount_top).max(0.0);
+    if gap > 1e-4 {
+        parts.push(wp(
+            false,
+            Tone::Dark,
+            (0.0, mount_top + gap * 0.5, z),
+            0.0,
+            (0.016, gap, OPTIC_DEPTH * 0.7),
+        ));
+    }
+    // THE CROSS - two thin emissive bars, dead centre. Kept clear of the
+    // frame (x1.55, not x2) so the arms float rather than touch, which
+    // is what makes it read as projected light instead of painted-on.
+    let arm = OPTIC_HALF * 1.55;
+    parts.push(wp(false, Tone::Reticle, (0.0, y, z), 0.0, (arm, 0.0024, 0.004)));
+    parts.push(wp(false, Tone::Reticle, (0.0, y, z), 0.0, (0.0024, arm, 0.004)));
 }
 
 /// §1.3: hand placements per weapon - (position, yaw, curl, mirrored) in
@@ -4914,12 +4981,8 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.05, -0.01), 0.18, (0.042, 0.13, 0.06)));
             parts.push(wp(false, Tone::Black, (0.0, -0.018, 0.048), 0.0, (0.012, 0.012, 0.05)));
             parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.011, 0.085, -0.03), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.011, 0.085, -0.03), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.079, -0.03), 0.0, (0.026, 0.005, 0.01)));
+            // 1x red dot on the slide - replaces the goalpost irons
+            push_red_dot(&mut parts, 0.1075, -0.015, 0.079); // slide top 0.079
         }
         GunKind::Deagle => {
             // the hand cannon: long light slide, heavy dark frame
@@ -4929,12 +4992,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
             push_muzzle(&mut parts, 0.055, 0.27, 0.055);
             parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.012, 0.1, -0.04), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.012, 0.1, -0.04), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.094, -0.04), 0.0, (0.028, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.1300, -0.02, 0.102); // slide rib top 0.102
         }
         GunKind::Mp5 => {
             // compact SMG: short everything - slab receiver, raked mag
@@ -4953,12 +5011,7 @@ fn spawn_weapon_model(
             // at all. Rear notch on the receiver, front post at the muzzle
             // end, both at the same height so they line up.
             parts.push(wp(false, Tone::Black, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.011, 0.088, -0.02), 0.0, (0.0045, 0.02, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.011, 0.088, -0.02), 0.0, (0.0045, 0.02, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.081, -0.02), 0.0, (0.026, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.1160, 0.005, 0.089); // rail top 0.089
         }
         GunKind::Shotgun => {
             // pump gun: barrel + tube pair over a light pump
@@ -4969,13 +5022,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
             parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT. The bead above had
-            // nothing to align against without this.
-            parts.push(wp(false, Tone::Black, (-0.011, 0.09, -0.05), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.011, 0.09, -0.05), 0.0, (0.0045, 0.018, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.084, -0.05), 0.0, (0.026, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.0950, -0.03, 0.0625); // receiver top 0.0625
         }
         GunKind::Ak47 => {
             // the classic: long gas tube, big two-segment raked magazine
@@ -4989,12 +5036,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.045);
             push_muzzle(&mut parts, 0.045, 0.635, 0.038);
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.011, 0.085, 0.1), 0.0, (0.0045, 0.024, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.011, 0.085, 0.1), 0.0, (0.0045, 0.024, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.076, 0.1), 0.0, (0.026, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.1060, 0.08, 0.078); // top cover 0.078
             parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
         }
         GunKind::M4 => {
@@ -5010,12 +5052,7 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
             push_stock(&mut parts, -0.30, 0.05);
             parts.push(wp(false, Tone::Black, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.011, 0.105, -0.02), 0.0, (0.0045, 0.02, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.011, 0.105, -0.02), 0.0, (0.0045, 0.02, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.098, -0.02), 0.0, (0.026, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.1120, 0.0, 0.084); // rail top 0.084
         }
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
@@ -5053,12 +5090,7 @@ fn spawn_weapon_model(
             // gun read as a grey wall. Front post is a tall blade off
             // the barrel so it shows THROUGH the rear aperture.
             parts.push(wp(false, Tone::Black, (0.0, 0.095, 0.62), 0.0, (0.008, 0.075, 0.01)));
-            // goalpost rear sight: two posts and a low crossbar - an
-            // aperture you look THROUGH, per the owner's reference shots,
-            // instead of a solid block you look AT
-            parts.push(wp(false, Tone::Black, (-0.012, 0.119, -0.02), 0.0, (0.0045, 0.024, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.012, 0.119, -0.02), 0.0, (0.0045, 0.024, 0.01)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.112, -0.02), 0.0, (0.028, 0.005, 0.01)));
+            push_red_dot(&mut parts, 0.1265, 0.0, 0.098); // feed cover 0.098
         }
         GunKind::Bow => {
             // hard-surface war bow: dark blocky limbs, mid riser, light tips
@@ -5127,6 +5159,10 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Black, (-0.02, -0.10, 0.18), 0.0, (0.026, 0.10, 0.035)));
             // feed chute hint on the right flank
             parts.push(wd(false, Tone::Light, (0.075, -0.02, -0.02), 0.0, (0.02, 0.06, 0.10)));
+            // §owner: the minigun had NO sights of any kind - it fell to
+            // the generic ADS shift and the player aimed by tracer alone.
+            // The optic sits above the motor housing (top y 0.075).
+            push_red_dot(&mut parts, 0.1120, -0.05, 0.075); // motor housing 0.075
         }
     }
     for p in parts {
@@ -6838,6 +6874,14 @@ fn setup(
         // decorative parchment (branding::palette::PARCHMENT_DIM), never
         // the ally signal white
         mech_stencil: materials.add(metal(Color::srgb(0.68, 0.63, 0.55), 0.0, 0.8)),
+        // unlit: an illuminated reticle does not take scene lighting, so
+        // it stays legible against a dark wall and a bright skyline alike
+        optic_red: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.14, 0.10),
+            emissive: LinearRgba::new(6.0, 0.35, 0.20, 1.0),
+            unlit: true,
+            ..default()
+        }),
     };
 
     // Fighter rigs, health bars, and pickup pads are match-scoped now
@@ -8041,6 +8085,48 @@ fn setup(
                 }
                 p.spawn((n, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.95))));
             }
+            // §owner: the ILLUMINATED CENTRE. Every other firearm now
+            // carries a red cross in a 1x optic; the scoped rifle is the
+            // one sight that could not (its viewmodel is hidden while
+            // zoomed), so its aiming mark lives here instead - same
+            // colour, same shape, so the eye learns one thing.
+            // The black stadia stay: red on its own vanishes against a
+            // sunlit wall, black on its own vanishes in shadow.
+            const SCOPE_RED: Color = Color::srgb(1.0, 0.16, 0.12);
+            p.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    top: Val::Percent(50.0),
+                    width: Val::Px(2.0),
+                    height: Val::Vh(5.4),
+                    margin: UiRect::new(
+                        Val::Px(-1.0),
+                        Val::Px(0.0),
+                        Val::Vh(-2.7),
+                        Val::Px(0.0),
+                    ),
+                    ..default()
+                },
+                BackgroundColor(SCOPE_RED),
+            ));
+            p.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    top: Val::Percent(50.0),
+                    width: Val::Vh(5.4),
+                    height: Val::Px(2.0),
+                    margin: UiRect::new(
+                        Val::Vh(-2.7),
+                        Val::Px(0.0),
+                        Val::Px(-1.0),
+                        Val::Px(0.0),
+                    ),
+                    ..default()
+                },
+                BackgroundColor(SCOPE_RED),
+            ));
         });
 
     // §4.3: AWARD TOASTS - stacked under the minimap, 2.5 s fade each.
@@ -15047,6 +15133,90 @@ mod band_tests {
                 feed_glyphs(hs, ns, bl, sm, wb),
                 want,
                 "glyphs for headshot={hs} noscope={ns} blind={bl} smoke={sm} wallbang={wb}"
+            );
+        }
+    }
+
+    /// §owner: every firearm carries a 1x red-dot optic, and the
+    /// reticle sits at EXACTLY the height focus aligns to the eye.
+    ///
+    /// This is the test the M249 needed and did not have. It shipped
+    /// with a sight line 2 mm above a flat feed cover and no rear
+    /// aperture at all, so aiming laid a 30 cm plate across the view -
+    /// a defect no unit test could see, because nothing tied the
+    /// declared number to the geometry that number is about.
+    ///
+    /// `push_red_dot(y, _)` builds its cross at `y`; `sight_line_y`
+    /// says where the eye goes. If those two ever disagree the optic
+    /// becomes decoration and the player aims with a cross that is not
+    /// on the target.
+    #[test]
+    fn every_firearm_carries_an_aligned_optic() {
+        // (kind, the y passed to push_red_dot in spawn_weapon_model)
+        let optics = [
+            (sim::GunKind::Glock, 0.1075_f32),
+            (sim::GunKind::Deagle, 0.1300),
+            (sim::GunKind::Mp5, 0.1160),
+            (sim::GunKind::Shotgun, 0.0950),
+            (sim::GunKind::Ak47, 0.1060),
+            (sim::GunKind::M4, 0.1120),
+            (sim::GunKind::M249, 0.1265),
+            (sim::GunKind::Minigun, 0.1120),
+        ];
+        for (kind, reticle_y) in optics {
+            let declared = sight_line_y(kind).unwrap_or_else(|| {
+                panic!("{kind:?} carries an optic but declares no sight line")
+            });
+            assert!(
+                (declared - reticle_y).abs() < 1e-6,
+                "{kind:?}: the reticle sits at {reticle_y} but focus aligns                  {declared} to the eye - the cross would not be on the                  crosshair"
+            );
+        }
+        // The AWM is the deliberate exception: `vm_hidden_while_scoped`
+        // deletes its viewmodel while zoomed, so a modelled optic could
+        // never be seen. Its illuminated cross lives in the scope
+        // overlay instead. Any sight line here would be a lie.
+        assert!(
+            sight_line_y(sim::GunKind::Awm).is_none(),
+            "the scoped rifle must not declare a viewmodel sight line"
+        );
+        // Fists, bow and spear have no sights to align.
+        for kind in [sim::GunKind::Fists, sim::GunKind::Bow, sim::GunKind::Spear] {
+            assert!(sight_line_y(kind).is_none(), "{kind:?} has no sights");
+        }
+    }
+
+    /// The optic must be a WINDOW, not a block: the frame bars sit
+    /// outside the clear aperture, and the cross arms stop short of the
+    /// frame. A reticle that touched the frame would read as painted-on
+    /// rather than projected, and a frame that overlapped the window
+    /// would be the grey wall all over again.
+    #[test]
+    fn the_optic_window_stays_clear() {
+        let mut parts = Vec::new();
+        push_red_dot(&mut parts, 0.10, 0.0, 0.06);
+        let reticles: Vec<&WPart> =
+            parts.iter().filter(|p| p.tone == Tone::Reticle).collect();
+        assert_eq!(reticles.len(), 2, "the cross is two bars");
+        for r in &reticles {
+            let half_x = r.size.x * 0.5;
+            let half_y = r.size.y * 0.5;
+            assert!(
+                half_x < OPTIC_HALF && half_y < OPTIC_HALF,
+                "a cross arm reaches the frame: {half_x} / {half_y} vs                  the {OPTIC_HALF} aperture"
+            );
+            assert!(
+                (r.pos.y - 0.10).abs() < 1e-6 && r.pos.x.abs() < 1e-6,
+                "the cross must be centred on the sight line"
+            );
+        }
+        // every frame bar clears the aperture
+        for b in parts.iter().filter(|p| p.tone == Tone::Black) {
+            let dx = b.pos.x.abs() - b.size.x * 0.5;
+            let dy = (b.pos.y - 0.10).abs() - b.size.y * 0.5;
+            assert!(
+                dx >= OPTIC_HALF - 1e-6 || dy >= OPTIC_HALF - 1e-6,
+                "a frame bar intrudes into the clear window"
             );
         }
     }
