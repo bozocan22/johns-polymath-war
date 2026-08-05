@@ -2208,6 +2208,12 @@ struct DecalMarker;
 #[derive(Component)]
 struct MainCam;
 
+/// The 2D camera the entire interface renders through. It exists purely
+/// to be LAST in the order so no 3D pass can draw over the HUD - see the
+/// note at its spawn.
+#[derive(Component)]
+struct UiCam;
+
 #[derive(Resource, Default)]
 struct TracerPool(Vec<Entity>);
 
@@ -2391,6 +2397,36 @@ fn push_muzzle(parts: &mut Vec<WPart>, y: f32, z: f32, w: f32) {
     parts.push(wp(true, Tone::Black, (0.0, y, z + 0.028), FRAC_PI_2, (w * 0.45, 0.03, w * 0.45)));
 }
 
+/// §owner: where a FIRST-PERSON shot should visually leave from, in
+/// camera-local space.
+///
+/// The sim casts every ray from the EYE - that is the hit test and it
+/// must not move. But drawing the streak from there too puts the muzzle
+/// flash in the middle of the screen, which reads as the player firing
+/// out of their own face. It is most obvious in a mech, where the
+/// mounts hang well off to one side of a very tall eye point.
+///
+/// These are the muzzle tips of the viewmodels as actually placed: the
+/// mount carries in `setup`, plus the barrel/tube length from their
+/// builders, times the 0.62/0.72 model scales. Kept next to `vm_carry`
+/// so the two stay in view of each other.
+fn fp_muzzle_local(p: &Fighter) -> Vec3 {
+    if p.in_mech() {
+        return match p.mech_weapon {
+            // the launch tube: carry (0.19,-0.20,-0.46), tube runs to
+            // local z 0.90 at scale 0.72
+            sim::MechWeapon::Rockets => Vec3::new(0.19, -0.20, -0.46 - 0.90 * 0.72),
+            // the gatling cluster: carry (0.20,-0.22,-0.52), barrels
+            // reach local z ~0.66 at scale 0.62
+            _ => Vec3::new(0.20, -0.22, -0.52 - 0.66 * 0.62),
+        };
+    }
+    // infantry: the carried gun's own offset, run forward to about the
+    // end of a typical barrel at the shared 0.9 model scale
+    let (tr, _) = vm_carry(p.gun);
+    Vec3::new(tr.x, tr.y, tr.z - 0.60 * 0.9)
+}
+
 /// §owner: a real ARROW in flight - forged head, tapered shaft, three
 /// fletching vanes. It replaced a featureless 5 cm box, which at the
 /// speeds this game looses arrows at read as a grey dash and told the
@@ -2477,6 +2513,11 @@ fn spawn_spear_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
     }
     root
 }
+
+/// How long a freshly launched rocket is drawn easing off the muzzle
+/// and onto its true position. Short enough that the correction is over
+/// long before the bird is anywhere near a target.
+const ROCKET_LAUNCH_BLEND_S: f32 = 0.09;
 
 /// Fletching roll rate. Fast enough to read as spin-stabilised at the
 /// speeds arrows fly here, slow enough not to strobe against the frame
@@ -3334,6 +3375,12 @@ const MECH_FP_BEATS: &[CapBeat] = &[
     // (Snap no earlier than ~1.5 s: the first render frames land before
     // the swapchain settles and save a 0-byte PNG.)
     CapBeat { snap: Some("01-fp-mech-turret"), ..beat(1.6) },
+    // FIRING: the streak has to leave the barrel cluster in the lower
+    // right, not the middle of the screen. Held through two snaps so the
+    // belt is definitely running by the second.
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.66) },
+    CapBeat { snap: Some("01b-fp-turret-firing"), ..beat(1.76) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(1.78) },
     CapBeat { press: &[CapKey::K(KeyCode::Digit2)], ..beat(1.8) },
     CapBeat { release: &[CapKey::K(KeyCode::Digit2)], ..beat(1.9) },
     CapBeat { snap: Some("02-fp-mech-rockets"), ..beat(2.4) },
@@ -5032,10 +5079,36 @@ struct MinigunSpinner;
 struct RocketVis(usize);
 
 /// §5.3: place the pooled missile visuals on the sim's live rockets.
-fn sync_rockets(game: Res<Game>, mut q: Query<(&RocketVis, &mut Transform, &mut Visibility)>) {
+fn sync_rockets(
+    game: Res<Game>,
+    cam_ctl: Res<CamCtl>,
+    cam_q: Query<&GlobalTransform, With<MainCam>>,
+    mut q: Query<(&RocketVis, &mut Transform, &mut Visibility)>,
+) {
+    // Our own launch, seen in first person, should leave the TUBE. The
+    // sim spawns the bird ahead of the eye because that is where the
+    // collision and the homing have to start from, and moving it would
+    // be a gameplay change - so only the drawn position is corrected,
+    // and only for the first instants of flight, easing onto the true
+    // position before anything can be hit. After that the visual IS the
+    // truth again.
+    let fp_muzzle: Option<Vec3> = if cam_ctl.first_person {
+        cam_q.get_single().ok().map(|g| {
+            let p = &game.sim.fighters[game.sim.player];
+            g.transform_point(fp_muzzle_local(p))
+        })
+    } else {
+        None
+    };
     for (rv, mut tf, mut vis) in &mut q {
         if let Some(r) = game.sim.rockets.get(rv.0) {
             tf.translation = Vec3::from_array(r.pos);
+            if let Some(m) = fp_muzzle {
+                if r.shooter == game.sim.player && r.t < ROCKET_LAUNCH_BLEND_S {
+                    let k = 1.0 - (r.t / ROCKET_LAUNCH_BLEND_S).clamp(0.0, 1.0);
+                    tf.translation = tf.translation.lerp(m, k);
+                }
+            }
             let v = Vec3::from_array(r.vel);
             if v.length_squared() > 1e-3 {
                 tf.look_to(v.normalize(), Vec3::Y);
@@ -7539,10 +7612,35 @@ fn setup(
             },
             Transform::from_xyz(0.0, 3.0, -28.0).looking_at(Vec3::ZERO, Vec3::Y),
             MainCam,
-            // two cameras now exist - the HUD belongs to this one
-            IsDefaultUiCamera,
         ))
         .id();
+
+    // ---- §owner: the UI CAMERA, and why the HUD needs its own ----------
+    //
+    // The HUD used to render through MainCam (order 0). The viewmodel
+    // camera is order 1 with no clear, so it composites AFTER - and
+    // therefore OVER - everything MainCam drew, the HUD included. On foot
+    // that went unnoticed because a rifle sits low and right of the ammo
+    // block. In a mech it is unmissable: the mount is a much bigger body
+    // and it ate the first characters of the ammo readout, which is how
+    // "TURRET 300 / HEAT 0%" reached the screen as "TURRET 300 / EAT 0%".
+    //
+    // Same family as the gun-over-the-pause-menu bug, and the visibility
+    // gate that fixed THAT one cannot help here: the HUD is supposed to
+    // be on screen at the same time as the weapon. The only real answer
+    // is ordering - the interface draws last, after every 3D pass, so
+    // nothing in the world can ever composite on top of it.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            // above MainCam (0) and the viewmodel (1)
+            order: 2,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        IsDefaultUiCamera,
+        UiCam,
+    ));
 
     // ---- §2.3 viewmodel camera: the gun renders on its OWN camera with a
     // FIXED ~55° FOV, so the world FOV zooming on ADS never stretches the
@@ -10312,9 +10410,23 @@ fn sync_tracers(
     mut commands: Commands,
     game: Res<Game>,
     assets: Res<FxAssets>,
+    cam_ctl: Res<CamCtl>,
+    cam_q: Query<&GlobalTransform, With<MainCam>>,
     mut pool: ResMut<TracerPool>,
     mut q: Query<(&mut Transform, &mut Visibility), With<TracerMarker>>,
 ) {
+    // The local player's own streaks, while in first person, are drawn
+    // from the WEAPON on screen instead of from the eye the ray was cast
+    // from. Everyone else's - and their own in third person - keep the
+    // sim's origin, which is already at the right place on the body.
+    let fp_origin: Option<Vec3> = if cam_ctl.first_person {
+        cam_q.get_single().ok().map(|g| {
+            let p = &game.sim.fighters[game.sim.player];
+            g.transform_point(fp_muzzle_local(p))
+        })
+    } else {
+        None
+    };
     while pool.0.len() < game.sim.tracers.len() {
         let e = commands
             .spawn((
@@ -10342,7 +10454,12 @@ fn sync_tracers(
                 let b = Vec3::from_array(tr.to);
                 let seg = b - a0;
                 let sl = seg.length().max(0.05);
-                let a = a0 + (seg / sl) * (0.45_f32).min(sl * 0.4) - Vec3::Y * 0.12;
+                let a = match fp_origin {
+                    // our own shot, seen down our own sights: start it at
+                    // the muzzle that is actually on screen
+                    Some(m) if tr.shooter == game.sim.player => m,
+                    _ => a0 + (seg / sl) * (0.45_f32).min(sl * 0.4) - Vec3::Y * 0.12,
+                };
                 let mid = (a + b) * 0.5;
                 let len = (b - a).length().max(0.05);
                 let dir = (b - a) / len;

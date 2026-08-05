@@ -1948,6 +1948,11 @@ pub struct Tracer {
     pub to: [f32; 3],
     pub team: Team,
     pub ttl: f32,
+    /// Who fired it. Pure presentation data - the renderer needs it to
+    /// know which streak is the LOCAL player's, because a first-person
+    /// shot has to be drawn leaving the weapon on screen rather than the
+    /// eye the ray was actually cast from.
+    pub shooter: usize,
 }
 
 /// Arrow / thrown spear in flight (or stuck).
@@ -6213,6 +6218,7 @@ impl TdmSim {
                 to: end,
                 team: shooter_team,
                 ttl: 0.06,
+                shooter: i,
             });
             // §4.5 WALLBANG: if the wall won, look a short window PAST
             // its entry face - a body inside it takes the round at half
