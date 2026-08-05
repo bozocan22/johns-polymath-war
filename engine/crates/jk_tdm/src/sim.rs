@@ -1529,6 +1529,14 @@ pub struct Fighter {
     pub parries: u32,
     /// Hull climbing: `Some` while gripping a mech (DESIGN.md). Both
     /// hands are on the hull - no ranged weapon until release.
+    /// §owner SQUAD AI: the enemy this bot is currently engaging, or -1.
+    /// Squadmates read it to converge their fire instead of each
+    /// shooting whoever happens to be nearest to them personally.
+    pub engaging: i32,
+    /// §owner SQUAD AI: anchor or flanker within a shared engagement.
+    /// Derived every tick from index order among the squadmates on the
+    /// same target - never stored across ticks, never rolled.
+    pub squad_role: SquadRole,
     /// §owner: which of the four classes this fighter is fighting as.
     /// Set at spawn and kept for the match - `class_spec` turns it into
     /// the four multipliers that actually bite.
@@ -3083,6 +3091,41 @@ pub const REGEN_RATE_HPS: f32 = 8.33;
 /// How long a parried attacker is staggered.
 pub const PARRY_STAGGER_S: f32 = 0.9;
 
+// ---- §owner SQUAD AI ------------------------------------------------------
+// Bots were five strangers who happened to share a field: every one of
+// them picked its own waypoint, its own target, and pushed on its own.
+// The visible symptom is TRICKLING - you hold one angle and they arrive
+// one at a time to be shot, so five opponents never feel like five.
+//
+// Everything below is deterministic by construction. Roles come from
+// fighter INDEX order, never from `rng`, because the replay tests assert
+// a full match is bit-identical and a coordination system that rolled
+// dice would desync every one of them.
+
+/// How near a teammate has to be to count as fighting alongside you.
+pub const SQUAD_RADIUS_M: f32 = 22.0;
+/// A target a squadmate is already on is treated as this much closer
+/// when picking who to shoot. Enough to break the "everyone shoots their
+/// own nearest" pattern, not enough to drag a bot across the map past a
+/// man in its face.
+pub const SQUAD_FOCUS_BONUS_M: f32 = 9.0;
+/// Bots closer together than this push apart. Stops a squad stacking
+/// into one grenade and makes the spread look deliberate.
+pub const SQUAD_SPACING_M: f32 = 3.4;
+pub const SQUAD_SPACING_PUSH: f32 = 0.55;
+/// How wide a flanker swings off the direct line to its target.
+pub const SQUAD_FLANK_STRENGTH: f32 = 0.85;
+
+/// What a bot is doing inside a shared engagement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SquadRole {
+    /// Fighting alone, or the one holding the enemy's attention.
+    #[default]
+    Anchor,
+    /// Working around the side while the anchor holds the front.
+    Flank,
+}
+
 /// §owner MELEE v2: which way a swing travels.
 ///
 /// Chosen by the attacker's own MOVEMENT at the moment the blade starts
@@ -3597,6 +3640,8 @@ impl TdmSim {
                     fired_wallbang: false,
                     stagger_t: 0.0,
                     parries: 0,
+                    engaging: -1,
+                    squad_role: SquadRole::Anchor,
                     class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
@@ -8346,11 +8391,84 @@ impl TdmSim {
             // sight the target's actual chest — a crouched enemy is LOWER
             let tgt = [g.pos[0], g.pos[1] + g.height() * 0.6, g.pos[2]];
             let d2 = (tgt[0] - eye[0]).powi(2) + (tgt[2] - eye[2]).powi(2);
+            // §owner SQUAD AI: FOCUS FIRE. A target a nearby squadmate is
+            // already engaging is scored as if it were closer, so a squad
+            // converges instead of each man dutifully shooting whoever is
+            // nearest to himself. This is most of why five bots used to
+            // feel like five separate fights.
+            let d2 = if self.squadmate_engaging(i, j) {
+                let d = d2.sqrt() - SQUAD_FOCUS_BONUS_M;
+                d.max(0.0) * d.max(0.0)
+            } else {
+                d2
+            };
             if best.map_or(true, |(_, b)| d2 < b) && self.sight_clear(eye, tgt) {
                 best = Some((j, d2));
             }
         }
         best.map(|(j, _)| j)
+    }
+
+    /// Is any living squadmate within `SQUAD_RADIUS_M` of `i` already
+    /// engaging enemy `j`? Pure read over a fixed iteration order.
+    fn squadmate_engaging(&self, i: usize, j: usize) -> bool {
+        let f = &self.fighters[i];
+        self.fighters.iter().enumerate().any(|(k, m)| {
+            k != i
+                && m.team == f.team
+                && m.alive()
+                && m.engaging == j as i32
+                && {
+                    let dx = m.pos[0] - f.pos[0];
+                    let dz = m.pos[2] - f.pos[2];
+                    dx * dx + dz * dz < SQUAD_RADIUS_M * SQUAD_RADIUS_M
+                }
+        })
+    }
+
+    /// §owner SQUAD AI: the bot's role in a shared engagement.
+    ///
+    /// The LOWEST-INDEX squadmate on a target anchors it; everyone else
+    /// works around the side. Index order rather than "who got there
+    /// first" keeps this stable frame to frame AND identical on replay -
+    /// a role that flickered would make the flankers jitter in place.
+    fn squad_role_for(&self, i: usize, target: usize) -> SquadRole {
+        let f = &self.fighters[i];
+        for (k, m) in self.fighters.iter().enumerate() {
+            if k >= i || m.team != f.team || !m.alive() || m.engaging != target as i32 {
+                continue;
+            }
+            let dx = m.pos[0] - f.pos[0];
+            let dz = m.pos[2] - f.pos[2];
+            if dx * dx + dz * dz < SQUAD_RADIUS_M * SQUAD_RADIUS_M {
+                return SquadRole::Flank; // someone lower-indexed anchors
+            }
+        }
+        SquadRole::Anchor
+    }
+
+    /// §owner SQUAD AI: a push away from squadmates who are too close.
+    /// Bots used to stack on the same waypoint and die to one grenade.
+    fn squad_spacing(&self, i: usize) -> [f32; 2] {
+        let f = &self.fighters[i];
+        let mut out = [0.0_f32, 0.0];
+        for (k, m) in self.fighters.iter().enumerate() {
+            if k == i || m.team != f.team || !m.alive() {
+                continue;
+            }
+            let dx = f.pos[0] - m.pos[0];
+            let dz = f.pos[2] - m.pos[2];
+            let d2 = dx * dx + dz * dz;
+            if d2 < SQUAD_SPACING_M * SQUAD_SPACING_M && d2 > 1e-4 {
+                let d = d2.sqrt();
+                // full strength when overlapping, fading to nothing at
+                // the spacing radius
+                let w = (1.0 - d / SQUAD_SPACING_M) * SQUAD_SPACING_PUSH;
+                out[0] += dx / d * w;
+                out[1] += dz / d * w;
+            }
+        }
+        out
     }
 
     /// What bot `i` should be shooting at, as (position, height,
@@ -8477,6 +8595,17 @@ impl TdmSim {
                 }
             }
         }
+        // §owner SQUAD AI: publish who this bot is on, then read what
+        // role that leaves it. Both are recomputed every tick from live
+        // positions - nothing is remembered, so a squad reforms
+        // correctly the instant someone dies or a target breaks LOS.
+        let engaged = self.nearest_visible_enemy(i);
+        self.fighters[i].engaging = engaged.map_or(-1, |j| j as i32);
+        self.fighters[i].squad_role = match engaged {
+            Some(j) => self.squad_role_for(i, j),
+            None => SquadRole::Anchor,
+        };
+        let role = self.fighters[i].squad_role;
         let enemy = self.nearest_visible_threat(i);
         let (fpos, strafe_phase, waypoint, ammo, reloading) = {
             let f = &self.fighters[i];
@@ -8512,9 +8641,23 @@ impl TdmSim {
                 // shield discipline: caught reloading in the open → turtle
                 // behind the shield until the mag is back in
                 self.fighters[i].shield_up = reloading && dist < 16.0;
+                // §owner SQUAD AI: the ANCHOR fights the way bots always
+                // did - hold the front, strafe, trade. A FLANKER commits
+                // to one side instead of oscillating, so the pair
+                // arrives from two angles rather than both walking up the
+                // same lane. The side is picked from the fighter's index
+                // parity: stable, free, and identical on replay.
+                let (strafe, closing) = match role {
+                    SquadRole::Anchor => (strafe, closing),
+                    SquadRole::Flank => {
+                        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        (side * SQUAD_FLANK_STRENGTH, closing * 0.55)
+                    }
+                };
+                let sep = self.squad_spacing(i);
                 vel = [
-                    (px * strafe + dx / dist * closing) * MOVE_SPEED * 0.8,
-                    (pz * strafe + dz / dist * closing) * MOVE_SPEED * 0.8,
+                    (px * strafe + dx / dist * closing + sep[0]) * MOVE_SPEED * 0.8,
+                    (pz * strafe + dz / dist * closing + sep[1]) * MOVE_SPEED * 0.8,
                 ];
                 // §D: MOUNT SELECTION. A bot in a chassis was still
                 // pulling the trigger on the rifle its pilot happened to
@@ -8632,7 +8775,14 @@ impl TdmSim {
                 }
                 let (dx, dz) = (waypoint[0] - fpos[0], waypoint[1] - fpos[2]);
                 let d = (dx * dx + dz * dz).sqrt().max(0.01);
-                vel = [dx / d * MOVE_SPEED * 0.85, dz / d * MOVE_SPEED * 0.85];
+                // spacing applies while ROAMING too, not just in a fight -
+                // squads used to walk to a shared waypoint in single file
+                // and arrive as one clump
+                let sep = self.squad_spacing(i);
+                vel = [
+                    (dx / d + sep[0]) * MOVE_SPEED * 0.85,
+                    (dz / d + sep[1]) * MOVE_SPEED * 0.85,
+                ];
                 yaw = dx.atan2(dz);
                 // probe at 0.75 m so waist-high garden ruins register too
                 let eye = [fpos[0], fpos[1] + 0.75, fpos[2]];
@@ -9710,6 +9860,150 @@ mod tests {
             MeleeDir::Left,
             "the line must hold for the whole strike"
         );
+    }
+
+    /// §owner SQUAD AI: a squad CONVERGES instead of each man shooting
+    /// whoever happens to be nearest to himself.
+    ///
+    /// The setup is the exact shape that used to trickle: two friendlies
+    /// side by side, two enemies, each friendly marginally nearer a
+    /// different one. Without focus fire they split and neither target
+    /// dies; with it they both take the one a squadmate is already on.
+    #[test]
+    fn a_squad_converges_its_fire_instead_of_splitting() {
+        // a 2v2 - `range` is a 1v1 and a squad needs squadmates
+        let mut s = TdmSim::new(cfg(0x5A0D, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        // two blues abreast
+        s.fighters[0].team = Team::Blue;
+        s.fighters[0].pos = [-1.0, 0.0, 0.0];
+        s.fighters[1].team = Team::Blue;
+        s.fighters[1].pos = [1.0, 0.0, 0.0];
+        // two reds, one slightly closer to each blue
+        for (idx, x) in [(2usize, -3.0_f32), (3, 3.0)] {
+            let f = &mut s.fighters[idx];
+            f.team = Team::Red;
+            f.pos = [x, 0.0, 14.0];
+            f.protect_t = 0.0;
+            f.health = MAX_HEALTH;
+        }
+        // fighter 1 has already called its target
+        s.fighters[1].engaging = 2;
+        // 0 is nearer red 2 anyway, so prove the BONUS is what decides by
+        // asking about the far one: with a squadmate on it, red 2 must
+        // win for fighter 1's neighbour even from the wrong side
+        s.fighters[0].pos = [4.0, 0.0, 0.0]; // now nearer red 3
+        let pick = s.nearest_visible_enemy(0);
+        assert_eq!(
+            pick,
+            Some(2),
+            "a target a squadmate is already on must win over a marginally \
+             nearer one - that is the whole of focus fire"
+        );
+        // but the bonus must not drag a bot across the map: put red 3 in
+        // its face and the near threat wins again
+        s.fighters[3].pos = [4.0, 0.0, 2.0];
+        assert_eq!(
+            s.nearest_visible_enemy(0),
+            Some(3),
+            "focus fire must not out-weigh a man at point blank"
+        );
+    }
+
+    /// Roles come from INDEX ORDER, so they are stable frame to frame
+    /// and identical on replay. The lowest-indexed squadmate on a target
+    /// anchors it and everyone else works the flank.
+    #[test]
+    fn one_squadmate_anchors_and_the_rest_flank() {
+        let mut s = TdmSim::new(cfg(0x5A0E, 2, Mode::Tdm, MapKind::Arena));
+        for i in 0..3 {
+            s.fighters[i].team = Team::Blue;
+            s.fighters[i].pos = [i as f32 * 2.0, 0.0, 0.0];
+            s.fighters[i].engaging = 3;
+        }
+        s.fighters[3].team = Team::Red;
+        s.fighters[3].pos = [0.0, 0.0, 12.0];
+        assert_eq!(
+            s.squad_role_for(0, 3),
+            SquadRole::Anchor,
+            "the lowest index on the target holds it"
+        );
+        for i in 1..3 {
+            assert_eq!(
+                s.squad_role_for(i, 3),
+                SquadRole::Flank,
+                "fighter {i} must work the flank, not stack on the anchor"
+            );
+        }
+        // a bot fighting alone is always an anchor - flanking nobody is
+        // just walking sideways
+        let mut solo = range(0x5A0F);
+        solo.fighters[0].engaging = 1;
+        assert_eq!(solo.squad_role_for(0, 1), SquadRole::Anchor);
+    }
+
+    /// Bots that stand on each other die to one grenade. Spacing pushes
+    /// them apart, and only within its own radius.
+    #[test]
+    fn squadmates_push_out_of_each_others_pockets() {
+        let mut s = range(0x5A10);
+        s.fighters[0].team = Team::Blue;
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[1].team = Team::Blue;
+        s.fighters[1].pos = [0.6, 0.0, 0.0]; // practically inside him
+        let push = s.squad_spacing(0);
+        assert!(
+            push[0] < -0.05,
+            "a crowded bot must push AWAY from its neighbour, got {push:?}"
+        );
+        // out past the radius there is no push at all
+        s.fighters[1].pos = [SQUAD_SPACING_M + 2.0, 0.0, 0.0];
+        let none = s.squad_spacing(0);
+        assert!(
+            none[0].abs() < 1e-6 && none[1].abs() < 1e-6,
+            "spacing must not reach past its own radius, got {none:?}"
+        );
+        // and it never pushes away from ENEMIES - that would be retreat,
+        // not spacing
+        s.fighters[1].team = Team::Red;
+        s.fighters[1].pos = [0.6, 0.0, 0.0];
+        let vs_enemy = s.squad_spacing(0);
+        assert!(
+            vs_enemy[0].abs() < 1e-6,
+            "spacing is a SQUAD rule; enemies must not repel"
+        );
+    }
+
+    /// The whole system is index-ordered rather than rolled, precisely so
+    /// it cannot desync a replay. This is the guard on that claim: a full
+    /// match with squads fighting must still be bit-identical.
+    #[test]
+    fn squad_coordination_stays_deterministic() {
+        let run = || -> Vec<(f32, f32, i32)> {
+            let mut s = TdmSim::new(cfg(0x5A11, 4, Mode::Tdm, MapKind::Arena));
+            for _ in 0..(SIM_HZ as usize * 6) {
+                s.step(PlayerCmd::default());
+            }
+            s.fighters
+                .iter()
+                .map(|f| (f.pos[0], f.pos[2], f.engaging))
+                .collect()
+        };
+        let a = run();
+        let b = run();
+        for (k, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                (x.0.to_bits(), x.1.to_bits(), x.2),
+                (y.0.to_bits(), y.1.to_bits(), y.2),
+                "fighter {k} diverged between identical runs - squad AI \
+                 must not introduce nondeterminism"
+            );
+        }
     }
 
     /// Climb checklist test 1+2: grip drains under hold, recovers under
