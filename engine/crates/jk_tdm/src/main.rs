@@ -2717,17 +2717,44 @@ fn weapon_strip(
     mut q: Query<(&WeaponStripCell, &mut Text, &mut TextColor)>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
-    if p.active != *last_active {
-        *last_active = p.active;
+    // §C.7 (Brief VIII): in a chassis the strip IS the two hull mounts -
+    // the carried inventory is sealed away with the rest of the infantry
+    // kit, exactly as the sim's slot keys already treat it.
+    let in_mech = p.in_mech();
+    let cur = if in_mech {
+        match p.mech_weapon {
+            sim::MechWeapon::Rockets => 1,
+            _ => 0,
+        }
+    } else {
+        p.active
+    };
+    if cur != *last_active {
+        *last_active = cur;
         *idle_t = 0.0;
     } else {
         *idle_t += time.delta_secs();
     }
     let strip_fade = if *idle_t > 4.0 { 0.45 } else { 1.0 };
     for (cell, mut t, mut tc) in &mut q {
-        let g = p.inventory[cell.0];
-        let name = if g == GunKind::Fists { "-" } else { gun(g).name };
-        let active = cell.0 == p.active;
+        let (name, active) = if in_mech {
+            match cell.0 {
+                0 => (format!("TURRET {}", p.mech_rounds), cur == 0),
+                1 => (format!("ROCKETS {}", p.pod_ammo), cur == 1),
+                _ => {
+                    **t = String::new();
+                    continue;
+                }
+            }
+        } else {
+            let g = p.inventory[cell.0];
+            let n = if g == GunKind::Fists {
+                "-".to_string()
+            } else {
+                gun(g).name.to_string()
+            };
+            (n, cell.0 == p.active)
+        };
         **t = if active {
             // §0 (Brief VII): ASCII only - U+25B8 had no font glyph.
             format!("> {}  [{}]", name, cell.0 + 1)
@@ -4199,13 +4226,20 @@ fn main() {
 fn rocket_aim_preview(
     game: Res<Game>,
     keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     vis: Res<RocketAimVis>,
     cam_q: Query<&Transform, With<MainCam>>,
     mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
-    let show =
-        p.alive() && p.in_mech() && p.pod_ammo > 0 && keys.pressed(KeyCode::KeyY);
+    // §C.7: the arc shows whenever the pod is being PRE-AIMED - Y, or
+    // RMB with the ROCKETS mount selected (mirrors the cmd mapping)
+    let show = p.alive()
+        && p.in_mech()
+        && p.pod_ammo > 0
+        && (keys.pressed(KeyCode::KeyY)
+            || (p.mech_weapon == sim::MechWeapon::Rockets
+                && buttons.pressed(MouseButton::Right)));
     if !show {
         for e in &vis.0 {
             if let Ok((_, mut v)) = q.get_mut(*e) {
@@ -4399,6 +4433,8 @@ fn shot_clock(f: &Fighter) -> f32 {
         match f.mech_weapon {
             sim::MechWeapon::Gatling => f.gatling_cd,
             sim::MechWeapon::Autocannon => f.autocannon_cd,
+            // §C.7: the pod's cycle is the relaunch cooldown
+            sim::MechWeapon::Rockets => f.pod_cd,
         }
     } else {
         f.fire_cd
@@ -4425,6 +4461,10 @@ fn spawn_casings(
             continue;
         }
         if matches!(f.gun, GunKind::Bow | GunKind::Spear | GunKind::Fists) {
+            continue;
+        }
+        // §C.7: a rocket tube ejects no brass
+        if f.in_mech() && f.mech_weapon == sim::MechWeapon::Rockets {
             continue;
         }
         budget -= 1;
@@ -7907,8 +7947,17 @@ fn input_and_step(
         throw_cancel: keys.just_pressed(KeyCode::KeyB),
         // §4.6 (Brief VI): U dismounts the mech
         exit_mech: keys.just_pressed(KeyCode::KeyU),
-        // §5.3 (Brief VI): Y holds missile targeting; release launches
-        pod_aim: keys.pressed(KeyCode::KeyY),
+        // §5.3 (Brief VI) / §C.7 (Brief VIII): missile targeting is pure
+        // PRE-AIM now - lock accrual and the amber arc; the launch is
+        // LMB through the ROCKETS mount. With that mount selected, RMB
+        // is the targeting hold (the finger that already means "aim"
+        // everywhere else); Y stays wired for muscle memory and the
+        // capture scripts.
+        pod_aim: keys.pressed(KeyCode::KeyY)
+            || (buttons.pressed(MouseButton::Right)
+                && game.sim.fighters[game.sim.player].in_mech()
+                && game.sim.fighters[game.sim.player].mech_weapon
+                    == sim::MechWeapon::Rockets),
         cycle_throw: game.pending_cycle_throw,
         // §5/§6 (Brief III): F is the KNIFE now; the armor ability
         // (brace / flame / repulsor) moved to held C
@@ -7964,6 +8013,9 @@ fn input_and_step(
                 sim::MechWeapon::Gatling => 0.0016,
                 // the autocannon is the reason the brace stance exists
                 sim::MechWeapon::Autocannon => 0.0180,
+                // §C.7: a launch is a THUMP, not a crack - between the
+                // two gun mounts, nearer the belt than the cannon
+                sim::MechWeapon::Rockets => 0.0110,
             }
         } else {
             gun(p.gun).kick
@@ -14503,6 +14555,16 @@ mod camera_v2_tests {
             1.35,
             "selecting the autocannon must move the shot clock with it"
         );
+        // §C.7: the pod rides its relaunch cooldown
+        s.fighters[0].mech_weapon = sim::MechWeapon::Rockets;
+        s.fighters[0].pod_cd = 0.9;
+        assert_eq!(
+            shot_clock(&s.fighters[0]),
+            0.9,
+            "the ROCKETS mount's shot clock is pod_cd"
+        );
+        s.fighters[0].pod_cd = 0.0;
+        s.fighters[0].mech_weapon = sim::MechWeapon::Autocannon;
 
         // The regression this guards: with the mount idle, the shot
         // clock must be ZERO even though the carried gun is hot. If this

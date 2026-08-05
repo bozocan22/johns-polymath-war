@@ -2623,6 +2623,13 @@ pub enum MechWeapon {
     #[default]
     Gatling,
     Autocannon,
+    /// §C.7 (Brief VIII): the missile pod as a SELECTABLE mount. The
+    /// pilot's strip is TURRET [1] / ROCKETS [2]; with this selected the
+    /// trigger launches a tube (`try_fire_rocket`) and RMB is pure
+    /// pre-aim - lock accrual and the amber arc, never a launch. The
+    /// autocannon mount still exists on the enum for the BOT brain,
+    /// which picks its mount by range, not by number key.
+    Rockets,
 }
 /// Gatling: SUPPRESSION. Every number is set against the man-portable
 /// minigun, because that is the weapon a player will compare it to.
@@ -4174,9 +4181,13 @@ impl TdmSim {
             // SWITCH_S he can neither see nor use.
             if let Some(s) = cmd.slot {
                 if self.fighters[p].in_mech() {
+                    // §C.7: the PILOT's strip is two mounts - TURRET and
+                    // ROCKETS. The autocannon is bot hardware now; giving
+                    // it a third key would contradict the two-slot strip
+                    // the HUD teaches.
                     match s {
                         0 => self.fighters[p].mech_weapon = MechWeapon::Gatling,
-                        1 => self.fighters[p].mech_weapon = MechWeapon::Autocannon,
+                        1 => self.fighters[p].mech_weapon = MechWeapon::Rockets,
                         _ => {}
                     }
                 } else {
@@ -4576,36 +4587,11 @@ impl TdmSim {
                         self.fighters[tgt as usize].lock_warn_t = 0.25;
                     }
                 }
-                let released = self.fighters[p].pod_aim_held && !cmd.pod_aim;
-                if released && can_pod {
-                    let locked = self.fighters[p].pod_lock_t >= POD_LOCK_S
-                        && self.fighters[p].pod_lock_id >= 0;
-                    let target = if locked {
-                        self.fighters[p].pod_lock_id
-                    } else {
-                        -1
-                    };
-                    let eye = self.muzzle_origin(p);
-                    let d = normalize(cmd.aim);
-                    let team = self.fighters[p].team;
-                    self.rockets.push(Rocket {
-                        pos: [
-                            eye[0] + d[0] * 0.6,
-                            eye[1] + d[1] * 0.6 + 0.35,
-                            eye[2] + d[2] * 0.6,
-                        ],
-                        vel: [d[0] * 20.0, d[1] * 20.0, d[2] * 20.0],
-                        target,
-                        shooter: p,
-                        team,
-                        t: 0.0,
-                        los_lost: 0.0,
-                        prev_los: d,
-                    });
-                    let f = &mut self.fighters[p];
-                    f.pod_ammo -= 1;
-                    f.pod_cd = POD_RELAUNCH_S;
-                }
+                // §C.7 (Brief VIII): aiming no longer LAUNCHES. The
+                // release-edge fire is gone - RMB/Y is pure pre-aim
+                // (lock accrual + the victim's warning) and the launch
+                // is `try_fire_rocket`, driven by the same trigger as
+                // every other mount via the `mech_weapon` match below.
                 if !cmd.pod_aim {
                     let f = &mut self.fighters[p];
                     f.pod_lock_t = 0.0;
@@ -4630,6 +4616,9 @@ impl TdmSim {
                         }
                         MechWeapon::Autocannon => {
                             self.try_fire_autocannon(p, cmd.aim);
+                        }
+                        MechWeapon::Rockets => {
+                            self.try_fire_rocket(p, cmd.aim);
                         }
                     }
                 }
@@ -6287,6 +6276,58 @@ impl TdmSim {
             let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
             self.emit_noise(at, gun_noise_m(GunKind::Minigun));
         }
+        true
+    }
+
+    /// §C.7 (Brief VIII): the ROCKETS mount's trigger. The pre-aim
+    /// (RMB/Y -> `cmd.pod_aim`) only ever AIMS - this is the one place a
+    /// missile leaves the pod. A ripe lock (full `POD_LOCK_S` on a mech
+    /// still under the reticle) rides out on the bird; anything less is
+    /// a dumb-fire straight down the aim line. Same gates the old
+    /// release-fire had: a tube in the pod, the relaunch cooldown, and
+    /// no launching mid power stride.
+    pub fn try_fire_rocket(&mut self, p: usize, aim: [f32; 3]) -> bool {
+        {
+            let f = &self.fighters[p];
+            if !f.in_mech()
+                || f.mech_weapon != MechWeapon::Rockets
+                || !f.alive()
+                || f.pod_ammo == 0
+                || f.pod_cd > 0.0
+                || f.mech_transition_t > 0.0
+                || f.stride_t > 0.0
+            {
+                return false;
+            }
+        }
+        let locked = self.fighters[p].pod_lock_t >= POD_LOCK_S
+            && self.fighters[p].pod_lock_id >= 0;
+        let target = if locked {
+            self.fighters[p].pod_lock_id
+        } else {
+            -1
+        };
+        let eye = self.muzzle_origin(p);
+        let d = normalize(aim);
+        let team = self.fighters[p].team;
+        self.rockets.push(Rocket {
+            pos: [
+                eye[0] + d[0] * 0.6,
+                eye[1] + d[1] * 0.6 + 0.35,
+                eye[2] + d[2] * 0.6,
+            ],
+            vel: [d[0] * 20.0, d[1] * 20.0, d[2] * 20.0],
+            target,
+            shooter: p,
+            team,
+            t: 0.0,
+            los_lost: 0.0,
+            prev_los: d,
+        });
+        let f = &mut self.fighters[p];
+        f.pod_ammo -= 1;
+        f.pod_cd = POD_RELAUNCH_S;
+        f.protect_t = 0.0;
         true
     }
 
@@ -8277,6 +8318,13 @@ impl TdmSim {
                             }
                             MechWeapon::Autocannon => {
                                 self.try_fire_autocannon(i, aim);
+                            }
+                            // §C.7: the bot brain never SELECTS the pod
+                            // (its mount choice is range-driven, above),
+                            // but if it ever does, the trigger still
+                            // means the same thing it means for a player
+                            MechWeapon::Rockets => {
+                                self.try_fire_rocket(i, aim);
                             }
                         }
                     } else {
@@ -12094,6 +12142,7 @@ mod tests {
             let fired = match w {
                 MechWeapon::Gatling => s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
                 MechWeapon::Autocannon => s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
+                MechWeapon::Rockets => unreachable!("this rig drives the gun mounts only"),
             };
             assert!(fired, "{w:?} must fire");
             let z = |id: u32| s.zombies.iter().find(|z| z.id == id).expect("zombie alive");
@@ -12234,8 +12283,9 @@ mod tests {
         s.step(PlayerCmd { slot: Some(1), aim: [0.0, 0.0, -1.0], ..Default::default() });
         assert_eq!(
             s.fighters[0].mech_weapon,
-            MechWeapon::Autocannon,
-            "key 2 must select the autocannon mount"
+            MechWeapon::Rockets,
+            "key 2 must select the rocket pod (§C.7: the pilot's strip \
+             is TURRET/ROCKETS; the autocannon is bot hardware)"
         );
         s.step(PlayerCmd { slot: Some(0), aim: [0.0, 0.0, -1.0], ..Default::default() });
         assert_eq!(
@@ -12334,6 +12384,7 @@ mod tests {
             let fired = match w {
                 MechWeapon::Gatling => s.try_fire_gatling(0, aim),
                 MechWeapon::Autocannon => s.try_fire_autocannon(0, aim),
+                MechWeapon::Rockets => unreachable!("this rig drives the gun mounts only"),
             };
             assert!(fired, "the mount must fire");
             assert_eq!(s.fighters[0].hits_dealt, 1, "the round must connect");
@@ -13149,6 +13200,9 @@ mod tests {
                 f.hull = MECH_HULL;
                 f.mech_rounds = MECH_ROUNDS;
                 f.pod_ammo = POD_TUBES;
+                // §C.7: launching now goes through the ROCKETS mount's
+                // trigger, so the pod must be the selected mount
+                f.mech_weapon = MechWeapon::Rockets;
             }
             s
         };
@@ -13198,12 +13252,14 @@ mod tests {
         }
         assert!(warned_early, "the victim is warned from lock START");
         assert!(s.fighters[0].pod_lock_t >= POD_LOCK_S, "full lock reached");
-        // 3) release → homing launch; PN turn stays under the cap; the
-        // hit lands with FRONT angle armor (270 × 0.15 = 40.5)
+        // 3) TRIGGER (§C.7: launch is LMB now, aim still held) → homing
+        // launch; PN turn stays under the cap; the hit lands with FRONT
+        // angle armor
         let h0 = s.fighters[1].hull;
         let aim = aim_at(&s);
         s.step(PlayerCmd {
-            pod_aim: false,
+            pod_aim: true,
+            shoot: true,
             aim,
             ..Default::default()
         });
@@ -13266,7 +13322,8 @@ mod tests {
         }
         let aim = aim_at(&s);
         s.step(PlayerCmd {
-            pod_aim: false,
+            pod_aim: true,
+            shoot: true,
             aim,
             ..Default::default()
         });
@@ -13296,6 +13353,65 @@ mod tests {
             went_ballistic,
             "hard cover for > 0.4 s must send the missile ballistic"
         );
+    }
+
+    /// §C.7 (Brief VIII): the pod is a SELECTED mount now. LMB launches
+    /// (dumb-fire without a lock), the relaunch cooldown holds the
+    /// trigger, RMB alone never launches, and a tube cannot leave the
+    /// pod while the TURRET is the selected mount.
+    #[test]
+    fn rockets_ride_the_trigger_and_only_their_own_slot() {
+        let mut s = mech_range(0xC0F7, MechWeapon::Rockets);
+        s.fighters[0].pod_ammo = POD_TUBES;
+        s.fighters[0].pod_cd = 0.0;
+        // pure pre-aim: a full second of RMB, including its release
+        // edge, launches nothing
+        for _ in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd {
+                pod_aim: true,
+                aim: [0.0, 0.0, -1.0],
+                ..Default::default()
+            });
+        }
+        s.step(PlayerCmd { aim: [0.0, 0.0, -1.0], ..Default::default() });
+        assert!(s.rockets.is_empty(), "aim (and its release) must never launch");
+        // trigger: one tube, dumb-fire, straight down the reticle
+        s.step(PlayerCmd {
+            shoot: true,
+            aim: [0.0, 0.0, -1.0],
+            ..Default::default()
+        });
+        assert_eq!(s.rockets.len(), 1, "LMB must launch");
+        assert_eq!(s.rockets[0].target, -1, "no lock -> dumb-fire");
+        assert_eq!(s.fighters[0].pod_ammo, POD_TUBES - 1);
+        // held trigger: the relaunch cooldown holds the next tube
+        s.step(PlayerCmd {
+            shoot: true,
+            aim: [0.0, 0.0, -1.0],
+            ..Default::default()
+        });
+        assert_eq!(
+            s.fighters[0].pod_ammo,
+            POD_TUBES - 1,
+            "POD_RELAUNCH_S must gate a held trigger"
+        );
+        // key 1 selects the TURRET; the trigger now drives the gatling
+        // and the pod count must not move
+        let mut s = mech_range(0xC0F8, MechWeapon::Rockets);
+        s.fighters[0].pod_ammo = POD_TUBES;
+        s.step(PlayerCmd { slot: Some(0), aim: [0.0, 0.0, -1.0], ..Default::default() });
+        assert_eq!(s.fighters[0].mech_weapon, MechWeapon::Gatling);
+        s.step(PlayerCmd {
+            shoot: true,
+            aim: [0.0, 0.0, -1.0],
+            ..Default::default()
+        });
+        assert_eq!(
+            s.fighters[0].pod_ammo,
+            POD_TUBES,
+            "the TURRET's trigger must never spend a rocket"
+        );
+        assert!(s.rockets.is_empty());
     }
 
     /// §10 (Brief III): regen waits 12 s, heals at 8.33/s, and ANY new
