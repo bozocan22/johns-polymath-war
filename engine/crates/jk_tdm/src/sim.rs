@@ -1698,6 +1698,13 @@ pub struct Fighter {
     /// §3: spear windup clock (counts down to the release), the aim
     /// tracked through the wind, and the charge the trigger locked in.
     pub spear_wind_t: f32,
+    /// §owner JAVELIN: how long the trigger has been held winding this
+    /// throw. Zero when not charging.
+    pub spear_charge_t: f32,
+    /// The velocity multiplier the pending throw was charged to. Set at
+    /// release, consumed by `try_fire`, reset after - bots never touch
+    /// it and so keep throwing at exactly the old fixed power.
+    pub spear_power: f32,
     pub spear_aim: [f32; 3],
     pub spear_v0: f32,
     /// §4.1 (Brief VII v2): the bow's draw clock - counts UP while aim
@@ -3291,6 +3298,35 @@ pub const SHIELD_DIP_S: f32 = 0.62;
 // grammar, retuned.
 pub const SPEAR_WINDUP_S: f32 = 0.40;
 
+/// §owner JAVELIN: the throw is CHARGED now.
+///
+/// It used to leave the hand at one fixed speed whether you flicked it
+/// or leaned into it, which made the most physical weapon in the game
+/// the least expressive - a javelin is the one throw where how hard you
+/// wind up obviously ought to matter.
+///
+/// Hold the trigger to wind, release to throw. Below the minimum it is
+/// a quick flick that still leaves the hand (never a dead trigger);
+/// past the full mark it stops gaining, so there is a right amount to
+/// hold rather than "always hold longest".
+pub const SPEAR_CHARGE_MIN_S: f32 = 0.12;
+pub const SPEAR_CHARGE_FULL_S: f32 = 0.85;
+/// Velocity multiplier at the two ends of that window. A faster spear
+/// flies FLATTER, so this buys range and lead-time as much as speed -
+/// which is the "further" half of the ask.
+pub const SPEAR_CHARGE_V0_MIN: f32 = 0.82;
+pub const SPEAR_CHARGE_V0_MAX: f32 = 1.30;
+
+/// How hard a javelin held for `held_s` leaves the hand, as a multiplier
+/// on the weapon's base velocity. Pure, so the HUD read and the throw
+/// itself cannot disagree about how charged a throw was.
+pub fn spear_charge_mult(held_s: f32) -> f32 {
+    let t = ((held_s - SPEAR_CHARGE_MIN_S)
+        / (SPEAR_CHARGE_FULL_S - SPEAR_CHARGE_MIN_S))
+        .clamp(0.0, 1.0);
+    SPEAR_CHARGE_V0_MIN + (SPEAR_CHARGE_V0_MAX - SPEAR_CHARGE_V0_MIN) * t
+}
+
 // ---- §4 (Brief III): aerial flips ----------------------------------------
 // Q + direction while airborne. ONE flip per airborne period, no firing
 // until landing recovery — pure mobility, never a combat move.
@@ -3698,6 +3734,8 @@ impl TdmSim {
                     lock_warn_t: 0.0,
                     shield_dip_t: 0.0,
                     spear_wind_t: 0.0,
+                    spear_charge_t: 0.0,
+                    spear_power: 1.0,
                     spear_aim: [0.0, 0.0, 1.0],
                     spear_v0: 0.0,
                     bow_draw_t: 0.0,
@@ -4859,6 +4897,11 @@ impl TdmSim {
                 }
             } else if self.fighters[p].gun == GunKind::Bow {
                 self.step_bow_draw(p, cmd.aim, cmd.shoot);
+            } else if self.fighters[p].gun == GunKind::Spear {
+                // §owner JAVELIN: like the bow, the spear needs the call
+                // EVERY tick (held or not) to see its release edge -
+                // `try_fire`'s "only while held" would never fire it.
+                self.step_spear_charge(p, cmd.aim, cmd.shoot);
             } else if cmd.shoot {
                 self.try_fire(p, cmd.aim, cmd.ads);
             }
@@ -5971,6 +6014,52 @@ impl TdmSim {
         spread * class_spec(f.class).spread_mult
     }
 
+    /// §owner JAVELIN: hold to wind the throw, release to let it go.
+    ///
+    /// Deliberately shaped like `step_bow_draw` rather than invented
+    /// fresh - both are "hold to charge, release to commit", and a
+    /// second grammar for the same idea is how two weapons end up
+    /// feeling like two different games.
+    ///
+    /// The PLAYER path only. Bots still throw through `try_fire`
+    /// directly at the old fixed power, so their behaviour - and every
+    /// seeded test that depends on it - is unchanged.
+    fn step_spear_charge(&mut self, i: usize, aim: [f32; 3], held: bool) {
+        let blocked = {
+            let f = &self.fighters[i];
+            !f.armed()
+                || f.gun != GunKind::Spear
+                || !f.alive()
+                || f.roll_t > 0.0
+                || f.shield_up
+                || f.knife_phase > 0.0
+                || f.spear_wind_t > 0.0 // already committed to a throw
+                || f.reload_t > 0.0
+                || f.ammo == 0
+        };
+        if blocked {
+            self.fighters[i].spear_charge_t = 0.0;
+            return;
+        }
+        if held {
+            let f = &mut self.fighters[i];
+            f.spear_charge_t += DT;
+            // cap the wind so the field cannot grow without bound on a
+            // held trigger; past full there is simply nothing more to win
+            f.spear_charge_t = f.spear_charge_t.min(SPEAR_CHARGE_FULL_S * 2.0);
+            return;
+        }
+        // release edge
+        let held_s = self.fighters[i].spear_charge_t;
+        self.fighters[i].spear_charge_t = 0.0;
+        if held_s <= 0.0 {
+            return; // was not winding
+        }
+        // even a flick throws - a dead trigger would feel broken
+        self.fighters[i].spear_power = spear_charge_mult(held_s);
+        self.try_fire(i, aim, false);
+    }
+
     fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], held: bool) {
         let blocked = {
             let f = &self.fighters[i];
@@ -6197,6 +6286,10 @@ impl TdmSim {
                 v0
             };
             if self.fighters[i].gun == GunKind::Spear {
+                // §owner JAVELIN: the wind-up's own charge, set by the
+                // player's hold at release. Bots leave it at 1.0, so
+                // their throws are bit-identical to the old behaviour.
+                let v0 = v0 * self.fighters[i].spear_power;
                 // §3: the throw WINDS UP — plant, hips, whip. The spear
                 // leaves the hand SPEAR_WINDUP_S later, on the aim held
                 // at release. Committal by design, visible to enemies.
@@ -6209,6 +6302,7 @@ impl TdmSim {
                 f.spear_wind_t = SPEAR_WINDUP_S;
                 f.spear_aim = d;
                 f.spear_v0 = v0;
+                f.spear_power = 1.0; // consumed
                 return true;
             }
             let (ex, ey) = (
@@ -10004,6 +10098,57 @@ mod tests {
                  must not introduce nondeterminism"
             );
         }
+    }
+
+    /// §owner JAVELIN: winding the throw must actually buy something,
+    /// and stop buying it past full. Measured on the spear that leaves
+    /// the hand, not on the constant table.
+    #[test]
+    fn a_wound_javelin_flies_harder_than_a_flicked_one() {
+        // the pure curve first
+        let flick = spear_charge_mult(SPEAR_CHARGE_MIN_S);
+        let full = spear_charge_mult(SPEAR_CHARGE_FULL_S);
+        assert!(
+            full > flick * 1.25,
+            "a full wind must be clearly stronger than a flick: {flick} vs {full}"
+        );
+        assert!(
+            (spear_charge_mult(SPEAR_CHARGE_FULL_S * 3.0) - full).abs() < 1e-6,
+            "holding past full must stop paying - otherwise the answer is              always 'hold longer' and there is no decision"
+        );
+        assert!(
+            spear_charge_mult(0.0) >= SPEAR_CHARGE_V0_MIN - 1e-6,
+            "even an instant release throws; a dead trigger reads as broken"
+        );
+
+        // and the real throw through the real path
+        let launch = |hold_ticks: usize| -> f32 {
+            let mut s = range(0x7A1E);
+            s.fighters[0].gun = GunKind::Spear;
+            s.fighters[0].inventory[2] = GunKind::Spear;
+            s.fighters[0].active = 2;
+            s.fighters[0].ammo = 1;
+            s.fighters[0].reserve = 5;
+            for _ in 0..hold_ticks {
+                s.step(PlayerCmd {
+                    shoot: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            // release, then run the windup out so the spear actually flies
+            for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
+                s.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
+            }
+            let m = s.missiles.first().expect("the javelin must leave the hand");
+            (m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]).sqrt()
+        };
+        let quick = launch(2);
+        let wound = launch((SPEAR_CHARGE_FULL_S / DT) as usize);
+        assert!(
+            wound > quick * 1.2,
+            "a wound javelin must leave the hand faster: {quick} vs {wound}"
+        );
     }
 
     /// Climb checklist test 1+2: grip drains under hold, recovers under

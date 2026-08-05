@@ -3525,8 +3525,10 @@ const PROJECTILE_FLIGHT_BEATS: &[CapBeat] = &[
     // proves the impact angle survives (the sim keeps `vel` on stick so
     // the render can read it).
     CapBeat { look: Some((0.0, 0.42)), ..beat(0.8) },
-    // draw to full, then loose
+    // draw / wind to full, then loose. The mid-hold snap catches the
+    // javelin's charge bar, which nothing else photographs.
     CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.0) },
+    CapBeat { snap: Some("00-charging"), ..beat(1.55) },
     CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(2.0) },
     CapBeat { snap: Some("01-launch"), ..beat(2.03) },
     CapBeat { snap: Some("02-early-flight"), ..beat(2.06) },
@@ -13316,6 +13318,24 @@ fn hud_system(
             // U+26A0 - it rendered as a tofu box in every capture. ASCII
             // reads correctly in any font.
             None if p.lock_warn_t > 0.0 => "! MISSILE LOCK !".to_string(),
+            // §owner: the SHOOTER's half of that exchange. The pod needs
+            // POD_LOCK_S of unbroken sight before it will home, and the
+            // victim has been warned since the instant it started - but
+            // the pilot doing the locking got no readout at all, so the
+            // only way to know whether a launch would track was to spend
+            // a rocket and watch. Both ends of the mechanic are on
+            // screen now.
+            None if p.in_mech()
+                && p.mech_weapon == sim::MechWeapon::Rockets
+                && p.pod_lock_t > 0.0 =>
+            {
+                if p.pod_lock_t >= sim::POD_LOCK_S {
+                    "LOCKED - release to launch".to_string()
+                } else {
+                    let pct = (p.pod_lock_t / sim::POD_LOCK_S * 100.0).min(99.0);
+                    format!("LOCKING {pct:.0}%")
+                }
+            }
             None => String::new(),
         };
     }
@@ -13378,8 +13398,31 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         // whole screen and folded into the ammo panel.
                         // (Also un-swaps the old args: POWER is p.armor,
                         // the 0..100 core - p.mech_rounds is turret belt.)
+                        // §owner: the chassis has state the pilot could
+                        // not see. BRACE changes how much recoil and how
+                        // much rocket damage you eat, and the POWER
+                        // STRIDE is on a heat budget that decides whether
+                        // the Q burst is even available - both were
+                        // simulated, neither was ever on screen, so the
+                        // pilot was flying half blind.
+                        let brace = if p.mech_brace { "  [BRACED]" } else { "" };
+                        // ten segments of stride heat: full bar = ready,
+                        // empty = still cooling. Shown only once it is
+                        // actually spent, so a fresh chassis stays clean.
+                        let stride = if p.stride_t > 0.0 {
+                            "  STRIDE!".to_string()
+                        } else if p.stride_heat > 1.0 {
+                            let n = (((100.0 - p.stride_heat) / 100.0) * 10.0)
+                                .round()
+                                .clamp(0.0, 10.0) as i32;
+                            let bar: String =
+                                (0..10).map(|i| if i < n { '#' } else { '.' }).collect();
+                            format!("  STRIDE [{bar}]")
+                        } else {
+                            String::new()
+                        };
                         format!("
-MECH  HULL {:.0}  PWR {:.0}", p.hull, p.armor)
+MECH  HULL {:.0}  PWR {:.0}{brace}{stride}", p.hull, p.armor)
                     }
                     ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
@@ -13421,6 +13464,17 @@ HEAT {:.0}%", p.mech_rounds, p.gatling_heat)
                     }
                 }
             }
+        } else if p.spear_charge_t > 0.0 {
+            // §owner JAVELIN: the wind, on screen. A charge you cannot
+            // see is a charge you cannot time, and this one has a real
+            // ceiling - the bar filling tells you when holding longer
+            // has stopped buying anything.
+            let frac = (p.spear_charge_t / sim::SPEAR_CHARGE_FULL_S).clamp(0.0, 1.0);
+            let n = (frac * 10.0).round() as i32;
+            let bar: String = (0..10).map(|i| if i < n { '#' } else { '.' }).collect();
+            let tag = if frac >= 1.0 { "FULL" } else { "WIND" };
+            format!("JAVELIN {tag}
+[{bar}]")
         } else if p.shield_up {
             "SHIELD".to_string()
         } else if p.reload_t > 0.0 {
