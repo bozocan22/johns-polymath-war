@@ -1905,6 +1905,7 @@ fn vm_carry(wk: GunKind) -> (Vec3, f32) {
         GunKind::Bow => (Vec3::new(-0.10, -0.16, -0.36), 0.0),
         GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
         GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
+        GunKind::M249 => (Vec3::new(0.13, -0.14, -0.42), 0.0),
         _ => (Vec3::new(0.11, -0.13, -0.32), 0.0),
     }
 }
@@ -1917,13 +1918,13 @@ fn vm_carry(wk: GunKind) -> (Vec3, f32) {
 /// generic focus shift.
 fn sight_line_y(wk: GunKind) -> Option<f32> {
     match wk {
-        GunKind::Glock => Some(0.085),
-        GunKind::Deagle => Some(0.10),
-        GunKind::Mp5 => Some(0.088),
-        GunKind::Shotgun => Some(0.09),
-        GunKind::Ak47 => Some(0.0875),
-        GunKind::M4 => Some(0.105),
-        GunKind::M249 => Some(0.10),
+        GunKind::Glock => Some(0.0877),
+        GunKind::Deagle => Some(0.1028),
+        GunKind::Mp5 => Some(0.0907),
+        GunKind::Shotgun => Some(0.0928),
+        GunKind::Ak47 => Some(0.0877),
+        GunKind::M4 => Some(0.1077),
+        GunKind::M249 => Some(0.1228),
         _ => None,
     }
 }
@@ -2445,6 +2446,9 @@ fn shot_sound<'a>(sfx: &'a Sfx, kind: GunKind) -> &'a Handle<AudioSource> {
 struct SfxState {
     last_t: f32,
     prev_gun: GunKind,
+    /// which HULL MOUNT was selected last frame - a mount swap is the
+    /// in-chassis equivalent of a weapon swap for shot detection
+    prev_mech_weapon: sim::MechWeapon,
     prev_fire_cd: f32,
     prev_reserve: u32,
     prev_reload: f32,
@@ -2464,6 +2468,7 @@ impl Default for SfxState {
         SfxState {
             last_t: 0.0,
             prev_gun: GunKind::Fists,
+            prev_mech_weapon: sim::MechWeapon::Gatling,
             prev_fire_cd: 0.0,
             prev_reserve: 0,
             prev_reload: 0.0,
@@ -3130,6 +3135,38 @@ const MECH_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(5.0) },
 ];
 
+/// Every iron-sighted gun's ADS sight picture, one frame each. Focus
+/// aligns `sight_line_y` to the eye, so a gun whose declared sight line
+/// does not match its actual geometry lays whatever IS at that height
+/// across the view - which is exactly how the M249 shipped with its flat
+/// feed cover on the eye line and no rear aperture at all. Nothing could
+/// photograph that, so nothing caught it.
+///
+/// Slot 1 is the primary, 2 the secondary, 3 the special; the harness
+/// sets loadout slots per-run (see `capture_quick_deploy`).
+const IRON_SIGHTS_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    // primary, hip then aimed
+    CapBeat { snap: Some("01-primary-hip"), ..beat(1.4) },
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.6) },
+    CapBeat { snap: Some("02-primary-ads"), ..beat(2.4) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(2.5) },
+    // secondary
+    CapBeat { press: &[CapKey::K(KeyCode::Digit2)], ..beat(2.7) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit2)], ..beat(2.8) },
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(3.4) },
+    CapBeat { snap: Some("03-secondary-ads"), ..beat(4.2) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(4.3) },
+    // special
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(4.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(4.6) },
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(5.2) },
+    CapBeat { snap: Some("04-special-ads"), ..beat(6.0) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(6.1) },
+    CapBeat { end: true, ..beat(6.4) },
+];
+
 /// The guard plate in first person. It used to be an opaque black slab
 /// that blinded the player it was protecting; it must now read as
 /// smoked glass with the world legible through it. On foot, because the
@@ -3239,6 +3276,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
+        "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
@@ -3270,7 +3308,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 12] = [
+const CAPTURE_SCRIPTS: [&str; 15] = [
     "baseline",
     "idle_life",
     "bow_draw",
@@ -3278,6 +3316,9 @@ const CAPTURE_SCRIPTS: [&str; 12] = [
     "mech_scale",
     "mech_fp",
     "shield_fp",
+    "sights_a",
+    "sights_b",
+    "sights_c",
     "minigun_check",
     "menus",
     "traversal",
@@ -3385,6 +3426,18 @@ fn capture_quick_deploy(
         // both bow scripts press Digit3, so slot 3 has to actually hold a
         // bow or they capture whatever the default special happens to be
         Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
+        // the seven iron-sighted guns across three runs; the AWM is
+        // deliberately absent (scoped-class hides its viewmodel by
+        // design) as are the bow/spear/minigun, which have no irons
+        Some("sights_a") => {
+            sel.loadout = [GunKind::M249, GunKind::Glock, GunKind::Ak47];
+        }
+        Some("sights_b") => {
+            sel.loadout = [GunKind::M4, GunKind::Deagle, GunKind::Mp5];
+        }
+        Some("sights_c") => {
+            sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Ak47];
+        }
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
@@ -4916,6 +4969,13 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
             parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT. The bead above had
+            // nothing to align against without this.
+            parts.push(wp(false, Tone::Black, (-0.011, 0.09, -0.05), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.011, 0.09, -0.05), 0.0, (0.0045, 0.018, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.084, -0.05), 0.0, (0.026, 0.005, 0.01)));
         }
         GunKind::Ak47 => {
             // the classic: long gas tube, big two-segment raked magazine
@@ -4978,11 +5038,27 @@ fn spawn_weapon_model(
             parts.push(wp(true, Tone::Dark, (0.0, 0.04, 0.50), FRAC_PI_2, (0.045, 0.40, 0.045)));
             push_muzzle(&mut parts, 0.04, 0.73, 0.06);
             parts.push(wp(false, Tone::Mid, (0.0, -0.13, 0.02), 0.0, (0.09, 0.16, 0.13)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.12, 0.08), 0.0, (0.02, 0.06, 0.16)));
+            // carry handle - ARCHED ABOVE the sight line, not across it.
+            // At y 0.12 x 0.06 tall it spanned 0.090-0.150 and contained
+            // the sight ray, so the aperture looked into solid plastic.
+            parts.push(wp(false, Tone::Light, (0.0, 0.171, 0.08), 0.0, (0.02, 0.042, 0.16)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.150, 0.015), 0.0, (0.018, 0.036, 0.018)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.150, 0.145), 0.0, (0.018, 0.036, 0.018)));
             push_stock(&mut parts, -0.30, 0.05);
             parts.push(wp(false, Tone::Dark, (0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
             parts.push(wp(false, Tone::Dark, (-0.03, -0.10, 0.44), 0.0, (0.014, 0.16, 0.014)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.30), 0.0, (0.01, 0.02, 0.012)));
+            // sights ride a raised block CLEAR of the feed cover. The
+            // cover's top is 0.098; the old sight line was 0.10, so
+            // focus laid a 30 cm plate exactly across the eye and the
+            // gun read as a grey wall. Front post is a tall blade off
+            // the barrel so it shows THROUGH the rear aperture.
+            parts.push(wp(false, Tone::Black, (0.0, 0.095, 0.62), 0.0, (0.008, 0.075, 0.01)));
+            // goalpost rear sight: two posts and a low crossbar - an
+            // aperture you look THROUGH, per the owner's reference shots,
+            // instead of a solid block you look AT
+            parts.push(wp(false, Tone::Black, (-0.012, 0.119, -0.02), 0.0, (0.0045, 0.024, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.012, 0.119, -0.02), 0.0, (0.0045, 0.024, 0.01)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.112, -0.02), 0.0, (0.028, 0.005, 0.01)));
         }
         GunKind::Bow => {
             // hard-surface war bow: dark blocky limbs, mid riser, light tips
@@ -8718,8 +8794,24 @@ fn input_and_step(
         // here does not "restrain the kick" - it teleports an aim the
         // player legitimately held into range the instant they pull the
         // trigger.
-        cam.pitch = recoil_kicked_pitch(cam.pitch, kick, p.bloom, brace);
-        cam.recoil = (cam.recoil + 0.6).min(1.0);
+        // §2: this channel has to obey the same two exemptions the
+        // sim's punch does, or the view kicks for a shot the simulation
+        // never punched. A drawn bow and a thrown spear produce NO
+        // punch (sim.rs gates the spray block on `projectile.is_none()`)
+        // yet were permanently walking the player's aim up the screen;
+        // and a scoped rifle's punch is scaled to 25/78 while the view
+        // took the full 3 degrees per shot.
+        let spec_now = gun(p.gun);
+        if spec_now.projectile.is_none() && p.gun != GunKind::Fists {
+            let scoped_scale = if spec_now.scoped && cam.ads {
+                25.0 / 78.0
+            } else {
+                1.0
+            };
+            cam.pitch =
+                recoil_kicked_pitch(cam.pitch, kick * scoped_scale, p.bloom, brace);
+            cam.recoil = (cam.recoil + 0.6).min(1.0);
+        }
     }
 
     // rematch detection: the sim reseeds itself → rebuild cover visuals
@@ -11329,7 +11421,13 @@ fn fp_viewmodel(
         let (tr, _) = vm_carry(p.gun);
         Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
     } else {
-        Vec3::new(-0.11, 0.052, 0.10) * ads_e
+        // no iron pair - still cancel THIS gun's own lateral carry. The
+        // old hardcoded -0.11 was the default carry's x, so it doubled
+        // the bow's -0.10 into -0.21 instead of zeroing it, and left the
+        // spear at +0.04. A nominal sight height stands in for the
+        // missing one.
+        let (tr, _) = vm_carry(p.gun);
+        Vec3::new(-tr.x, -(tr.y + 0.0866 * 0.9), 0.10) * ads_e
     };
     // §3 (Brief IV): the signature reload replaces the flat dip - the
     // hands and weapon do the acting, on the sim's own reload clock
@@ -12054,10 +12152,37 @@ fn sfx_system(
     let p = &simr.fighters[simr.player];
     let p_team = p.team;
 
-    // your own shot - fire_cd jumps up on the tick you fire (an ammo delta
-    // misses the shot fired the same tick a reload completes)
-    if p.alive() && p.gun == st.prev_gun && p.fire_cd > st.prev_fire_cd {
-        play(&mut commands, shot_sound(&sfx, p.gun), 0.8);
+    // your own shot - the shot clock jumps up on the tick you fire (an
+    // ammo delta misses the shot fired the same tick a reload completes).
+    //
+    // §C.7: this must read `shot_clock`, not `fire_cd`. A pilot's shots
+    // run on the MOUNT's cycle, so every mech burst was silent to the
+    // pilot firing it while everyone else heard it - the one FX site
+    // still asking the stowed rifle whether anything had happened. The
+    // `prev_gun` guard also has to relax in a chassis: the carried gun
+    // never changes while piloting, but swapping MOUNTS must not be
+    // mistaken for a weapon swap (which suppresses the shot that lands
+    // on the same tick).
+    let clock_now = shot_clock(p);
+    let same_weapon = if p.in_mech() {
+        p.mech_weapon == st.prev_mech_weapon
+    } else {
+        p.gun == st.prev_gun
+    };
+    if p.alive() && same_weapon && clock_now > st.prev_fire_cd {
+        let snd = if p.in_mech() {
+            match p.mech_weapon {
+                // the hull gatling is the M249's big brother
+                sim::MechWeapon::Gatling => &sfx.shot_mg,
+                // the autocannon is a single heavy crack
+                sim::MechWeapon::Autocannon => &sfx.shot_sniper,
+                // a launch is a shotgun-class thump, not a rifle report
+                sim::MechWeapon::Rockets => &sfx.shot_shotgun,
+            }
+        } else {
+            shot_sound(&sfx, p.gun)
+        };
+        play(&mut commands, snd, 0.8);
     }
     // dry fire: trigger down on an empty magazine → the click (whatever
     // the reserve says - an empty chamber clicks until you reload)
@@ -12190,7 +12315,8 @@ fn sfx_system(
 
     st.last_t = simr.t;
     st.prev_gun = p.gun;
-    st.prev_fire_cd = p.fire_cd;
+    st.prev_fire_cd = shot_clock(p);
+    st.prev_mech_weapon = p.mech_weapon;
     st.prev_reserve = p.reserve;
     st.prev_reload = p.reload_t;
     st.prev_vy = p.vy;
@@ -12357,8 +12483,21 @@ fn hud_system(
             // largest number on screen; armor status beside it.
             // §0 (Brief VII): U+271A had no glyph in the bundled font -
             // rendered as a tofu box; ASCII '+' is guaranteed to exist.
+            // hull climbing: a pool that drains and DROPS you is not
+            // allowed to be invisible. Ten segments, same vocabulary as
+            // the pod tubes.
+            let grip = if p.climbing.is_some() {
+                let n = ((p.grip_pool / sim::CLIMB_GRIP_MAX) * 10.0).round() as i32;
+                let bar: String = (0..10)
+                    .map(|i| if i < n { '#' } else { '.' })
+                    .collect();
+                format!("
+GRIP [{bar}] {:.0}%", p.grip_pool)
+            } else {
+                String::new()
+            };
             format!(
-                "+ {:.0}{regen}{}{}",
+                "+ {:.0}{regen}{}{}{grip}",
                 p.health.max(0.0),
                 if p.shield_up && !p.in_mech() { "  [SHIELD]" } else { "" },
                 match p.armor_set {
@@ -12973,7 +13112,7 @@ fn stability_bracket(
 fn hud_fade(
     time: Res<Time>,
     game: Res<Game>,
-    mut last: Local<(u32, u32, i32, u8, u32, u8, i32)>,
+    mut last: Local<(u32, u32, i32, u8, u32, u8, i32, i32)>,
     mut idle_t: Local<f32>,
     mut q: Query<
         &mut TextColor,
@@ -12992,6 +13131,7 @@ fn hud_fade(
         p.mech_rounds,
         p.pod_ammo,
         p.hull as i32,
+        p.grip_pool as i32,
     );
     if snap != *last {
         *last = snap;
@@ -13327,6 +13467,24 @@ fn contextual_prompts(
     if *hint_t > 0.0 {
         *hint_t -= time.delta_secs();
         **t = hint.clone();
+        return;
+    }
+    // hull climbing: the grab is invisible without this - a stripped
+    // zone looks like any other piece of a mech. Uses the sim's own
+    // `climb_target`, so the prompt cannot offer a grab the step would
+    // refuse.
+    if p.climbing.is_some() {
+        **t = "U - LET GO".to_string();
+        return;
+    }
+    if !p.in_mech() && p.alive() && game.sim.climb_target(game.sim.player).is_some() {
+        // distinguish "in reach" from "in reach but too spent to hold" -
+        // the same 5.0 floor the attach verb enforces
+        **t = if p.grip_pool > 5.0 {
+            "U - GRAB THE HULL".to_string()
+        } else {
+            "GRIP SPENT - let it recover".to_string()
+        };
         return;
     }
     // otherwise: the nearest live pickup within 3 m announces itself

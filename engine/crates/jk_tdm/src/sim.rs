@@ -519,7 +519,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             reload_s: 4.5,
             spread: 0.012,
             spread_move: 0.032,
-            kick: 0.0044,
+            kick: 0.0026, // 8 kg of belt-fed mass eats the climb
             damage: 11.0,
             zoom_deg: 52.0,
             ..base
@@ -4487,36 +4487,7 @@ impl TdmSim {
                 && self.fighters[p].climbing.is_none()
                 && self.fighters[p].grip_pool > 5.0
             {
-                // nearest EXPOSED zone in reach - deterministic: fixed
-                // iteration order, no randomness
-                let ppos = self.fighters[p].pos;
-                let mut best: Option<(usize, PlateZone, f32)> = None;
-                for (mi, m) in self.fighters.iter().enumerate() {
-                    if mi == p || !m.in_mech() || !m.alive() {
-                        continue;
-                    }
-                    for zone in PlateZone::ALL {
-                        if m.mech_plates_dropped & zone.bit() == 0 {
-                            continue; // covered - climbing is the payoff
-                        }
-                        let o = zone.offset();
-                        let (sy, cy) = m.yaw.sin_cos();
-                        let gp = [
-                            m.pos[0] + o[0] * cy + o[2] * sy,
-                            m.pos[1] + o[1],
-                            m.pos[2] - o[0] * sy + o[2] * cy,
-                        ];
-                        let dx = gp[0] - ppos[0];
-                        let dz = gp[2] - ppos[2];
-                        let d = (dx * dx + dz * dz).sqrt();
-                        if d < CLIMB_ATTACH_RANGE_M
-                            && best.map_or(true, |(_, _, bd)| d < bd)
-                        {
-                            best = Some((mi, zone, d));
-                        }
-                    }
-                }
-                if let Some((mi, zone, _)) = best {
+                if let Some((mi, zone, _)) = self.climb_target(p) {
                     let pool = self.fighters[p].grip_pool;
                     self.fighters[p].climbing = Some(ClimbState {
                         mech_target: mi,
@@ -6329,6 +6300,45 @@ impl TdmSim {
         f.pod_cd = POD_RELAUNCH_S;
         f.protect_t = 0.0;
         true
+    }
+
+    /// The nearest EXPOSED hull zone `p` could grab right now, as
+    /// `(mech index, zone, distance)`. Pure read, deterministic (fixed
+    /// iteration order, no RNG) - shared by the attach verb and the
+    /// contextual prompt so the HUD can never offer a grab the sim
+    /// would refuse.
+    ///
+    /// Note this deliberately does NOT test grip_pool or whether `p` is
+    /// already climbing: those are the CALLER's conditions, and the
+    /// prompt wants to distinguish "nothing in reach" from "in reach but
+    /// too tired".
+    pub fn climb_target(&self, p: usize) -> Option<(usize, PlateZone, f32)> {
+        let ppos = self.fighters[p].pos;
+        let mut best: Option<(usize, PlateZone, f32)> = None;
+        for (mi, m) in self.fighters.iter().enumerate() {
+            if mi == p || !m.in_mech() || !m.alive() {
+                continue;
+            }
+            for zone in PlateZone::ALL {
+                if m.mech_plates_dropped & zone.bit() == 0 {
+                    continue; // covered - climbing is the payoff
+                }
+                let o = zone.offset();
+                let (sy, cy) = m.yaw.sin_cos();
+                let gp = [
+                    m.pos[0] + o[0] * cy + o[2] * sy,
+                    m.pos[1] + o[1],
+                    m.pos[2] - o[0] * sy + o[2] * cy,
+                ];
+                let dx = gp[0] - ppos[0];
+                let dz = gp[2] - ppos[2];
+                let d = (dx * dx + dz * dz).sqrt();
+                if d < CLIMB_ATTACH_RANGE_M && best.map_or(true, |(_, _, bd)| d < bd) {
+                    best = Some((mi, zone, d));
+                }
+            }
+        }
+        best
     }
 
     /// Melee v1: is `victim` currently PARRYING a blow from `attack_from`?
@@ -9065,6 +9075,45 @@ mod tests {
         );
     }
 
+
+    /// The HUD prompt and the attach verb must answer the SAME
+    /// question: `climb_target` is what both ask, so a covered hull
+    /// offers nothing, a stripped one in reach offers a grab, and
+    /// walking out of range withdraws it.
+    #[test]
+    fn the_grab_prompt_tracks_the_same_target_the_verb_uses() {
+        let mut s = range(0xC5);
+        {
+            let m = &mut s.fighters[1];
+            m.armor_set = ArmorSet::RobotSuit;
+            m.hull = MECH_HULL;
+            m.mech_rounds = 0;
+            m.pod_ammo = 0;
+            m.mech_plates_dropped = 0; // pristine
+            m.pos = [0.0, 0.0, 2.0];
+            m.yaw = 0.0;
+        }
+        s.fighters[0].pos = [1.2, 0.0, 2.2];
+        assert!(
+            s.climb_target(0).is_none(),
+            "a covered hull must offer no grab - climbing is the PAYOFF              for stripping it"
+        );
+        // strip the skirts: the same spot now offers one
+        s.fighters[1].mech_plates_dropped = 0b001;
+        let (mi, zone, _) = s.climb_target(0).expect("stripped zone in reach");
+        assert_eq!(mi, 1);
+        assert_eq!(zone.bit(), 0b001);
+        // and the verb agrees - this is the anti-drift half
+        s.step(PlayerCmd { exit_mech: true, ..Default::default() });
+        assert!(s.fighters[0].climbing.is_some(), "the verb must take it");
+        // walk out of reach: no target, so no prompt
+        s.fighters[0].climbing = None;
+        s.fighters[0].pos = [CLIMB_ATTACH_RANGE_M + 4.0, 0.0, 2.0];
+        assert!(
+            s.climb_target(0).is_none(),
+            "out of reach must withdraw the offer"
+        );
+    }
 
     /// Climb checklist test 1+2: grip drains under hold, recovers under
     /// release - ASYMMETRICALLY, per [S-02] - and zero grip detaches
