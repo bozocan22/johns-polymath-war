@@ -1,4 +1,4 @@
-# What is missing / not built yet — 2026-08-05
+# What is missing / not built yet — 2026-08-05 (rev 2)
 
 Compiled from `BACKLOG.md`, `THOR_LOG.md`'s ranked findings, and session
 knowledge. Ordering inside each tier is Thor's ranking rule: an item
@@ -11,14 +11,7 @@ emblem) and are wired through the splash, menus, and seal footers.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-1. **Grip HUD for hull climbing** — the climb ships with a grip pool
-   that drains and drops you, and no readout for it. A pilot can feel
-   it; a climber cannot see it. Also the contextual prompt ("U - GRAB
-   THE HULL") when a stripped zone is in range.
-2. **Mech mount audio** — `own_shot` audio reads `p.fire_cd`, not
-   `shot_clock`, so a piloted turret/pod fires SILENT for the pilot.
-   Pre-existing gap, isolated to one condition.
-3. **Numeric tunings** — the remaining screen-intrusion profiles called
+1. **Numeric tunings** — the remaining screen-intrusion profiles called
    out in THOR_LOG. Picked off one at a time as work continues.
 4. **HUD award toasts for a resource economy** — the toast system
    itself shipped (kills/assists/parries/streaks). §4.3's *resource*
@@ -42,13 +35,25 @@ emblem) and are wired through the splash, menus, and seal footers.
 | Killfeed WALLBANG modifier | Bullet penetration shipped (`PEN_WINDOW_M`, 0.5x damage), killfeed marks it `#`. |
 | Melee parry + stagger | Parry window on both the axe arc-sweep and knife/thrust line paths; attacker takes `PARRY_STAGGER_S`. |
 
+### Closed 2026-08-05 (rev 2)
+
+| Item | How it closed |
+|---|---|
+| Grip HUD + climb prompt | Ten-segment GRIP bar in the vitals block while hanging; "U - GRAB THE HULL" / "U - LET GO", and a distinct line when the pool is too spent. The attach search moved out of the step into `climb_target` so the prompt asks the same question the verb answers. |
+| Mech mount audio | `own_shot` read `fire_cd`, which never moves in a chassis - a piloted mount fired silent for its own pilot. Now on `shot_clock`, one sound per mount, and the "same weapon" guard understands a mount swap. |
+| Iron sights on every gun | Two guns had NO rear sight at all (shotgun, M249); five declared the front-post centre as their sight line instead of the aperture centre. Then all of it was superseded: every firearm now carries a **1x red-dot optic with an illuminated red cross**, the AWM's cross living in its scope overlay. |
+| M249 "grey wall" | Its sight line sat 2 mm above a flat feed cover, so aiming laid a 30 cm plate across the eye; it also shared the rifle carry offset despite a receiver 2.1x the AK's cross-section. Own carry, raised sights, arched carry handle. |
+| Recoil correctness | The permanent camera-pitch channel ignored two rules the sim obeys - projectile weapons produce no punch (a drawn bow was walking the aim up the screen) and a scoped rifle's punch is scaled 25/78. The M249's kick equalled the AK's while cycling 40% faster. |
+| Arrow + spear models | Both were one featureless box. Now a bodkin head, tapered shaft, nock and three spinning fletching vanes; a leaf blade, collar, haft and butt spike. |
+| **4-class system** | LINE / SKIRMISHER / WARDEN / MARKSMAN, each hooked to health, movement, spread and swap speed, with a per-class silhouette and a Forge picker. LINE is 1.0 across the board; a test proves the other three each trade. |
+
 ## 2. Large, multi-session architectural (do not rush — BACKLOG.md)
 
 Ranked by value, blockers first:
 
-- **26-piece armour + 4-class system**: no existing code to extend;
-  currently 5 whole-body presets. The biggest single feature left, and
-  it multiplies the melee and AI work that follows it.
+- **26-piece armour**: the 4-CLASS half is built (see below); the
+  per-piece armour half is not. Today armour is 5 whole-body presets
+  found as loot, and a class is a separate standing pick.
 - **Melee depth v2**: directional attacks and deflection. Parry and
   stagger are built; direction and deflection are not.
 - **AI squad coordination** (#5): flanking, suppression, bounding
