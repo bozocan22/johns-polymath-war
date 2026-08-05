@@ -3098,6 +3098,53 @@ const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(3.1) },
 ];
 
+/// The four surfaces that shipped with NO capture coverage, which is
+/// exactly why each one broke in a way only a player could see: the
+/// first-person hull mounts (the pilot used to hold his stowed rifle),
+/// the translucent guard plate, and the viewmodel drawing OVER the pause
+/// menu. The existing "menus" script cannot prove that last one - it
+/// walks Intro straight to Paused, so the viewmodel was hidden by the
+/// third-person default and the bug hid with it. This script reproduces
+/// the real conditions: in a match, in first person, then ESC.
+const MECH_FP_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    // TURRET is the default mount - the barrel cluster, hull housing,
+    // and hazard strip should sit in the lower-right frame.
+    // (Snap no earlier than ~1.5 s: the first render frames land before
+    // the swapchain settles and save a 0-byte PNG.)
+    CapBeat { snap: Some("01-fp-mech-turret"), ..beat(1.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit2)], ..beat(1.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit2)], ..beat(1.9) },
+    CapBeat { snap: Some("02-fp-mech-rockets"), ..beat(2.4) },
+    // RMB on the pod is PRE-AIM ONLY: the amber arc appears and the FOV
+    // must not move a degree. Compare 03 against 02 - identical framing.
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(2.6) },
+    CapBeat { snap: Some("03-fp-rockets-preaim-no-zoom"), ..beat(3.2) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(3.3) },
+    // ESC from a live first-person frame - the case the old capture
+    // could not reach. No gun may appear over the plate.
+    CapBeat { press: &[CapKey::K(KeyCode::Escape)], ..beat(3.6) },
+    CapBeat { release: &[CapKey::K(KeyCode::Escape)], ..beat(3.8) },
+    CapBeat { snap: Some("04-pause-no-viewmodel"), ..beat(4.6) },
+    CapBeat { end: true, ..beat(5.0) },
+];
+
+/// The guard plate in first person. It used to be an opaque black slab
+/// that blinded the player it was protecting; it must now read as
+/// smoked glass with the world legible through it. On foot, because the
+/// plate is sealed away inside a chassis.
+const SHIELD_FP_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { snap: Some("01-fp-guard-down"), ..beat(1.2) },
+    // slot 4 raises it now - E is dead
+    CapBeat { press: &[CapKey::K(KeyCode::Digit4)], ..beat(1.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit4)], ..beat(1.5) },
+    CapBeat { snap: Some("02-fp-guard-up-see-through"), ..beat(2.2) },
+    CapBeat { end: true, ..beat(2.6) },
+];
+
 // Task 5.7 (MISSION doc): the mech at its new scale/palette, held
 // stationary at a known-clear spot (Arena center, set in
 // capture_quick_deploy) with the camera aimed level and slightly down -
@@ -3190,6 +3237,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
+        "mech_fp" => MECH_FP_BEATS,
+        "shield_fp" => SHIELD_FP_BEATS,
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
@@ -3221,12 +3270,14 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 10] = [
+const CAPTURE_SCRIPTS: [&str; 12] = [
     "baseline",
     "idle_life",
     "bow_draw",
     "bow_draw_fp",
     "mech_scale",
+    "mech_fp",
+    "shield_fp",
     "minigun_check",
     "menus",
     "traversal",
@@ -3337,7 +3388,7 @@ fn capture_quick_deploy(
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
-    if cap.script.as_deref() == Some("mech_scale") {
+    if matches!(cap.script.as_deref(), Some("mech_scale") | Some("mech_fp")) {
         // Task 5.7: board the mech directly - no need to walk to a pad
         // just to prove the scale/palette read. Also plant it at a KNOWN
         // clear spot (Arena center) - the default spawn's proximity to
@@ -3349,6 +3400,8 @@ fn capture_quick_deploy(
         f.armor = POWER_MAX;
         f.hull = MECH_HULL;
         f.mech_transition_t = 0.0; // skip the seal-up window for the capture
+        f.mech_rounds = MECH_ROUNDS;
+        f.pod_ammo = POD_TUBES;
         f.pos = stage;
         f.yaw = 0.0;
     }
@@ -4080,7 +4133,11 @@ fn main() {
                 capture_screenshot_driver,
             )
                 .chain()
-                .run_if(in_state(GameState::Playing)),
+                // Paused too: a script that drives ESC has to keep
+                // ticking on the far side of the transition or it can
+                // never snap the menu and never reach its `end` beat -
+                // the process just hangs until the tool times out.
+                .run_if(in_state(GameState::Playing).or(in_state(GameState::Paused))),
         )
         .add_systems(Startup, setup)
         .add_systems(Update, input_and_step.run_if(in_state(GameState::Playing)))
@@ -5181,7 +5238,10 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     for (mat, pos, size) in [
         (kit.mech_khaki.clone(), Vec3::new(0.0, -0.02, -0.10), Vec3::new(0.20, 0.16, 0.26)),
         (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.11, 0.06), Vec3::new(0.14, 0.05, 0.30)),
-        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.075, -0.10), Vec3::new(0.20, 0.012, 0.26)),
+        // a narrow front stripe, NOT a deck: mech_hazard is capped at
+        // an accent (<=10% of surface), and a full-footprint yellow top
+        // plate was the single loudest thing on the screen
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.081, -0.02), Vec3::new(0.20, 0.012, 0.05)),
     ] {
         commands
             .spawn((
@@ -5198,16 +5258,45 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     root
 }
 
-/// §C.7: the ROCKETS hull-mount viewmodel - a boxy launch pod with a
-/// 3x2 face of bored black tubes. Same structural doctrine as the turret.
+/// §C.7: the ROCKETS hull-mount viewmodel - a LAUNCH TUBE carried
+/// forward over the mount, not a box.
+///
+/// The first draft was a boxy pod with a 3x2 bored face, which is what
+/// the hull's own pod looks like from outside. In first person you view
+/// it from BEHIND, so the tube face - the entire read - pointed away
+/// and the player got a featureless slab with a yellow deck. A tube
+/// receding to a visible muzzle ring reads as "launcher" from the one
+/// angle a pilot actually has.
 fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    for (mat, pos, size) in [
-        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.10), Vec3::new(0.26, 0.20, 0.42)),
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, 0.315), Vec3::new(0.24, 0.18, 0.02)),
-        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.105, 0.10), Vec3::new(0.26, 0.012, 0.42)),
+    // the tube itself, running forward (local +Z; the root's PI yaw puts
+    // that down the view axis), plus its muzzle collar and dark bore
+    for (mat, pos, sc) in [
+        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.45), Vec3::new(0.150, 0.90, 0.150)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, 0.88), Vec3::new(0.178, 0.05, 0.178)),
+        (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.90), Vec3::new(0.120, 0.03, 0.120)),
+        // a hazard BAND around the tube - a ring, not a painted deck
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.0, 0.24), Vec3::new(0.163, 0.035, 0.163)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, 0.10), Vec3::new(0.172, 0.06, 0.172)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(mat),
+                Transform {
+                    translation: pos,
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: sc,
+                },
+            ))
+            .set_parent(root);
+    }
+    // the reload magazine slung under the rear, and a grip block
+    for (mat, pos, sc) in [
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.13, 0.16), Vec3::new(0.17, 0.14, 0.30)),
+        (kit.mech_metal.clone(), Vec3::new(0.0, -0.115, 0.44), Vec3::new(0.06, 0.12, 0.09)),
     ] {
         commands
             .spawn((
@@ -5215,27 +5304,26 @@ fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 MeshMaterial3d(mat),
                 Transform {
                     translation: pos,
-                    scale: size,
+                    scale: sc,
                     ..default()
                 },
             ))
             .set_parent(root);
     }
-    // 3x2 black launch bores on the face
-    for x in [-0.065_f32, 0.0, 0.065] {
-        for y in [-0.045_f32, 0.045] {
-            commands
-                .spawn((
-                    Mesh3d(kit.cyl.clone()),
-                    MeshMaterial3d(kit.grey_black.clone()),
-                    Transform {
-                        translation: Vec3::new(x, y, 0.33),
-                        rotation: Quat::from_rotation_x(FRAC_PI_2),
-                        scale: Vec3::new(0.045, 0.05, 0.045),
-                    },
-                ))
-                .set_parent(root);
-        }
+    // two spare rounds visible in the magazine - the tube alone reads a
+    // little empty, and these sell "10 in the pod"
+    for x in [-0.045_f32, 0.045] {
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(x, -0.13, 0.30),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.05, 0.10, 0.05),
+                },
+            ))
+            .set_parent(root);
     }
     root
 }
@@ -7056,10 +7144,16 @@ fn setup(
     commands
         .entity(mech_turret)
         .insert((
+            // A hull mount is a MUCH chunkier body than a rifle, so it
+            // cannot reuse the rifle carry distance: at the old
+            // (0.16, -0.15, -0.34) x0.9 the housing's near face sat
+            // 0.13 m from a 68-degree lens and ate 80% of the screen.
+            // Pushed back and shrunk until the cluster reads as a mount
+            // in the lower right instead of a wall.
             Transform {
-                translation: Vec3::new(0.16, -0.15, -0.34),
+                translation: Vec3::new(0.20, -0.22, -0.52),
                 rotation: Quat::from_rotation_y(PI + 0.026),
-                scale: Vec3::splat(0.9),
+                scale: Vec3::splat(0.62),
             },
             Visibility::Hidden,
         ))
@@ -7068,10 +7162,13 @@ fn setup(
     commands
         .entity(mech_pod)
         .insert((
+            // See the turret note: the pod box is chunkier still, and
+            // at the old placement its near face was 0.26 m out and
+            // filled half the frame.
             Transform {
-                translation: Vec3::new(0.15, -0.14, -0.36),
+                translation: Vec3::new(0.19, -0.20, -0.46),
                 rotation: Quat::from_rotation_y(PI + 0.026),
-                scale: Vec3::splat(0.9),
+                scale: Vec3::splat(0.72),
             },
             Visibility::Hidden,
         ))
