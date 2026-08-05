@@ -1381,6 +1381,27 @@ struct FighterRig {
     prev_yaw_vis: f32,
     wr_lag_yaw: f32,
     wr_lag_v: f32,
+    /// §2.5 HAND FOLLOW (k=120) and ELBOW POLE (k=60). The IK target is
+    /// a hard snap - it is wherever the weapon's grip socket is THIS
+    /// frame - so driving the arm straight from it makes a hand that
+    /// teleports between poses. These carry the sprung position the arm
+    /// actually reaches for, per side, so a hand SETTLES onto its grip
+    /// and the elbow swings after it instead of with it.
+    ///
+    /// `f32::NAN` marks "no pose yet"; the first frame snaps rather than
+    /// springing in from the origin, which would fling every arm across
+    /// the body on spawn.
+    hand_r: Vec3,
+    hand_r_v: Vec3,
+    hand_l: Vec3,
+    hand_l_v: Vec3,
+    pole_r_s: Vec3,
+    pole_r_v: Vec3,
+    pole_l_s: Vec3,
+    pole_l_v: Vec3,
+    /// §2.5 CLAVICLE (k=45) - the shoulder's own sprung offset.
+    clav: Vec3,
+    clav_v: Vec3,
     /// per side: [thigh (hip pivot), shin (knee pivot), foot (ankle pivot)]
     leg_l: [Entity; 3],
     leg_r: [Entity; 3],
@@ -1597,6 +1618,22 @@ fn damped_spring(x: Vec2, v: Vec2, target: Vec2, k: f32, dt: f32) -> (Vec2, Vec2
     let new_x = target + (x0 + (v + x0 * w) * dt) * decay;
     let new_v = (v - (v + x0 * w) * w * dt) * decay;
     (new_x, new_v)
+}
+
+/// The same critically-damped spring over three axes. Two `damped_spring`
+/// calls, not a new solver - the xy pair and the z axis are independent,
+/// so this stays exactly the documented math rather than a second
+/// implementation free to drift away from it.
+fn damped_spring3(x: Vec3, v: Vec3, target: Vec3, k: f32, dt: f32) -> (Vec3, Vec3) {
+    let (xy, vxy) = damped_spring(x.truncate(), v.truncate(), target.truncate(), k, dt);
+    let (z, vz) = damped_spring(
+        Vec2::new(x.z, 0.0),
+        Vec2::new(v.z, 0.0),
+        Vec2::new(target.z, 0.0),
+        k,
+        dt,
+    );
+    (xy.extend(z.x), vxy.extend(vz.x))
 }
 
 /// §2.5 named spring stiffnesses (k) from the brief's table - critical
@@ -7021,6 +7058,16 @@ fn spawn_fighter_rigs(
             carry_t: 0.0,
             prev_yaw_vis: f.yaw,
             wr_lag_yaw: 0.0,
+            hand_r: Vec3::NAN,
+            hand_r_v: Vec3::ZERO,
+            hand_l: Vec3::NAN,
+            hand_l_v: Vec3::ZERO,
+            pole_r_s: Vec3::NAN,
+            pole_r_v: Vec3::ZERO,
+            pole_l_s: Vec3::NAN,
+            pole_l_v: Vec3::ZERO,
+            clav: Vec3::NAN,
+            clav_v: Vec3::ZERO,
             wr_lag_v: 0.0,
             leg_l,
             leg_r,
@@ -10214,8 +10261,33 @@ fn sync_fighters(
         let sockets = weapon_hand_specs(f.gun);
         let grip_t = sockets.first().map(|(p, ..)| wr_pos + wr_rot * *p);
         let fore_t = sockets.get(1).map(|(p, ..)| wr_pos + wr_rot * *p);
-        let sh_l = Vec3::new(-0.26, 0.62, 0.02);
-        let sh_r = Vec3::new(0.26, 0.62, 0.02);
+        // §2.5 CLAVICLE (k=45): a real shoulder is not a fixed pivot -
+        // it PROTRACTS as the arm reaches across or forward, and it is
+        // the slowest link in the chain, which is why it gets the
+        // softest spring in the table. Without it the arm rotates out of
+        // a socket bolted to the ribcage, which is the other half of the
+        // "keyframed" look the hand spring fixes.
+        //
+        // Driven by how far the grip sits from a neutral carry: reaching
+        // forward or across pulls the shoulder after it, a little.
+        let reach = grip_t.map_or(Vec3::ZERO, |t| t - Vec3::new(0.14, 0.50, 0.20));
+        let clav_target = Vec3::new(
+            reach.x.clamp(-0.09, 0.09) * 0.30,
+            reach.y.clamp(-0.12, 0.12) * 0.22,
+            reach.z.clamp(-0.12, 0.16) * 0.26,
+        );
+        let clav = if rig.clav.is_nan() {
+            rig.clav = clav_target;
+            clav_target
+        } else {
+            let (nx, nv) =
+                damped_spring3(rig.clav, rig.clav_v, clav_target, SPRING_K_SHOULDER, dt);
+            rig.clav = nx;
+            rig.clav_v = nv;
+            nx
+        };
+        let sh_l = Vec3::new(-0.26, 0.62, 0.02) + clav;
+        let sh_r = Vec3::new(0.26, 0.62, 0.02) + clav;
         let pole_l = Vec3::new(-0.574, -0.80, 0.15); // down-and-out 35°
         let pole_r = Vec3::new(0.574, -0.80, 0.15);
         // (shoulder quat, elbow flex, wrist pitch) per arm
@@ -10260,8 +10332,45 @@ fn sync_fighters(
                     // gun/spear: right hand IK to the grip socket; left
                     // hand IK to the foregrip, or a chest-guard idle when
                     // the weapon has none (pistols)
+                    //
+                    // §2.5: the socket is a HARD SNAP - it is wherever
+                    // the weapon is this frame - so the hand springs onto
+                    // it (k=120) and the elbow pole follows more slowly
+                    // (k=60). That difference is the whole read: the hand
+                    // arrives first and the elbow swings in after it,
+                    // which is what stops an arm looking keyframed.
                     if let Some(t) = grip_t {
-                        let (q, e) = solve_arm_ik(sh_r, t, pole_r);
+                        let sprung = if rig.hand_r.is_nan() {
+                            rig.hand_r = t; // first pose snaps, never springs in
+                            t
+                        } else {
+                            let (nx, nv) = damped_spring3(
+                                rig.hand_r,
+                                rig.hand_r_v,
+                                t,
+                                SPRING_K_HAND_FOLLOW,
+                                dt,
+                            );
+                            rig.hand_r = nx;
+                            rig.hand_r_v = nv;
+                            nx
+                        };
+                        let pole = if rig.pole_r_s.is_nan() {
+                            rig.pole_r_s = pole_r;
+                            pole_r
+                        } else {
+                            let (nx, nv) = damped_spring3(
+                                rig.pole_r_s,
+                                rig.pole_r_v,
+                                pole_r,
+                                SPRING_K_ELBOW_POLE,
+                                dt,
+                            );
+                            rig.pole_r_s = nx;
+                            rig.pole_r_v = nv;
+                            nx
+                        };
+                        let (q, e) = solve_arm_ik(sh_r, sprung, pole);
                         right = (q, e, 0.0);
                     }
                     // §3.2: through the windup the OFF ARM points at the
@@ -10272,7 +10381,27 @@ fn sync_fighters(
                     } else {
                         fore_t.unwrap_or(Vec3::new(-0.12, 0.38, 0.16))
                     };
-                    let (q, e) = solve_arm_ik(sh_l, lt, pole_l);
+                    let sprung_l = if rig.hand_l.is_nan() {
+                        rig.hand_l = lt;
+                        lt
+                    } else {
+                        let (nx, nv) =
+                            damped_spring3(rig.hand_l, rig.hand_l_v, lt, SPRING_K_HAND_FOLLOW, dt);
+                        rig.hand_l = nx;
+                        rig.hand_l_v = nv;
+                        nx
+                    };
+                    let pole_ls = if rig.pole_l_s.is_nan() {
+                        rig.pole_l_s = pole_l;
+                        pole_l
+                    } else {
+                        let (nx, nv) =
+                            damped_spring3(rig.pole_l_s, rig.pole_l_v, pole_l, SPRING_K_ELBOW_POLE, dt);
+                        rig.pole_l_s = nx;
+                        rig.pole_l_v = nv;
+                        nx
+                    };
+                    let (q, e) = solve_arm_ik(sh_l, sprung_l, pole_ls);
                     left = (q, e, 0.0);
                 }
             }
@@ -11800,6 +11929,9 @@ struct VmState {
     /// ~30 cm of translation and ~31 deg of rotation - reading it raw
     /// teleported the viewmodel in a single frame.
     spear_wind_ease: f32,
+    /// §2.5 finger-settle spring state (k=220) - see `fp_viewmodel`.
+    finger: f32,
+    finger_v: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11850,9 +11982,29 @@ fn fp_viewmodel(
     // every state except Aimed - it moves to the trigger during the ADS
     // blend. Nearly free, and it reads as "trained".
     let on_trigger = cam_ctl.ads_t;
+    // §2.5 FINGER SETTLE (k=220): the curve above is a hard target, so
+    // driving the joint straight from it makes the finger TELEPORT
+    // between rest and trigger. The stiffest spring in the table -
+    // fingers settle fast, but they do settle, and that last few
+    // milliseconds of overshoot-free travel is the whole difference
+    // between a hand and a hinge.
+    let finger_target = -0.12 + press * -0.38;
+    {
+        let (nx, nv) = damped_spring(
+            Vec2::new(st.finger, 0.0),
+            Vec2::new(st.finger_v, 0.0),
+            Vec2::new(finger_target, 0.0),
+            SPRING_K_FINGER_SETTLE,
+            dt,
+        );
+        st.finger = nx.x;
+        st.finger_v = nv.x;
+    }
     for (mut t, tf_) in &mut trig {
-        let rest = -0.12 + (tf_.rest + 0.12) * on_trigger;
-        t.rotation = Quat::from_rotation_x(rest - press * 0.38);
+        // the per-finger rest offset still rides the ADS blend; only the
+        // moving part is sprung
+        let rest = (tf_.rest + 0.12) * on_trigger;
+        t.rotation = Quat::from_rotation_x(st.finger + rest);
     }
     let show = vm_rendered(state.get(), cam_ctl.person_t, p.alive(), p.roll_t);
     if let Ok((_, mut v)) = q.get_mut(vm.root) {
@@ -15914,6 +16066,63 @@ mod band_tests {
     }
 
     /// §1.4 Rule-2 gate: scoped + zoomed = the viewmodel is not rendered.
+    #[test]
+    /// §2.5: the Vec3 spring is the SAME math as the 2D one, not a
+    /// second solver - it must critically damp on every axis, reach its
+    /// target, and never overshoot.
+    #[test]
+    fn the_three_axis_spring_settles_without_overshoot() {
+        let target = Vec3::new(0.4, -0.2, 0.7);
+        let mut x = Vec3::ZERO;
+        let mut v = Vec3::ZERO;
+        let mut max_over = 0.0_f32;
+        for _ in 0..400 {
+            let (nx, nv) = damped_spring3(x, v, target, SPRING_K_HAND_FOLLOW, 1.0 / 120.0);
+            x = nx;
+            v = nv;
+            // critical damping never crosses the target
+            for a in 0..3 {
+                let over = (x[a] - target[a]) * target[a].signum();
+                max_over = max_over.max(over);
+            }
+        }
+        assert!(
+            max_over < 1e-3,
+            "a critically damped spring must not overshoot, got {max_over}"
+        );
+        assert!(
+            (x - target).length() < 1e-3,
+            "the spring must actually arrive: {x:?} vs {target:?}"
+        );
+        // a stiffer spring must arrive sooner - this is what makes the
+        // named k values mean something rather than being decoration
+        let settle = |k: f32| -> usize {
+            let (mut x, mut v) = (Vec3::ZERO, Vec3::ZERO);
+            for i in 0..2000 {
+                let (nx, nv) = damped_spring3(x, v, target, k, 1.0 / 120.0);
+                x = nx;
+                v = nv;
+                if (x - target).length() < 0.01 {
+                    return i;
+                }
+            }
+            usize::MAX
+        };
+        assert!(
+            settle(SPRING_K_FINGER_SETTLE) < settle(SPRING_K_HAND_FOLLOW),
+            "fingers (k=220) must settle faster than the hand (k=120)"
+        );
+        assert!(
+            settle(SPRING_K_HAND_FOLLOW) < settle(SPRING_K_ELBOW_POLE),
+            "the hand (k=120) must arrive before the elbow pole (k=60) - \
+             that lag IS the secondary motion"
+        );
+        assert!(
+            settle(SPRING_K_ELBOW_POLE) < settle(SPRING_K_SHOULDER),
+            "the clavicle (k=45) must be the slowest link in the chain"
+        );
+    }
+
     #[test]
     fn vm_hides_while_scoped() {
         assert!(vm_hidden_while_scoped(true, true));
