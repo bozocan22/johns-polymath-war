@@ -3421,6 +3421,31 @@ const CLASS_LOOK_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(3.4) },
 ];
 
+/// §owner MELEE v2: the three swing lines, third person, caught at the
+/// COCK - the frame a defender has to read to answer the attack. If
+/// these three silhouettes are not distinguishable the feature does not
+/// work, however correct the sim is.
+///
+/// Strafe is held to pick the line, and the knife tapped, so each snap
+/// lands mid-wind rather than mid-recovery.
+const MELEE_DIRS_BEATS: &[CapBeat] = &[
+    // LEFT: strafe left, tap the blade
+    CapBeat { press: &[CapKey::K(KeyCode::KeyA), CapKey::K(KeyCode::KeyF)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyF)], ..beat(0.84) },
+    CapBeat { snap: Some("01-left-cock"), ..beat(0.94) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyA)], ..beat(1.6) },
+    // RIGHT
+    CapBeat { press: &[CapKey::K(KeyCode::KeyD), CapKey::K(KeyCode::KeyF)], ..beat(2.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyF)], ..beat(2.04) },
+    CapBeat { snap: Some("02-right-cock"), ..beat(2.14) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyD)], ..beat(2.8) },
+    // OVERHEAD: no strafe at all
+    CapBeat { press: &[CapKey::K(KeyCode::KeyF)], ..beat(3.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyF)], ..beat(3.24) },
+    CapBeat { snap: Some("03-overhead-cock"), ..beat(3.34) },
+    CapBeat { end: true, ..beat(3.9) },
+];
+
 const IRON_SIGHTS_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
@@ -3585,6 +3610,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "shield_fp" => SHIELD_FP_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
+        "melee_dirs" => MELEE_DIRS_BEATS,
         "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
             CLASS_LOOK_BEATS
         }
@@ -3619,7 +3645,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 21] = [
+const CAPTURE_SCRIPTS: [&str; 22] = [
     "baseline",
     "idle_life",
     "bow_draw",
@@ -3636,6 +3662,7 @@ const CAPTURE_SCRIPTS: [&str; 21] = [
     "class_skirmisher",
     "class_warden",
     "class_marksman",
+    "melee_dirs",
     "minigun_check",
     "menus",
     "traversal",
@@ -10297,18 +10324,36 @@ fn sync_fighters(
                     }
                 }
             } else if ph < w {
-                // wind: from a mid guard up beside the ear
+                // §owner MELEE v2: the wind COCKS to the line the blade
+                // will travel, because this is the frame the defender
+                // has to read to answer it. A left swing draws back over
+                // the left shoulder, a right over the right, an overhead
+                // straight up beside the ear as before.
+                //
+                // Third person carries this as much as first: the
+                // attacker's silhouette is the only tell the defender
+                // actually gets.
                 let e = ease_out((ph / w).clamp(0.0, 1.0));
-                Vec3::new(0.16, 0.44, 0.28).lerp(Vec3::new(0.36, 0.80, -0.06), e)
+                let cocked = match f.knife_dir {
+                    sim::MeleeDir::Left => Vec3::new(-0.34, 0.74, -0.02),
+                    sim::MeleeDir::Right => Vec3::new(0.52, 0.72, 0.02),
+                    sim::MeleeDir::Overhead => Vec3::new(0.36, 0.80, -0.06),
+                };
+                Vec3::new(0.16, 0.44, 0.28).lerp(cocked, e)
             } else {
-                // strike snaps across, then eases back to the guard
+                // strike snaps ACROSS its own line, then eases back to
+                // the guard - a left swing finishes right and vice versa
                 let active = if f.melee_axe {
                     AXE_QUICK_ACTIVE_S + AXE_QUICK_RECOVER_S
                 } else {
                     KNIFE_QUICK_ACTIVE_S + KNIFE_QUICK_RECOVER_S
                 };
                 let r = ((ph - w) / active).clamp(0.0, 1.0);
-                let hit = Vec3::new(-0.26, 0.26, 0.44);
+                let hit = match f.knife_dir {
+                    sim::MeleeDir::Left => Vec3::new(0.46, 0.30, 0.40),
+                    sim::MeleeDir::Right => Vec3::new(-0.40, 0.28, 0.42),
+                    sim::MeleeDir::Overhead => Vec3::new(-0.26, 0.26, 0.44),
+                };
                 hit.lerp(Vec3::new(0.16, 0.44, 0.28), ease_out(r))
             };
             let (q, e) = solve_arm_ik(sh_r, target, pole_r);
@@ -12113,19 +12158,49 @@ fn fp_viewmodel(
             };
         let ph = p.knife_phase;
         let amp = if axe { 1.0 } else { 0.5 };
+        // §owner MELEE v2: the swing has to SHOW its line, or the
+        // defender is being asked to read something invisible. The
+        // wind-up cocks to the side the blade will travel from and the
+        // strike whips across to the other - an overhead keeps the
+        // original up-and-over. `side` is +1 for a right swing, -1 for a
+        // left, 0 for an overhead.
+        let side = match p.knife_dir {
+            sim::MeleeDir::Left => -1.0_f32,
+            sim::MeleeDir::Right => 1.0,
+            sim::MeleeDir::Overhead => 0.0,
+        };
+        let lateral = side.abs();
         if ph < w {
             let e = ease_out((ph / w).clamp(0.0, 1.0)) * amp;
             (
-                Vec3::new(0.10 * e, 0.09 * e, 0.05 * e),
-                Vec3::new(0.20 * e, -0.45 * e, 0.35 * e),
+                Vec3::new(
+                    // a side swing cocks OUT to its own side; an
+                    // overhead keeps the old inward wind
+                    (0.10 - 0.34 * lateral) * e + 0.30 * side * e,
+                    (0.09 + 0.05 * lateral) * e,
+                    0.05 * e,
+                ),
+                Vec3::new(
+                    (0.20 - 0.10 * lateral) * e,
+                    (-0.45 + 0.30 * lateral) * e - 0.85 * side * e,
+                    0.35 * e + 0.55 * side * e,
+                ),
             )
         } else {
             let r = ((ph - w) / (total - w)).clamp(0.0, 1.0);
             // snap through, then settle home over the recovery
             let e = (1.0 - ease_out(r)) * amp;
             (
-                Vec3::new(-0.14 * e, -0.06 * e, -0.10 * e),
-                Vec3::new(-0.30 * e, 0.55 * e, -0.50 * e),
+                Vec3::new(
+                    (-0.14 + 0.06 * lateral) * e - 0.34 * side * e,
+                    -0.06 * e,
+                    -0.10 * e,
+                ),
+                Vec3::new(
+                    (-0.30 + 0.14 * lateral) * e,
+                    (0.55 - 0.30 * lateral) * e + 0.95 * side * e,
+                    -0.50 * e - 0.65 * side * e,
+                ),
             )
         }
     } else {

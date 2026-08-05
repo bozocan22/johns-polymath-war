@@ -1628,6 +1628,10 @@ pub struct Fighter {
     /// recovery. `knife_committed` = the held lunge variant.
     pub knife_phase: f32,
     pub knife_committed: bool,
+    /// §owner MELEE v2: the line THIS swing travels. Latched when the
+    /// wind starts and held for the whole strike, so wiggling a strafe
+    /// key mid-swing cannot re-aim a blade already in motion.
+    pub knife_dir: MeleeDir,
     pub knife_struck: bool,
     /// §6 (Brief IV): the melee slot carries the AXE instead of the
     /// knife — slower, harder, and the swing sweeps the whole arc.
@@ -3078,6 +3082,50 @@ pub const REGEN_RATE_HPS: f32 = 8.33;
 // front-arc cosine the shield uses: one facing rule for the whole game.
 /// How long a parried attacker is staggered.
 pub const PARRY_STAGGER_S: f32 = 0.9;
+
+/// §owner MELEE v2: which way a swing travels.
+///
+/// Chosen by the attacker's own MOVEMENT at the moment the blade starts
+/// its wind - strafing left throws a left swing, strafing right a right
+/// one, standing or pushing forward an overhead. No new keys: the
+/// direction is something the hand is already on.
+///
+/// It exists so a knife fight is a READ rather than a timing check. A
+/// parry only meets a blade travelling the same way (see
+/// `is_parrying_dir`), so defending means guessing the attacker's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MeleeDir {
+    /// Straight down the middle - what standing still gives you.
+    #[default]
+    Overhead,
+    Left,
+    Right,
+}
+
+/// How hard you must be strafing before the swing follows the strafe
+/// rather than coming overhead. Below this, drifting sideways during a
+/// fight cannot silently change your attack out from under you.
+pub const MELEE_DIR_DEADZONE: f32 = 0.35;
+
+impl MeleeDir {
+    /// The swing a given movement input produces.
+    pub fn from_move(move_x: f32) -> MeleeDir {
+        if move_x <= -MELEE_DIR_DEADZONE {
+            MeleeDir::Left
+        } else if move_x >= MELEE_DIR_DEADZONE {
+            MeleeDir::Right
+        } else {
+            MeleeDir::Overhead
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            MeleeDir::Overhead => "OVERHEAD",
+            MeleeDir::Left => "LEFT",
+            MeleeDir::Right => "RIGHT",
+        }
+    }
+}
 /// Move-speed multiplier while staggered.
 pub const STAGGER_SPEED_MULT: f32 = 0.55;
 /// A parried ZOMBIE eats a longer stun - the claw has no discipline to
@@ -3581,6 +3629,7 @@ impl TdmSim {
                     autocannon_cd: 0.0,
                     knife_phase: 0.0,
                     knife_committed: false,
+                    knife_dir: MeleeDir::Overhead,
                     knife_struck: false,
                     melee_axe: false,
                     spin_t: 0.0,
@@ -4031,6 +4080,7 @@ impl TdmSim {
                     f.autocannon_cd = 0.0;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
+                    f.knife_dir = MeleeDir::Overhead;
                     f.knife_struck = false;
                     f.spin_t = 0.0;
                     f.heat = 0.0;
@@ -5032,6 +5082,9 @@ impl TdmSim {
                 f.knife_phase = DT;
                 f.knife_committed = false;
                 f.knife_struck = false;
+                // latched ONCE, here - a blade already moving cannot be
+                // re-aimed by tapping a strafe key
+                f.knife_dir = MeleeDir::from_move(cmd.move_x);
             } else if self.fighters[p].knife_phase > 0.0 {
                 let phase = self.fighters[p].knife_phase + DT;
                 self.fighters[p].knife_phase = phase;
@@ -5122,9 +5175,9 @@ impl TdmSim {
                     // §6: ONE sweep on the first active tick — everyone
                     // inside the 90° arc takes it, horde included
                     self.fighters[p].knife_struck = true;
-                    let (ppos, pteam, pyaw) = {
+                    let (ppos, pteam, pyaw, pdir) = {
                         let f = &self.fighters[p];
-                        (f.pos, f.team, f.yaw)
+                        (f.pos, f.team, f.yaw, f.knife_dir)
                     };
                     let (fx, fz) = (pyaw.sin(), pyaw.cos());
                     let mut hits: Vec<usize> = Vec::new();
@@ -5149,7 +5202,9 @@ impl TdmSim {
                         let behind = (v.yaw.sin() * dxv + v.yaw.cos() * dzv) / dl > 0.35;
                         // Melee v1: a victim mid-wind facing the sweep
                         // PARRIES it - the attacker staggers instead.
-                        if self.is_parrying(j, ppos) {
+                        // Melee v2: and only if their blade is on the
+                        // SAME line this one is travelling.
+                        if self.is_parrying_dir(j, ppos, Some(pdir)) {
                             self.fighters[p].stagger_t = PARRY_STAGGER_S;
                             self.fighters[j].parries += 1;
                             continue;
@@ -5209,9 +5264,9 @@ impl TdmSim {
                     // §2: the thrust is a LINE — a much tighter cone than
                     // the knife's target-assisted slash
                     let cone = if thrust { THRUST_ARC_COS } else { 0.42 };
-                    let (ppos, pteam, pyaw) = {
+                    let (ppos, pteam, pyaw, pdir) = {
                         let f = &self.fighters[p];
-                        (f.pos, f.team, f.yaw)
+                        (f.pos, f.team, f.yaw, f.knife_dir)
                     };
                     let (fx, fz) = (pyaw.sin(), pyaw.cos());
                     let mut best: Option<(usize, f32)> = None;
@@ -5234,7 +5289,8 @@ impl TdmSim {
                         // Melee v1: the knife and the thrust can be
                         // parried too - same rule as the axe sweep and
                         // the claws, one facing law for the whole game.
-                        if self.is_parrying(j, ppos) {
+                        // Melee v2: matched on the swing's line as well.
+                        if self.is_parrying_dir(j, ppos, Some(pdir)) {
                             self.fighters[p].stagger_t = PARRY_STAGGER_S;
                             self.fighters[j].parries += 1;
                         } else {
@@ -6526,9 +6582,33 @@ impl TdmSim {
     /// and the attacker stands inside their front arc. Pure read - the
     /// caller decides what a successful parry does to whom.
     pub fn is_parrying(&self, victim: usize, attack_from: [f32; 3]) -> bool {
+        self.is_parrying_dir(victim, attack_from, None)
+    }
+
+    /// §owner MELEE v2: the parry test, given the incoming swing's LINE.
+    ///
+    /// `incoming = None` keeps the old behaviour - any raised blade in
+    /// the front arc parries - and is what non-directional threats use.
+    /// With a direction, the defender's own swing must travel the SAME
+    /// way: two blades on the same line meet, while a left parry against
+    /// an overhead simply is not there.
+    ///
+    /// That is the whole of melee v2. Timing alone no longer saves you;
+    /// you have to read which line the attacker picked.
+    pub fn is_parrying_dir(
+        &self,
+        victim: usize,
+        attack_from: [f32; 3],
+        incoming: Option<MeleeDir>,
+    ) -> bool {
         let v = &self.fighters[victim];
         if !v.alive() || v.knife_phase <= 0.0 {
             return false;
+        }
+        if let Some(dir) = incoming {
+            if v.knife_dir != dir {
+                return false; // guarding the wrong line
+            }
         }
         let wind = if v.melee_axe {
             AXE_QUICK_WIND_S
@@ -9542,6 +9622,93 @@ mod tests {
         assert!(
             TRAINING_RESPAWN_S < RESPAWN_S,
             "range targets must reset faster than a match respawn"
+        );
+    }
+
+    /// §owner MELEE v2: a parry has to MEET the line the blade is on.
+    ///
+    /// This is the whole point of the feature - before it, any raised
+    /// blade in the front arc parried anything, so a knife fight was a
+    /// timing check. Now it is a read: guard the wrong line and the
+    /// blade lands.
+    #[test]
+    fn a_parry_only_meets_a_blade_on_its_own_line() {
+        // the input mapping, including the deadzone that stops a drift
+        // from silently re-aiming your attack
+        assert_eq!(MeleeDir::from_move(-1.0), MeleeDir::Left);
+        assert_eq!(MeleeDir::from_move(1.0), MeleeDir::Right);
+        assert_eq!(MeleeDir::from_move(0.0), MeleeDir::Overhead);
+        assert_eq!(
+            MeleeDir::from_move(MELEE_DIR_DEADZONE * 0.9),
+            MeleeDir::Overhead,
+            "a light drift must not become a side swing"
+        );
+        assert_eq!(MeleeDir::from_move(MELEE_DIR_DEADZONE), MeleeDir::Right);
+
+        // a defender mid-wind, attacker stood in front of them
+        let rig = |defender: MeleeDir| -> TdmSim {
+            let mut s = range(0xB1AD);
+            s.fighters[1].pos = [0.0, 0.0, 2.0];
+            s.fighters[1].yaw = std::f32::consts::PI; // facing the attacker
+            s.fighters[1].knife_phase = KNIFE_QUICK_WIND_S * 0.5; // blade up
+            s.fighters[1].knife_dir = defender;
+            s
+        };
+        let attacker_at = [0.0, 0.0, 0.0];
+        for dir in [MeleeDir::Overhead, MeleeDir::Left, MeleeDir::Right] {
+            let s = rig(dir);
+            assert!(
+                s.is_parrying_dir(1, attacker_at, Some(dir)),
+                "{dir:?} must parry a {dir:?} swing - same line, blades meet"
+            );
+            for other in [MeleeDir::Overhead, MeleeDir::Left, MeleeDir::Right] {
+                if other == dir {
+                    continue;
+                }
+                assert!(
+                    !s.is_parrying_dir(1, attacker_at, Some(other)),
+                    "{dir:?} must NOT parry a {other:?} swing - wrong line"
+                );
+            }
+            // and the undirected form still parries anything, which is
+            // what non-directional threats rely on
+            assert!(
+                s.is_parrying(1, attacker_at),
+                "the undirected parry must be unchanged"
+            );
+        }
+    }
+
+    /// The swing's line is latched at the WIND and held: a blade already
+    /// travelling cannot be re-aimed by tapping a strafe key, or the
+    /// read the defender just made would be worthless.
+    #[test]
+    fn a_swing_cannot_be_re_aimed_once_it_is_moving() {
+        let mut s = range(0xB1AE);
+        // start the swing while strafing LEFT
+        s.step(PlayerCmd {
+            knife_hold: true,
+            move_x: -1.0,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.fighters[0].knife_dir,
+            MeleeDir::Left,
+            "the wind must take the line the strafe was on"
+        );
+        // now yank the strafe the other way, mid-swing
+        for _ in 0..6 {
+            s.step(PlayerCmd {
+                knife_hold: false,
+                move_x: 1.0,
+                ..Default::default()
+            });
+        }
+        assert!(s.fighters[0].knife_phase > 0.0, "still mid-swing");
+        assert_eq!(
+            s.fighters[0].knife_dir,
+            MeleeDir::Left,
+            "the line must hold for the whole strike"
         );
     }
 

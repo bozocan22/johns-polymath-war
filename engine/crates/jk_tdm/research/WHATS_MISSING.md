@@ -45,6 +45,9 @@ emblem) and are wired through the splash, menus, and seal footers.
 | M249 "grey wall" | Its sight line sat 2 mm above a flat feed cover, so aiming laid a 30 cm plate across the eye; it also shared the rifle carry offset despite a receiver 2.1x the AK's cross-section. Own carry, raised sights, arched carry handle. |
 | Recoil correctness | The permanent camera-pitch channel ignored two rules the sim obeys - projectile weapons produce no punch (a drawn bow was walking the aim up the screen) and a scoped rifle's punch is scaled 25/78. The M249's kick equalled the AK's while cycling 40% faster. |
 | Arrow + spear models | Both were one featureless box. Now a bodkin head, tapered shaft, nock and three spinning fletching vanes; a leaf blade, collar, haft and butt spike. |
+| Mech fire came from the screen centre | The ray still leaves the eye (that is the hit test), but the STREAK is drawn from the muzzle actually on screen. Rockets ease off the tube onto their true position over 90 ms without touching physics. |
+| The HUD was drawn OVER by the weapon | The interface rendered on MainCam (order 0) while the viewmodel camera is order 1 with no clear, so the gun composited on top - it ate the first characters of the mech ammo readout. The UI has its own Camera2d at order 2 now; nothing 3D can draw over it again. |
+| **Melee depth v2** | Directional attacks: strafe picks the swing's LINE (left / right / overhead) at the wind, latched for the whole strike. A parry only meets a blade on the same line, so a knife fight is a read rather than a timing check. Both viewmodel and third-person silhouettes cock to the chosen line, because the defender has to be able to SEE what to answer. |
 | **4-class system** | LINE / SKIRMISHER / WARDEN / MARKSMAN, each hooked to health, movement, spread and swap speed, with a per-class silhouette and a Forge picker. LINE is 1.0 across the board; a test proves the other three each trade. |
 
 ## 2. Large, multi-session architectural (do not rush — BACKLOG.md)
@@ -54,8 +57,6 @@ Ranked by value, blockers first:
 - **26-piece armour**: the 4-CLASS half is built (see below); the
   per-piece armour half is not. Today armour is 5 whole-body presets
   found as loot, and a class is a separate standing pick.
-- **Melee depth v2**: directional attacks and deflection. Parry and
-  stagger are built; direction and deflection are not.
 - **AI squad coordination** (#5): flanking, suppression, bounding
   overwatch; `jk_wall` morale exists to hook into.
 - **20-segment mass-bearing rig** (Steps 0, 2–7 remain): real
