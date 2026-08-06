@@ -17,7 +17,7 @@ interesting. Blocked items are never researched "in preparation."
 | # | System | Why | Attaches to | Status |
 |---|---|---|---|---|
 | 4 | Melee depth: parry, deflection, directional attack, stagger, armour penetration, weak points | Melee exists but shallow | axe/spear/shield | Not started |
-| 5 | AI squad coordination: flanking, suppression, bounding overwatch, retreat | Bots exist; `jk_wall` already models morale/fear/rout | bot AI, jk_wall morale | Not started |
+| 5 | AI squad coordination: flanking, suppression, bounding overwatch, retreat | Bots exist; `jk_wall` already models morale/fear/rout | bot AI, jk_wall morale | **Flanking, suppression and bounding overwatch DONE** (2026-08-05/06). RETREAT is the remainder and is the one that genuinely wants `jk_wall`'s morale model rather than another derived-from-index rule — a squad that breaks needs memory of what broke it, which nothing in the TDM sim currently keeps. |
 | 6 | Mech operation feel: weight, mechanical inertia, cockpit vibration, heat, internal damage, emergency shutdown/eject | Extends #1; heat-and-cool creates rhythm a fuel bar can't | mech sim | Partially started — power stride (this session, Section H) added a heat-budget mechanic to mech mobility, not yet extended to internal damage/eject |
 | 7 | Traversal: climb, vault, mantle, ledge bands | Already scoped in the master prompt; must match map metrics | none yet — needs map metrics first | Blocked on map metrics quota |
 
@@ -49,6 +49,7 @@ interesting. Blocked items are never researched "in preparation."
 | 19 | §5.4 spear running-throw bonus | Done | Built 2026-08-01 (`baf50ca`) | — |
 | 20 | §4.3 minimap enemy spotting | Done | Built 2026-08-01 (`5fbb3c7`) | — |
 | 21 | §4.1 bow full-draw hold sway | Done | Built 2026-08-01 (`054a283`) | — |
+| 22 | Derive the screen-intrusion budgets from the weapon geometry | Low | The three profiles and the per-weapon sweep landed 2026-08-06, but the bounded-part extents are AUDITED off the model tables rather than measured from them, so widening a model fails nothing. Recorded rather than left implicit, because an audited number that looks like a measurement is the exact shape of the false-passing test this repo has already been bitten by once | Unblocker: lift `spawn_weapon_model`'s `match kind` into a pure `weapon_parts(kind) -> Vec<WPart>`; the Minigun's spinner is the one arm that spawns an entity and needs splitting out |
 
 ## Thor's audit (2026-08-01): 143 findings across all 9 briefs, full detail in `THOR_LOG.md`
 
