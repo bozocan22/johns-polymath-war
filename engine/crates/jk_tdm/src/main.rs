@@ -5470,6 +5470,27 @@ fn spawn_weapon_model(
             parts.push(wp(false, Tone::Dark, (-0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
             parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.02), FRAC_PI_2, (0.060, 0.02, 0.060)));
             parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.14), FRAC_PI_2, (0.060, 0.02, 0.060)));
+            // §owner: the parts that make a rifle read as a SNIPER rather
+            // than a long tube - elevation and windage turrets, the bolt
+            // you cycle between shots, a box magazine, a cheek riser, and
+            // a slotted brake on the muzzle.
+            // elevation turret on top of the scope, windage on the side
+            parts.push(wp(true, Tone::Dark, (0.0, 0.148, 0.10), 0.0, (0.036, 0.030, 0.036)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.166, 0.10), 0.0, (0.026, 0.012, 0.026)));
+            parts.push(wp(true, Tone::Dark, (0.052, 0.10, 0.10), FRAC_PI_2, (0.032, 0.028, 0.032)));
+            // bolt handle: a stub off the right of the receiver, angled
+            // down and back the way a turned-down bolt sits
+            parts.push(wp(true, Tone::Mid, (0.046, 0.045, -0.05), FRAC_PI_2, (0.018, 0.075, 0.018)));
+            parts.push(wp(true, Tone::Black, (0.082, 0.032, -0.05), FRAC_PI_2, (0.024, 0.030, 0.024)));
+            // detachable box magazine under the action
+            parts.push(wp(false, Tone::Dark, (0.0, -0.075, 0.03), 0.10, (0.038, 0.10, 0.10)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.128, 0.03), 0.10, (0.042, 0.012, 0.11)));
+            // raised cheek piece on the comb
+            parts.push(wp(false, Tone::Mid, (0.0, 0.055, -0.20), 0.0, (0.040, 0.030, 0.20)));
+            // slotted muzzle brake - three cuts, the sniper's own tell
+            for bz in [0.885_f32, 0.905, 0.925] {
+                parts.push(wp(false, Tone::Black, (0.0, 0.052, bz), 0.0, (0.050, 0.008, 0.006)));
+            }
         }
         GunKind::M249 => {
             // belt-fed support gun: deep receiver, box mag, thick barrel
@@ -5546,11 +5567,30 @@ fn spawn_weapon_model(
             parts.push(wd(false, Tone::Reticle, (0.0, 0.052, 0.044), 0.0, (0.006, 0.006, 0.006)));
         }
         GunKind::Spear => {
-            // war spear: dark shaft, light flat blade, black collar + butt
+            // §owner: a JAVELIN, not a broomstick with a wedge on it. The
+            // head is a leaf blade with a raised midrib and a socket that
+            // swallows the shaft; the haft carries a bound grip where the
+            // hand goes and a weighted butt that balances the throw.
             parts.push(wp(true, Tone::Dark, (0.0, 0.0, 0.35), FRAC_PI_2, (0.032, 1.85, 0.032)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.32), 0.0, (0.055, 0.018, 0.22)));
-            parts.push(wp(true, Tone::Black, (0.0, 0.0, 1.18), FRAC_PI_2, (0.042, 0.09, 0.042)));
-            parts.push(wp(true, Tone::Black, (0.0, 0.0, -0.56), FRAC_PI_2, (0.038, 0.07, 0.038)));
+            // leaf blade: a wide belly tapering to a point, with the
+            // midrib proud along its spine
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.30), 0.0, (0.058, 0.016, 0.20)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.42), 0.0, (0.030, 0.013, 0.10)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 1.30), 0.0, (0.014, 0.026, 0.19)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.485), 0.0, (0.012, 0.010, 0.05)));
+            // socket: the collar the blade seats into, with two rivets
+            parts.push(wp(true, Tone::Black, (0.0, 0.0, 1.17), FRAC_PI_2, (0.046, 0.11, 0.046)));
+            for rz in [1.135_f32, 1.205] {
+                parts.push(wp(true, Tone::Mid, (0.026, 0.0, rz), FRAC_PI_2, (0.012, 0.012, 0.012)));
+            }
+            // bound grip where the hand sits - three cord wraps
+            for gz in [-0.06_f32, 0.0, 0.06] {
+                parts.push(wp(true, Tone::Mid, (0.0, 0.0, gz), FRAC_PI_2, (0.040, 0.030, 0.040)));
+            }
+            // weighted butt + a spike, the counterweight that makes a
+            // javelin fly nose-first
+            parts.push(wp(true, Tone::Black, (0.0, 0.0, -0.54), FRAC_PI_2, (0.044, 0.10, 0.044)));
+            parts.push(wp(true, Tone::Mid, (0.0, 0.0, -0.62), FRAC_PI_2, (0.020, 0.07, 0.020)));
             parts.push(wd(false, Tone::Light, (0.0, 0.0, 1.10), 0.0, (0.045, 0.045, 0.02)));
         }
         GunKind::Minigun => {
@@ -10248,16 +10288,40 @@ fn sync_fighters(
         };
         let reload_cant = if f.reload_t > 0.0 { 0.44 } else { 0.0 };
         let (wr_pos, wr_rot) = if spear_cocked || f.spear_wind_t > 0.0 {
-            // §3.2: drawn back level with the shoulder through the wind,
-            // whipping forward at release
-            let wind_back = if f.spear_wind_t > 0.0 {
-                (1.0 - f.spear_wind_t / SPEAR_WINDUP_S).min(0.68) * 0.8
+            // §owner: a JAVELIN THROW, in two beats you can read from
+            // across the field.
+            //
+            // The old motion travelled about six centimetres and rotated
+            // a little - technically present, invisible in play. A throw
+            // is the most telegraphed action in the game and SHOULD be:
+            // it is a committed, single-shot, empty-your-hands decision,
+            // and the enemy is entitled to see it coming.
+            //
+            // COCK (first ~65% of the wind): the arm hauls the shaft up
+            // and back over the shoulder, out to the side of the head.
+            // WHIP (last ~35%): the hips are already opening under it
+            // (`torso_coil_yaw`), and the arm drives through hard, past
+            // neutral, so the release looks thrown rather than dropped.
+            let wp = if f.spear_wind_t > 0.0 {
+                (1.0 - f.spear_wind_t / SPEAR_WINDUP_S).clamp(0.0, 1.0)
             } else {
                 0.0
             };
+            const COCK_FRAC: f32 = 0.65;
+            let (cock, whip) = if wp < COCK_FRAC {
+                (ease_out(wp / COCK_FRAC), 0.0)
+            } else {
+                (1.0, ease_out((wp - COCK_FRAC) / (1.0 - COCK_FRAC)))
+            };
             (
-                Vec3::new(0.16, 0.72, 0.02 - 0.12 * wind_back),
-                Quat::from_rotation_x(wr_pitch - 1.35 - 0.5 * wind_back + jerk * 1.5),
+                Vec3::new(
+                    0.16 + 0.10 * cock - 0.06 * whip,
+                    0.72 + 0.17 * cock - 0.10 * whip,
+                    0.02 - 0.34 * cock + 0.78 * whip,
+                ),
+                Quat::from_rotation_x(
+                    wr_pitch - 1.35 - 0.62 * cock + 1.45 * whip + jerk * 1.5,
+                ),
             )
         } else if f.gun == GunKind::Bow {
             // the bow stands in front of the LEFT side
