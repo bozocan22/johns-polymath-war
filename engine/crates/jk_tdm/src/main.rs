@@ -244,6 +244,15 @@ const TP_SPRINT_LAG_S: f32 = 0.12;
 /// §5.1: aim (RMB in third person) - 1.35m boom, +0.55m right, FOV -12deg.
 const TP_BOOM_AIM: f32 = 1.35;
 const TP_RIGHT_AIM: f32 = 0.55;
+/// §5.1: the third-person aim FOV pull-in. This line of the table was
+/// DOCUMENTED for a long time and never implemented - the comment above
+/// promised -12 degrees while the FOV path only ever lerped toward the
+/// held gun's own `zoom_deg`, which for a projectile weapon is no zoom
+/// at all. An audit against the brief is what surfaced it.
+///
+/// Applied on top of whatever the weapon asks for, and only in third
+/// person, so first-person focus is untouched.
+const TP_FOV_AIM_DELTA: f32 = -12.0;
 /// §5.2: upper-body additive aim before the legs turn-in-place catch up.
 const TORSO_AIM_LIMIT_DEG: f32 = 60.0;
 
@@ -1508,6 +1517,25 @@ const ROLL_SETTLE_DIP: f32 = 0.055;
 /// value `head_base_y` reported, which put the head base at ~0.79 of
 /// height - outside the 0.82 band the test claims to guard, and
 /// classified as Arms by the sim while looking like a head.
+/// §owner ATHLETIC MOTION: how far the acceleration term alone may lean
+/// the torso, and the hard ceiling on the combined run+accel pitch.
+///
+/// 0.52 rad is ~30 degrees - the sprinter's drive angle the brief asks
+/// for. The old ceiling was 0.185 (10.6 deg), which capped the whole
+/// system well below the figure it was supposed to hit.
+const ATHLETIC_LEAN_MAX: f32 = 0.40;
+const ATHLETIC_LEAN_CAP: f32 = 0.52;
+/// §owner ATHLETIC MOTION: peak knee flexion on the recovery leg, in
+/// radians. 2.27 rad is ~130 deg - the sprinter's heel-to-seat fold the
+/// brief asks for. It reaches that only at full `amp` (sprint speed);
+/// a walk still bends about as little as it always did.
+const KNEE_DRIVE_MAX: f32 = 2.27;
+/// §owner ATHLETIC MOTION: shoulder swing amplitude at a sprint. The
+/// old 0.5 gave +-17 deg with a weapon-free arm, and armed fighters
+/// never saw it at all because both arms IK to the grip. Unarmed
+/// sprinting now drives the arms properly.
+const ARM_DRIVE_SWING: f32 = 1.15;
+
 fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -> (f32, f32) {
     let (hip, pitch) = if crouch {
         (
@@ -1518,7 +1546,7 @@ fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -
         (
             0.63 + 0.0175 * (1.0 - (2.0 * theta).cos()) * amp,
             // stronger run lean - the band cap still rules (§0.2 test)
-            (0.05 + amp * 0.09 + accel_lean).min(0.185),
+            (0.05 + amp * 0.09 + accel_lean).min(ATHLETIC_LEAN_CAP),
         )
     };
     // The band is law, so the dip is clamped BY it rather than checked
@@ -10229,7 +10257,21 @@ fn sync_fighters(
         // the head stays in band - the cap lives in gait_pose)
         let accel = (speed - rig.prev_speed) / dt.max(1e-4);
         rig.prev_speed = speed;
-        let lean_target = (accel * 0.012).clamp(-0.07, 0.07);
+        // §owner ATHLETIC MOTION: a sprinter driving off the line leans
+        // 28-32 degrees into it. This was clamped to 0.07 rad - FOUR
+        // degrees - which is a nod, not an acceleration.
+        //
+        // Asymmetric on purpose: you throw yourself forward far harder
+        // than you rock back stopping, and a symmetric clamp made hard
+        // braking look like a stumble.
+        //
+        // The head-band law still rules it. `gait_pose` derives the hip
+        // height needed to keep the head base on the 0.82 hit line from
+        // whatever pitch it is handed, so a deeper lean RAISES the hip
+        // to compensate rather than dragging the head out of its band.
+        // That is what makes this safe to open up: the invariant is
+        // enforced downstream, not by this clamp.
+        let lean_target = (accel * 0.055).clamp(-0.14, ATHLETIC_LEAN_MAX);
         rig.accel_lean += (lean_target - rig.accel_lean) * (8.0 * dt).min(1.0);
         // move direction in body space: forward + lateral fractions drive
         // the swing AXIS, so strafing reads as a crossover step instead of
@@ -10303,8 +10345,16 @@ fn sync_fighters(
                 // rolls heel-strike → toe-off - the *human* read
                 let sw = (rig.phase + off).sin() * amp;
                 let lift = (rig.phase + off + 0.9).sin().max(0.0) * amp;
+                // §owner ATHLETIC MOTION: KNEE DRIVE. The recovery knee
+                // used to peak near 49 deg, which is a jog. A sprinter
+                // folds the heel up toward the seat - the brief asks for
+                // ~130 deg, and the drive is what sells speed far more
+                // than stride length does.
+                //
+                // Scaled by `amp` (speed fraction), so a walk keeps its
+                // old shallow bend and only a genuine sprint folds hard.
                 thigh = sw * 0.9;
-                shin = 0.10 + lift * 1.25;
+                shin = 0.10 + lift * KNEE_DRIVE_MAX;
                 foot = -(thigh + shin) * 0.55
                     + (rig.phase + off - 1.2).sin() * 0.20 * amp
                     + (rig.phase + off + 0.6).sin() * 0.22 * amp; // ankle roll
@@ -10768,8 +10818,25 @@ fn sync_fighters(
         let pole_l = Vec3::new(-0.574, -0.80, 0.15); // down-and-out 35°
         let pole_r = Vec3::new(0.574, -0.80, 0.15);
         // (shoulder quat, elbow flex, wrist pitch) per arm
-        let mut left = (Quat::from_rotation_x(swing * 0.5), 0.15, 0.0_f32);
-        let mut right = (Quat::from_rotation_x(-swing * 0.5), 0.15, 0.0_f32);
+        // §owner ATHLETIC MOTION: ARM DRIVE. A sprinting soldier drives
+        // the arms hard and bends the elbow toward a right angle; the
+        // old +-17 deg with a straight arm read as a stroll.
+        //
+        // NOTE this is the UNARMED pose. An armed fighter's arms are
+        // overridden below by the weapon-grip IK, which is correct -
+        // you cannot pump a rifle like a sprinter's fist - so the drive
+        // shows on empty hands and on the off hand.
+        let arm_bend = 0.15 + 0.85 * amp.clamp(0.0, 1.0);
+        let mut left = (
+            Quat::from_rotation_x(swing * ARM_DRIVE_SWING),
+            arm_bend,
+            0.0_f32,
+        );
+        let mut right = (
+            Quat::from_rotation_x(-swing * ARM_DRIVE_SWING),
+            arm_bend,
+            0.0_f32,
+        );
         if rolling {
             // arms wrap the ball
             left = (Quat::from_rotation_x(-0.9), 1.2, 0.0);
@@ -12051,6 +12118,15 @@ fn camera_system(
             }
         } else {
             settings.fov_deg()
+        };
+        // §5.1: THIRD-PERSON AIM also pulls the FOV in, on top of
+        // whatever the weapon asked for. First person is untouched -
+        // there the weapon's own zoom is the whole story, and stacking
+        // a boom-camera delta on it would double-count.
+        let zoom = if cam_ctl.person_t > 0.5 {
+            zoom + TP_FOV_AIM_DELTA
+        } else {
+            zoom
         };
         // the player's chosen hip FOV, not the fixed 62 (Settings)
         let hip = settings.fov_deg().to_radians();

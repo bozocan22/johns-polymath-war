@@ -2795,7 +2795,7 @@ pub const BRACE_SPEED_MULT: f32 = 0.25;
 // would silently apply the INFANTRY 0.25x, and any later rebalance of
 // BRACE_SPEED_MULT would move mech pacing as an invisible side effect.
 // The two are calibrated for completely different mass and HP scales
-// (MECH_HULL 1000.0 vs infantry HP two orders of magnitude smaller).
+// (MECH_HULL 600.0 vs infantry HP two orders of magnitude smaller).
 pub const MECH_BRACE_STANCE_DROP: f32 = 0.12; // fraction of height() the hull sinks
 pub const MECH_BRACE_SPEED_MULT: f32 = 0.12; // below infantry's 0.25 - braced is near-planted
 pub const MECH_BRACE_RECOIL_DAMP: f32 = 0.30; // fraction of unbraced kick retained
@@ -2939,8 +2939,9 @@ pub const RECON_REGEN_DELAY: f32 = 5.0;
 // radius (MECH_RADIUS below is already a formula, not a bespoke system -
 // this scale change needed no new collision/doorway infrastructure).
 pub const MECH_SCALE: f32 = 1.7;
-// §4.5 (Brief VI): hull 1000, and the sensor visor is a ×2.0 weak
-// point applied AFTER the angle multiplier (front-arc only).
+// §4.5 (Brief VI): the sensor visor is a ×2.0 weak point applied AFTER
+// the angle multiplier (front-arc only). (Brief VI's hull of 1000 was
+// superseded by the rebalance below - MECH_HULL is 600.)
 /// §owner (rebalance): the chassis dies to sustained FRONTAL fire now.
 /// Targets, from the front arc: ~10 AWM body shots, ~14 spear hits
 /// (the owner's 15-20 band, hit at its floor because the spear also
@@ -3092,7 +3093,13 @@ pub const CLIMB_GRIP_RECOVER_PER_S: f32 = 9.0;
 /// Stacks ON TOP of angle armor and the exposed-frame x1.25.
 pub const CLIMB_STRIKE_MULT: f32 = 1.6;
 pub const MECH_EXPOSED_DMG_MULT: f32 = 1.25;
-/// Frontal 0–60°: 85% reduction. Side 60–120°: 70%. Rear: none.
+/// Frontal 0–60°: 47.5% reduction (×0.525 through). Side 60–120°: 30%
+/// (×0.70). Rear: none.
+///
+/// Brief VI specified 85%/70%, and this comment still claimed those long
+/// after the constants below were rebalanced - see the §owner note above
+/// MECH_HULL for why the front was opened up. Read the constants, not
+/// the brief.
 pub const MECH_RED_FRONT: f32 = 0.475;
 pub const MECH_RED_SIDE: f32 = 0.30;
 /// §11.2 rule 2: explosives bypass HALF the reduction; fire bypasses ALL
@@ -16000,7 +16007,7 @@ mod tests {
     /// §3.2: 85 body, ×2 head (170, a lethal skill shot but not the
     /// guns' ×4), ×0.75 legs - measured through the real hit path.
     #[test]
-    fn spear_zone_damage_matches_85_170_64() {
+    fn spear_zone_damage_follows_the_shipped_weapon_table() {
         let dmg_at = |frac: f32| {
             let mut s = range(23);
             let h = s.fighters[1].height();
@@ -16012,7 +16019,13 @@ mod tests {
                 vel: [0.0, 0.0, -1.0],
                 team: Team::Blue,
                 shooter: 0,
-                damage: 85.0,
+                // §owner: READ the shipped value. This used to hardcode
+                // 85.0, which is what the spear did before it was raised
+                // to 105 - so the test kept asserting 170/85/64 and
+                // passing against a number the game no longer used. A
+                // test that builds its own copy of the thing it is
+                // testing cannot detect a change in it.
+                damage: gun(GunKind::Spear).damage,
                 is_spear: true,
                 stuck_t: None,
                 embedded: true,
@@ -16023,9 +16036,23 @@ mod tests {
             s.step_missiles();
             hp0 - s.fighters[1].health
         };
-        assert!((dmg_at(0.9) - 170.0).abs() < 0.5, "head: {}", dmg_at(0.9));
-        assert!((dmg_at(0.5) - 85.0).abs() < 0.5, "torso: {}", dmg_at(0.5));
-        assert!((dmg_at(0.1) - 63.75).abs() < 0.5, "legs: {}", dmg_at(0.1));
+        // the multipliers are the contract; the base is whatever the
+        // weapon table currently says, so a rebalance moves all three
+        // together instead of silently breaking the relationship
+        let base = gun(GunKind::Spear).damage;
+        assert!(
+            (dmg_at(0.9) - base * SPEAR_HEAD_MULT).abs() < 0.5,
+            "head must be base x{SPEAR_HEAD_MULT}: {} vs {}",
+            dmg_at(0.9),
+            base * SPEAR_HEAD_MULT
+        );
+        assert!((dmg_at(0.5) - base).abs() < 0.5, "torso is the base: {}", dmg_at(0.5));
+        assert!(
+            (dmg_at(0.1) - base * LEG_MULT).abs() < 0.5,
+            "legs must be base x{LEG_MULT}: {} vs {}",
+            dmg_at(0.1),
+            base * LEG_MULT
+        );
     }
 
     /// §3.4: the ammo cap is genuinely 2, not a leftover 6.
