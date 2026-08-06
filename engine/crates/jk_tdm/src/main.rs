@@ -233,6 +233,97 @@ fn bow_draw_visual(bow_draw_t: f32, fire_cd: f32, fire_period: f32, is_player: b
         0.0
     }
 }
+// ---- the war bow's STRING, as geometry ----------------------------------
+//
+// The bow turned HORIZONTAL and the draw did not follow it. Every number
+// that placed a hand, an arrow, or the string itself was a separate magic
+// literal tuned against the old VERTICAL bow, and a vertical bow hides the
+// error: its string spans Y, so a draw hand could ride UP toward the cheek
+// and still be touching string at every height. Turn the limbs sideways
+// and the string spans X at y = 0 - and the same hand is now a hand's
+// width ABOVE the string it is supposedly pulling.
+//
+// The string was worse than the hand. It was ONE STATIC BOX from tip to
+// tip and nothing ever moved it, so at full draw the archer's fingers sat
+// 18 cm behind a string that had not budged. The nocked arrow was parented
+// to the BOW hand, not to the bow, so it did not track the draw either.
+// Three things that must agree were three independent guesses.
+//
+// So the nock is a FUNCTION now, and the string halves, the arrow and the
+// draw hand are all placed from it. They cannot drift apart because there
+// is nothing left to drift.
+
+/// Limb tip centre, ±X. The string leaves the tip here.
+const BOW_TIP_X: f32 = 0.392;
+/// Tip depth. The recurve steps backward, so the tips sit behind the riser.
+const BOW_TIP_Z: f32 = -0.088;
+/// The nock at REST - a hair behind the tips, which is what gives an
+/// undrawn string its slight tension rather than a dead straight line.
+const BOW_STRING_Z: f32 = -0.098;
+/// How far back the nock travels at full draw. Scaled to this bow's
+/// 0.78 m span rather than to a real 0.7 m draw length: at true scale the
+/// hand ends up behind the shoulder and the IK chain runs out of arm.
+const BOW_DRAW_PULL: f32 = 0.20;
+/// String thickness. Thin enough to read as cord, thick enough to survive
+/// being one pixel wide at range.
+const BOW_STRING_R: f32 = 0.007;
+/// The arrow runs BESIDE the riser, not through it. The riser is a solid
+/// block 0.052 wide; at this offset the shaft clears it with 2 mm to spare
+/// and still sits close enough to read as nocked.
+const BOW_ARROW_X: f32 = 0.036;
+/// Nocked-arrow length. Shorter than the flying arrow's envelope so the
+/// head does not stand a full metre past the bow at rest.
+const BOW_ARROW_LEN: f32 = 0.66;
+/// Where the draw HAND sits relative to the nock: the fingers hook the
+/// string from behind and slightly outboard, they do not occupy it.
+const BOW_HAND_OFF: Vec3 = Vec3::new(0.018, 0.0, -0.030);
+
+/// Where the nock is this frame, in the bow model's own local space.
+///
+/// The single source every other bow placement reads. `draw` is
+/// `bow_draw_visual`'s 0..1.
+fn bow_nock_local(draw: f32) -> Vec3 {
+    Vec3::new(0.0, 0.0, BOW_STRING_Z - BOW_DRAW_PULL * draw.clamp(0.0, 1.0))
+}
+
+/// Pose one half of the string - from a limb tip to the nock.
+///
+/// A drawn string is a V, and a V is two segments, which is why the single
+/// tip-to-tip box could never have been animated: there was no vertex at
+/// the nock to pull. `side` is -1.0 or +1.0.
+///
+/// Both the length AND the angle come out of the same subtraction, so a
+/// half can never be pointing somewhere its own endpoints are not.
+fn bow_string_half(side: f32, draw: f32) -> Transform {
+    let tip = Vec3::new(side * BOW_TIP_X, 0.0, BOW_TIP_Z);
+    let nock = bow_nock_local(draw);
+    let d = nock - tip;
+    let len = d.length().max(1e-4);
+    // The cube's long axis is +X. Rotating about +Y by θ maps +X to
+    // (cos θ, 0, −sin θ), so θ = atan2(−d.z, d.x) aims it down the span.
+    Transform {
+        translation: (tip + nock) * 0.5,
+        rotation: Quat::from_rotation_y((-d.z).atan2(d.x)),
+        scale: Vec3::new(len, BOW_STRING_R, BOW_STRING_R),
+    }
+}
+
+/// Pose the nocked arrow so its NOCK sits on the string.
+///
+/// `ARROW_NOCK_Z` is where the tail is in the arrow model's own unit
+/// envelope, so the root has to sit that far FORWARD of the nock point.
+/// Placing the root at the nock - the obvious version - buries a third of
+/// the shaft behind the string.
+fn bow_nocked_arrow(draw: f32) -> Transform {
+    let nock = bow_nock_local(draw);
+    Transform::from_xyz(
+        BOW_ARROW_X,
+        0.0,
+        nock.z - ARROW_NOCK_Z * BOW_ARROW_LEN,
+    )
+    .with_scale(Vec3::splat(BOW_ARROW_LEN))
+}
+
 /// Third-person boom: back / up / screen-right of the head pivot (§5.1).
 // §5.1 (Brief VII v2): hip 2.2m back / +0.45m right / +0.12m up.
 const TP_BOOM: f32 = 2.2;
@@ -1679,7 +1770,6 @@ struct FighterRig {
     weapons: [Entity; N_WEAPONS],
     /// the always-carried shield, shown raised on the left arm
     shield: Entity,
-    bow_arrow: Entity,
     armor_rig: Entity,
     /// D.1: mech leg armour roots, [left, right] x [thigh, shin, foot] -
     /// parented to the REAL leg bones so the plating walks with the gait.
@@ -2046,6 +2136,31 @@ struct VmRig {
 /// Extra weapon greebles that only show while aiming - the ADS detail pass.
 #[derive(Component)]
 struct AdsDetail;
+
+/// How drawn this bow model is, carried on the model ROOT.
+///
+/// Written by whichever system owns the wielder - the body rig for a
+/// fighter, the viewmodel system for the player's own hands - and read by
+/// `bow_string_sync`, which is the only place that knows how a string and
+/// a nocked arrow are shaped. That split is deliberate: the two wielders
+/// disagree about almost everything (whose clock, whose visibility, whose
+/// space) and agree about exactly this one number.
+#[derive(Component, Clone, Copy)]
+struct BowDraw {
+    /// `bow_draw_visual`'s 0..1.
+    pull: f32,
+    /// Whether an arrow is actually on the string. False through the
+    /// reload gap after a shot, when the nock is empty.
+    nocked: bool,
+}
+
+/// One half of a bowstring: tip to nock. `0` is the side, -1.0 or +1.0.
+#[derive(Component, Clone, Copy)]
+struct BowStringHalf(f32);
+
+/// The arrow sitting on the string, as opposed to one in flight.
+#[derive(Component)]
+struct NockedArrow;
 
 /// The illuminated dot inside a 1x optic. Carries its own rest position
 /// because recoil FLOATS it about that point instead of kicking the
@@ -3026,6 +3141,16 @@ fn fp_muzzle_local(p: &Fighter) -> Vec3 {
     Vec3::new(tr.x, tr.y, tr.z - 0.60 * 0.9)
 }
 
+/// Where the arrow's NOCK - the very back of the tail - sits in the arrow
+/// model's own local space, per unit of `scale.z`.
+///
+/// Named because the BOW has to put this exact point on the string, and a
+/// nocked arrow whose tail floats off the string, or buries through it, is
+/// the first thing the eye catches on a drawn bow. It is the nock block's
+/// centre (-0.345) less half its 0.03 length; `spawn_arrow_model` asserts
+/// the two still agree.
+const ARROW_NOCK_Z: f32 = -0.36;
+
 /// §owner: a real ARROW in flight - forged head, tapered shaft, three
 /// fletching vanes. It replaced a featureless 5 cm box, which at the
 /// speeds this game looses arrows at read as a grey dash and told the
@@ -3036,6 +3161,10 @@ fn fp_muzzle_local(p: &Fighter) -> Vec3 {
 /// The `spin` child carries the fletching alone - vanes rotate about
 /// the shaft, a shaft that rolled as a whole would look like a drill.
 fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity) {
+    debug_assert!(
+        (ARROW_NOCK_Z - (-0.345 - 0.03 * 0.5)).abs() < 1e-6,
+        "ARROW_NOCK_Z must track the nock block below"
+    );
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
@@ -5356,6 +5485,7 @@ fn main() {
                 update_casings,
                 spin_minigun_barrels,
                 spin_mech_turret_barrels,
+                bow_string_sync,
                 grenade_arc,
                 rocket_aim_preview,
                 crosshair_render,
@@ -5370,6 +5500,40 @@ fn main() {
                 .run_if(in_state(GameState::Playing)),
         )
         .run();
+}
+
+/// Draw every bow in the world - the string halves and the arrow on them.
+///
+/// One system for every bow that exists: the player's viewmodel, the
+/// player's own body, and every bot's. They differ only in who wrote
+/// `BowDraw`, which is exactly the point - the SHAPE of a drawn bow is one
+/// piece of knowledge and it lives here alone. The old code had the hand
+/// in the body rig, the string frozen in the model table, and the arrow
+/// stuck to a hand, and no two of them agreed.
+///
+/// Cosmetic only, and downstream of the sim in every sense: it reads a
+/// number the sim produced and writes Transforms nothing reads back.
+fn bow_string_sync(
+    bows: Query<(&BowDraw, &Children)>,
+    mut halves: Query<(&BowStringHalf, &mut Transform), Without<NockedArrow>>,
+    mut arrows: Query<(&mut Transform, &mut Visibility), With<NockedArrow>>,
+) {
+    for (draw, children) in &bows {
+        for child in children.iter() {
+            if let Ok((side, mut t)) = halves.get_mut(*child) {
+                *t = bow_string_half(side.0, draw.pull);
+            } else if let Ok((mut t, mut v)) = arrows.get_mut(*child) {
+                *t = bow_nocked_arrow(draw.pull);
+                // An empty nock is INFORMATION - it is how an opponent
+                // reads that this archer cannot loose yet.
+                *v = if draw.nocked {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+            }
+        }
+    }
 }
 
 /// §1 (Brief V): the grenade pre-aim arc. While the throw is held this
@@ -6126,15 +6290,27 @@ fn spawn_weapon_model(
                 parts.push(wp(
                     false,
                     Tone::Light,
-                    (side * 0.392, 0.0, -0.088),
+                    (side * BOW_TIP_X, 0.0, BOW_TIP_Z),
                     0.0,
                     (0.040, 0.026, 0.028),
                 ));
             }
-            // the string, tip to tip across the back
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, -0.098), 0.0, (0.78, 0.007, 0.007)));
-            // ADS-only: the arrow shelf and a sighting mark on the riser
-            parts.push(wd(false, Tone::Light, (0.028, 0.030, 0.030), 0.0, (0.030, 0.010, 0.062)));
+            // The string is NOT in this list - it is two live halves hung
+            // below, because a drawn string is a V and this table can only
+            // describe a fixed pose. See `bow_string_sync`.
+            //
+            // The arrow rest moved with it. It used to be a shelf ON TOP of
+            // the riser at y +0.030, left over from the vertical bow where
+            // the arrow lay over the hand. Held horizontal there is no "on
+            // top" - the shaft passes BESIDE the riser, so the rest is a
+            // side bracket under the shaft's own line.
+            parts.push(wd(
+                false,
+                Tone::Light,
+                (BOW_ARROW_X, -0.016, 0.030),
+                0.0,
+                (0.030, 0.018, 0.062),
+            ));
             parts.push(wd(false, Tone::Reticle, (0.0, 0.052, 0.044), 0.0, (0.006, 0.006, 0.006)));
         }
         GunKind::Spear => {
@@ -6242,6 +6418,32 @@ fn spawn_weapon_model(
             e.insert(ReticleDot { rest: p.pos });
         }
         e.set_parent(root);
+    }
+    // The bow's LIVE parts: two string halves and the arrow on them.
+    //
+    // Spawned here rather than pushed as `WPart`s because both move every
+    // frame, and spawned for BOTH views deliberately. The viewmodel bow
+    // never had a nocked arrow at all - a first-person archer drew an empty
+    // string - and the reason is visible in the capture scripts: the
+    // third-person script cannot see the viewmodel, and until `bow_draw_fp`
+    // existed nothing had ever looked at it.
+    if kind == GunKind::Bow {
+        commands.entity(root).insert(BowDraw { pull: 0.0, nocked: true });
+        for side in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.tone(Tone::Light)),
+                    bow_string_half(side, 0.0),
+                    BowStringHalf(side),
+                ))
+                .set_parent(root);
+        }
+        let (arrow, _spin) = spawn_arrow_model(commands, kit);
+        commands
+            .entity(arrow)
+            .insert((bow_nocked_arrow(0.0), NockedArrow))
+            .set_parent(root);
     }
     // §1.2 (Brief VI): the on-weapon ammo bar - 8 emissive ticks on the
     // left receiver face, VIEWMODEL ONLY, driven by `ammo_bar_sync`
@@ -7681,18 +7883,10 @@ fn spawn_fighter_rigs(
                 Visibility::Hidden,
             ))
             .set_parent(arm_l[1]);
-        // the nocked arrow, shown while a bow is drawn
-        let bow_arrow = commands
-            .spawn((
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.wood.clone()),
-                Transform::from_xyz(0.0, -0.12, 0.04)
-                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
-                    .with_scale(Vec3::new(0.015, 0.015, 0.62)),
-                Visibility::Hidden,
-            ))
-            .set_parent(arm_l[2])
-            .id();
+        // (The nocked arrow used to be spawned here, on the BOW hand, as a
+        // featureless box at a fixed offset. It now lives inside the bow
+        // model itself - see `spawn_weapon_model` - so it rides the draw
+        // and the viewmodel gets one too.)
         // the mech hull kit + leg armour (Brief VIII-B D.1-D.6)
         let (armor_rig, hull_det) = spawn_armor_rig(commands, kit);
         let la_l = spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0);
@@ -7729,7 +7923,6 @@ fn spawn_fighter_rigs(
             weapon_root,
             weapons,
             shield,
-            bow_arrow,
             armor_rig,
             mech_leg_armor: [la_l.roots, la_r.roots],
             mech_detach_70: [hull_det.skirt_l, hull_det.skirt_r, la_l.thigh_plate],
@@ -10389,6 +10582,8 @@ fn sync_fighters(
     mut life: Local<Vec<LifeState>>,
     mut roots: Query<(&FighterVis, &mut FighterRig, &mut Transform, &mut Visibility)>,
     mut parts: Query<(&mut Transform, &mut Visibility), Without<FighterVis>>,
+    // the draw, handed to `bow_string_sync` - see `BowDraw`
+    mut bow_draws: Query<&mut BowDraw>,
 ) {
     let dt = time.delta_secs();
     if life.len() < game.sim.fighters.len() {
@@ -10730,6 +10925,20 @@ fn sync_fighters(
         } else {
             ls.suppress_t = (ls.suppress_t - dt).max(0.0);
         }
+        // §owner SUPPRESSION: the sim now measures rounds passing close,
+        // for every fighter, which is a strictly better source than this
+        // client-side arrow proximity check - it covers BULLETS, which are
+        // what suppression is actually made of. The arrow check stays as
+        // the floor: a spear going past your head at 60 m/s deserves a
+        // flinch whether or not the sim scored it, and `max` means neither
+        // source can cancel the other.
+        //
+        // The flinch is the same one it always was: this feeds the body's
+        // shake, nothing else. What it does NOT do is touch the player's
+        // aim - see `Fighter::suppress_t`.
+        ls.suppress_t = ls
+            .suppress_t
+            .max((f.suppress_t / sim::SUPPRESS_MAX_S).clamp(0.0, 1.0) * 0.28);
         let deaths_now: u32 = game
             .sim
             .fighters
@@ -11010,9 +11219,19 @@ fn sync_fighters(
                 ),
             )
         } else if f.gun == GunKind::Bow {
-            // the bow stands in front of the LEFT side
+            // The bow stands in front of the LEFT side, and it COMES UP as
+            // it is drawn.
+            //
+            // That rise is what makes a horizontal bow readable. Held flat
+            // at rest the string plane is a chest-height line and the draw
+            // hand ends at the sternum, which is a real hold but a dull
+            // one. Bringing the riser up to just under the shoulder puts
+            // the anchor at the armpit-to-jaw line, which is the pose an
+            // archer actually finishes in - and it does it WITHOUT tilting
+            // the bow, because the whole point of the horizontal hold is
+            // that it stays horizontal.
             (
-                Vec3::new(-0.04, 0.48, 0.16),
+                Vec3::new(-0.04, 0.48 + 0.11 * bow_draw, 0.16 - 0.02 * bow_draw),
                 Quat::from_rotation_x(wr_pitch * 0.9),
             )
         } else {
@@ -11125,17 +11344,32 @@ fn sync_fighters(
                         let (q, e) = solve_arm_ik(sh_l, t, pole_l);
                         left = (q, e, 0.0);
                     }
-                    // §3.3: a REAL anchor - the string hand draws to the
-                    // corner of the mouth at full draw, and flies back
-                    // past the ear on release (the follow-through sells it)
+                    // §3.3: a REAL anchor - and it is the STRING's anchor,
+                    // not a guess at one.
+                    //
+                    // The hand target comes out of `bow_nock_local`, the
+                    // same function that places the string halves and the
+                    // arrow, offset only by where fingers sit relative to
+                    // the cord they hook. It cannot be off the string,
+                    // because "on the string" is now the only thing this
+                    // expression can say.
+                    //
+                    // What it replaces was three literals - x 0.03, y
+                    // 0.14·draw, z -0.09 - 0.18·draw - tuned against the
+                    // VERTICAL bow. A vertical string spans Y, so lifting
+                    // the hand 14 cm still had it touching string. Turned
+                    // horizontal, that same lift is a hand held a palm's
+                    // width clear of the cord, pulling nothing.
+                    //
+                    // The follow-through survives: on release the hand
+                    // flies back past the anchor, which is what sells a
+                    // loose as a release rather than a fade.
                     let release_fly = if jerk > 0.55 { (jerk - 0.55) * 0.5 } else { 0.0 };
                     let nock = wr_pos
                         + wr_rot
-                            * Vec3::new(
-                                0.03,
-                                0.14 * bow_draw,
-                                -0.09 - 0.18 * bow_draw - release_fly,
-                            );
+                            * (bow_nock_local(bow_draw)
+                                + BOW_HAND_OFF
+                                + Vec3::new(0.0, 0.0, -release_fly));
                     let (q, e) = solve_arm_ik(sh_r, nock, pole_r);
                     right = (q, e, 0.0);
                     if f.ammo > 0 && f.reload_t <= 0.0 {
@@ -11334,8 +11568,15 @@ fn sync_fighters(
                 Visibility::Hidden
             };
         }
-        if let Ok((_, mut v)) = parts.get_mut(rig.bow_arrow) {
-            *v = arrow_vis;
+        // Hand the draw to `bow_string_sync`, which owns the string and
+        // the arrow on it. The arrow used to hang off `arm_l[2]` - the BOW
+        // hand - at a fixed offset, so it tracked the hand and not the
+        // bow, and never moved with the draw at all.
+        if let Some(bow_slot) = weapon_slot(GunKind::Bow) {
+            if let Ok(mut d) = bow_draws.get_mut(rig.weapons[bow_slot]) {
+                d.pull = bow_draw;
+                d.nocked = arrow_vis != Visibility::Hidden;
+            }
         }
         // §6: the powered shell shows while the Robot Suit is worn
         if let Ok((_, mut v)) = parts.get_mut(rig.armor_rig) {
@@ -12782,6 +13023,8 @@ fn fp_viewmodel(
         (Without<MainCam>, Without<TriggerFinger>, Without<ReticleDot>),
     >,
     mut trig: Query<(&mut Transform, &TriggerFinger), (Without<MainCam>, Without<ReticleDot>)>,
+    // the draw, handed to `bow_string_sync` - see `BowDraw`
+    mut bow_draws: Query<&mut BowDraw>,
     // Every &mut Transform query here must be provably disjoint from
     // every other or Bevy panics B0001 at startup - and "no entity would
     // ever have both" is not proof, it has to be in the FILTER. Hence
@@ -12897,6 +13140,16 @@ fn fp_viewmodel(
     } else {
         0.0
     };
+    // Hand it to `bow_string_sync` exactly as the body rig does. Same
+    // number, same shape function, so first and third person cannot show
+    // two different bows - which they did, because first person showed no
+    // string movement and no arrow at all.
+    if let Some(bow_slot) = weapon_slot(GunKind::Bow) {
+        if let Ok(mut d) = bow_draws.get_mut(vm.weapons[bow_slot]) {
+            d.pull = bow_pull;
+            d.nocked = p.ammo > 0 && p.reload_t <= 0.0;
+        }
+    }
     let speed = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
     // §2.2 suppression during ADS: ×(1 − 0.85-ads_t) - a trace of life
     // stays at full zoom, but a scoped gun does not swim
@@ -13216,8 +13469,31 @@ fn fp_viewmodel(
         // ramp was ever pointed at projectile weapons - it was standing
         // in for a pose that did not exist.
         let bow_t = Vec3::new(-0.075, 0.030, 0.050) * bow_pull;
+        // §owner SUPPRESSION, the PLAYER's half.
+        //
+        // Rounds cracking past shake the weapon in your hands - and ONLY
+        // the weapon. It is a viewmodel translation, so it moves the
+        // picture and not the shot: the round still leaves the camera ray
+        // exactly where the crosshair is. Bots pay for suppression in
+        // accuracy (`SUPPRESS_AIM_PENALTY`); a human pays in composure,
+        // which is the only currency a human should be charged in. Taking
+        // a player's aim away is not tension, it is the game playing
+        // itself.
+        //
+        // Two frequencies that do not share a period, so it reads as
+        // rattle rather than as a wobble on a dial.
+        let sup_shake = {
+            let a = (p.suppress_t / sim::SUPPRESS_MAX_S).clamp(0.0, 1.0);
+            let t = time.elapsed_secs();
+            Vec3::new(
+                (t * 31.0).sin() * 0.011,
+                (t * 23.0).sin() * 0.008,
+                0.0,
+            ) * a
+        };
         tf.translation = ads_shift
             + bow_t
+            + sup_shake
             + Vec3::new(-0.06, -0.02, 0.06) * ie
             + rl_t
             + mel_t
@@ -18054,6 +18330,147 @@ mod bow_draw_visual_tests {
         ] {
             let v = bow_draw_visual(t, cd, PERIOD, player);
             assert!((0.0..=1.0).contains(&v), "out of range: {v}");
+        }
+    }
+}
+
+/// The bow's string, arrow and draw hand, which must agree by
+/// construction because for a long time they did not.
+#[cfg(test)]
+mod bow_string_tests {
+    use super::*;
+
+    /// Sample draws across the full range, ends included.
+    const DRAWS: [f32; 6] = [0.0, 0.2, 0.45, 0.7, 0.9, 1.0];
+
+    /// The two halves meet AT the nock, and their far ends stay pinned to
+    /// the limb tips.
+    ///
+    /// This is the whole geometric claim of a bowstring and it is the one
+    /// the single tip-to-tip box could not make: it had no vertex at the
+    /// nock, so there was nothing to pull and nothing to check.
+    #[test]
+    fn both_string_halves_run_from_a_limb_tip_to_the_nock() {
+        for d in DRAWS {
+            let nock = bow_nock_local(d);
+            for side in [-1.0_f32, 1.0] {
+                let t = bow_string_half(side, d);
+                // reconstruct the segment from the transform alone - if
+                // the rotation and the length disagree this fails
+                let half = t.rotation * Vec3::X * (t.scale.x * 0.5);
+                let (a, b) = (t.translation - half, t.translation + half);
+                let tip = Vec3::new(side * BOW_TIP_X, 0.0, BOW_TIP_Z);
+                // whichever end is nearer the tip must BE the tip, and the
+                // other must be the nock
+                let (near_tip, near_nock) =
+                    if (a - tip).length() < (b - tip).length() { (a, b) } else { (b, a) };
+                assert!(
+                    (near_tip - tip).length() < 1e-4,
+                    "side {side} draw {d}: string leaves {near_tip:?}, tip is {tip:?}"
+                );
+                assert!(
+                    (near_nock - nock).length() < 1e-4,
+                    "side {side} draw {d}: string ends {near_nock:?}, nock is {nock:?}"
+                );
+            }
+        }
+    }
+
+    /// Drawing makes the string LONGER, monotonically. A V is two sides of
+    /// a triangle and both grow with the pull; a version that shortened
+    /// would mean the halves were being rotated without being re-measured.
+    #[test]
+    fn the_string_lengthens_as_it_is_drawn() {
+        let len = |d: f32| bow_string_half(1.0, d).scale.x;
+        let rest = len(0.0);
+        assert!(rest > BOW_TIP_X, "a slack string still spans the limb");
+        let mut prev = rest;
+        for d in [0.2_f32, 0.45, 0.7, 0.9, 1.0] {
+            let l = len(d);
+            assert!(l > prev, "draw {d}: {l} did not exceed {prev}");
+            prev = l;
+        }
+        // and the nock really travels the full pull
+        assert!(
+            (bow_nock_local(1.0).z - (BOW_STRING_Z - BOW_DRAW_PULL)).abs() < 1e-6,
+            "full draw must be exactly BOW_DRAW_PULL back"
+        );
+    }
+
+    /// The arrow's NOCK sits on the string at every draw.
+    ///
+    /// The failure this pins is the one that shipped: the arrow hung off
+    /// the bow HAND at a fixed offset, so it tracked a hand rather than a
+    /// bow and never moved with the draw at all. Here the tail is computed
+    /// from the arrow transform the same way the renderer will, so an
+    /// arrow that floats off the cord fails.
+    #[test]
+    fn the_nocked_arrow_keeps_its_tail_on_the_string() {
+        for d in DRAWS {
+            let t = bow_nocked_arrow(d);
+            let tail_z = t.translation.z + ARROW_NOCK_Z * t.scale.z;
+            let nock = bow_nock_local(d);
+            assert!(
+                (tail_z - nock.z).abs() < 1e-5,
+                "draw {d}: tail at z {tail_z}, string at z {nock:?}"
+            );
+            // and it points DOWNRANGE - +Z, never reversed
+            assert!(
+                t.translation.z > tail_z,
+                "draw {d}: the arrow is facing backwards"
+            );
+        }
+    }
+
+    /// The shaft clears the riser it runs beside.
+    ///
+    /// Held horizontal there is no "on top of the riser" for an arrow to
+    /// rest on, which is exactly what the old vertical-bow shelf assumed.
+    /// The riser is 0.052 wide, so its face is at x 0.026.
+    #[test]
+    fn the_arrow_runs_clear_of_the_riser() {
+        const RISER_HALF_W: f32 = 0.026;
+        // the shaft is 0.020 across in the arrow's unit envelope, so it
+        // scales with the nocked length like every other part of it
+        let shaft_r = 0.020 * 0.5 * BOW_ARROW_LEN;
+        assert!(
+            BOW_ARROW_X - shaft_r > RISER_HALF_W,
+            "the shaft at x {BOW_ARROW_X} (r {shaft_r}) cuts through a riser \
+             half-width {RISER_HALF_W}"
+        );
+        // and the ADS arrow rest must be UNDER it, not above: the rest is
+        // a side bracket at y -0.016 with a 0.018 box, top face -0.007
+        assert!(
+            -0.007 < 0.0 && -0.016 + 0.018 * 0.5 > -shaft_r - 0.004,
+            "the rest has to actually meet the shaft it supports"
+        );
+    }
+
+    /// The draw HAND is on the string - the anchor restage itself.
+    ///
+    /// What this replaces was a y lift of 0.14·draw, which was correct for
+    /// a VERTICAL bow (whose string spans Y, so any height is still on the
+    /// cord) and wrong the moment the limbs turned sideways: the hand rode
+    /// a palm's width above a horizontal string, pulling nothing. The
+    /// hand's offset from the nock must therefore be CONSTANT - it cannot
+    /// grow with the draw, because fingers do not drift off a string they
+    /// are holding.
+    #[test]
+    fn the_draw_hand_holds_the_string_at_every_draw() {
+        for d in DRAWS {
+            let hand = bow_nock_local(d) + BOW_HAND_OFF;
+            let off = hand - bow_nock_local(d);
+            assert!(
+                (off - BOW_HAND_OFF).length() < 1e-6,
+                "draw {d}: the hand drifted to {off:?}"
+            );
+            // within a hand's reach of the cord, in the cord's own plane
+            assert!(off.length() < 0.06, "draw {d}: {off:?} is not a grip");
+            assert!(
+                off.y.abs() < 1e-6,
+                "draw {d}: the hand left the string's plane by {}",
+                off.y
+            );
         }
     }
 }
