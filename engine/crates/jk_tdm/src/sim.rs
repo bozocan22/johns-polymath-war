@@ -1400,6 +1400,15 @@ pub struct ClassSpec {
     pub spread_mult: f32,
     /// Scales `SWITCH_S`. BELOW 1.0 is a faster weapon swap.
     pub switch_mult: f32,
+    /// §owner RETREAT: scales `ROUT_TOLERANCE`. ABOVE 1.0 holds longer.
+    ///
+    /// The fifth trade, and the one that makes a class read as a
+    /// TEMPERAMENT rather than a stat block. It replaces `jk_wall`'s
+    /// rolled per-man tolerance, which this build cannot copy - a roll
+    /// would desync every replay test - and it is the better answer
+    /// regardless: a Warden that stands when a Skirmisher runs is a
+    /// difference the player can name.
+    pub nerve_mult: f32,
     /// One line, shown on the class picker.
     pub blurb: &'static str,
 }
@@ -1420,6 +1429,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             move_mult: 1.0,
             spread_mult: 1.0,
             switch_mult: 1.0,
+            nerve_mult: 1.0,
             blurb: "the baseline - no bonus, no penalty, never wrong",
         },
         Class::Skirmisher => ClassSpec {
@@ -1428,6 +1438,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             move_mult: 1.12,
             spread_mult: 1.15,
             switch_mult: 0.72,
+            nerve_mult: 0.78,
             blurb: "fastest on foot and to the trigger - thin, and sprays",
         },
         Class::Warden => ClassSpec {
@@ -1436,6 +1447,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             move_mult: 0.90,
             spread_mult: 0.92,
             switch_mult: 1.28,
+            nerve_mult: 1.35,
             blurb: "soaks the most and shoots steady - slow to arrive",
         },
         Class::Marksman => ClassSpec {
@@ -1444,6 +1456,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             move_mult: 0.96,
             spread_mult: 0.70,
             switch_mult: 1.15,
+            nerve_mult: 0.92,
             blurb: "the tightest shot in the game - wants the FIRST one",
         },
     }
@@ -1557,6 +1570,29 @@ pub struct Fighter {
     /// nothing else. A human's aim is his own; taking it away is not
     /// tension, it is the game playing itself.
     pub suppress_t: f32,
+    /// §owner SUPPRESSION: where the last close round came FROM.
+    ///
+    /// Suppression without a bearing is half a message. "You are being
+    /// shot at" tells a player to move; "you are being shot at from
+    /// THERE" tells them where to move TO, and only the second is
+    /// actionable. The shooter's MUZZLE origin rather than his feet, so a
+    /// hull mount high on a chassis reads from where its rounds actually
+    /// leave.
+    ///
+    /// Latest round wins: the freshest line is the one still live.
+    pub suppress_from: [f32; 3],
+    /// §owner RETREAT: accumulated nerve loss, 0..`FEAR_MAX`.
+    ///
+    /// The first genuinely REMEMBERED bot state in this sim - every other
+    /// squad behaviour is re-derived each tick from live positions. It has
+    /// to be, because breaking is a response to what has been happening to
+    /// you, and there is no such thing as an instantaneous reading of
+    /// that. Never written for the player: a human's nerve is the human's
+    /// problem.
+    pub fear: f32,
+    /// §owner RETREAT: broken and pulling out. Hysteretic - see
+    /// `RALLY_FEAR`.
+    pub routing: bool,
     /// §owner: which of the four classes this fighter is fighting as.
     /// Set at spawn and kept for the match - `class_spec` turns it into
     /// the four multipliers that actually bite.
@@ -3245,6 +3281,62 @@ pub enum SquadRole {
     Flank,
 }
 
+// ---- RETREAT -------------------------------------------------------------
+//
+// The last quarter of squad AI, and the only part of it that needed
+// something the TDM sim did not have: MEMORY. Focus fire, roles, bounding
+// and suppression are all derived fresh every tick from live positions -
+// nothing is remembered, which is what keeps them free and replay-safe. A
+// squad that BREAKS cannot work that way. Breaking is a response to what
+// has been happening to you, and a bot with no memory of the last ten
+// seconds has nothing to break from.
+//
+// So `fear` is the first genuinely accumulated bot state in this file,
+// and it is modelled on `jk_wall`'s morale pass, which the backlog named
+// as the right source years before this. What is borrowed is the SHAPE:
+// fear flows in from what a man sees and feels, bleeds out over time, and
+// crosses a threshold with HYSTERESIS so a squad breaks and rallies
+// instead of flickering on the boundary.
+//
+// What is NOT borrowed is `jk_wall`'s per-man `rout_tolerance`, which it
+// rolls from rng at spawn. This build asserts bit-identical replays, so
+// the threshold comes from CLASS instead - which is better anyway: it
+// makes nerve a fifth thing the four classes trade, and a Warden that
+// holds when a Skirmisher runs is a Warden you can feel.
+
+/// How near a man has to fall for it to shake you, and how much it does
+/// at zero range. Distance-weighted to nothing at the edge.
+pub const FEAR_WITNESS_M: f32 = 18.0;
+pub const FEAR_WITNESS_DOWN: f32 = 0.40;
+/// Fear per second while pinned, at full suppression.
+///
+/// This is where the two systems meet: rounds cracking past you are the
+/// most direct thing that makes a man want to be elsewhere, and
+/// suppression was already measuring exactly that. Bounding overwatch
+/// produces the suppression, the suppression produces the fear, the fear
+/// breaks the squad. None of those three needed a new input.
+pub const FEAR_SUPPRESSED_PER_S: f32 = 0.42;
+/// Fear per second per NET enemy in the local fight.
+pub const FEAR_OUTNUMBER_PER_S: f32 = 0.20;
+/// Fear per second from your own blood, scaled by the fraction of health
+/// already gone. A man at full health feels none of it.
+pub const FEAR_WOUNDED_PER_S: f32 = 0.34;
+/// Nerve recovers at this rate, multiplied once contact is broken -
+/// distance calms, which is what makes a retreat self-limiting rather
+/// than a one-way exit from the match.
+pub const FEAR_RECOVERY_PER_S: f32 = 0.26;
+pub const FEAR_ROUTING_RECOVERY_MULT: f32 = 3.0;
+/// The break threshold, before the class multiplier.
+pub const ROUT_TOLERANCE: f32 = 1.0;
+/// And the rally threshold. Well below the break point ON PURPOSE: equal
+/// thresholds would put a bot on a knife edge, flipping stance every few
+/// ticks and reading as a twitch rather than a decision.
+pub const RALLY_FEAR: f32 = 0.34;
+pub const FEAR_MAX: f32 = 1.6;
+/// How fast a broken man moves away. Faster than a fighting advance -
+/// he is not trading any more, he is leaving.
+pub const ROUT_SPEED_MULT: f32 = 1.15;
+
 /// Which half of a bounding pair a bot is in this instant.
 ///
 /// Orthogonal to `SquadRole` - see the comment above. `Free` is the
@@ -3807,6 +3899,9 @@ impl TdmSim {
                     squad_role: SquadRole::Anchor,
                     bound_phase: BoundPhase::Free,
                     suppress_t: 0.0,
+                    suppress_from: [0.0, 0.0, 0.0],
+                    fear: 0.0,
+                    routing: false,
                     class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
@@ -7052,10 +7147,21 @@ impl TdmSim {
             2.2,
         ));
         if fatal {
+            // §owner RETREAT: a man fell, and the men near him saw it.
+            //
+            // Banked HERE, at the moment of the kill, rather than scanned
+            // out of `self.hits` in the tick pass - those events live 2.2
+            // seconds and would be counted again on every one of the ~530
+            // ticks they persist for.
+            self.witness_fall(j);
             self.fighters[j].deaths += 1;
             self.fighters[j].respawn_t = self.death_respawn_t();
             self.fighters[j].vel = [0.0, 0.0];
             self.fighters[j].shield_up = false; // the plate drops with you
+            // and his own nerve resets with him - fear is a state of a
+            // life, not of a scoreboard row
+            self.fighters[j].fear = 0.0;
+            self.fighters[j].routing = false;
             self.fighters[i].kills += 1;
             if self.mode == Mode::Tdm {
                 let s = Self::team_idx(self.fighters[i].team);
@@ -8769,8 +8875,11 @@ impl TdmSim {
             ];
             let d2 = miss[0] * miss[0] + miss[1] * miss[1] + miss[2] * miss[2];
             if d2 < SUPPRESS_RADIUS_M * SUPPRESS_RADIUS_M {
-                let s = &mut self.fighters[j].suppress_t;
-                *s = (*s + SUPPRESS_PER_ROUND_S).min(SUPPRESS_MAX_S);
+                let g = &mut self.fighters[j];
+                g.suppress_t = (g.suppress_t + SUPPRESS_PER_ROUND_S).min(SUPPRESS_MAX_S);
+                // the bearing the HUD reads. `o` is the muzzle the round
+                // left, not the shooter's feet - see `suppress_from`.
+                g.suppress_from = o;
             }
         }
     }
@@ -8819,6 +8928,108 @@ impl TdmSim {
             BoundPhase::Bounding
         } else {
             BoundPhase::Overwatch
+        }
+    }
+
+    /// §owner RETREAT: fighter `j` has just fallen - shake the men who
+    /// were near enough to see it.
+    ///
+    /// Distance-weighted to nothing at `FEAR_WITNESS_M`, so a death
+    /// across the map costs nobody anything. Only his own side: an enemy
+    /// going down is good news, and while `jk_wall` banks that as a cheer
+    /// this does not - a TDM squad already gets its morale boost in the
+    /// currency that matters, which is one fewer gun pointed at it.
+    fn witness_fall(&mut self, j: usize) {
+        let (dead_team, at) = {
+            let f = &self.fighters[j];
+            (f.team, f.pos)
+        };
+        for k in 0..self.fighters.len() {
+            if k == j || k == self.player {
+                continue; // a human's nerve is the human's problem
+            }
+            let g = &self.fighters[k];
+            if g.team != dead_team || !g.alive() {
+                continue;
+            }
+            let dx = g.pos[0] - at[0];
+            let dz = g.pos[2] - at[2];
+            let d = (dx * dx + dz * dz).sqrt();
+            if d < FEAR_WITNESS_M {
+                let w = 1.0 - d / FEAR_WITNESS_M;
+                let g = &mut self.fighters[k];
+                g.fear = (g.fear + FEAR_WITNESS_DOWN * w).min(FEAR_MAX);
+            }
+        }
+    }
+
+    /// §owner RETREAT: one bot's morale tick - what flows in, what bleeds
+    /// out, and whether he is still in this fight.
+    ///
+    /// Modelled on `jk_wall`'s morale pass, which the backlog named as
+    /// the right source. Everything here is derived or accumulated, never
+    /// rolled: `jk_wall` gives each man a random `rout_tolerance` at
+    /// spawn, and this build asserts bit-identical replays, so the
+    /// threshold comes from his CLASS instead.
+    fn morale_tick(&mut self, i: usize) {
+        if i == self.player {
+            return;
+        }
+        // what he can see of the odds, before taking the borrow
+        let (mine, theirs) = {
+            let f = &self.fighters[i];
+            let mut mine = 0.0_f32;
+            let mut theirs = 0.0_f32;
+            for (k, g) in self.fighters.iter().enumerate() {
+                if !g.alive() || g.protect_t > 0.0 {
+                    continue;
+                }
+                let dx = g.pos[0] - f.pos[0];
+                let dz = g.pos[2] - f.pos[2];
+                if dx * dx + dz * dz > SQUAD_RADIUS_M * SQUAD_RADIUS_M {
+                    continue;
+                }
+                if g.team == f.team {
+                    if k != i {
+                        mine += 1.0;
+                    }
+                } else {
+                    theirs += 1.0;
+                }
+            }
+            (mine, theirs)
+        };
+        let tol = ROUT_TOLERANCE * class_spec(self.fighters[i].class).nerve_mult;
+        let f = &mut self.fighters[i];
+        if !f.alive() {
+            f.fear = 0.0;
+            f.routing = false;
+            return;
+        }
+        // IN: rounds cracking past, being outnumbered, and your own blood
+        let sup = (f.suppress_t / SUPPRESS_MAX_S).clamp(0.0, 1.0);
+        f.fear += FEAR_SUPPRESSED_PER_S * sup * DT;
+        f.fear += FEAR_OUTNUMBER_PER_S * (theirs - mine).max(0.0) * DT;
+        let hurt = 1.0 - (f.health / MAX_HEALTH).clamp(0.0, 1.0);
+        f.fear += FEAR_WOUNDED_PER_S * hurt * DT;
+        // OUT: time, and faster once contact is broken. That second term
+        // is what makes a retreat SELF-LIMITING - a bot that ran gets its
+        // nerve back and comes forward again, instead of leaving the
+        // match on foot.
+        let rec = if f.routing {
+            FEAR_RECOVERY_PER_S * FEAR_ROUTING_RECOVERY_MULT
+        } else {
+            FEAR_RECOVERY_PER_S
+        };
+        f.fear = (f.fear - rec * DT).clamp(0.0, FEAR_MAX);
+        // BREAK / RALLY, with the gap between the thresholds doing the
+        // work: equal ones would sit a bot on a knife edge, flipping
+        // stance every few ticks, which reads as a twitch and not a
+        // decision.
+        if !f.routing && f.fear > tol {
+            f.routing = true;
+        } else if f.routing && f.fear < RALLY_FEAR {
+            f.routing = false;
         }
     }
 
@@ -8898,6 +9109,9 @@ impl TdmSim {
         if self.mode == Mode::Training && i != self.player {
             return;
         }
+        // §owner RETREAT: nerve first. Everything below reads `routing`,
+        // so it has to be settled before the think, not alongside it.
+        self.morale_tick(i);
         let half = self.half;
         let f = &self.fighters[i];
         let team = f.team;
@@ -8996,6 +9210,13 @@ impl TdmSim {
                 if ammo == 0 {
                     self.try_reload(i);
                 }
+                // §owner RETREAT: and a man who has broken contact TOPS
+                // UP. Breaking to reload is the one thing a withdrawal is
+                // unambiguously good for, and a bot that came back on a
+                // half-magazine would just break again.
+                if self.fighters[i].routing && ammo < gun(self.fighters[i].gun).mag {
+                    self.try_reload(i);
+                }
                 let (dx, dz) = (gpos[0] - fpos[0], gpos[2] - fpos[2]);
                 let dist = (dx * dx + dz * dz).sqrt().max(0.01);
                 yaw = dx.atan2(dz);
@@ -9058,15 +9279,29 @@ impl TdmSim {
                 // on, the same one the role was derived from. Bounding
                 // with a partner who is shooting at somebody else is not
                 // bounding, it is two men taking turns standing still.
+                let routing = self.fighters[i].routing;
                 let bound = match engaged {
-                    Some(j) => self.bound_phase_for(i, j, dist),
-                    None => BoundPhase::Free,
+                    // a broken man is not bounding with anybody
+                    Some(j) if !routing => self.bound_phase_for(i, j, dist),
+                    _ => BoundPhase::Free,
                 };
                 self.fighters[i].bound_phase = bound;
                 let (strafe, closing) = match bound {
                     BoundPhase::Free => (strafe, closing),
                     BoundPhase::Bounding => (strafe, closing * BOUND_CLOSE_MULT),
                     BoundPhase::Overwatch => (strafe * 0.15, 0.0),
+                };
+                // §owner RETREAT: broken - straight back, no strafe, no
+                // trading. It OVERRIDES everything above rather than
+                // blending with it, because a man who has decided to
+                // leave is not still working an angle. He is still facing
+                // the enemy (`yaw` is untouched) - a retreat is a
+                // withdrawal, not a turned back, and a bot that spun
+                // round would be handing over free rear shots.
+                let (strafe, closing) = if routing {
+                    (0.0, -ROUT_SPEED_MULT)
+                } else {
+                    (strafe, closing)
                 };
                 let sep = self.squad_spacing(i);
                 vel = [
@@ -9145,6 +9380,12 @@ impl TdmSim {
                     // moment, bought back by the other half being planted
                     // and therefore accurate.
                     && bound != BoundPhase::Bounding
+                    // §owner RETREAT: a man pulling out is not trading.
+                    // Holding fire is what makes the break COST
+                    // something - otherwise "retreat" is a free kite,
+                    // strictly better than standing, and every bot would
+                    // want to be broken all the time.
+                    && !routing
                 {
                     // fire from the REAL muzzle (crouch lowers it) at the
                     // target's REAL chest (crouched enemies are short) —
@@ -10639,6 +10880,197 @@ mod tests {
         assert!(bounded && overwatched, "a 5v5 must actually bound at some point");
         assert!(moved, "a bounding squad still has to cross ground");
         assert!(shots > 0, "a bounding squad still has to put rounds down");
+    }
+
+    /// §owner RETREAT: a squad BREAKS under pressure, and then RALLIES.
+    ///
+    /// Both halves matter and the second one more. A morale system that
+    /// only breaks is a bot-removal system: the losing side walks off the
+    /// map and the round becomes a jog. The rally is what makes it a
+    /// rhythm rather than an exit.
+    #[test]
+    fn a_squad_breaks_under_pressure_and_comes_back() {
+        let mut s = TdmSim::new(cfg(0x5D01, 3, Mode::Tdm, MapKind::Arena));
+        let bot = (0..s.fighters.len())
+            .find(|&i| i != s.player && s.fighters[i].alive())
+            .unwrap();
+        s.fighters[bot].class = Class::Line;
+        // pin him: full suppression, held there
+        for _ in 0..(SIM_HZ as usize * 6) {
+            s.fighters[bot].suppress_t = SUPPRESS_MAX_S;
+            s.morale_tick(bot);
+        }
+        assert!(
+            s.fighters[bot].routing,
+            "six seconds pinned and he has not broken - fear reached {}",
+            s.fighters[bot].fear
+        );
+        // now the fire lifts
+        let broke_at = s.fighters[bot].fear;
+        for _ in 0..(SIM_HZ as usize * 10) {
+            s.fighters[bot].suppress_t = 0.0;
+            s.morale_tick(bot);
+        }
+        assert!(
+            !s.fighters[bot].routing,
+            "he never rallied - fear went {broke_at} -> {}. A retreat that \
+             does not end is a bot leaving the match on foot",
+            s.fighters[bot].fear
+        );
+    }
+
+    /// The thresholds have a GAP, and the gap is what stops a bot
+    /// flickering between stances on the boundary.
+    #[test]
+    fn breaking_and_rallying_are_not_the_same_line() {
+        assert!(
+            RALLY_FEAR < ROUT_TOLERANCE * 0.8,
+            "rally {RALLY_FEAR} sits too close to break {ROUT_TOLERANCE} - \
+             a bot on the boundary would flip stance every few ticks, which \
+             reads as a twitch and not a decision"
+        );
+        // and a man who breaks can actually get back under the rally line
+        assert!(RALLY_FEAR > 0.0);
+    }
+
+    /// Nerve is a real class trade, in the same shape as the other four.
+    #[test]
+    fn the_four_classes_trade_nerve_too() {
+        let n = |c: Class| class_spec(c).nerve_mult;
+        assert_eq!(n(Class::Line), 1.0, "LINE is the baseline in every column");
+        assert!(
+            n(Class::Warden) > n(Class::Line),
+            "the anchor holds longest, or 'anchor' means nothing"
+        );
+        assert!(
+            n(Class::Skirmisher) < n(Class::Line),
+            "the light fast one is the first to leave - that is its cost"
+        );
+        // nobody is free: every class that gains nerve pays elsewhere, and
+        // every one that loses it is paid elsewhere
+        assert!(class_spec(Class::Warden).move_mult < 1.0);
+        assert!(class_spec(Class::Skirmisher).move_mult > 1.0);
+    }
+
+    /// The player is never broken FOR them.
+    ///
+    /// Borrowed straight from `jk_wall`: "the player's nerve is the
+    /// human's problem". A game that walks your own body away from a
+    /// fight has stopped being a game you are playing.
+    #[test]
+    fn the_player_is_never_routed() {
+        let mut s = TdmSim::new(cfg(0x5D02, 3, Mode::Tdm, MapKind::Arena));
+        let p = s.player;
+        for _ in 0..(SIM_HZ as usize * 10) {
+            s.fighters[p].suppress_t = SUPPRESS_MAX_S;
+            s.fighters[p].health = 1.0;
+            s.morale_tick(p);
+        }
+        assert_eq!(s.fighters[p].fear, 0.0, "the player banked fear");
+        assert!(!s.fighters[p].routing, "the player was routed");
+        // and a teammate falling in his lap does not shake him either
+        let mate = (0..s.fighters.len())
+            .find(|&i| i != p && s.fighters[i].team == s.fighters[p].team)
+            .unwrap();
+        s.fighters[mate].pos = s.fighters[p].pos;
+        s.witness_fall(mate);
+        assert_eq!(s.fighters[p].fear, 0.0);
+    }
+
+    /// A death shakes the men who SAW it, weighted by distance, and
+    /// nobody on the other side.
+    #[test]
+    fn a_fall_shakes_the_men_who_saw_it() {
+        let mut s = TdmSim::new(cfg(0x5D03, 4, Mode::Tdm, MapKind::Arena));
+        let dead = (0..s.fighters.len())
+            .find(|&i| i != s.player && s.fighters[i].team == Team::Red)
+            .unwrap();
+        s.fighters[dead].pos = [0.0, 0.0, 0.0];
+        // one close friend, one distant friend, one enemy on top of him
+        let mut friends: Vec<usize> = (0..s.fighters.len())
+            .filter(|&i| i != dead && i != s.player && s.fighters[i].team == Team::Red)
+            .take(2)
+            .collect();
+        assert_eq!(friends.len(), 2, "the fixture needs two squadmates");
+        s.fighters[friends[0]].pos = [1.0, 0.0, 0.0];
+        s.fighters[friends[1]].pos = [FEAR_WITNESS_M + 5.0, 0.0, 0.0];
+        let foe = (0..s.fighters.len())
+            .find(|&i| i != s.player && s.fighters[i].team == Team::Blue)
+            .unwrap();
+        s.fighters[foe].pos = [1.0, 0.0, 0.0];
+        for f in s.fighters.iter_mut() {
+            f.fear = 0.0;
+            f.health = MAX_HEALTH;
+        }
+        s.witness_fall(dead);
+        assert!(s.fighters[friends[0]].fear > 0.0, "the man beside him felt nothing");
+        assert_eq!(
+            s.fighters[friends[1]].fear, 0.0,
+            "a death past the witness radius must cost nobody anything"
+        );
+        assert_eq!(
+            s.fighters[foe].fear, 0.0,
+            "an enemy going down is not YOUR loss"
+        );
+        // closer is worse - move the near man out and the shake shrinks
+        friends.truncate(1);
+        let near = s.fighters[friends[0]].fear;
+        s.fighters[friends[0]].fear = 0.0;
+        s.fighters[friends[0]].pos = [FEAR_WITNESS_M * 0.75, 0.0, 0.0];
+        s.witness_fall(dead);
+        assert!(
+            s.fighters[friends[0]].fear < near,
+            "distance must soften it: {} at range vs {near} up close",
+            s.fighters[friends[0]].fear
+        );
+    }
+
+    /// Retreat, through the real step loop, and the two ways it could
+    /// ruin the match rather than enrich it.
+    ///
+    /// A determinism test cannot see either: both reproduce perfectly.
+    #[test]
+    fn retreat_does_not_empty_the_battlefield_or_free_kite() {
+        let mut s = TdmSim::new(cfg(0x5D04, 5, Mode::Tdm, MapKind::Arena));
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        let mut ever_routed = false;
+        let mut routing_shots = 0usize;
+        let mut peak_routing = 0usize;
+        for _ in 0..(SIM_HZ as usize * 40) {
+            s.step(PlayerCmd::default());
+            let now = s
+                .fighters
+                .iter()
+                .enumerate()
+                .filter(|(i, f)| *i != s.player && f.routing && f.alive())
+                .count();
+            peak_routing = peak_routing.max(now);
+            if now > 0 {
+                ever_routed = true;
+            }
+            // a broken man must not be firing - that would make breaking
+            // a free kite, strictly better than standing
+            for (i, f) in s.fighters.iter().enumerate() {
+                if i != s.player && f.routing && f.fire_cd > gun(f.gun).fire_period - DT * 2.0 {
+                    routing_shots += 1;
+                }
+            }
+        }
+        assert!(ever_routed, "a 40 s 5v5 with nobody ever breaking is not a morale system");
+        assert_eq!(routing_shots, 0, "a routing bot pulled the trigger");
+        // and the field is not empty at the end of it
+        let standing = s
+            .fighters
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != s.player && f.alive() && !f.routing)
+            .count();
+        assert!(
+            standing > 0,
+            "every bot alive is routing - the match has become a jog"
+        );
     }
 
     /// Bots that stand on each other die to one grenade. Spacing pushes

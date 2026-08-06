@@ -2259,16 +2259,20 @@ const VM_SWAY_CAP_DEG: f32 = 0.3;
 /// Fire back-slide: ≤ 1.5 cm along the barrel, returned in ≤ 120 ms.
 const VM_KICK_SLIDE_M: f32 = 0.015 * VIEW_KICK_TRIM;
 const VM_KICK_RETURN_S: f32 = 0.12;
-/// §1.4a screen-intrusion budgets: every weapon's geometry must fit a
-/// two-part envelope around the vm root - a RECEIVER box (wide but low)
-/// and a MAST (sights/scope: tall but narrow). The sweep test proves the
-/// ROOT can never carry either part across the vertical midline or into
-/// the central 12%-of-screen-height circle. Current widest receiver =
-/// minigun cluster (0.069 left); tallest mast = AWM scope (0.085 up).
-const VM_RECEIVER_LEFT: f32 = 0.09;
-const VM_RECEIVER_UP: f32 = 0.05;
-const VM_MAST_LEFT: f32 = 0.03;
-const VM_MAST_UP: f32 = 0.09;
+// §1.4a screen-intrusion. There used to be four constants here - a
+// declared RECEIVER box and a declared MAST box that every weapon was
+// asserted to fit inside, with a comment naming the widest and tallest
+// weapons in the arsenal.
+//
+// They are gone because they were a PROXY for the geometry, and the
+// proxy was wrong. The comment claimed the tallest thing in the game was
+// the AWM's scope at 0.085 up; the M249's arched carry handle is 0.192,
+// and has been since it was raised clear of its own sight line. Nothing
+// noticed, because the geometry lived inside a function that needed
+// `Commands` and could not be read.
+//
+// `weapon_bounded_extent` measures the real thing now, per weapon, under
+// that weapon's own profile. See `screen_profile` below.
 
 // ---- the three SCREEN PROFILES (Brief VII §3.3, §4.3) --------------------
 //
@@ -2319,34 +2323,71 @@ fn screen_profile(kind: GunKind) -> ScreenProfile {
     }
 }
 
-/// The BOUNDED part's half-extents, weapon-local, per profile.
+/// How far either side of the hand a `SpearRaised` profile still counts
+/// as "the grip".
 ///
-/// For a gun this is the receiver box (the existing budget). For the
-/// spear it is the bound cord grip - 0.040 across, so 0.020 out - and NOT
-/// the 1.85 m shaft, which is exactly what the profile exempts. For the
-/// bow it is the riser, 0.052 across.
-///
-/// Hand-read off the model tables in `spawn_weapon_model`: the spear's
-/// cord wraps are 0.040 across, the bow's riser 0.052 x 0.115.
-///
-/// Stated plainly because it is the weak link. These are AUDITED numbers,
-/// not derived ones - nothing checks that a weapon's actual parts fit its
-/// budget, so widening a model here would not fail anything. Deriving
-/// them means lifting the part tables out of `spawn_weapon_model` into a
-/// pure function the tests can call, which is worth doing and is not this
-/// change. Until then the numbers carry their provenance in this comment
-/// rather than pretending to be measurements.
-fn profile_bounded(p: ScreenProfile) -> (f32, f32) {
+/// The javelin's cord wraps sit at z -0.06, 0.0 and +0.06. The 1.85 m
+/// shaft's CENTRE is out at z 0.35, because a javelin is held about a
+/// third of the way along - so this window excludes the shaft, and that
+/// exclusion IS the exemption the profile grants.
+const GRIP_WINDOW_M: f32 = 0.15;
+
+/// Does this profile bound this part, or exempt it?
+fn profile_bounds_part(p: ScreenProfile, w: &WPart) -> bool {
     match p {
-        ScreenProfile::Strict => (VM_RECEIVER_LEFT, VM_RECEIVER_UP),
-        ScreenProfile::SpearRaised => (0.020, 0.020),
-        ScreenProfile::BowDrawn => (0.026, 0.058),
+        // Everything. Brief VIII exempts the muzzle TIP, but the tip is
+        // the narrowest thing on any gun and can never be the widest
+        // part - so exempting it explicitly would buy nothing and leave
+        // one more rule to get wrong. Bounding it is strictly safer.
+        ScreenProfile::Strict => true,
+        ScreenProfile::SpearRaised => w.pos.z.abs() <= GRIP_WINDOW_M,
+        // Everything, but measured VERTICALLY - see below.
+        ScreenProfile::BowDrawn => true,
     }
 }
 
-/// How far the WHOLE bow reaches up from its root - riser top plus the
-/// tallest thing on it. The `BowDrawn` profile bounds this, not a grip.
-const VM_BOW_TOP: f32 = 0.058;
+/// The bounded part's reach, MEASURED off the geometry: how far left of
+/// the weapon's own root it extends, and how far up.
+///
+/// These were audited constants until `weapon_parts` existed to be read.
+/// The difference is not cosmetic - an audited budget is a claim about
+/// geometry that nothing rechecks, so widening a model silently widened
+/// the lie, and the number would stay right up until the moment it
+/// mattered. Now the budget IS the geometry.
+///
+/// Conservative in every direction it can be: `WPart::half` bounds a
+/// tilted box by its AABB and a cylinder by its box, and no part is
+/// exempt that the profile does not name.
+fn weapon_bounded_extent(kind: GunKind) -> (f32, f32) {
+    weapon_bounded_corners(kind)
+        .into_iter()
+        .fold((0.0_f32, 0.0_f32), |(l, u), (pl, pu)| (l.max(pl), u.max(pu)))
+}
+
+/// Every bounded part's own upper-left corner, one entry per part.
+///
+/// PER PART, and that distinction is load-bearing. The leftmost thing on
+/// a rifle (the magazine, low and wide) and the tallest thing (the scope,
+/// high and narrow) are different objects, so a single corner built from
+/// the widest x and the tallest y describes a point the weapon does not
+/// occupy. Testing the circle against that invented corner fails weapons
+/// that are perfectly clear - which is exactly why the retired envelope
+/// carried a separate RECEIVER box and MAST box instead of one.
+///
+/// Taking the real corners is both more accurate AND stricter: it checks
+/// eleven or twenty of them instead of two, and every one is somewhere
+/// the weapon actually is.
+fn weapon_bounded_corners(kind: GunKind) -> Vec<(f32, f32)> {
+    let prof = screen_profile(kind);
+    weapon_parts(kind)
+        .into_iter()
+        .filter(|w| profile_bounds_part(prof, w))
+        .map(|w| {
+            let h = w.half();
+            (h.x - w.pos.x, w.pos.y + h.y)
+        })
+        .collect()
+}
 
 // The sustained pose shifts, named. Each was an anonymous `Vec3::new(..)`
 // inline in `fp_viewmodel`, which meant the intrusion sweep could not see
@@ -2459,7 +2500,14 @@ fn vm_carry(wk: GunKind) -> (Vec3, f32) {
         // the screen. Pushed out and centred, the way a bow is actually
         // held, and it now leaves the sight line clear rather than
         // putting a limb through it.
-        GunKind::Bow => (Vec3::new(-0.02, -0.17, -0.66), 0.0),
+        // §owner: and it carries LOW. The riser's grip swells top out
+        // 0.10 above the root - the tallest thing on any weapon relative
+        // to its own carry - so at -0.17 the bow's top edge sat inside
+        // the central 12%-of-screen-height circle as soon as any pose
+        // raised it. Nothing caught that while the intrusion sweep was
+        // checking a declared envelope at a generic carry instead of this
+        // weapon's real geometry at its own.
+        GunKind::Bow => (Vec3::new(-0.02, -0.22, -0.66), 0.0),
         GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
         GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
         GunKind::M249 => (Vec3::new(0.13, -0.14, -0.42), 0.0),
@@ -3148,6 +3196,32 @@ struct WPart {
     size: Vec3,
     /// true → ADS-only greeble (rides the existing detail-LOD path)
     detail: bool,
+    /// true → hangs off the SPINNER child instead of the model root.
+    ///
+    /// Only the minigun's barrel cluster. A flag on the PART rather than a
+    /// hand-written spawn chain, because that chain was the single thing
+    /// keeping this whole vocabulary trapped inside a function that needs
+    /// `Commands` - see `weapon_parts`.
+    spin: bool,
+}
+
+impl WPart {
+    /// Half-extents in the weapon's own frame, after `tilt`.
+    ///
+    /// `tilt` rotates about X, so the X half-extent is untouched and Y and
+    /// Z mix. This is the AABB of the rotated box - a BOUND, not the exact
+    /// silhouette, and conservative on purpose: a budget that
+    /// over-estimates a part fails safe, one that under-estimates it lets
+    /// geometry through.
+    ///
+    /// A cylinder is bounded by its own box for the same reason. Bevy's
+    /// cylinder is Y-aligned before `tilt`, so that box is already the
+    /// right shape to contain it.
+    fn half(&self) -> Vec3 {
+        let (s, c) = (self.tilt.sin().abs(), self.tilt.cos().abs());
+        let h = self.size.abs() * 0.5;
+        Vec3::new(h.x, h.y * c + h.z * s, h.y * s + h.z * c)
+    }
 }
 
 fn wp(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
@@ -3158,12 +3232,21 @@ fn wp(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f
         tilt,
         size: Vec3::new(size.0, size.1, size.2),
         detail: false,
+        spin: false,
     }
 }
 
 fn wd(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
     WPart {
         detail: true,
+        ..wp(cyl, tone, pos, tilt, size)
+    }
+}
+
+/// A part on the SPINNER - the minigun's barrel cluster, and nothing else.
+fn ws(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
+    WPart {
+        spin: true,
         ..wp(cyl, tone, pos, tilt, size)
     }
 }
@@ -6181,24 +6264,25 @@ fn spawn_hand(commands: &mut Commands, kit: &ModelKit, curl: f32, mirror: bool) 
     root
 }
 
-/// Spawn a weapon model from the §2.1 shared part vocabulary. Root sits
-/// at the grip; +Z is the muzzle. (The bow stands along +Y with its
-/// string toward -Z.) Per-gun differentiation is PROPORTION, not new part
-/// types; tone changes - not geometry - suggest complexity. Every gun
-/// `with_detail` adds the ADS-only greebles (sights, scope rings) - the
-/// detail LOD belongs to YOUR weapons; bots skip the parts entirely.
-/// `with_hands` bakes posed mitten hands onto the model (viewmodel only -
-/// §1.3 third-person hands are the BODY's, IK'd onto the sockets).
-fn spawn_weapon_model(
-    commands: &mut Commands,
-    kit: &ModelKit,
-    kind: GunKind,
-    with_detail: bool,
-    with_hands: bool,
-) -> Entity {
-    let root = commands
-        .spawn((Transform::IDENTITY, Visibility::default()))
-        .id();
+/// Every weapon's geometry, as DATA.
+///
+/// Root sits at the grip; +Z is the muzzle. (The bow runs along +-X
+/// with its string toward -Z.) Per-gun differentiation is PROPORTION,
+/// not new part types; tone changes - not geometry - suggest
+/// complexity.
+///
+/// This table used to live INSIDE `spawn_weapon_model`, welded to
+/// `Commands`, and that had a cost nobody was charging for: the
+/// geometry could not be READ. The screen-intrusion budgets that
+/// govern these very models had to be transcribed by eye into
+/// constants, and nothing could check that a model still fitted the
+/// budget it was given - so widening a gun silently widened the
+/// budget's lie. `weapon_bounded_extent` measures them now.
+///
+/// The minigun's barrel cluster was the one thing blocking the move:
+/// it spawned onto a `MinigunSpinner` child. It is a `spin` FLAG on
+/// the part now, and the caller does the parenting.
+fn weapon_parts(kind: GunKind) -> Vec<WPart> {
     let mut parts: Vec<WPart> = Vec::new();
     match kind {
         GunKind::Fists => {}
@@ -6438,39 +6522,23 @@ fn spawn_weapon_model(
             // brace. Reads as MASS from every angle. The whole barrel
             // cluster lives on its own SPINNER child so the viewmodel can
             // rotate it with the sim's spin_t.
-            let spinner = commands
-                .spawn((Transform::IDENTITY, Visibility::default()))
-                .id();
-            if with_hands {
-                commands.entity(spinner).insert(MinigunSpinner);
-            }
-            commands.entity(spinner).set_parent(root);
-            let mut cluster: Vec<(Tone, Vec3, Vec3)> = vec![
-                (Tone::Mid, Vec3::new(0.0, 0.0, 0.24), Vec3::new(0.024, 0.52, 0.024)),
-                (Tone::Black, Vec3::new(0.0, 0.0, 0.50), Vec3::new(0.082, 0.05, 0.082)),
-                (Tone::Black, Vec3::new(0.0, 0.0, 0.16), Vec3::new(0.086, 0.05, 0.086)),
-            ];
+            // The cluster: spine, two end caps, six barrels. `ws` marks
+            // them as SPINNER parts and the caller hangs them off the
+            // rotating child - they were a hand-written spawn chain, which
+            // is exactly what kept this table welded to `Commands`.
+            parts.push(ws(true, Tone::Mid, (0.0, 0.0, 0.24), FRAC_PI_2, (0.024, 0.52, 0.024)));
+            parts.push(ws(true, Tone::Black, (0.0, 0.0, 0.50), FRAC_PI_2, (0.082, 0.05, 0.082)));
+            parts.push(ws(true, Tone::Black, (0.0, 0.0, 0.16), FRAC_PI_2, (0.086, 0.05, 0.086)));
             for i in 0..6 {
                 let a = i as f32 * std::f32::consts::TAU / 6.0;
                 let (bx, by) = (a.cos() * 0.052, a.sin() * 0.052);
-                cluster.push((
+                parts.push(ws(
+                    true,
                     Tone::Dark,
-                    Vec3::new(bx, by, 0.26),
-                    Vec3::new(0.017, 0.56, 0.017),
+                    (bx, by, 0.26),
+                    FRAC_PI_2,
+                    (0.017, 0.56, 0.017),
                 ));
-            }
-            for (tone, pos, size) in cluster {
-                commands
-                    .spawn((
-                        Mesh3d(kit.cyl.clone()),
-                        MeshMaterial3d(kit.tone(tone)),
-                        Transform {
-                            translation: pos,
-                            rotation: Quat::from_rotation_x(FRAC_PI_2),
-                            scale: size,
-                        },
-                    ))
-                    .set_parent(spinner);
             }
             // motor housing + rear cap (the torso-brace face)
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, -0.05), 0.0, (0.13, 0.15, 0.18)));
@@ -6486,6 +6554,37 @@ fn spawn_weapon_model(
             push_red_dot(&mut parts, 0.1120, -0.05, 0.075); // motor housing 0.075
         }
     }
+    parts
+}
+
+/// Build one weapon model out of `weapon_parts`. Every gun
+/// `with_detail` adds the ADS-only greebles (sights, scope rings) - the
+/// detail LOD belongs to YOUR weapons; bots skip the parts entirely.
+/// `with_hands` bakes posed mitten hands onto the model (viewmodel only -
+/// §1.3 third-person hands are the BODY's, IK'd onto the sockets).
+fn spawn_weapon_model(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    kind: GunKind,
+    with_detail: bool,
+    with_hands: bool,
+) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let parts = weapon_parts(kind);
+    // The spinner is created LAZILY, only if some part asked for one, so
+    // no weapon ends up carrying an empty child node it never rotates.
+    let spinner = parts.iter().any(|p| p.spin).then(|| {
+        let e = commands
+            .spawn((Transform::IDENTITY, Visibility::default()))
+            .id();
+        if with_hands {
+            commands.entity(e).insert(MinigunSpinner);
+        }
+        commands.entity(e).set_parent(root);
+        e
+    });
     for p in parts {
         if p.detail && !with_detail {
             continue; // bots carry the plain silhouette - the LOD working
@@ -6509,7 +6608,9 @@ fn spawn_weapon_model(
             // and it needs its rest pose remembered
             e.insert(ReticleDot { rest: p.pos });
         }
-        e.set_parent(root);
+        // a spinner part hangs off the rotating child; everything else
+        // off the model root
+        e.set_parent(if p.spin { spinner.unwrap_or(root) } else { root });
     }
     // The bow's LIVE parts: two string halves and the arrow on them.
     //
@@ -13560,7 +13661,14 @@ fn fp_viewmodel(
         // left, out of the sightline. This is the whole reason the ADS
         // ramp was ever pointed at projectile weapons - it was standing
         // in for a pose that did not exist.
-        let bow_t = VM_BOW_DRAW_SHIFT * bow_pull;
+        // The draw pose YIELDS to the grenade coil, because the two
+        // cannot both be true of the same body: the hand that cooks a
+        // grenade is the hand that would be on the string. The sim does
+        // not gate them against each other - `step_bow_draw` and the
+        // throw hold are separate keys - so both clocks really can run at
+        // once, and until now the viewmodel added both shifts and rode up
+        // 6.5 cm into the crosshair zone.
+        let bow_t = VM_BOW_DRAW_SHIFT * bow_pull * (1.0 - gr);
         // §owner SUPPRESSION, the PLAYER's half.
         //
         // Rounds cracking past shake the weapon in your hands - and ONLY
@@ -15368,49 +15476,101 @@ fn wrap_angle(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
 }
 
-/// When you're hit, the screen edge facing the shooter flashes red - you
-/// always know which way the bullet came from.
+/// Which screen edge a world point sits behind, given the camera yaw.
+///
+/// 0 front / 1 right / 2 behind / 3 left. Extracted because suppression
+/// now asks the same question the damage flash does, and two copies of a
+/// screen-convention this fiddly would drift: screen-right is
+/// (−cos yaw, sin yaw) in this game's convention (the playtest-verified
+/// A/D mapping), so a shooter at rel −π/2 sits screen-RIGHT - the right
+/// strip, not the left.
+fn edge_toward(from: [f32; 3], at: [f32; 3], yaw: f32) -> Option<usize> {
+    let dx = from[0] - at[0];
+    let dz = from[2] - at[2];
+    if dx * dx + dz * dz < 1e-4 {
+        return None;
+    }
+    let rel = wrap_angle(dx.atan2(dz) - yaw);
+    let (c, s) = (rel.cos(), rel.sin());
+    Some(if c > 0.5 {
+        0
+    } else if c < -0.5 {
+        2
+    } else if s < 0.0 {
+        1
+    } else {
+        3
+    })
+}
+
+/// Damage RED tops out at 0.55 alpha; suppression's pale gold at 0.25.
+///
+/// The GAP is what makes "hit" and "shot at" two different messages
+/// rather than two strengths of one, and it is what lets the two share a
+/// widget at all: a hit wins the strip on alpha alone, with no priority
+/// rule bolted on to arbitrate. Kept at or under half the damage ceiling
+/// so the separation is unmistakable rather than merely present -
+/// `being_hit_outshouts_being_shot_at` is what set this number, after the
+/// first guess (0.28) failed its own rule by a hundredth.
+const SUPPRESS_EDGE_ALPHA: f32 = 0.25;
+
+/// The screen edge facing the shooter flashes - RED when you are hit,
+/// pale gold when rounds merely crack past you.
+///
+/// §owner SUPPRESSION's player-facing half. The mechanic shipped with a
+/// viewmodel shake and nothing else, which told you that something was
+/// happening but not what or where - and a shake is easy to read as
+/// recoil, which is the one thing it is not.
+///
+/// It reuses the damage flash's own strips deliberately, rather than
+/// getting a HUD element of its own. The player already knows how to read
+/// "that edge means over there"; suppression is the SAME information one
+/// step earlier - rounds from that bearing, and they have not hit you
+/// yet. A second, differently-shaped directional widget would be asking
+/// them to learn the same idea twice.
+///
+/// That is also the whole answer to "does it need a directional tell":
+/// yes, because "you are being shot at" only tells a player to move,
+/// while "from THERE" tells them where to move to.
 fn damage_indicator(
     game: Res<Game>,
     cam: Res<CamCtl>,
     mut edges: Query<(&DmgEdge, &mut BackgroundColor)>,
 ) {
     let pi = game.sim.player;
-    let ppos = game.sim.fighters[pi].pos;
+    let p = &game.sim.fighters[pi];
+    let ppos = p.pos;
     let mut inten = [0.0_f32; 4]; // top(front) right bottom(behind) left
     for (ev, ttl) in &game.sim.hits {
         if ev.victim != pi {
             continue;
         }
         let w = (ttl / 2.2).clamp(0.0, 1.0);
-        let dx = ev.from[0] - ppos[0];
-        let dz = ev.from[2] - ppos[2];
-        if dx * dx + dz * dz < 1e-4 {
-            continue;
+        if let Some(idx) = edge_toward(ev.from, ppos, cam.yaw) {
+            inten[idx] = inten[idx].max(w);
         }
-        let rel = wrap_angle(dx.atan2(dz) - cam.yaw);
-        let (c, s) = (rel.cos(), rel.sin());
-        // screen-right is (−cos yaw, sin yaw) in this game's convention
-        // (the playtest-verified A/D mapping), so a shooter at rel −π/2
-        // sits screen-RIGHT: sin < 0 → the right strip, not the left
-        let idx = if c > 0.5 {
-            0
-        } else if c < -0.5 {
-            2
-        } else if s < 0.0 {
-            1
-        } else {
-            3
-        };
-        inten[idx] = inten[idx].max(w);
+    }
+    // suppression, on the same strips at a quieter weight
+    let mut supp = [0.0_f32; 4];
+    if p.suppress_t > 0.0 {
+        let w = (p.suppress_t / sim::SUPPRESS_MAX_S).clamp(0.0, 1.0);
+        if let Some(idx) = edge_toward(p.suppress_from, ppos, cam.yaw) {
+            supp[idx] = w;
+        }
     }
     for (e, mut bg) in &mut edges {
-        *bg = BackgroundColor(Color::srgba(
-            0.85,
-            0.08,
-            0.08,
-            inten[e.0 as usize] * 0.55,
-        ));
+        let i = e.0 as usize;
+        let a_dmg = inten[i] * 0.55;
+        let a_sup = supp[i] * SUPPRESS_EDGE_ALPHA;
+        // A hit is the louder message and always wins the strip - not by
+        // a priority rule bolted on top, but because its alpha ceiling is
+        // twice suppression's, so the comparison decides it by itself.
+        let (r, g, b) = if a_dmg >= a_sup {
+            (0.85, 0.08, 0.08)
+        } else {
+            (0.95, 0.86, 0.55)
+        };
+        *bg = BackgroundColor(Color::srgba(r, g, b, a_dmg.max(a_sup)));
     }
 }
 
@@ -17127,66 +17287,21 @@ mod band_tests {
         );
     }
 
-    /// §1.4a screen-intrusion: across stances × phases × fire × air, the
-    /// root motion can never carry the weapon envelope (receiver box +
-    /// sight mast) across the vertical midline nor into the central
-    /// circle of radius 12% of screen height (vm FOV 68°).
-    #[test]
-    fn vm_envelope_clears_midline_and_center() {
-        // circle radius in camera space at depth z: 12% of the full
-        // screen height = 0.12 - 2-z-tan(fov/2)
-        let r_at = |z: f32| 0.24 * z * (VM_FOV_DEG.to_radians() * 0.5).tan();
-        for sf in [0.0_f32, 0.3, 0.6, 1.0] {
-            for th in 0..80 {
-                for (kick, sp) in [(0.0_f32, 0.0_f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                    for grounded in [true, false] {
-                        let o = carry_offset(
-                            sf,
-                            th as f32 * 0.173,
-                            grounded,
-                            kick,
-                            sp,
-                            0.04,
-                            0.0,
-                        );
-                        let (x, y, z) = (0.11 + o.x, -0.13 + o.y, 0.32 + o.z);
-                        let sway = z * VM_SWAY_CAP_DEG.to_radians().tan();
-                        // midline: the widest part stays right of center
-                        let recv_left = x - VM_RECEIVER_LEFT - sway;
-                        let mast_left = x - VM_MAST_LEFT - sway;
-                        assert!(
-                            recv_left > 0.0,
-                            "receiver crosses the midline: sf {sf} th {th}"
-                        );
-                        // center circle: nearest corner of each envelope
-                        // part stays outside the 12% circle
-                        let r = r_at(z);
-                        for (dx, dy) in [
-                            (recv_left, y + VM_RECEIVER_UP),
-                            (mast_left, y + VM_MAST_UP),
-                        ] {
-                            let d = (dx * dx + dy * dy).sqrt();
-                            assert!(
-                                d > r,
-                                "envelope corner inside the center circle: \
-                                 d {d:.3} ≤ r {r:.3} (sf {sf} th {th})"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Brief VII §3.3/§4.3: EVERY weapon, under ITS OWN profile, across
-    /// every pose it can be held in indefinitely.
+    /// §1.4a screen-intrusion, Brief VII §3.3/§4.3: EVERY weapon, at ITS
+    /// OWN carry, with ITS OWN measured geometry, under ITS OWN profile,
+    /// across every pose it can be held in indefinitely.
     ///
-    /// Two things were missing and both were invisible. The sweep above
-    /// runs one hard-coded root, `(0.11, -0.13, 0.32)`, which is the
-    /// GENERIC carry - so the pistol's, the M249's, the spear's and the
-    /// bow's own placements were never checked at all. And it swept only
-    /// `carry_offset`, so every POSE shift was unbounded: full draw pulls
-    /// the bow 7.5 cm toward the midline and nothing looked.
+    /// This replaces a sweep that could see almost none of that. The old
+    /// one ran a single hard-coded root, `(0.11, -0.13, 0.32)` - the
+    /// GENERIC carry - against a pair of DECLARED envelope boxes. So the
+    /// pistol's, the M249's, the spear's and the bow's own placements
+    /// were never checked; every pose shift was unbounded (full draw
+    /// pulls the bow 7.5 cm toward the midline and nothing looked); and
+    /// the envelope it did check was a transcription that had drifted
+    /// 2.3x off the real geometry. It passed the whole time.
+    ///
+    /// Nothing it covered is lost: stance, bob phase, fire kick, sprint
+    /// and air are all still swept, now per weapon.
     ///
     /// SUSTAINED poses only, and that is a real distinction rather than a
     /// convenience. A drawn bow, a cooked grenade, a sprint and a
@@ -17202,61 +17317,100 @@ mod band_tests {
         let r_at = |z: f32| 0.24 * z * (VM_FOV_DEG.to_radians() * 0.5).tan();
         for kind in ALL_WEAPONS {
             let prof = screen_profile(kind);
-            let (bl, bu) = profile_bounded(prof);
+            // MEASURED off the model, not transcribed from it. The
+            // aggregate answers the MIDLINE question (how far left does
+            // anything reach); the per-part corners answer the CIRCLE
+            // one, because that needs a point the weapon really occupies.
+            let (bl, bu) = weapon_bounded_extent(kind);
+            let corners = weapon_bounded_corners(kind);
             let (carry, _) = vm_carry(kind);
             // the root, in the same frame the sweep above uses: vm_carry
             // stores forward as NEGATIVE z, the camera frame as positive
             let base = Vec3::new(carry.x, carry.y, -carry.z);
-            for sf in [0.0_f32, 0.5, 1.0] {
-                for th in 0..40 {
+            for sf in [0.0_f32, 0.3, 0.6, 1.0] {
+                for th in 0..80 {
                     for grounded in [true, false] {
-                        for pull in [0.0_f32, 1.0] {
-                            for cook in [0.0_f32, 1.0] {
-                                // worst case: every sustained shift at
-                                // its most intrusive, all at once. They
-                                // cannot all peak together in play, which
-                                // is the point - the bound has to hold
-                                // even then.
-                                //
-                                // The draw shift is the BOW's - applying
-                                // it to a pistol is how the first run of
-                                // this test "found" a midline crossing on
-                                // the Glock that no player could ever see.
-                                let draw = if kind == GunKind::Bow { pull } else { 0.0 };
-                                let pose = base
-                                    + carry_offset(sf, th as f32 * 0.173, grounded, 1.0, 1.0, 0.04, 0.0)
-                                    + VM_BOW_DRAW_SHIFT * draw
-                                    + VM_GRENADE_SHIFT * cook
-                                    - VM_SUPPRESS_SHAKE;
-                                let sway = pose.z.abs() * VM_SWAY_CAP_DEG.to_radians().tan();
-                                let r = r_at(pose.z.abs());
-                                match prof {
-                                    // the bow is symmetric: no midline
-                                    // test, a VERTICAL one instead
-                                    ScreenProfile::BowDrawn => {
-                                        assert!(
-                                            pose.y + VM_BOW_TOP < -r,
-                                            "{kind:?}: the bow reaches the crosshair - \
-                                             top {:.3} vs circle {:.3} (sf {sf} th {th} pull {pull})",
-                                            pose.y + VM_BOW_TOP,
-                                            -r
-                                        );
-                                    }
-                                    _ => {
-                                        let left = pose.x - bl - sway;
-                                        assert!(
-                                            left > 0.0,
-                                            "{kind:?} ({prof:?}): the bounded part crosses \
-                                             the midline at {left:.3} (sf {sf} th {th} cook {cook})"
-                                        );
-                                        let d = (left * left
-                                            + (pose.y + bu) * (pose.y + bu))
-                                            .sqrt();
-                                        assert!(
-                                            d > r,
-                                            "{kind:?} ({prof:?}): inside the centre circle - \
-                                             d {d:.3} <= r {r:.3} (sf {sf} th {th})"
-                                        );
+                        for (kick, sp) in
+                            [(0.0_f32, 0.0_f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                        {
+                            for pull in [0.0_f32, 1.0] {
+                                for cook in [0.0_f32, 1.0] {
+                                    // worst case: every sustained shift at
+                                    // its most intrusive, all at once.
+                                    // They cannot all peak together in
+                                    // play, which is the point - the
+                                    // bound has to hold even then.
+                                    //
+                                    // The draw shift is the BOW's -
+                                    // applying it to a pistol is how the
+                                    // first run of this test "found" a
+                                    // midline crossing on the Glock that
+                                    // no player could ever see.
+                                    // the draw shift is the BOW's -
+                                    // applying it to a pistol is how the
+                                    // first run of this test "found" a
+                                    // midline crossing on the Glock that
+                                    // no player could ever see - and it
+                                    // yields to the coil exactly as the
+                                    // render path does
+                                    let draw = if kind == GunKind::Bow {
+                                        pull * (1.0 - cook)
+                                    } else {
+                                        0.0
+                                    };
+                                    let pose = base
+                                        + carry_offset(
+                                            sf,
+                                            th as f32 * 0.173,
+                                            grounded,
+                                            kick,
+                                            sp,
+                                            0.04,
+                                            0.0,
+                                        )
+                                        + VM_BOW_DRAW_SHIFT * draw
+                                        + VM_GRENADE_SHIFT * cook
+                                        - VM_SUPPRESS_SHAKE;
+                                    let sway =
+                                        pose.z.abs() * VM_SWAY_CAP_DEG.to_radians().tan();
+                                    let r = r_at(pose.z.abs());
+                                    match prof {
+                                        // the bow is symmetric: no midline
+                                        // test, a VERTICAL one instead
+                                        ScreenProfile::BowDrawn => {
+                                            assert!(
+                                                pose.y + bu < -r,
+                                                "{kind:?}: the bow reaches the crosshair \
+                                                 - top {:.3} vs circle {:.3} \
+                                                 (sf {sf} th {th} pull {pull})",
+                                                pose.y + bu,
+                                                -r
+                                            );
+                                        }
+                                        _ => {
+                                            // midline: the widest thing on
+                                            // the weapon, wherever it is
+                                            assert!(
+                                                pose.x - bl - sway > 0.0,
+                                                "{kind:?} ({prof:?}): the bounded part \
+                                                 crosses the midline at {:.3} \
+                                                 (sf {sf} th {th} cook {cook})",
+                                                pose.x - bl - sway
+                                            );
+                                            // circle: every REAL corner
+                                            for (pl, pu) in &corners {
+                                                let dx = pose.x - pl - sway;
+                                                let dy = pose.y + pu;
+                                                let d = (dx * dx + dy * dy).sqrt();
+                                                assert!(
+                                                    d > r,
+                                                    "{kind:?} ({prof:?}): a part corner \
+                                                     is inside the centre circle - \
+                                                     d {d:.3} <= r {r:.3} \
+                                                     (sf {sf} th {th} kick {kick} sp {sp})"
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -17265,6 +17419,184 @@ mod band_tests {
                 }
             }
         }
+    }
+
+    /// What the arsenal's extremes actually ARE, pinned - so a model that
+    /// grows past them names itself instead of drifting.
+    ///
+    /// This is the test that retired the audited budgets, and it retired
+    /// them by disagreeing with them. `VM_RECEIVER_LEFT`/`VM_MAST_UP`
+    /// carried the note "current widest receiver = minigun cluster (0.069
+    /// left); tallest mast = AWM scope (0.085 up)". Measured:
+    ///
+    ///   widest   MINIGUN  0.065 up-left   (the note was close, and
+    ///                                      conservative, which is fine)
+    ///   tallest  M249     0.192 up        (the note said 0.085, and
+    ///                                      named the wrong weapon)
+    ///
+    /// The M249 is 2.3x the claimed ceiling, and the reason is ordinary:
+    /// its arched carry handle was raised clear of the sight line in a
+    /// later change, and the comment describing the arsenal was not part
+    /// of that change. Nothing could catch it, because the geometry could
+    /// not be read - which is the whole argument for `weapon_parts`.
+    ///
+    /// It is NOT a screen intrusion. The M249 carries lower and further
+    /// out than the generic placement (`vm_carry`), and
+    /// `every_weapon_holds_its_own_screen_profile` clears it at its own
+    /// carry. The defect was the claim, not the gun.
+    #[test]
+    fn the_arsenals_extremes_are_what_we_think_they_are() {
+        let mut widest = (GunKind::Fists, 0.0_f32);
+        let mut tallest = (GunKind::Fists, 0.0_f32);
+        for kind in ALL_WEAPONS {
+            if screen_profile(kind) != ScreenProfile::Strict {
+                continue; // the polearm and the bow have their own rules
+            }
+            let (l, u) = weapon_bounded_extent(kind);
+            if l > widest.1 {
+                widest = (kind, l);
+            }
+            if u > tallest.1 {
+                tallest = (kind, u);
+            }
+        }
+        assert_eq!(
+            widest.0,
+            GunKind::Minigun,
+            "the widest gun is the minigun's barrel cluster, not {:?} at {:.3}",
+            widest.0,
+            widest.1
+        );
+        assert!(
+            (widest.1 - 0.065).abs() < 0.002,
+            "the minigun now reaches {:.4} left, not 0.065 - if that is \
+             deliberate, move this number and re-read the sweep",
+            widest.1
+        );
+        assert_eq!(
+            tallest.0,
+            GunKind::M249,
+            "the tallest gun is the M249's carry handle, not {:?} at {:.3}",
+            tallest.0,
+            tallest.1
+        );
+        assert!(
+            (tallest.1 - 0.192).abs() < 0.002,
+            "the M249 now reaches {:.4} up, not 0.192",
+            tallest.1
+        );
+    }
+
+    /// The profiles exempt what they say they exempt, and nothing else.
+    ///
+    /// The spear's is the one worth pinning: bounding its 1.85 m SHAFT
+    /// would be bounding the raised javelin's whole silhouette, which is
+    /// the thing the profile exists to permit.
+    #[test]
+    fn each_profile_exempts_exactly_what_it_claims() {
+        let spear = weapon_parts(GunKind::Spear);
+        let bounded: Vec<&WPart> = spear
+            .iter()
+            .filter(|w| profile_bounds_part(ScreenProfile::SpearRaised, w))
+            .collect();
+        assert!(!bounded.is_empty(), "the grip cannot be empty");
+        assert!(
+            bounded.len() < spear.len(),
+            "SpearRaised must exempt SOMETHING, or it is just Strict"
+        );
+        // the shaft - the longest part - must be among the exempt
+        let longest = spear
+            .iter()
+            .max_by(|a, b| a.half().z.partial_cmp(&b.half().z).unwrap())
+            .unwrap();
+        assert!(
+            !profile_bounds_part(ScreenProfile::SpearRaised, longest),
+            "the shaft is bounded - that is the javelin's silhouette, not an \
+             intrusion"
+        );
+        // and every bounded part really is at the hand
+        for w in bounded {
+            assert!(
+                w.pos.z.abs() <= GRIP_WINDOW_M,
+                "a part at z {} is not the grip",
+                w.pos.z
+            );
+        }
+        // a gun exempts nothing
+        for w in &weapon_parts(GunKind::Ak47) {
+            assert!(profile_bounds_part(ScreenProfile::Strict, w));
+        }
+    }
+
+    /// The lift out of `spawn_weapon_model` was a pure MOVE.
+    ///
+    /// Every weapon still has parts, the minigun still has exactly the
+    /// nine that spin, and no other weapon has any - if the `spin` flag
+    /// had leaked onto a shared helper this is where it would show.
+    #[test]
+    fn the_part_tables_survived_being_lifted_out() {
+        for kind in ALL_WEAPONS {
+            let parts = weapon_parts(kind);
+            assert!(!parts.is_empty(), "{kind:?} has no geometry at all");
+            for w in &parts {
+                assert!(w.size.min_element() > 0.0, "{kind:?}: a zero-sized part");
+                assert!(w.pos.is_finite() && w.size.is_finite(), "{kind:?}: NaN part");
+            }
+            let spinning = parts.iter().filter(|w| w.spin).count();
+            let expect = if kind == GunKind::Minigun { 9 } else { 0 };
+            assert_eq!(
+                spinning, expect,
+                "{kind:?} has {spinning} spinning parts, expected {expect} - \
+                 the barrel cluster is a spine, two caps and six barrels"
+            );
+        }
+        // `Fists` is the one weapon that legitimately has no model, and
+        // it is not in ALL_WEAPONS - assert that stays true, since the
+        // loop above would fail loudly if it were ever added
+        assert!(!ALL_WEAPONS.contains(&GunKind::Fists));
+    }
+
+    /// The directional read: the strip that lights is the one facing the
+    /// fire, on all four bearings.
+    ///
+    /// This is the whole value of the suppression HUD - without a correct
+    /// bearing it is a screen flash that tells a player to panic in an
+    /// unspecified direction. The right/left convention is the easy one
+    /// to get backwards, and getting it backwards would send someone
+    /// turning INTO the gun, so both are pinned explicitly.
+    #[test]
+    fn the_lit_edge_faces_the_fire_on_every_bearing() {
+        let me = [0.0_f32, 0.0, 0.0];
+        // camera looking down +Z (yaw 0)
+        assert_eq!(edge_toward([0.0, 0.0, 10.0], me, 0.0), Some(0), "ahead");
+        assert_eq!(edge_toward([0.0, 0.0, -10.0], me, 0.0), Some(2), "behind");
+        assert_eq!(edge_toward([-10.0, 0.0, 0.0], me, 0.0), Some(1), "screen-right");
+        assert_eq!(edge_toward([10.0, 0.0, 0.0], me, 0.0), Some(3), "screen-left");
+        // turning the camera turns the read with it: face the man who was
+        // behind you and he is now ahead
+        assert_eq!(edge_toward([0.0, 0.0, -10.0], me, PI), Some(0));
+        // a shooter standing exactly on you has no bearing to report
+        assert_eq!(edge_toward(me, me, 0.0), None);
+        // and height never decides a compass bearing
+        assert_eq!(
+            edge_toward([0.0, 40.0, 10.0], me, 0.0),
+            Some(0),
+            "a mech firing down from a hull is still AHEAD"
+        );
+    }
+
+    /// A hit always outranks being shot at, and it does so by
+    /// construction rather than by a priority rule.
+    #[test]
+    fn being_hit_outshouts_being_shot_at() {
+        assert!(
+            SUPPRESS_EDGE_ALPHA * 2.0 <= 0.55 + 1e-6,
+            "suppression's ceiling ({SUPPRESS_EDGE_ALPHA}) must stay far \
+             enough under the damage flash's 0.55 that a hit wins the strip \
+             on alpha alone - the moment they overlap, the two messages stop \
+             being distinguishable and the shared widget stops being honest"
+        );
+        assert!(SUPPRESS_EDGE_ALPHA > 0.1, "and it still has to be visible");
     }
 
     /// The exemption above is only honest if the exempt poses are bounded
