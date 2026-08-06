@@ -2418,6 +2418,65 @@ fn make_tex(images: &mut Assets<Image>, f: impl Fn(u32, u32) -> f32) -> Handle<I
     images.add(img)
 }
 
+/// Build a NORMAL MAP from the same height field that drives an albedo
+/// texture, by central differences (a Sobel-lite).
+///
+/// This is what turns colour variation into apparent DEPTH: mortar
+/// courses catch a shadow on one side, plank seams read as grooves, and
+/// the brushed metal picks up a direction. The albedo alone could only
+/// ever make a surface look painted.
+///
+/// Two things are load-bearing and easy to get wrong:
+/// - the format MUST stay linear (`Rgba8Unorm`). A normal map decoded as
+///   sRGB is a wrong vector at every texel, which reads as blotchy
+///   lighting rather than as an obvious error.
+/// - the mesh MUST carry tangents, or Bevy silently declines to apply
+///   this at all. See `with_tangents` at the mesh sites.
+fn make_normal_tex(
+    images: &mut Assets<Image>,
+    strength: f32,
+    height: impl Fn(u32, u32) -> f32,
+) -> Handle<Image> {
+    use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let w = |x: i64, y: i64| -> f32 {
+        // wrap, so the normal map tiles as seamlessly as its albedo
+        let xi = x.rem_euclid(TEX_SIZE as i64) as u32;
+        let yi = y.rem_euclid(TEX_SIZE as i64) as u32;
+        height(xi, yi)
+    };
+    let mut data = Vec::with_capacity((TEX_SIZE * TEX_SIZE * 4) as usize);
+    for y in 0..TEX_SIZE as i64 {
+        for x in 0..TEX_SIZE as i64 {
+            let dx = (w(x + 1, y) - w(x - 1, y)) * strength;
+            let dy = (w(x, y + 1) - w(x, y - 1)) * strength;
+            // the surface normal of a heightfield: (-dh/dx, -dh/dy, 1)
+            let (nx, ny, nz) = (-dx, -dy, 1.0_f32);
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+            let enc = |v: f32| (((v / len) * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            data.extend_from_slice(&[enc(nx), enc(ny), enc(nz), 255]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d {
+            width: TEX_SIZE,
+            height: TEX_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..ImageSamplerDescriptor::linear()
+    });
+    images.add(img)
+}
+
 /// The generated surface set. Structure only - every one of these is
 /// grey and takes its colour from whatever material mounts it.
 #[derive(Resource, Clone)]
@@ -2430,63 +2489,84 @@ struct TextureKit {
     wood: Handle<Image>,
     /// fine brushed grain with a few deeper scratches
     metal: Handle<Image>,
+    /// Matching normal maps, generated from the SAME height functions -
+    /// so the bumps line up with the colour rather than being a second
+    /// pattern laid over the first.
+    ground_n: Handle<Image>,
+    stone_n: Handle<Image>,
+    wood_n: Handle<Image>,
+    metal_n: Handle<Image>,
+}
+
+/// The four height fields, named once and shared.
+///
+/// Albedo and normal are generated from the SAME function per surface -
+/// that is the whole reason these are hoisted out rather than written
+/// inline at each `make_tex` call. Two copies would drift, and a normal
+/// map whose bumps do not line up with its own colour looks worse than
+/// no normal map at all.
+fn height_ground(x: u32, y: u32) -> f32 {
+    let broad = tex_fbm(x, y, 11);
+    let grit = tex_hash(x, y, 733);
+    // fbm clusters hard around its own mean, so raw it produced a band
+    // far too narrow to see once lit - a checkerboard diagnostic proved
+    // the texture was binding and tiling correctly all along and only
+    // the CONTRAST was wrong. Pushed out from the midpoint before use.
+    let broad = ((broad - 0.5) * 2.4 + 0.5).clamp(0.0, 1.0);
+    // patches of packed dirt against looser sand, at a scale bigger than
+    // one tile's noise so the ground does not read as uniform fuzz
+    let patch = if tex_noise(x, y, 3, 401) > 0.58 { 0.86 } else { 1.0 };
+    ((0.55 + broad * 0.45) * patch + grit * 0.06).min(1.0)
+}
+
+/// Mortar courses every quarter tile, offset row to row so it reads as
+/// laid blockwork rather than a grid, with noise over the faces so no
+/// two blocks match.
+fn height_stone(x: u32, y: u32) -> f32 {
+    let block = TEX_SIZE / 4;
+    let row = y / block;
+    let shift = if row % 2 == 0 { 0 } else { block / 2 };
+    let bx = (x + shift) % block;
+    let by = y % block;
+    let mortar = bx < 3 || by < 3;
+    let body = 0.74 + tex_fbm(x, y, 29) * 0.26;
+    if mortar {
+        body * 0.55 // the joint reads as a real recess
+    } else {
+        body
+    }
+}
+
+/// Grain along one axis, warped by noise so it is grain and not stripes,
+/// with the odd darker knot.
+fn height_wood(x: u32, y: u32) -> f32 {
+    let n = TEX_SIZE as f32;
+    let warp = tex_fbm(x, y, 53) * 12.0;
+    let rings = (((y as f32 + warp) / n * 22.0).sin() * 0.5 + 0.5).powf(1.6);
+    let knot = if tex_noise(x, y, 6, 91) > 0.86 { 0.62 } else { 1.0 };
+    ((0.66 + rings * 0.34) * knot).min(1.0)
+}
+
+/// Fine horizontal brushing, plus a few deeper scratches.
+fn height_metal(x: u32, y: u32) -> f32 {
+    let brush = tex_hash(x / 2, y, 137) * 0.12;
+    let scratch = if tex_noise(x, y, 3, 211) > 0.90 { 0.80 } else { 1.0 };
+    ((0.84 + brush) * scratch).min(1.0)
 }
 
 fn build_texture_kit(images: &mut Assets<Image>) -> TextureKit {
-    let n = TEX_SIZE as f32;
-    // GROUND: broad dunes plus fine grit, so it reads both at the
-    // player's feet and out at the fog line
-    let ground = make_tex(images, |x, y| {
-        let broad = tex_fbm(x, y, 11);
-        let grit = tex_hash(x, y, 733);
-        // fbm clusters hard around its own mean, so raw it produced a
-        // band far too narrow to see once lit - a checkerboard
-        // diagnostic proved the texture was binding and tiling
-        // correctly all along and only the CONTRAST was wrong. Pushed
-        // out from the midpoint before use.
-        let broad = ((broad - 0.5) * 2.4 + 0.5).clamp(0.0, 1.0);
-        // patches of packed dirt against looser sand, at a scale bigger
-        // than one tile's noise so the ground does not read as uniform
-        // fuzz
-        let patch = if tex_noise(x, y, 3, 401) > 0.58 { 0.86 } else { 1.0 };
-        ((0.55 + broad * 0.45) * patch + grit * 0.06).min(1.0)
-    });
-    // STONE: mortar lines every quarter tile, courses offset row to row
-    // so it reads as laid blockwork rather than a grid, with noise over
-    // the faces so no two blocks match
-    let stone = make_tex(images, |x, y| {
-        let block = TEX_SIZE / 4;
-        let row = y / block;
-        let shift = if row % 2 == 0 { 0 } else { block / 2 };
-        let bx = (x + shift) % block;
-        let by = y % block;
-        let mortar = bx < 3 || by < 3;
-        let body = 0.74 + tex_fbm(x, y, 29) * 0.26;
-        if mortar {
-            body * 0.55 // the joint reads as a real recess
-        } else {
-            body
-        }
-    });
-    // WOOD: grain along one axis, warped by noise so it is grain and not
-    // stripes, with the odd darker knot
-    let wood = make_tex(images, |x, y| {
-        let warp = tex_fbm(x, y, 53) * 12.0;
-        let rings = (((y as f32 + warp) / n * 22.0).sin() * 0.5 + 0.5).powf(1.6);
-        let knot = if tex_noise(x, y, 6, 91) > 0.86 { 0.62 } else { 1.0 };
-        ((0.66 + rings * 0.34) * knot).min(1.0)
-    });
-    // METAL: fine horizontal brushing, plus a few deeper scratches
-    let metal = make_tex(images, |x, y| {
-        let brush = tex_hash(x / 2, y, 137) * 0.12;
-        let scratch = if tex_noise(x, y, 3, 211) > 0.90 { 0.80 } else { 1.0 };
-        ((0.84 + brush) * scratch).min(1.0)
-    });
+    // Normal strengths are per-surface on purpose: mortar joints are a
+    // real recess and want to read hard, brushed metal is microscopic
+    // and wants to read as sheen rather than as corrugation.
     TextureKit {
-        ground,
-        stone,
-        wood,
-        metal,
+        ground: make_tex(images, height_ground),
+        stone: make_tex(images, height_stone),
+        wood: make_tex(images, height_wood),
+        metal: make_tex(images, height_metal),
+        ground_n: make_normal_tex(images, 2.4, height_ground),
+        stone_n: make_normal_tex(images, 6.0, height_stone),
+        wood_n: make_normal_tex(images, 3.0, height_wood),
+        metal_n: make_normal_tex(images, 1.4, height_metal),
     }
 }
 
@@ -7568,17 +7648,51 @@ fn setup(
     // the metal grain, and inserted as a resource so `rebuild_world` -
     // which runs on every deploy and rematch - always finds it present.
     let tex_kit = build_texture_kit(&mut images);
+    // §owner: the same `metal`/`flat` helpers, with a surface mounted.
+    // Written as helpers rather than expanding every material inline so
+    // the kit stays a readable table of colours instead of forty lines
+    // of struct literal.
+    let tex_metal = |c: Color, m: f32, r: f32, uv: f32| StandardMaterial {
+        base_color: c,
+        base_color_texture: Some(tex_kit.metal.clone()),
+        normal_map_texture: Some(tex_kit.metal_n.clone()),
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(uv)),
+        metallic: m,
+        perceptual_roughness: r,
+        ..default()
+    };
+    let tex_wood = |c: Color, uv: Vec2| StandardMaterial {
+        base_color: c,
+        base_color_texture: Some(tex_kit.wood.clone()),
+        normal_map_texture: Some(tex_kit.wood_n.clone()),
+        uv_transform: bevy::math::Affine2::from_scale(uv),
+        perceptual_roughness: 0.85,
+        ..default()
+    };
+    // §owner: TANGENTS. A normal map without them is silently ignored -
+    // Bevy needs a tangent basis to take a texel from tangent space into
+    // world space, and the primitive builders do not generate one. Doing
+    // it once here covers every model in the game, since all of them are
+    // built from these three shared meshes.
+    let with_tangents = |mut m: Mesh| -> Mesh {
+        // failure is cosmetic (that mesh just keeps flat normals), so it
+        // warns rather than panicking the whole game at startup
+        if let Err(e) = m.generate_tangents() {
+            warn!("tangent generation failed, normal maps disabled for a mesh: {e}");
+        }
+        m
+    };
     let kit = ModelKit {
-        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        cyl: meshes.add(Cylinder::new(0.5, 1.0)),
-        ball: meshes.add(Sphere::new(0.5)),
-        grey_light: materials.add(flat(0xC8C9CB)),
-        grey_mid: materials.add(flat(0x8A8C8F)),
-        grey_dark: materials.add(flat(0x3A3C40)),
-        grey_black: materials.add(flat(0x1E2024)),
-        gunmetal: materials.add(metal(Color::srgb(0.16, 0.17, 0.19), 0.8, 0.45)),
-        steel: materials.add(metal(Color::srgb(0.62, 0.64, 0.68), 0.95, 0.30)),
-        wood: materials.add(metal(Color::srgb(0.42, 0.28, 0.15), 0.0, 0.85)),
+        cube: meshes.add(with_tangents(Cuboid::new(1.0, 1.0, 1.0).into())),
+        cyl: meshes.add(with_tangents(Cylinder::new(0.5, 1.0).into())),
+        ball: meshes.add(with_tangents(Sphere::new(0.5).mesh().uv(24, 12))),
+        grey_light: materials.add(tex_metal(Color::srgb_u8(0xC8, 0xC9, 0xCB), 0.05, 0.60, 3.0)),
+        grey_mid: materials.add(tex_metal(Color::srgb_u8(0x8A, 0x8C, 0x8F), 0.05, 0.60, 3.0)),
+        grey_dark: materials.add(tex_metal(Color::srgb_u8(0x3A, 0x3C, 0x40), 0.05, 0.60, 3.0)),
+        grey_black: materials.add(tex_metal(Color::srgb_u8(0x1E, 0x20, 0x24), 0.05, 0.60, 3.0)),
+        gunmetal: materials.add(tex_metal(Color::srgb(0.16, 0.17, 0.19), 0.8, 0.45, 3.0)),
+        steel: materials.add(tex_metal(Color::srgb(0.62, 0.64, 0.68), 0.95, 0.30, 3.0)),
+        wood: materials.add(tex_wood(Color::srgb(0.42, 0.28, 0.15), Vec2::new(1.0, 2.5))),
         string: materials.add(metal(Color::srgb(0.85, 0.82, 0.70), 0.0, 0.9)),
         lens: materials.add(StandardMaterial {
             base_color: Color::srgb(0.3, 0.8, 1.0),
@@ -7586,7 +7700,7 @@ fn setup(
             unlit: true,
             ..default()
         }),
-        olive: materials.add(metal(Color::srgb(0.32, 0.35, 0.22), 0.2, 0.8)),
+        olive: materials.add(tex_metal(Color::srgb(0.32, 0.35, 0.22), 0.2, 0.8, 2.0)),
         gold: materials.add(StandardMaterial {
             base_color: Color::srgb(0.95, 0.80, 0.30),
             metallic: 1.0,
@@ -7594,14 +7708,14 @@ fn setup(
             emissive: LinearRgba::new(0.6, 0.45, 0.1, 1.0),
             ..default()
         }),
-        white: materials.add(metal(Color::srgb(0.92, 0.92, 0.90), 0.1, 0.6)),
+        white: materials.add(tex_metal(Color::srgb(0.92, 0.92, 0.90), 0.1, 0.6, 2.0)),
         med_glow: materials.add(StandardMaterial {
             base_color: Color::srgb(0.2, 0.95, 0.4),
             emissive: LinearRgba::new(0.2, 1.8, 0.4, 1.0),
             unlit: true,
             ..default()
         }),
-        armor_dark: materials.add(metal(Color::srgb(0.14, 0.15, 0.18), 0.9, 0.35)),
+        armor_dark: materials.add(tex_metal(Color::srgb(0.14, 0.15, 0.18), 0.9, 0.35, 2.4)),
         core_glow: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.25, 0.15),
             emissive: LinearRgba::new(2.2, 0.35, 0.15, 1.0),
@@ -7632,9 +7746,9 @@ fn setup(
             perceptual_roughness: 0.75,
             ..default()
         }),
-        mech_khaki_lt: materials.add(metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65)),
+        mech_khaki_lt: materials.add(tex_metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65, 2.2)),
         mech_shadow: materials.add(flat(0x33352F)),
-        mech_metal: materials.add(metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45)),
+        mech_metal: materials.add(tex_metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45, 2.6)),
         // §4.2: hazard chevrons - shoulder-pod cover and knee plates
         // ONLY (≤10% of surface; an accent, not a paint job)
         mech_hazard: materials.add(flat(0xD9A916)),
@@ -9187,10 +9301,17 @@ fn rebuild_world(
     // ground + border walls, sized to THIS map
     let half = game.sim.half;
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(half * 2.2, half * 2.2))),
+        // tangents here too, or the ground's normal map is ignored -
+        // and the ground is the surface that most needs the relief
+        Mesh3d(meshes.add({
+            let mut m: Mesh = Plane3d::default().mesh().size(half * 2.2, half * 2.2).into();
+            let _ = m.generate_tangents();
+            m
+        })),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: ground_c,
             base_color_texture: Some(tex.ground.clone()),
+            normal_map_texture: Some(tex.ground_n.clone()),
             // the plane's UVs run 0..1 across its whole span, so without
             // a transform one 128px tile stretches over the entire map.
             // Tiled per ~4 m, which is about where grit stops reading as
@@ -9203,6 +9324,11 @@ fn rebuild_world(
     ));
     let border_mat = materials.add(StandardMaterial {
         base_color: border_c,
+        base_color_texture: Some(tex.stone.clone()),
+        normal_map_texture: Some(tex.stone_n.clone()),
+        // the border runs the whole map edge, so it needs the densest
+        // tiling of anything - one course per couple of metres
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::new(half * 0.35, 1.0)),
         perceptual_roughness: 0.85,
         ..default()
     });
@@ -9271,6 +9397,7 @@ fn rebuild_world(
     let crate_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.50, 0.40, 0.28),
         base_color_texture: Some(tex.wood.clone()),
+        normal_map_texture: Some(tex.wood_n.clone()),
         uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.6)),
         perceptual_roughness: 0.9,
         ..default()
@@ -9281,6 +9408,7 @@ fn rebuild_world(
             _ => Color::srgb(0.56, 0.56, 0.54),
         },
         base_color_texture: Some(tex.stone.clone()),
+        normal_map_texture: Some(tex.stone_n.clone()),
         // cover blocks vary hugely in size; a modest tile keeps the
         // course height believable on a low wall without turning a big
         // one into gravel
@@ -9290,6 +9418,12 @@ fn rebuild_world(
     });
     let hedge_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.15, 0.38, 0.14),
+        // foliage borrows the GROUND generator, not a leaf one: its
+        // broad mottling plus grit is exactly the clumped-and-speckled
+        // read a hedge wants, and a fifth generator for one surface
+        // would be a texture nobody could name
+        base_color_texture: Some(tex.ground.clone()),
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(3.0)),
         perceptual_roughness: 1.0,
         ..default()
     });
