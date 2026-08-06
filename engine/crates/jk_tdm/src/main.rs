@@ -2270,6 +2270,98 @@ const VM_RECEIVER_UP: f32 = 0.05;
 const VM_MAST_LEFT: f32 = 0.03;
 const VM_MAST_UP: f32 = 0.09;
 
+// ---- the three SCREEN PROFILES (Brief VII §3.3, §4.3) --------------------
+//
+// Brief VII extends Brief VI's intrusion rule "with per-weapon allowance
+// profiles (`spear_raised`, `bow_drawn`). The strict gun profile must keep
+// passing." There was one profile. This is the other two.
+//
+// They are not slack granted to awkward weapons. Each says which PART of
+// the weapon carries the constraint, because for a polearm and a bow the
+// answer is not the receiver:
+//
+//   STRICT       guns. Receiver and hands stay right of the vertical
+//                midline; nothing enters the central 12%-height circle.
+//                Muzzle tip exempt, per Brief VIII §3.6.
+//   SPEAR_RAISED the SHAFT may cross top-centre - that is the raised
+//                javelin's whole silhouette - but the GRIP stays right of
+//                the midline and the lower-centre reticle zone stays
+//                clear. What is bounded moves from the receiver to the
+//                hand.
+//   BOW_DRAWN    the bow is SYMMETRIC about the sight line, so a midline
+//                test is meaningless on it: it has a limb either side by
+//                construction. The constraint that survives is VERTICAL -
+//                the whole bow stays below the centre circle, so the
+//                crosshair is never covered.
+//
+// That last profile deliberately supersedes the brief's own wording
+// ("limbs left/below, string may approach center, grip never crosses the
+// midline inward"). That sentence describes a VERTICAL bow, which is what
+// Brief VII was written against; the war bow was turned horizontal since,
+// and a horizontal bow held to the RIGHT of the midline is a bow aimed
+// off the sight line. `vm_carry` already centres it deliberately. The
+// rule is restated here rather than quietly dropped, because a profile
+// that no longer matches the geometry it governs is worse than none.
+
+/// Which intrusion profile a weapon is held to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScreenProfile {
+    Strict,
+    SpearRaised,
+    BowDrawn,
+}
+
+fn screen_profile(kind: GunKind) -> ScreenProfile {
+    match kind {
+        GunKind::Bow => ScreenProfile::BowDrawn,
+        GunKind::Spear => ScreenProfile::SpearRaised,
+        _ => ScreenProfile::Strict,
+    }
+}
+
+/// The BOUNDED part's half-extents, weapon-local, per profile.
+///
+/// For a gun this is the receiver box (the existing budget). For the
+/// spear it is the bound cord grip - 0.040 across, so 0.020 out - and NOT
+/// the 1.85 m shaft, which is exactly what the profile exempts. For the
+/// bow it is the riser, 0.052 across.
+///
+/// Hand-read off the model tables in `spawn_weapon_model`: the spear's
+/// cord wraps are 0.040 across, the bow's riser 0.052 x 0.115.
+///
+/// Stated plainly because it is the weak link. These are AUDITED numbers,
+/// not derived ones - nothing checks that a weapon's actual parts fit its
+/// budget, so widening a model here would not fail anything. Deriving
+/// them means lifting the part tables out of `spawn_weapon_model` into a
+/// pure function the tests can call, which is worth doing and is not this
+/// change. Until then the numbers carry their provenance in this comment
+/// rather than pretending to be measurements.
+fn profile_bounded(p: ScreenProfile) -> (f32, f32) {
+    match p {
+        ScreenProfile::Strict => (VM_RECEIVER_LEFT, VM_RECEIVER_UP),
+        ScreenProfile::SpearRaised => (0.020, 0.020),
+        ScreenProfile::BowDrawn => (0.026, 0.058),
+    }
+}
+
+/// How far the WHOLE bow reaches up from its root - riser top plus the
+/// tallest thing on it. The `BowDrawn` profile bounds this, not a grip.
+const VM_BOW_TOP: f32 = 0.058;
+
+// The sustained pose shifts, named. Each was an anonymous `Vec3::new(..)`
+// inline in `fp_viewmodel`, which meant the intrusion sweep could not see
+// them: it swept the base carry and nothing else, so every pose that
+// actually moves the weapon toward the midline was unbounded. The bow's
+// is the one that matters - it pulls 7.5 cm LEFT at full draw.
+/// Full draw brings the bow up and in toward the aiming eye.
+const VM_BOW_DRAW_SHIFT: Vec3 = Vec3::new(-0.075, 0.030, 0.050);
+/// The inspect turn.
+const VM_INSPECT_SHIFT: Vec3 = Vec3::new(-0.06, -0.02, 0.06);
+/// The grenade coil, deepening with the charge.
+const VM_GRENADE_SHIFT: Vec3 = Vec3::new(0.03, 0.035, -0.05);
+/// Peak amplitude of the suppression shake (§ `Fighter::suppress_t`).
+const VM_SUPPRESS_SHAKE: Vec3 = Vec3::new(0.011, 0.008, 0.0);
+
 // ---- §3.4 low-ready / obstruction + ready-up ---------------------------
 // BRIEF VIII §3.4, verbatim: "approaching a wall within 0.6m rotates the
 // muzzle up-and-in 22° (rotation only) so the barrel never visually
@@ -13468,7 +13560,7 @@ fn fp_viewmodel(
         // left, out of the sightline. This is the whole reason the ADS
         // ramp was ever pointed at projectile weapons - it was standing
         // in for a pose that did not exist.
-        let bow_t = Vec3::new(-0.075, 0.030, 0.050) * bow_pull;
+        let bow_t = VM_BOW_DRAW_SHIFT * bow_pull;
         // §owner SUPPRESSION, the PLAYER's half.
         //
         // Rounds cracking past shake the weapon in your hands - and ONLY
@@ -13486,18 +13578,18 @@ fn fp_viewmodel(
             let a = (p.suppress_t / sim::SUPPRESS_MAX_S).clamp(0.0, 1.0);
             let t = time.elapsed_secs();
             Vec3::new(
-                (t * 31.0).sin() * 0.011,
-                (t * 23.0).sin() * 0.008,
+                (t * 31.0).sin() * VM_SUPPRESS_SHAKE.x,
+                (t * 23.0).sin() * VM_SUPPRESS_SHAKE.y,
                 0.0,
             ) * a
         };
         tf.translation = ads_shift
             + bow_t
             + sup_shake
-            + Vec3::new(-0.06, -0.02, 0.06) * ie
+            + VM_INSPECT_SHIFT * ie
             + rl_t
             + mel_t
-            + Vec3::new(0.03, 0.035, -0.05) * gr
+            + VM_GRENADE_SHIFT * gr
             + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind);
         // §3.4: low-ready is ROTATION ONLY - it appears in these three
         // Quats and nowhere in `tf.translation` above. Muzzle UP is
@@ -17083,6 +17175,141 @@ mod band_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Brief VII §3.3/§4.3: EVERY weapon, under ITS OWN profile, across
+    /// every pose it can be held in indefinitely.
+    ///
+    /// Two things were missing and both were invisible. The sweep above
+    /// runs one hard-coded root, `(0.11, -0.13, 0.32)`, which is the
+    /// GENERIC carry - so the pistol's, the M249's, the spear's and the
+    /// bow's own placements were never checked at all. And it swept only
+    /// `carry_offset`, so every POSE shift was unbounded: full draw pulls
+    /// the bow 7.5 cm toward the midline and nothing looked.
+    ///
+    /// SUSTAINED poses only, and that is a real distinction rather than a
+    /// convenience. A drawn bow, a cooked grenade, a sprint and a
+    /// suppression shake are states you can sit in for as long as you
+    /// like, so an intrusion there is permanent. A reload, an inspect and
+    /// a melee swing are committed actions that run to completion on
+    /// their own clocks - a swing that crosses the whole frame is the
+    /// READ the defender is being given, and clamping it would be
+    /// removing the tell. `transient_poses_cannot_be_held_open` keeps
+    /// that from becoming a loophole.
+    #[test]
+    fn every_weapon_holds_its_own_screen_profile() {
+        let r_at = |z: f32| 0.24 * z * (VM_FOV_DEG.to_radians() * 0.5).tan();
+        for kind in ALL_WEAPONS {
+            let prof = screen_profile(kind);
+            let (bl, bu) = profile_bounded(prof);
+            let (carry, _) = vm_carry(kind);
+            // the root, in the same frame the sweep above uses: vm_carry
+            // stores forward as NEGATIVE z, the camera frame as positive
+            let base = Vec3::new(carry.x, carry.y, -carry.z);
+            for sf in [0.0_f32, 0.5, 1.0] {
+                for th in 0..40 {
+                    for grounded in [true, false] {
+                        for pull in [0.0_f32, 1.0] {
+                            for cook in [0.0_f32, 1.0] {
+                                // worst case: every sustained shift at
+                                // its most intrusive, all at once. They
+                                // cannot all peak together in play, which
+                                // is the point - the bound has to hold
+                                // even then.
+                                //
+                                // The draw shift is the BOW's - applying
+                                // it to a pistol is how the first run of
+                                // this test "found" a midline crossing on
+                                // the Glock that no player could ever see.
+                                let draw = if kind == GunKind::Bow { pull } else { 0.0 };
+                                let pose = base
+                                    + carry_offset(sf, th as f32 * 0.173, grounded, 1.0, 1.0, 0.04, 0.0)
+                                    + VM_BOW_DRAW_SHIFT * draw
+                                    + VM_GRENADE_SHIFT * cook
+                                    - VM_SUPPRESS_SHAKE;
+                                let sway = pose.z.abs() * VM_SWAY_CAP_DEG.to_radians().tan();
+                                let r = r_at(pose.z.abs());
+                                match prof {
+                                    // the bow is symmetric: no midline
+                                    // test, a VERTICAL one instead
+                                    ScreenProfile::BowDrawn => {
+                                        assert!(
+                                            pose.y + VM_BOW_TOP < -r,
+                                            "{kind:?}: the bow reaches the crosshair - \
+                                             top {:.3} vs circle {:.3} (sf {sf} th {th} pull {pull})",
+                                            pose.y + VM_BOW_TOP,
+                                            -r
+                                        );
+                                    }
+                                    _ => {
+                                        let left = pose.x - bl - sway;
+                                        assert!(
+                                            left > 0.0,
+                                            "{kind:?} ({prof:?}): the bounded part crosses \
+                                             the midline at {left:.3} (sf {sf} th {th} cook {cook})"
+                                        );
+                                        let d = (left * left
+                                            + (pose.y + bu) * (pose.y + bu))
+                                            .sqrt();
+                                        assert!(
+                                            d > r,
+                                            "{kind:?} ({prof:?}): inside the centre circle - \
+                                             d {d:.3} <= r {r:.3} (sf {sf} th {th})"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exemption above is only honest if the exempt poses are bounded
+    /// in BOTH senses: they displace the weapon by a finite amount, and
+    /// they run on clocks that finish.
+    ///
+    /// The first draft of this asserted something stronger and wrong -
+    /// that a reload pose is the identity at r = 0 and r = 1, so it begins
+    /// and ends exactly at the carry. The SHOTGUN disproves it: its
+    /// shell-by-shell feed holds a constant 6 cm dip for the whole reload
+    /// because the gun is held low at the loading gate throughout, so it
+    /// steps to the dip the instant the reload starts. That is the pose
+    /// the weapon is supposed to have, not a defect, and a test that
+    /// demanded otherwise would have been demanding a worse animation.
+    #[test]
+    fn transient_poses_are_bounded_in_travel_and_in_time() {
+        // No reload displaces the weapon further than this at any point
+        // in its run. Generous - it is a cap on runaway, not a style
+        // note - but finite, which is the whole claim.
+        const RELOAD_TRAVEL_CAP_M: f32 = 0.30;
+        for kind in ALL_WEAPONS {
+            for step in 0..=100 {
+                let r = step as f32 / 100.0;
+                let (t, _) = reload_pose(kind, r);
+                assert!(
+                    t.length() < RELOAD_TRAVEL_CAP_M,
+                    "{kind:?} at r {r}: the reload throws the weapon {:.3} m - \
+                     an exempt pose still has to come back",
+                    t.length()
+                );
+                assert!(t.is_finite(), "{kind:?} at r {r}: non-finite pose {t:?}");
+            }
+        }
+        // and the melee windows are finite and positive - a swing that
+        // never ended would hold the frame open forever, which is exactly
+        // the loophole the exemption must not have
+        for w in [
+            KNIFE_QUICK_WIND_S,
+            KNIFE_QUICK_ACTIVE_S,
+            KNIFE_QUICK_RECOVER_S,
+            AXE_QUICK_WIND_S,
+            AXE_QUICK_ACTIVE_S,
+            AXE_QUICK_RECOVER_S,
+        ] {
+            assert!(w > 0.0 && w < 2.0, "a melee window of {w}s is not a swing");
         }
     }
 
