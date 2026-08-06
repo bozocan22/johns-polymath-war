@@ -1545,6 +1545,18 @@ pub struct Fighter {
     /// Derived every tick from index order among the squadmates on the
     /// same target - never stored across ticks, never rolled.
     pub squad_role: SquadRole,
+    /// §owner SQUAD AI: which half of a bounding pair this bot is in.
+    /// Derived, like the role, from the clock and index order.
+    pub bound_phase: BoundPhase,
+    /// §owner SUPPRESSION: seconds of "rounds are cracking past me" left,
+    /// capped at `SUPPRESS_MAX_S`.
+    ///
+    /// Written for EVERY fighter, player included - the geometry does not
+    /// ask who you are. What reads it differs: a bot's aim degrades and it
+    /// stops pushing, while the player's copy drives a viewmodel shake and
+    /// nothing else. A human's aim is his own; taking it away is not
+    /// tension, it is the game playing itself.
+    pub suppress_t: f32,
     /// §owner: which of the four classes this fighter is fighting as.
     /// Set at spawn and kept for the match - `class_spec` turns it into
     /// the four multipliers that actually bite.
@@ -3168,6 +3180,61 @@ pub const SQUAD_SPACING_PUSH: f32 = 0.55;
 /// How wide a flanker swings off the direct line to its target.
 pub const SQUAD_FLANK_STRENGTH: f32 = 0.85;
 
+// ---- SUPPRESSION ---------------------------------------------------------
+//
+// The half of squad AI that acts on the man being shot AT rather than on
+// the men shooting. Until now a round that missed by 20 cm and a round
+// that missed by 20 m were the same event: nothing. That is why a squad
+// could put a hundred rounds through a doorway and the man in it would
+// walk out of it at full speed, shooting straight.
+//
+// Produced by GEOMETRY, not by intent. A bot does not decide to suppress
+// you; rounds pass close to you and that is the whole mechanism. Which
+// means the player suppresses bots by shooting near them, with no special
+// case, and a wild burst that happens to crack past someone's ear counts
+// exactly as much as a deliberate one - because to the man behind the
+// wall those are the same thing.
+
+/// How near a round has to pass to count. A shade over a metre: close
+/// enough that it went past YOU rather than past the room.
+pub const SUPPRESS_RADIUS_M: f32 = 1.15;
+/// Seconds of suppression one close round buys, and the ceiling it stacks
+/// to. The ceiling matters more than the increment: without it, sustained
+/// fire from a belt gun would pin a target for the rest of the round.
+pub const SUPPRESS_PER_ROUND_S: f32 = 0.55;
+pub const SUPPRESS_MAX_S: f32 = 1.8;
+/// How much a suppressed bot's aim degrades, at full suppression. It is a
+/// MULTIPLIER on the difficulty's own `aim_sigma`, so a hard bot under
+/// fire is still better than an easy one in the open - suppression makes
+/// a bot worse than itself, never worse than the difficulty below it.
+pub const SUPPRESS_AIM_PENALTY: f32 = 1.9;
+
+// ---- BOUNDING OVERWATCH --------------------------------------------------
+//
+// Anchor/flank answers WHERE a bot goes. This answers WHEN it moves, and
+// the two are deliberately separate axes: a flanker still bounds, an
+// anchor still takes its turn to hold. Collapsing them into one enum
+// would have made "the flanker" and "the one who is moving" the same
+// fighter forever, which is the single-file advance the spacing fix
+// already had to clean up once.
+//
+// One element moves while the other shoots, then they swap. The swap is a
+// function of the sim clock and the fighter's rank among the squadmates
+// on that target - no stored phase, no timer to get out of sync, nothing
+// rolled. Two runs of the same seed bound on exactly the same ticks.
+
+/// How long one bound lasts before the pair swaps. Long enough to cross a
+/// lane, short enough that the stationary half is never a free target for
+/// more than a breath.
+pub const BOUND_PERIOD_S: f32 = 1.6;
+/// The bounding element pushes harder than a lone bot would - it is
+/// moving under someone else's covering fire, which is the entire point.
+pub const BOUND_CLOSE_MULT: f32 = 1.7;
+/// Squads only bound when they are far enough out for it to mean
+/// anything. Inside this it is a room fight, and stopping dead to shoot
+/// while a man closes on you is just dying on schedule.
+pub const BOUND_MIN_RANGE_M: f32 = 11.0;
+
 /// What a bot is doing inside a shared engagement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SquadRole {
@@ -3176,6 +3243,21 @@ pub enum SquadRole {
     Anchor,
     /// Working around the side while the anchor holds the front.
     Flank,
+}
+
+/// Which half of a bounding pair a bot is in this instant.
+///
+/// Orthogonal to `SquadRole` - see the comment above. `Free` is the
+/// ordinary case: no squadmate to bound with, or too close for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoundPhase {
+    /// Not in a bounding pair - moves and shoots as bots always did.
+    #[default]
+    Free,
+    /// Moving. Pushes hard, holds fire - a man at a run is not shooting.
+    Bounding,
+    /// Planted and firing, so the other half can move.
+    Overwatch,
 }
 
 /// §owner MELEE v2: which way a swing travels.
@@ -3723,6 +3805,8 @@ impl TdmSim {
                     parries: 0,
                     engaging: -1,
                     squad_role: SquadRole::Anchor,
+                    bound_phase: BoundPhase::Free,
+                    suppress_t: 0.0,
                     class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
@@ -4073,6 +4157,10 @@ impl TdmSim {
             // minigun's ~4.4 s, not nine times.
             f.gatling_cd = (f.gatling_cd - DT).max(0.0);
             f.stagger_t = (f.stagger_t - DT).max(0.0);
+            // §owner SUPPRESSION decays in real time, so it takes SUSTAINED
+            // fire to hold someone down. One lucky round buys half a
+            // second; pinning a man costs a belt.
+            f.suppress_t = (f.suppress_t - DT).max(0.0);
             f.gatling_trigger_t = (f.gatling_trigger_t - DT).max(0.0);
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
@@ -6483,6 +6571,19 @@ impl TdmSim {
                 ttl: 0.06,
                 shooter: i,
             });
+            // §owner SUPPRESSION: every enemy this round passed CLOSE to.
+            //
+            // Measured against the segment the tracer actually drew, not
+            // the infinite ray - a round that buried itself in a wall
+            // short of you did not come near you, however good the line
+            // looked from the muzzle. That distinction is the whole reason
+            // this sits here, after `end` is known, rather than up beside
+            // the hit test.
+            //
+            // Anyone actually HIT is skipped: they have a damage number,
+            // which is a louder message than suppression and is already
+            // being delivered.
+            self.mark_suppressed(i, o, end, victim.map(|(j, _, _)| j));
             // §4.5 WALLBANG: if the wall won, look a short window PAST
             // its entry face - a body inside it takes the round at half
             // damage. See PEN_WINDOW_M for why the window is also an
@@ -8627,6 +8728,100 @@ impl TdmSim {
         SquadRole::Anchor
     }
 
+    /// §owner SUPPRESSION: bank suppression on every enemy a round passed
+    /// close to.
+    ///
+    /// `o`..`end` is the segment the round actually travelled - see the
+    /// call site for why that matters. `hit` is the fighter who took the
+    /// round, if any, and is excluded.
+    ///
+    /// Distance is measured to the target's CHEST line rather than to his
+    /// feet: a round that goes over a crouching man's head by a metre is
+    /// terrifying, and one that furrows the dirt a metre in front of him
+    /// is barely worth turning around for, and both are exactly 1 m from
+    /// his position if you measure from the ground.
+    fn mark_suppressed(&mut self, i: usize, o: [f32; 3], end: [f32; 3], hit: Option<usize>) {
+        let shooter_team = self.fighters[i].team;
+        let seg = [end[0] - o[0], end[1] - o[1], end[2] - o[2]];
+        let seg_len2 = seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2];
+        if seg_len2 < 1e-6 {
+            return;
+        }
+        for j in 0..self.fighters.len() {
+            if j == i || Some(j) == hit {
+                continue;
+            }
+            let g = &self.fighters[j];
+            if g.team == shooter_team || !g.alive() || g.protect_t > 0.0 {
+                continue;
+            }
+            let chest = [g.pos[0], g.pos[1] + g.height() * 0.55, g.pos[2]];
+            let to = [chest[0] - o[0], chest[1] - o[1], chest[2] - o[2]];
+            // closest approach, CLAMPED to the segment - past its end the
+            // nearest point is the impact itself, not a projection beyond
+            // the wall the round stopped in
+            let t = ((to[0] * seg[0] + to[1] * seg[1] + to[2] * seg[2]) / seg_len2)
+                .clamp(0.0, 1.0);
+            let miss = [
+                to[0] - seg[0] * t,
+                to[1] - seg[1] * t,
+                to[2] - seg[2] * t,
+            ];
+            let d2 = miss[0] * miss[0] + miss[1] * miss[1] + miss[2] * miss[2];
+            if d2 < SUPPRESS_RADIUS_M * SUPPRESS_RADIUS_M {
+                let s = &mut self.fighters[j].suppress_t;
+                *s = (*s + SUPPRESS_PER_ROUND_S).min(SUPPRESS_MAX_S);
+            }
+        }
+    }
+
+    /// §owner BOUNDING OVERWATCH: which half of the pair `i` is in, given
+    /// the target it shares.
+    ///
+    /// The swap comes out of the sim clock and the fighter's RANK among
+    /// the squadmates on that target - both derived fresh every tick, so
+    /// there is no phase to store, nothing to drift, and two runs of one
+    /// seed bound on identical ticks. Rank is by index, the same ordering
+    /// `squad_role_for` uses, so the two axes at least disagree in a
+    /// predictable way rather than a random one.
+    ///
+    /// A lone bot is `Free`, not `Overwatch`: overwatch means covering
+    /// SOMEONE, and a bot standing still to cover nobody is a bot that
+    /// decided to die where it stood.
+    fn bound_phase_for(&self, i: usize, target: usize, dist: f32) -> BoundPhase {
+        if dist < BOUND_MIN_RANGE_M {
+            return BoundPhase::Free;
+        }
+        let f = &self.fighters[i];
+        let mut rank = 0usize;
+        let mut mates = 0usize;
+        for (k, m) in self.fighters.iter().enumerate() {
+            if k == i || m.team != f.team || !m.alive() || m.engaging != target as i32 {
+                continue;
+            }
+            let dx = m.pos[0] - f.pos[0];
+            let dz = m.pos[2] - f.pos[2];
+            if dx * dx + dz * dz < SQUAD_RADIUS_M * SQUAD_RADIUS_M {
+                mates += 1;
+                if k < i {
+                    rank += 1;
+                }
+            }
+        }
+        if mates == 0 {
+            return BoundPhase::Free;
+        }
+        // `floor` not `trunc`: t is never negative here, but trunc would
+        // fold the tick either side of zero into one double-length bound
+        // if it ever were.
+        let tick = (self.t / BOUND_PERIOD_S).floor() as i64;
+        if (tick + rank as i64).rem_euclid(2) == 0 {
+            BoundPhase::Bounding
+        } else {
+            BoundPhase::Overwatch
+        }
+    }
+
     /// §owner SQUAD AI: a push away from squadmates who are too close.
     /// Bots used to stack on the same waypoint and die to one grenade.
     fn squad_spacing(&self, i: usize) -> [f32; 2] {
@@ -8814,9 +9009,20 @@ impl TdmSim {
                 } else {
                     0.0
                 };
+                // §owner SUPPRESSION, consumed: a bot with rounds coming
+                // in stops WALKING INTO them. The push scales away as
+                // suppression builds and reverses at the top - it gives
+                // ground rather than freezing, because a bot that simply
+                // stopped would still be standing in the beaten zone.
+                //
+                // Applied before the crouch decision on purpose, so a
+                // suppressed bot ends up crouched by the existing rule
+                // rather than needing a second one bolted beside it.
+                let sup_move = (self.fighters[i].suppress_t / SUPPRESS_MAX_S).clamp(0.0, 1.0);
+                let closing = closing * (1.0 - sup_move * 1.35);
                 // through the shared guard - a bot-piloted mech must obey
                 // the same crouch ban the player's does
-                let want_crouch = closing == 0.0 && dist > 9.0;
+                let want_crouch = closing.abs() < 0.05 && dist > 9.0;
                 self.fighters[i].set_crouch(want_crouch);
                 // shield discipline: caught reloading in the open → turtle
                 // behind the shield until the mag is back in
@@ -8833,6 +9039,34 @@ impl TdmSim {
                         let side = if i % 2 == 0 { 1.0 } else { -1.0 };
                         (side * SQUAD_FLANK_STRENGTH, closing * 0.55)
                     }
+                };
+                // §owner BOUNDING OVERWATCH, on top of that: WHEN this bot
+                // moves, as against where it was already headed.
+                //
+                // Bounding multiplies whatever the role wanted rather than
+                // replacing it, so a flanker bounds along its flank and an
+                // anchor bounds up the middle - the two axes compose
+                // instead of one overruling the other.
+                //
+                // Overwatch plants: no closing, and the strafe cut to a
+                // token, because a man putting rounds on a doorway so his
+                // partner can cross it is not also side-stepping. That
+                // planting is what makes his fire land close enough to
+                // actually suppress, which is the whole trade - he buys
+                // his partner's bound with his own mobility.
+                // keyed off `engaged` - the target the SQUAD is converging
+                // on, the same one the role was derived from. Bounding
+                // with a partner who is shooting at somebody else is not
+                // bounding, it is two men taking turns standing still.
+                let bound = match engaged {
+                    Some(j) => self.bound_phase_for(i, j, dist),
+                    None => BoundPhase::Free,
+                };
+                self.fighters[i].bound_phase = bound;
+                let (strafe, closing) = match bound {
+                    BoundPhase::Free => (strafe, closing),
+                    BoundPhase::Bounding => (strafe, closing * BOUND_CLOSE_MULT),
+                    BoundPhase::Overwatch => (strafe * 0.15, 0.0),
                 };
                 let sep = self.squad_spacing(i);
                 vel = [
@@ -8901,6 +9135,16 @@ impl TdmSim {
                     // a hull mount has NO magazine - gating a chassis on
                     // the pilot's carried rounds is the whole defect
                     && (ammo > 0 || in_mech)
+                    // §owner BOUNDING OVERWATCH: the bounding half HOLDS
+                    // FIRE. A man crossing open ground at a run is not
+                    // shooting, and if he were, this would collapse into
+                    // "everyone advances while everyone fires" - which is
+                    // what bots already did, and is the thing bounding
+                    // exists to replace. The cost is real and is the
+                    // point: half the squad's guns are silent at any
+                    // moment, bought back by the other half being planted
+                    // and therefore accurate.
+                    && bound != BoundPhase::Bounding
                 {
                     // fire from the REAL muzzle (crouch lowers it) at the
                     // target's REAL chest (crouched enemies are short) —
@@ -8909,14 +9153,26 @@ impl TdmSim {
                     let eye = self.muzzle_origin(i);
                     let tgt = [gpos[0], gpos[1] + ghigh * 0.55, gpos[2]];
                     let aim = [tgt[0] - eye[0], tgt[1] - eye[1], tgt[2] - eye[2]];
+                    // §owner SUPPRESSION, consumed: a bot with rounds
+                    // cracking past it shoots WORSE. This is the whole
+                    // gameplay payload on the receiving end - a squad that
+                    // puts fire on a position now gets something for it
+                    // besides noise.
+                    //
+                    // A multiplier on the difficulty's own sigma, never a
+                    // floor: suppression makes a bot worse than ITSELF and
+                    // never worse than the difficulty below it, so a hard
+                    // bot pinned in a doorway is still a hard bot.
+                    let sup = (self.fighters[i].suppress_t / SUPPRESS_MAX_S).clamp(0.0, 1.0);
+                    let sigma = bp.aim_sigma * (1.0 + sup * (SUPPRESS_AIM_PENALTY - 1.0));
                     // NOTE the RNG draws are UNCONDITIONAL on the branch
                     // below and keep their original position: the bot
                     // stream is shared with everything else in the tick,
                     // so moving or skipping them would re-order the seeded
                     // sequence for every scenario, not just mech ones.
                     let (e1, e2) = (
-                        self.rng.range(-bp.aim_sigma, bp.aim_sigma),
-                        self.rng.range(-bp.aim_sigma, bp.aim_sigma),
+                        self.rng.range(-sigma, sigma),
+                        self.rng.range(-sigma, sigma),
                     );
                     let aim = perturb(normalize(aim), e1, e2);
                     if in_mech {
@@ -8944,6 +9200,10 @@ impl TdmSim {
                 self.fighters[i].los_time = 0.0;
                 self.fighters[i].crouch = false;
                 self.fighters[i].shield_up = false;
+                // nobody to bound against - and leaving a stale Overwatch
+                // on a roaming bot would have the client drawing a planted
+                // stance on a man walking to a waypoint
+                self.fighters[i].bound_phase = BoundPhase::Free;
                 // nothing to shoot: the plant is dropped. A braced mech
                 // walks at 12% - a bot that kept the stance after its
                 // target broke LOS would crawl the rest of the match.
@@ -10125,6 +10385,260 @@ mod tests {
         let mut solo = range(0x5A0F);
         solo.fighters[0].engaging = 1;
         assert_eq!(solo.squad_role_for(0, 1), SquadRole::Anchor);
+    }
+
+    /// §owner SUPPRESSION: a round that goes CLOSE PAST a man suppresses
+    /// him, and one that goes wide does not.
+    ///
+    /// The distinction is the entire feature. Before it, missing by 20 cm
+    /// and missing by 20 m were the same event - nothing - which is why a
+    /// squad could pour fire through a doorway and the man in it would
+    /// stroll out of it at full speed shooting straight.
+    #[test]
+    fn a_near_miss_suppresses_and_a_wide_one_does_not() {
+        let mut s = range(0x5C01);
+        s.fighters[0].team = Team::Blue;
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[1].team = Team::Red;
+        s.fighters[1].protect_t = 0.0;
+        s.fighters[1].pos = [0.0, 0.0, 20.0];
+        let chest_y = s.fighters[1].pos[1] + s.fighters[1].height() * 0.55;
+
+        // straight past his ear, half a metre off the chest line
+        let o = [0.5, chest_y, 0.0];
+        let end = [0.5, chest_y, 40.0];
+        s.mark_suppressed(0, o, end, None);
+        assert!(
+            s.fighters[1].suppress_t > 0.0,
+            "a round half a metre off the chest must suppress"
+        );
+
+        // a round the same distance out but WIDE of the radius does not
+        s.fighters[1].suppress_t = 0.0;
+        let wide = SUPPRESS_RADIUS_M + 1.0;
+        s.mark_suppressed(0, [wide, chest_y, 0.0], [wide, chest_y, 40.0], None);
+        assert_eq!(
+            s.fighters[1].suppress_t, 0.0,
+            "a round {wide} m out is past the room, not past him"
+        );
+
+        // and a round that STOPPED in a wall short of him does not
+        // either, however good the line was from the muzzle - this is why
+        // the measurement is against the segment, not the ray
+        s.mark_suppressed(0, o, [0.5, chest_y, 8.0], None);
+        assert_eq!(
+            s.fighters[1].suppress_t, 0.0,
+            "a round that died in cover 12 m short cannot have gone past him"
+        );
+
+        // it never suppresses your own side, and never the man who was HIT
+        // - he has a damage number, which is a louder message
+        s.fighters[1].team = Team::Blue;
+        s.mark_suppressed(0, o, end, None);
+        assert_eq!(s.fighters[1].suppress_t, 0.0, "friendly fire is not suppression");
+        s.fighters[1].team = Team::Red;
+        s.mark_suppressed(0, o, end, Some(1));
+        assert_eq!(s.fighters[1].suppress_t, 0.0, "the man hit is not also suppressed");
+    }
+
+    /// Suppression STACKS to a ceiling and DECAYS in real time, so
+    /// pinning a man costs a belt rather than a lucky round.
+    #[test]
+    fn suppression_stacks_to_a_ceiling_and_bleeds_off() {
+        let mut s = range(0x5C02);
+        s.fighters[0].team = Team::Blue;
+        s.fighters[1].team = Team::Red;
+        s.fighters[1].protect_t = 0.0;
+        s.fighters[1].pos = [0.0, 0.0, 20.0];
+        let y = s.fighters[1].pos[1] + s.fighters[1].height() * 0.55;
+        let (o, end) = ([0.4, y, 0.0], [0.4, y, 40.0]);
+
+        s.mark_suppressed(0, o, end, None);
+        let one = s.fighters[1].suppress_t;
+        assert!(
+            (one - SUPPRESS_PER_ROUND_S).abs() < 1e-6,
+            "one round buys exactly one increment, got {one}"
+        );
+        for _ in 0..200 {
+            s.mark_suppressed(0, o, end, None);
+        }
+        assert!(
+            (s.fighters[1].suppress_t - SUPPRESS_MAX_S).abs() < 1e-6,
+            "sustained fire must saturate at the ceiling, not run away - \
+             without one, a belt gun pins a man for the rest of the round"
+        );
+        // and it bleeds: one second of the real step loop, no more fire
+        let before = s.fighters[1].suppress_t;
+        for _ in 0..(SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.fighters[1].suppress_t < before - 0.5,
+            "suppression must decay in real time: {before} -> {}",
+            s.fighters[1].suppress_t
+        );
+    }
+
+    /// A suppressed bot's aim degrades - but only relative to ITSELF.
+    ///
+    /// The multiplier form matters: a floor would make a hard bot under
+    /// fire worse than an easy bot in the open, which would mean turning
+    /// the difficulty up could make an encounter easier.
+    #[test]
+    fn suppression_degrades_a_bot_toward_itself_never_past_the_tier_below() {
+        let sigma = |base: f32, sup: f32| {
+            let a = (sup / SUPPRESS_MAX_S).clamp(0.0, 1.0);
+            base * (1.0 + a * (SUPPRESS_AIM_PENALTY - 1.0))
+        };
+        let hard = bot_params(Difficulty::Hard).aim_sigma;
+        let easy = bot_params(Difficulty::Easy).aim_sigma;
+        assert!(hard < easy, "the test's premise: harder bots aim tighter");
+        assert_eq!(sigma(hard, 0.0), hard, "unsuppressed changes nothing");
+        assert!(
+            sigma(hard, SUPPRESS_MAX_S) > hard,
+            "a pinned bot must actually shoot worse"
+        );
+        assert!(
+            sigma(hard, SUPPRESS_MAX_S) < easy,
+            "a pinned HARD bot must still out-shoot a free EASY one, or the \
+             difficulty dial stops meaning anything under fire"
+        );
+        // over-saturation cannot push it further - the clamp is load-bearing
+        assert_eq!(sigma(hard, SUPPRESS_MAX_S * 9.0), sigma(hard, SUPPRESS_MAX_S));
+    }
+
+    /// §owner BOUNDING OVERWATCH: at any instant one half of the pair is
+    /// moving and the other is planted, and they swap.
+    ///
+    /// The phase is a function of the clock and index rank alone - no
+    /// stored timer - which is what makes it survive the replay tests. So
+    /// this checks the real property: the two are never in the same phase,
+    /// and both phases are visited over one period.
+    #[test]
+    fn a_bounding_pair_never_moves_at_the_same_time() {
+        let mut s = TdmSim::new(cfg(0x5C03, 2, Mode::Tdm, MapKind::Arena));
+        for i in 0..2 {
+            s.fighters[i].team = Team::Blue;
+            s.fighters[i].pos = [i as f32 * 2.0, 0.0, 0.0];
+            s.fighters[i].engaging = 3;
+        }
+        s.fighters[3].team = Team::Red;
+        s.fighters[3].pos = [0.0, 0.0, 30.0];
+        let far = 30.0;
+
+        let mut seen = [false, false];
+        for tick in 0..(SIM_HZ as usize * 4) {
+            s.t = tick as f32 * DT;
+            let a = s.bound_phase_for(0, 3, far);
+            let b = s.bound_phase_for(1, 3, far);
+            assert_ne!(
+                a, b,
+                "at t={} both men are {a:?} - somebody has to be shooting",
+                s.t
+            );
+            for p in [a, b] {
+                match p {
+                    BoundPhase::Bounding => seen[0] = true,
+                    BoundPhase::Overwatch => seen[1] = true,
+                    BoundPhase::Free => panic!("a real pair at {far} m must bound"),
+                }
+            }
+        }
+        assert!(seen[0] && seen[1], "both phases must actually occur");
+
+        // and it really does swap - not one static assignment held forever
+        s.t = 0.0;
+        let first = s.bound_phase_for(0, 3, far);
+        s.t = BOUND_PERIOD_S * 1.5;
+        assert_ne!(first, s.bound_phase_for(0, 3, far), "the pair must trade turns");
+    }
+
+    /// A lone bot is `Free`, and so is any pair in a room fight.
+    ///
+    /// Overwatch means covering SOMEONE. A bot planting itself to cover
+    /// nobody is a bot deciding to die where it stands, and stopping dead
+    /// while a man closes the last ten metres is the same thing.
+    #[test]
+    fn nobody_bounds_alone_or_at_knife_range() {
+        let mut s = TdmSim::new(cfg(0x5C04, 2, Mode::Tdm, MapKind::Arena));
+        for i in 0..2 {
+            s.fighters[i].team = Team::Blue;
+            s.fighters[i].pos = [i as f32 * 2.0, 0.0, 0.0];
+            s.fighters[i].engaging = 3;
+        }
+        s.fighters[3].team = Team::Red;
+        assert_eq!(
+            s.bound_phase_for(0, 3, BOUND_MIN_RANGE_M - 0.1),
+            BoundPhase::Free,
+            "inside the minimum this is a room fight"
+        );
+        // alone: nobody else is on that target
+        s.fighters[1].engaging = -1;
+        assert_eq!(
+            s.bound_phase_for(0, 3, 30.0),
+            BoundPhase::Free,
+            "a bot with no partner has nobody to cover"
+        );
+        // a partner too far away to be a partner
+        s.fighters[1].engaging = 3;
+        s.fighters[1].pos = [SQUAD_RADIUS_M + 10.0, 0.0, 0.0];
+        assert_eq!(
+            s.bound_phase_for(0, 3, 30.0),
+            BoundPhase::Free,
+            "a man across the map is not bounding with you"
+        );
+        // and a dead partner is not a partner
+        s.fighters[1].pos = [2.0, 0.0, 0.0];
+        s.fighters[1].health = 0.0;
+        assert_eq!(s.bound_phase_for(0, 3, 30.0), BoundPhase::Free);
+    }
+
+    /// The behavioural claim, through the real step loop: over a long
+    /// engagement a bounding squad both MOVES and SHOOTS, and does not
+    /// deadlock into one or the other.
+    ///
+    /// The two ways this feature could quietly ruin the game are a squad
+    /// that freezes (everyone stuck in overwatch, nobody closes, the round
+    /// times out) and a squad that never stops running (bounding gates
+    /// fire, so a stuck-bounding squad is a squad that has disarmed
+    /// itself). Both are invisible to a determinism test - they reproduce
+    /// perfectly.
+    #[test]
+    fn a_bounding_squad_still_advances_and_still_shoots() {
+        let mut s = TdmSim::new(cfg(0x5C05, 5, Mode::Tdm, MapKind::Arena));
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        let blue: Vec<usize> = (0..s.fighters.len())
+            .filter(|&i| s.fighters[i].team == Team::Blue && i != s.player)
+            .collect();
+        let start: Vec<[f32; 3]> = blue.iter().map(|&i| s.fighters[i].pos).collect();
+        let mut moved = false;
+        let mut shots = 0usize;
+        let mut bounded = false;
+        let mut overwatched = false;
+        for _ in 0..(SIM_HZ as usize * 25) {
+            s.step(PlayerCmd::default());
+            shots += s.tracers.len();
+            for &i in &blue {
+                match s.fighters[i].bound_phase {
+                    BoundPhase::Bounding => bounded = true,
+                    BoundPhase::Overwatch => overwatched = true,
+                    BoundPhase::Free => {}
+                }
+            }
+        }
+        for (n, &i) in blue.iter().enumerate() {
+            let d = s.fighters[i].pos;
+            let dx = d[0] - start[n][0];
+            let dz = d[2] - start[n][2];
+            if dx * dx + dz * dz > 4.0 {
+                moved = true;
+            }
+        }
+        assert!(bounded && overwatched, "a 5v5 must actually bound at some point");
+        assert!(moved, "a bounding squad still has to cross ground");
+        assert!(shots > 0, "a bounding squad still has to put rounds down");
     }
 
     /// Bots that stand on each other die to one grenade. Spacing pushes
