@@ -2298,6 +2298,198 @@ struct BarAssets {
     red: Handle<StandardMaterial>,
 }
 
+// ---- §owner TEXTURE PIPELINE ---------------------------------------------
+//
+// Every surface in this world was a flat colour. That is the single
+// biggest thing holding the look back: shape and lighting were doing all
+// the work, so a wall, a crate and the ground differed only in hue.
+//
+// The textures are GENERATED, not loaded. There is no texture art in
+// this project, and inventing a dependency on files that do not exist
+// would block the whole feature on an art pass. Procedural noise costs
+// nothing at build time, ships inside the binary, and - because every
+// generator here is a pure function of a seed - is bit-identical on
+// every machine, which matters for a capture harness that compares
+// frames.
+//
+// All of it is COSMETIC. No texture is ever read by `sim`.
+
+/// Side of every generated texture. Small on purpose: these tile, and a
+/// 128px tile that repeats convincingly beats a 1024px one that costs
+/// memory to say the same thing at this art style's fidelity.
+const TEX_SIZE: u32 = 128;
+
+/// A deterministic value-noise hash in 0..1, seeded per texture.
+///
+/// Deliberately its own tiny hash rather than the sim's `Pcg32`: this
+/// runs at startup on the render side and must never touch the
+/// simulation's RNG stream, or generating a texture would move where
+/// bullets go.
+fn tex_hash(x: u32, y: u32, seed: u32) -> f32 {
+    let mut h = x
+        .wrapping_mul(0x27d4_eb2d)
+        ^ y.wrapping_mul(0x1656_67b1)
+        ^ seed.wrapping_mul(0x9e37_79b9);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    (h & 0xffff) as f32 / 65535.0
+}
+
+/// Smoothed noise at a given cell size, wrapping at the tile edge so the
+/// texture repeats seamlessly - a tile with a visible seam is worse than
+/// no texture at all.
+fn tex_noise(x: u32, y: u32, cells: u32, seed: u32) -> f32 {
+    let cells = cells.max(1);
+    let step = (TEX_SIZE / cells).max(1);
+    let (gx, gy) = (x / step, y / step);
+    let (fx, fy) = (
+        (x % step) as f32 / step as f32,
+        (y % step) as f32 / step as f32,
+    );
+    // smoothstep, for a soft interpolation rather than a linear ramp
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let w = |a: u32, b: u32| tex_hash(a % cells, b % cells, seed);
+    let (a, b) = (w(gx, gy), w(gx + 1, gy));
+    let (c, d) = (w(gx, gy + 1), w(gx + 1, gy + 1));
+    let top = a + (b - a) * sx;
+    let bot = c + (d - c) * sx;
+    top + (bot - top) * sy
+}
+
+/// Several octaves of the above - the standard trick that turns flat
+/// noise into something that reads as a material.
+fn tex_fbm(x: u32, y: u32, seed: u32) -> f32 {
+    let mut v = 0.0;
+    let mut amp = 0.5;
+    let mut cells = 4;
+    for o in 0..4 {
+        v += tex_noise(x, y, cells, seed.wrapping_add(o * 977)) * amp;
+        amp *= 0.5;
+        cells *= 2;
+    }
+    v.clamp(0.0, 1.0)
+}
+
+/// Build a tiling texture from a per-pixel closure returning a
+/// brightness multiplier in 0..1, where 1.0 means "leave this texel
+/// alone".
+///
+/// The base colour stays on the MATERIAL, so one generator serves every
+/// tint: the texture supplies structure, the material supplies colour.
+/// That is why these are all grey.
+///
+/// The generators therefore run DARK-SIDE ONLY - they shade downward
+/// from white and never above it. The first cut centred them on 1.0 and
+/// encoded that as mid-grey, which silently halved the brightness of
+/// every surface it touched and washed the variation out to nothing.
+fn make_tex(images: &mut Assets<Image>, f: impl Fn(u32, u32) -> f32) -> Handle<Image> {
+    use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut data = Vec::with_capacity((TEX_SIZE * TEX_SIZE * 4) as usize);
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let v = (f(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+            data.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d {
+            width: TEX_SIZE,
+            height: TEX_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        // Unorm, NOT Srgb: this is a multiplier against base_color, and
+        // running it through an sRGB decode would darken every surface
+        // it touches rather than modulating it.
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // These tile across large surfaces. Without Repeat the sampler
+    // clamps and a single edge texel smears across a whole wall.
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..ImageSamplerDescriptor::linear()
+    });
+    images.add(img)
+}
+
+/// The generated surface set. Structure only - every one of these is
+/// grey and takes its colour from whatever material mounts it.
+#[derive(Resource, Clone)]
+struct TextureKit {
+    /// wind-rippled dirt with scattered grit
+    ground: Handle<Image>,
+    /// coarse blockwork with offset courses and mortar lines
+    stone: Handle<Image>,
+    /// straight grain with occasional knots
+    wood: Handle<Image>,
+    /// fine brushed grain with a few deeper scratches
+    metal: Handle<Image>,
+}
+
+fn build_texture_kit(images: &mut Assets<Image>) -> TextureKit {
+    let n = TEX_SIZE as f32;
+    // GROUND: broad dunes plus fine grit, so it reads both at the
+    // player's feet and out at the fog line
+    let ground = make_tex(images, |x, y| {
+        let broad = tex_fbm(x, y, 11);
+        let grit = tex_hash(x, y, 733);
+        // fbm clusters hard around its own mean, so raw it produced a
+        // band far too narrow to see once lit - a checkerboard
+        // diagnostic proved the texture was binding and tiling
+        // correctly all along and only the CONTRAST was wrong. Pushed
+        // out from the midpoint before use.
+        let broad = ((broad - 0.5) * 2.4 + 0.5).clamp(0.0, 1.0);
+        // patches of packed dirt against looser sand, at a scale bigger
+        // than one tile's noise so the ground does not read as uniform
+        // fuzz
+        let patch = if tex_noise(x, y, 3, 401) > 0.58 { 0.86 } else { 1.0 };
+        ((0.55 + broad * 0.45) * patch + grit * 0.06).min(1.0)
+    });
+    // STONE: mortar lines every quarter tile, courses offset row to row
+    // so it reads as laid blockwork rather than a grid, with noise over
+    // the faces so no two blocks match
+    let stone = make_tex(images, |x, y| {
+        let block = TEX_SIZE / 4;
+        let row = y / block;
+        let shift = if row % 2 == 0 { 0 } else { block / 2 };
+        let bx = (x + shift) % block;
+        let by = y % block;
+        let mortar = bx < 3 || by < 3;
+        let body = 0.74 + tex_fbm(x, y, 29) * 0.26;
+        if mortar {
+            body * 0.55 // the joint reads as a real recess
+        } else {
+            body
+        }
+    });
+    // WOOD: grain along one axis, warped by noise so it is grain and not
+    // stripes, with the odd darker knot
+    let wood = make_tex(images, |x, y| {
+        let warp = tex_fbm(x, y, 53) * 12.0;
+        let rings = (((y as f32 + warp) / n * 22.0).sin() * 0.5 + 0.5).powf(1.6);
+        let knot = if tex_noise(x, y, 6, 91) > 0.86 { 0.62 } else { 1.0 };
+        ((0.66 + rings * 0.34) * knot).min(1.0)
+    });
+    // METAL: fine horizontal brushing, plus a few deeper scratches
+    let metal = make_tex(images, |x, y| {
+        let brush = tex_hash(x / 2, y, 137) * 0.12;
+        let scratch = if tex_noise(x, y, 3, 211) > 0.90 { 0.80 } else { 1.0 };
+        ((0.84 + brush) * scratch).min(1.0)
+    });
+    TextureKit {
+        ground,
+        stone,
+        wood,
+        metal,
+    }
+}
+
 /// Shared meshes + materials for building weapon / gear models.
 #[derive(Resource, Clone)]
 struct ModelKit {
@@ -7371,6 +7563,11 @@ fn setup(
         perceptual_roughness: 0.60,
         ..default()
     };
+    // §owner TEXTURE PIPELINE: generated once at startup, then shared.
+    // Built BEFORE the model kit so the mech's own materials can mount
+    // the metal grain, and inserted as a resource so `rebuild_world` -
+    // which runs on every deploy and rematch - always finds it present.
+    let tex_kit = build_texture_kit(&mut images);
     let kit = ModelKit {
         cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         cyl: meshes.add(Cylinder::new(0.5, 1.0)),
@@ -7416,8 +7613,25 @@ fn setup(
         // Task 5.2 (MISSION doc, supersedes Brief VI's gunmetal): a real
         // military walker is olive-drab/khaki, not gray - the art's
         // whole "this is real hardware" read depends on the palette.
-        mech_khaki: materials.add(metal(Color::srgb_u8(0x8A, 0x87, 0x70), 0.05, 0.72)),
-        mech_khaki_dk: materials.add(metal(Color::srgb_u8(0x5F, 0x5E, 0x52), 0.05, 0.75)),
+        // §owner: the chassis carries the brushed grain. Its plates
+        // are the largest single-colour surfaces on any character, so
+        // they are where flat shading showed worst.
+        mech_khaki: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x8A, 0x87, 0x70),
+            base_color_texture: Some(tex_kit.metal.clone()),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
+            metallic: 0.05,
+            perceptual_roughness: 0.72,
+            ..default()
+        }),
+        mech_khaki_dk: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x5F, 0x5E, 0x52),
+            base_color_texture: Some(tex_kit.metal.clone()),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
+            metallic: 0.05,
+            perceptual_roughness: 0.75,
+            ..default()
+        }),
         mech_khaki_lt: materials.add(metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65)),
         mech_shadow: materials.add(flat(0x33352F)),
         mech_metal: materials.add(metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45)),
@@ -7480,6 +7694,7 @@ fn setup(
     let orange = materials.add(unlit(Color::srgb(0.95, 0.65, 0.15)));
     let red = materials.add(unlit(Color::srgb(0.92, 0.18, 0.15)));
     commands.insert_resource(BarAssets { green, orange, red });
+    commands.insert_resource(tex_kit.clone());
     commands.insert_resource(kit.clone());
 
     // ---- §7.2 the Forge turntable stage --------------------------------
@@ -8899,6 +9114,7 @@ fn rebuild_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     kit: Res<ModelKit>,
+    tex: Res<TextureKit>,
     bars: Res<BarAssets>,
     sel: Res<Selected>,
     old: Query<
@@ -8974,6 +9190,12 @@ fn rebuild_world(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(half * 2.2, half * 2.2))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: ground_c,
+            base_color_texture: Some(tex.ground.clone()),
+            // the plane's UVs run 0..1 across its whole span, so without
+            // a transform one 128px tile stretches over the entire map.
+            // Tiled per ~4 m, which is about where grit stops reading as
+            // grit and starts reading as noise.
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(half * 0.55)),
             perceptual_roughness: 1.0,
             ..default()
         })),
@@ -9048,6 +9270,8 @@ fn rebuild_world(
     // cover blocks, styled by what they're made of
     let crate_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.50, 0.40, 0.28),
+        base_color_texture: Some(tex.wood.clone()),
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.6)),
         perceptual_roughness: 0.9,
         ..default()
     });
@@ -9056,6 +9280,11 @@ fn rebuild_world(
             MapKind::Arena => Color::srgb(0.52, 0.48, 0.42),
             _ => Color::srgb(0.56, 0.56, 0.54),
         },
+        base_color_texture: Some(tex.stone.clone()),
+        // cover blocks vary hugely in size; a modest tile keeps the
+        // course height believable on a low wall without turning a big
+        // one into gravel
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.25)),
         perceptual_roughness: 0.95,
         ..default()
     });
@@ -9066,6 +9295,9 @@ fn rebuild_world(
     });
     let trunk_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.35, 0.24, 0.13),
+        base_color_texture: Some(tex.wood.clone()),
+        // a trunk wants its grain running up it, not around it
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::new(1.0, 3.0)),
         perceptual_roughness: 1.0,
         ..default()
     });
@@ -16251,6 +16483,50 @@ mod band_tests {
 
     /// §1.4 Rule-2 gate: scoped + zoomed = the viewmodel is not rendered.
     #[test]
+    /// §owner TEXTURE PIPELINE: the generators are pure functions of a
+    /// seed, they TILE seamlessly, and they only ever darken.
+    ///
+    /// All three properties are load-bearing. Purity keeps every machine
+    /// (and every capture) identical. Seamlessness is what makes a 128px
+    /// tile usable across a 60 m map - a visible seam is worse than no
+    /// texture. And "never brighter than white" is the one that already
+    /// bit once: the first encoding centred the multiplier on mid-grey,
+    /// which silently halved the brightness of every surface it touched.
+    #[test]
+    fn generated_textures_tile_and_only_darken() {
+        // pure: same input, same output, every time
+        for (x, y, seed) in [(0u32, 0u32, 7u32), (63, 17, 11), (127, 127, 29)] {
+            assert_eq!(tex_hash(x, y, seed), tex_hash(x, y, seed));
+            assert_eq!(tex_fbm(x, y, seed), tex_fbm(x, y, seed));
+        }
+        // seamless: the noise wraps, so the left edge matches where the
+        // right edge would continue to
+        for y in (0..TEX_SIZE).step_by(7) {
+            let left = tex_noise(0, y, 8, 5);
+            let wrapped = tex_noise(TEX_SIZE, y, 8, 5);
+            assert!(
+                (left - wrapped).abs() < 1e-6,
+                "the tile must wrap at x: {left} vs {wrapped} at y={y}"
+            );
+        }
+        for x in (0..TEX_SIZE).step_by(7) {
+            let top = tex_noise(x, 0, 8, 5);
+            let wrapped = tex_noise(x, TEX_SIZE, 8, 5);
+            assert!(
+                (top - wrapped).abs() < 1e-6,
+                "the tile must wrap at y: {top} vs {wrapped} at x={x}"
+            );
+        }
+        // in range: fbm never leaves 0..1, so no generator can be pushed
+        // past white by its own noise term
+        for x in (0..TEX_SIZE).step_by(11) {
+            for y in (0..TEX_SIZE).step_by(11) {
+                let v = tex_fbm(x, y, 3);
+                assert!((0.0..=1.0).contains(&v), "fbm out of range: {v}");
+            }
+        }
+    }
+
     /// §2.5: the Vec3 spring is the SAME math as the 2D one, not a
     /// second solver - it must critically damp on every axis, reach its
     /// target, and never overshoot.
