@@ -10,3 +10,11 @@ export/
 # clean checkout produces, and before/after comparison is only valid when
 # both frames came from the same settings.
 engine/crates/jk_tdm/config/settings.txt
+
+# Forge profile slots, written next to the running exe by F5/F6/F7. Same
+# reasoning as settings.txt: per-machine player state that the game READS AT
+# STARTUP, so a committed copy would put someone else's saved appearance on
+# every fresh checkout - and the pre-helmet-format compatibility path in
+# `ForgeProfile::from_line` exists precisely because these files outlive the
+# code that wrote them.
+engine/forge_slot_*.txt

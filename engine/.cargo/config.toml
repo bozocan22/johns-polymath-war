@@ -1,0 +1,21 @@
+# rustc needs a bigger stack to compile this workspace.
+#
+# `jk_tdm/src/main.rs` is ~19k lines in one file, and rustc's type-checking
+# and const-evaluation recurse over it deeply enough to blow the default
+# 8 MB thread stack. On Windows that surfaces as an ABRUPT compiler crash
+# with NO diagnostic at all:
+#
+#     process didn't exit successfully: rustc.exe ...
+#     (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+#
+# It is not a code error, it is the compiler running out of stack - which
+# is worth stating plainly, because the failure looks exactly like a
+# miscompile and the natural response is to start deleting the code you
+# just wrote. It reproduces on `cargo test` (the bigger crate) before
+# `cargo build`, and it is sensitive to how much is in the file, so it will
+# come and go as the file grows and shrinks.
+#
+# 128 MB is far more than measured need - the point is headroom, so this
+# does not have to be revisited every time the file grows.
+[env]
+RUST_MIN_STACK = "134217728"

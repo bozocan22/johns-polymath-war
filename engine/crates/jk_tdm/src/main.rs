@@ -887,6 +887,8 @@ struct Selected {
     /// cosmetic only: hat + tunic colors picked before the match
     hat: usize,
     tunic: usize,
+    /// §8.1: the helmet SHAPE, orthogonal to `hat` (which is its tint).
+    helmet: usize,
     /// §6/§8 (Brief IV): melee slot choice + grenade budget preset
     melee_axe: bool,
     grenade_preset: usize,
@@ -907,6 +909,9 @@ struct ForgeProfile {
     tunic: usize,
     melee_axe: bool,
     grenade_preset: usize,
+    /// §8.1. Added AFTER slots shipped, which is why `from_line` treats it
+    /// as optional - see there.
+    helmet: usize,
 }
 
 impl ForgeProfile {
@@ -916,19 +921,35 @@ impl ForgeProfile {
             tunic: sel.tunic,
             melee_axe: sel.melee_axe,
             grenade_preset: sel.grenade_preset,
+            helmet: sel.helmet,
         }
     }
     fn apply_to(&self, sel: &mut Selected) {
         sel.hat = self.hat;
         sel.tunic = self.tunic;
+        sel.helmet = self.helmet;
         sel.melee_axe = self.melee_axe;
         sel.grenade_preset = self.grenade_preset;
     }
     /// A compact one-line format - no serde dependency needed for four
-    /// small fields. `hat,tunic,melee_axe,grenade_preset`.
+    /// A compact one-line format - no serde dependency needed for five
+    /// small fields. `hat,tunic,melee_axe,grenade_preset,helmet`.
     fn to_line(&self) -> String {
-        format!("{},{},{},{}", self.hat, self.tunic, self.melee_axe as u8, self.grenade_preset)
+        format!(
+            "{},{},{},{},{}",
+            self.hat, self.tunic, self.melee_axe as u8, self.grenade_preset, self.helmet
+        )
     }
+    /// Parses both the four-field format that shipped and the five-field
+    /// one that adds the helmet.
+    ///
+    /// The trailing field is OPTIONAL rather than required because slot
+    /// files already exist on disk from before §8.1, and the alternative -
+    /// rejecting them - would silently wipe someone's saved profiles the
+    /// first time they launched an updated build. A missing helmet reads as
+    /// index 0, the FIELD CAP, which is exactly the shape those profiles
+    /// were wearing when they were written. Everything up to the comma
+    /// count is still strict: a malformed field is still `None`.
     fn from_line(s: &str) -> Option<Self> {
         let mut it = s.trim().split(',');
         Some(ForgeProfile {
@@ -936,6 +957,10 @@ impl ForgeProfile {
             tunic: it.next()?.parse().ok()?,
             melee_axe: it.next()?.parse::<u8>().ok()? != 0,
             grenade_preset: it.next()?.parse().ok()?,
+            helmet: match it.next() {
+                None => 0,
+                Some(v) => v.trim().parse().ok()?,
+            },
         })
     }
 }
@@ -964,6 +989,7 @@ impl Default for Selected {
             tdm_target: sim::TDM_TARGET,
             hat: 0,
             tunic: 0,
+            helmet: 0,
             melee_axe: false,
             grenade_preset: 0,
         }
@@ -1366,6 +1392,231 @@ const TUNIC_CHOICES: [(&str, (f32, f32, f32)); 4] = [
     ("VIOLET", (0.60, 0.35, 0.85)),
     ("STEEL", (0.55, 0.58, 0.62)),
 ];
+
+// ---- §8.1 (Brief VIII): the HELMET part library -------------------------
+//
+// Until now "hat" was a COLOUR pick: four entries in `HAT_CHOICES`, all
+// wearing the identical brim-crown-band. Two players who picked
+// differently had the same silhouette in a different tint, and at the
+// ranges this game is played at, tint is the first thing the fog and the
+// team-signal wash out. Silhouette is what survives.
+//
+// So a helmet is now GEOMETRY. Each entry below is a list of primitive
+// pieces placed in the hat socket's local space, and the four colours
+// remain, orthogonal - five shapes x four tints.
+//
+// The library is plain data on purpose. A helmet that is a `&[HelmetPiece]`
+// can be checked by a test that never opens a window: bounds, piece count,
+// and the frozen-shape guarantee below are all decidable from the table.
+// A helmet that was a hand-written run of `commands.spawn` calls - which is
+// exactly what this replaces - could only be checked by looking at it.
+//
+// COSMETIC. A helmet never changes a hitbox. In particular it does not
+// change the HEAD BAND: `sim` classifies a head hit above height fraction
+// 0.82 of the fighter capsule, computed from the capsule alone, and a tall
+// crest sticking out above that line is decoration hanging in free air. Do
+// not "fix" that by growing the capsule - the band is a gameplay contract
+// shared with every hit test and every bot's aim.
+
+/// Which unit primitive a helmet piece is built from. The three the
+/// `ModelKit` already carries - the library deliberately invents no new
+/// meshes, since the whole point is that shape comes from ARRANGEMENT.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Prim {
+    Cyl,
+    Cube,
+    Ball,
+}
+
+/// Which material slot a piece paints with. `Tint` is the player's
+/// `HAT_CHOICES` pick; the rest are fixed kit greys, so every helmet keeps
+/// some metal on it and no tint choice can turn one into a flat blob.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HelmetMat {
+    Tint,
+    Gunmetal,
+    Steel,
+    Glow,
+}
+
+/// One primitive in a helmet, in hat-socket local space.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct HelmetPiece {
+    prim: Prim,
+    mat: HelmetMat,
+    pos: (f32, f32, f32),
+    scale: (f32, f32, f32),
+    /// Lean about X (nose-down positive) and about Z (splay outward),
+    /// radians. Two axes because the library needs both: a brow slab
+    /// overhangs FORWARD and a horn sweeps SIDEWAYS, and one angle cannot
+    /// do both. Most pieces use neither.
+    pitch: f32,
+    roll: f32,
+}
+
+const fn hp(
+    prim: Prim,
+    mat: HelmetMat,
+    pos: (f32, f32, f32),
+    scale: (f32, f32, f32),
+) -> HelmetPiece {
+    HelmetPiece { prim, mat, pos, scale, pitch: 0.0, roll: 0.0 }
+}
+
+/// Same, leaning. `pitch` tips it forward/back, `roll` splays it out.
+const fn hpr(
+    prim: Prim,
+    mat: HelmetMat,
+    pos: (f32, f32, f32),
+    scale: (f32, f32, f32),
+    pitch: f32,
+    roll: f32,
+) -> HelmetPiece {
+    HelmetPiece { prim, mat, pos, scale, pitch, roll }
+}
+
+/// The antenna, worn by EVERY helmet.
+///
+/// Shared rather than repeated per entry because it is not decoration: the
+/// glowing tip is how you read a robot's facing at distance, and a helmet
+/// that dropped it would be strictly harder to fight against than the
+/// others. Cosmetic choices must not change how legible a target is.
+const HELMET_ANTENNA: [HelmetPiece; 2] = [
+    hp(Prim::Cyl, HelmetMat::Steel, (0.13, 1.22, 0.0), (0.015, 0.13, 0.015)),
+    hp(Prim::Cube, HelmetMat::Glow, (0.13, 1.30, 0.0), (0.035, 0.035, 0.035)),
+];
+
+/// FIELD CAP - the original. FROZEN: these three pieces carry the exact
+/// positions and scales the body had before the library existed, so index
+/// 0 is a byte-for-byte continuation of the old look and nobody's saved
+/// profile silently changes shape. `helmet_zero_is_the_frozen_field_cap`
+/// pins them.
+const HELM_CAP: [HelmetPiece; 3] = [
+    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.02, 0.0), (0.72, 0.028, 0.72)),
+    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.11, 0.0), (0.36, 0.18, 0.36)),
+    hp(Prim::Cyl, HelmetMat::Gunmetal, (0.0, 1.045, 0.0), (0.365, 0.04, 0.365)),
+];
+
+/// VISOR - a closed combat helm. Round dome, a brow slab that overhangs
+/// the eyes, and two cheek plates. Reads as the heaviest of the five from
+/// the front and is the one that most changes the head's outline.
+const HELM_VISOR: [HelmetPiece; 5] = [
+    hp(Prim::Ball, HelmetMat::Tint, (0.0, 1.08, 0.0), (0.44, 0.40, 0.44)),
+    hpr(Prim::Cube, HelmetMat::Gunmetal, (0.0, 1.03, -0.19), (0.40, 0.075, 0.10), -0.28, 0.0),
+    hp(Prim::Cube, HelmetMat::Tint, (-0.19, 0.97, -0.06), (0.055, 0.16, 0.20)),
+    hp(Prim::Cube, HelmetMat::Tint, (0.19, 0.97, -0.06), (0.055, 0.16, 0.20)),
+    hp(Prim::Cyl, HelmetMat::Steel, (0.0, 1.155, 0.0), (0.30, 0.030, 0.30)),
+];
+
+/// CREST - officer's helm. Low dome with a fore-and-aft blade running over
+/// the crown, the classic parade silhouette; the tallest entry.
+const HELM_CREST: [HelmetPiece; 4] = [
+    hp(Prim::Ball, HelmetMat::Tint, (0.0, 1.06, 0.0), (0.42, 0.34, 0.42)),
+    hp(Prim::Cube, HelmetMat::Gunmetal, (0.0, 1.23, 0.0), (0.045, 0.19, 0.52)),
+    hp(Prim::Cube, HelmetMat::Tint, (0.0, 1.31, 0.02), (0.075, 0.055, 0.40)),
+    hp(Prim::Cyl, HelmetMat::Steel, (0.0, 1.015, 0.0), (0.44, 0.035, 0.44)),
+];
+
+/// HOOD - a scout's soft cowl. No brim and no crown: a shallow shell with
+/// a flap down the back of the neck. The lowest-profile entry, and the one
+/// that leaves the most of the head shell showing.
+const HELM_HOOD: [HelmetPiece; 3] = [
+    hp(Prim::Ball, HelmetMat::Tint, (0.0, 1.02, 0.0), (0.40, 0.24, 0.44)),
+    hpr(Prim::Cube, HelmetMat::Tint, (0.0, 0.98, 0.17), (0.30, 0.20, 0.045), 0.22, 0.0),
+    hp(Prim::Cube, HelmetMat::Gunmetal, (0.0, 1.04, -0.17), (0.16, 0.045, 0.06)),
+];
+
+/// HORNS - the intimidation pick. Band and dome with two swept horns. The
+/// widest entry, which is the point: it is unmistakable in peripheral
+/// vision even when the tint is lost to fog.
+const HELM_HORNS: [HelmetPiece; 5] = [
+    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.10, 0.0), (0.38, 0.16, 0.38)),
+    hp(Prim::Cyl, HelmetMat::Gunmetal, (0.0, 1.03, 0.0), (0.40, 0.045, 0.40)),
+    hpr(Prim::Cube, HelmetMat::Steel, (-0.22, 1.20, 0.0), (0.05, 0.26, 0.05), 0.0, 0.38),
+    hpr(Prim::Cube, HelmetMat::Steel, (0.22, 1.20, 0.0), (0.05, 0.26, 0.05), 0.0, -0.38),
+    hp(Prim::Ball, HelmetMat::Tint, (0.0, 1.17, 0.0), (0.30, 0.14, 0.30)),
+];
+
+/// How many helmets the library holds.
+///
+/// Spelled out rather than taken as `HELMET_CHOICES.len()`: the turntable
+/// mounts them in a fixed-size array, and using the table's own length in
+/// that array TYPE makes rustc const-evaluate a static full of `&str` and
+/// `&[HelmetPiece]` references inside a const-generic argument, which it
+/// crashes on (STATUS_STACK_BUFFER_OVERRUN) in a file this size. One
+/// literal, with `helmet_library_is_the_declared_size` pinning the two
+/// together so they cannot drift apart silently.
+const N_HELMETS: usize = 5;
+
+/// The library. Name plus pieces; the tint is chosen separately from
+/// `HAT_CHOICES`, so this is 5 shapes x 4 colours = 20 heads.
+const HELMET_CHOICES: [(&str, &[HelmetPiece]); N_HELMETS] = [
+    ("FIELD CAP", &HELM_CAP),
+    ("VISOR", &HELM_VISOR),
+    ("CREST", &HELM_CREST),
+    ("HOOD", &HELM_HOOD),
+    ("HORNS", &HELM_HORNS),
+];
+
+/// Every piece must sit inside this box, in hat-socket local space.
+///
+/// These are not style guidance - each bound is a failure the geometry can
+/// actually have. Below `Y_MIN` a piece is inside the head shell (z-fighting
+/// through the face); above `Y_MAX` it reads as floating above the fighter;
+/// outside `XZ_MAX` it pokes through a wall the player thinks they are
+/// safely behind. `helmet_pieces_stay_in_the_socket_envelope` checks the
+/// whole library against them, so a new helmet cannot be added wrong.
+const HELMET_Y_MIN: f32 = 0.86;
+const HELMET_Y_MAX: f32 = 1.36;
+const HELMET_XZ_MAX: f32 = 0.42;
+
+/// Hang one helmet under the hat socket, and return the GROUP entity it
+/// hangs from.
+///
+/// Replaces the five hand-written `commands.spawn` chains this used to be.
+/// The antenna is appended to whichever helmet was picked rather than
+/// living in the table, so it cannot be forgotten by a new entry.
+///
+/// The group exists so the Forge turntable can mount all five at once and
+/// switch between them with one `Visibility` write - the same trick the
+/// preview already plays with class rigs and the weapon rack. A live
+/// fighter mounts exactly one and never touches it again.
+fn spawn_helmet(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    look: &SoldierLook,
+    socket: Entity,
+    helmet: usize,
+) -> Entity {
+    let group = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .set_parent(socket)
+        .id();
+    let (_, pieces) = HELMET_CHOICES[helmet % HELMET_CHOICES.len()];
+    for p in pieces.iter().chain(HELMET_ANTENNA.iter()) {
+        let mesh = match p.prim {
+            Prim::Cyl => kit.cyl.clone(),
+            Prim::Cube => kit.cube.clone(),
+            Prim::Ball => kit.ball.clone(),
+        };
+        let mat = match p.mat {
+            HelmetMat::Tint => look.hat.clone(),
+            HelmetMat::Gunmetal => kit.gunmetal.clone(),
+            HelmetMat::Steel => kit.steel.clone(),
+            HelmetMat::Glow => kit.core_glow.clone(),
+        };
+        let mut t = Transform::from_xyz(p.pos.0, p.pos.1, p.pos.2)
+            .with_scale(Vec3::new(p.scale.0, p.scale.1, p.scale.2));
+        if p.pitch != 0.0 || p.roll != 0.0 {
+            t.rotation = Quat::from_rotation_z(p.roll) * Quat::from_rotation_x(p.pitch);
+        }
+        commands
+            .spawn((Mesh3d(mesh), MeshMaterial3d(mat), t))
+            .set_parent(group);
+    }
+    group
+}
+
 
 // ---- world-space visuals -------------------------------------------------
 
@@ -1874,6 +2125,11 @@ struct ForgePreview {
     arm_r: [Entity; 3],
     /// one silhouette group per class, indexed by `Class::ALL`
     class_rigs: [Entity; 4],
+    /// §8.1: all five helmets mounted at once, indexed by
+    /// `HELMET_CHOICES`. Same trick as `class_rigs` and `weapons` - one
+    /// `Visibility` write swaps the head, where a rebuild would fight the
+    /// render-layer tagging latch.
+    helmets: [Entity; N_HELMETS],
 }
 /// Viewmodel camera FOV. §1.2 (Brief VI): CS:GO Classic preset = 68°.
 const VM_FOV_DEG: f32 = 68.0;
@@ -4698,9 +4954,24 @@ enum ForgeUiButton {
     Randomize,
 }
 
-/// Cosmetics: (0 = hat, 1 = tunic; choice index).
+/// Which appearance pick a cosmetic pill drives.
+///
+/// A named slot rather than the `0`/`1` this used to be: §8.1 made it
+/// three, and a chain of `if slot == 0 ... else` over bare integers is one
+/// where adding the third silently routes it to the `else`. The compiler
+/// checks a match over this.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum CosmeticSlot {
+    /// §8.1: the helmet SHAPE - `HELMET_CHOICES`.
+    Helmet,
+    /// The helmet TINT - `HAT_CHOICES`. Orthogonal to the shape.
+    HatTint,
+    Tunic,
+}
+
+/// One appearance pill: which slot, and which index within it.
 #[derive(Component, Clone, Copy)]
-struct CosmeticButton(usize, usize);
+struct CosmeticButton(CosmeticSlot, usize);
 
 /// §6 (Brief IV): melee slot pick - false = knife, true = axe.
 #[derive(Component, Clone, Copy)]
@@ -6901,6 +7172,9 @@ struct SoldierParts {
     arm_r: [Entity; 3],
     weapon_root: Entity,
     weapons: [Entity; N_WEAPONS],
+    /// §8.1: where a helmet mounts. Published so a caller that passed
+    /// `None` for the helmet can fill it - see `spawn_soldier_body`.
+    helmet_socket: Entity,
 }
 
 /// The four limb capsules, created once per rig batch.
@@ -6940,6 +7214,12 @@ fn spawn_soldier_body(
     look: &SoldierLook,
     weapon_detail: bool,
     class: sim::Class,
+    // §8.1 which helmet to mount. `Some(i)` indexes `HELMET_CHOICES` and
+    // wraps, so a caller can hand it a raw fighter slot. `None` leaves the
+    // socket EMPTY for the caller to fill - the Forge turntable needs all
+    // five mounted at once, and an unconditional one here would leave it
+    // wearing two.
+    helmet: Option<usize>,
 ) -> SoldierParts {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
@@ -7128,42 +7408,11 @@ fn spawn_soldier_body(
         .spawn((Transform::from_xyz(0.0, -0.856, 0.0), Visibility::default()))
         .set_parent(head)
         .id();
-    // hat: brim, crown, band - plus the little antenna
-    commands
-        .spawn((
-            Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(look.hat.clone()),
-            Transform::from_xyz(0.0, 1.02, 0.0).with_scale(Vec3::new(0.72, 0.028, 0.72)),
-        ))
-        .set_parent(hat_socket);
-    commands
-        .spawn((
-            Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(look.hat.clone()),
-            Transform::from_xyz(0.0, 1.11, 0.0).with_scale(Vec3::new(0.36, 0.18, 0.36)),
-        ))
-        .set_parent(hat_socket);
-    commands
-        .spawn((
-            Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(kit.gunmetal.clone()),
-            Transform::from_xyz(0.0, 1.045, 0.0).with_scale(Vec3::new(0.365, 0.04, 0.365)),
-        ))
-        .set_parent(hat_socket);
-    commands
-        .spawn((
-            Mesh3d(kit.cyl.clone()),
-            MeshMaterial3d(kit.steel.clone()),
-            Transform::from_xyz(0.13, 1.22, 0.0).with_scale(Vec3::new(0.015, 0.13, 0.015)),
-        ))
-        .set_parent(hat_socket);
-    commands
-        .spawn((
-            Mesh3d(kit.cube.clone()),
-            MeshMaterial3d(kit.core_glow.clone()),
-            Transform::from_xyz(0.13, 1.30, 0.0).with_scale(Vec3::splat(0.035)),
-        ))
-        .set_parent(hat_socket);
+    // §8.1: the helmet is a library pick now, not five hand-written
+    // spawns. Index 0 reproduces those five exactly.
+    if let Some(h) = helmet {
+        spawn_helmet(commands, kit, look, hat_socket, h);
+    }
     // ARMS: shoulder → elbow → wrist off the yoke, every joint a dark
     // ball in a visible gap, white shell segments, mitten hands
     let mut arms = [[Entity::PLACEHOLDER; 3]; 2];
@@ -7256,6 +7505,7 @@ fn spawn_soldier_body(
         arm_r,
         weapon_root,
         weapons,
+        helmet_socket: hat_socket,
     }
 }
 
@@ -7391,7 +7641,18 @@ fn spawn_fighter_rigs(
                 joint.clone()
             },
         };
-        let parts = spawn_soldier_body(commands, kit, &limbs, &look, is_player, f.class);
+        // §8.1: the player wears their Forge pick; each bot wears a helmet
+        // derived from its slot, so a firefight has five silhouettes in it
+        // rather than one repeated. Derived from the INDEX, never from rng
+        // - a random helmet would differ between a live match and its
+        // replay, and this whole build is a bit-identical-replay build.
+        let helmet = if is_player {
+            sel.helmet
+        } else {
+            slot % HELMET_CHOICES.len()
+        };
+        let parts =
+            spawn_soldier_body(commands, kit, &limbs, &look, is_player, f.class, Some(helmet));
         commands.entity(parts.root).insert((
             Transform::from_xyz(f.pos[0], f.pos[1], f.pos[2]),
             FighterVis { index: i },
@@ -7406,6 +7667,9 @@ fn spawn_fighter_rigs(
             arm_r,
             weapon_root,
             weapons,
+            // §8.1: a live fighter's helmet is mounted and never touched
+            // again - only the Forge turntable needs the socket back.
+            helmet_socket: _,
         } = parts;
         // the always-carried shield, on the left forearm
         let shield = spawn_shield_model(commands, kit, false);
@@ -7970,8 +8234,13 @@ fn setup(
         // class's shape is hung beside it; `forge_preview_sync` shows
         // the picked one. Rebuilding the rig per click would fight the
         // layer-tagging latch (`tag_forge_preview_layer` stamps once).
+        // §8.1: `None` - the socket is filled by the rack below, not by
+        // one helmet, so the mannequin can change heads without a rebuild.
         let parts =
-            spawn_soldier_body(&mut commands, &kit, &limbs, &look, true, sim::Class::Line);
+            spawn_soldier_body(&mut commands, &kit, &limbs, &look, true, sim::Class::Line, None);
+        let helmets: [Entity; N_HELMETS] = std::array::from_fn(|i| {
+            spawn_helmet(&mut commands, &kit, &look, parts.helmet_socket, i)
+        });
         let mut class_rigs = [Entity::PLACEHOLDER; 4];
         for (i, c) in sim::Class::ALL.into_iter().enumerate() {
             let g = spawn_class_silhouette(&mut commands, &kit, &look, parts.torso, c);
@@ -7992,6 +8261,7 @@ fn setup(
             arm_l: parts.arm_l,
             arm_r: parts.arm_r,
             class_rigs,
+            helmets,
         });
     }
 
@@ -12272,6 +12542,16 @@ fn forge_preview_sync(
         // card's tunic glows exactly like the field one
         mat.emissive = LinearRgba::new(tr * 0.4, tg * 0.4, tb * 0.4, 1.0);
     }
+    // §8.1: the picked helmet, and only that one
+    for (i, e) in fp.helmets.iter().enumerate() {
+        if let Ok(mut v) = vis.get_mut(*e) {
+            *v = if i == sel.helmet % HELMET_CHOICES.len() {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
     // the picked class's shape, and only that one
     for (i, e) in fp.class_rigs.iter().enumerate() {
         if let Ok(mut v) = vis.get_mut(*e) {
@@ -15219,16 +15499,24 @@ fn open_intro(
                 .map(|(i, (_, n))| (*n, NadeButton(i)))
                 .collect();
             menu_ui::pill_row(b, "GRENADES", &nades, sold);
+            // §8.1: SHAPE first, then the tint that paints it - the row
+            // order is the order the two choices actually compose in.
+            let helmets: Vec<(&str, CosmeticButton)> = HELMET_CHOICES
+                .iter()
+                .enumerate()
+                .map(|(i, (n, _))| (*n, CosmeticButton(CosmeticSlot::Helmet, i)))
+                .collect();
+            menu_ui::pill_row(b, "HELMET", &helmets, sold);
             let hats: Vec<(&str, CosmeticButton)> = HAT_CHOICES
                 .iter()
                 .enumerate()
-                .map(|(i, (n, _))| (*n, CosmeticButton(0, i)))
+                .map(|(i, (n, _))| (*n, CosmeticButton(CosmeticSlot::HatTint, i)))
                 .collect();
-            menu_ui::pill_row(b, "HAT", &hats, sold);
+            menu_ui::pill_row(b, "HELMET TINT", &hats, sold);
             let tunics: Vec<(&str, CosmeticButton)> = TUNIC_CHOICES
                 .iter()
                 .enumerate()
-                .map(|(i, (n, _))| (*n, CosmeticButton(1, i)))
+                .map(|(i, (n, _))| (*n, CosmeticButton(CosmeticSlot::Tunic, i)))
                 .collect();
             menu_ui::pill_row(b, "OUTFIT", &tunics, sold);
             // §7.2: the Forge, on screen at last
@@ -15626,6 +15914,7 @@ fn intro_forge_buttons(
                 sel.grenade_preset = roll(GRENADE_PRESETS.len());
                 sel.hat = roll(HAT_CHOICES.len());
                 sel.tunic = roll(TUNIC_CHOICES.len());
+                sel.helmet = roll(HELMET_CHOICES.len());
                 toast.text = "FORGE: fate rolled".to_string();
                 toast.t = 1.8;
             }
@@ -15676,19 +15965,20 @@ fn intro_cosmetic_buttons(
 ) {
     for (i, cb, _, _) in &mut q {
         if *i == Interaction::Pressed {
-            if cb.0 == 0 {
-                sel.hat = cb.1;
-            } else {
-                sel.tunic = cb.1;
+            match cb.0 {
+                CosmeticSlot::Helmet => sel.helmet = cb.1,
+                CosmeticSlot::HatTint => sel.hat = cb.1,
+                CosmeticSlot::Tunic => sel.tunic = cb.1,
             }
         }
     }
     for (i, cb, mut bg, mut border) in &mut q {
-        let selected = if cb.0 == 0 {
-            sel.hat == cb.1
-        } else {
-            sel.tunic == cb.1
-        };
+        let selected = cb.1
+            == match cb.0 {
+                CosmeticSlot::Helmet => sel.helmet,
+                CosmeticSlot::HatTint => sel.hat,
+                CosmeticSlot::Tunic => sel.tunic,
+            };
         paint(&mut bg, &mut border, selected, *i == Interaction::Hovered);
     }
 }
@@ -17971,9 +18261,9 @@ mod forge_tests {
     #[test]
     fn profile_line_round_trips_every_field() {
         for p in [
-            ForgeProfile { hat: 0, tunic: 0, melee_axe: false, grenade_preset: 0 },
-            ForgeProfile { hat: 3, tunic: 2, melee_axe: true, grenade_preset: 3 },
-            ForgeProfile { hat: 1, tunic: 3, melee_axe: false, grenade_preset: 2 },
+            ForgeProfile { hat: 0, tunic: 0, melee_axe: false, grenade_preset: 0, helmet: 0 },
+            ForgeProfile { hat: 3, tunic: 2, melee_axe: true, grenade_preset: 3, helmet: 4 },
+            ForgeProfile { hat: 1, tunic: 3, melee_axe: false, grenade_preset: 2, helmet: 2 },
         ] {
             let line = p.to_line();
             let back = ForgeProfile::from_line(&line).expect("must parse what it wrote");
@@ -17988,10 +18278,148 @@ mod forge_tests {
         assert!(ForgeProfile::from_line("1,2,3").is_none(), "too few fields");
     }
 
+    /// §8.1: slot files written before the helmet field existed must
+    /// still load. This is the actual upgrade path - anyone who used the
+    /// Forge before this build has four-field files sitting on disk, and
+    /// the failure mode if `from_line` were strict is that their saved
+    /// profiles vanish on first launch without a word.
+    #[test]
+    fn a_pre_helmet_save_file_still_loads_as_the_field_cap() {
+        let old = ForgeProfile::from_line("3,2,1,3")
+            .expect("the four-field format that shipped must still parse");
+        assert_eq!(old.hat, 3);
+        assert_eq!(old.tunic, 2);
+        assert!(old.melee_axe);
+        assert_eq!(old.grenade_preset, 3);
+        assert_eq!(
+            old.helmet, 0,
+            "a file with no helmet must read as the FIELD CAP - the shape              it was actually wearing when it was written"
+        );
+        // and a malformed FIFTH field is still an error, not a silent 0:
+        // absent and wrong are different, and only absent is forgiven
+        assert!(ForgeProfile::from_line("3,2,1,3,x").is_none());
+    }
+
+    /// §8.1: index 0 must still be the exact brim-crown-band the body had
+    /// before the library existed. Anyone whose saved profile predates the
+    /// helmet field loads as 0 (see above), so if these values drifted,
+    /// those profiles would quietly change shape.
+    #[test]
+    fn helmet_zero_is_the_frozen_field_cap() {
+        let (name, pieces) = HELMET_CHOICES[0];
+        assert_eq!(name, "FIELD CAP");
+        assert_eq!(pieces.len(), 3, "brim, crown, band");
+        assert_eq!(pieces[0].pos, (0.0, 1.02, 0.0));
+        assert_eq!(pieces[0].scale, (0.72, 0.028, 0.72));
+        assert_eq!(pieces[1].pos, (0.0, 1.11, 0.0));
+        assert_eq!(pieces[1].scale, (0.36, 0.18, 0.36));
+        assert_eq!(pieces[2].pos, (0.0, 1.045, 0.0));
+        assert_eq!(pieces[2].scale, (0.365, 0.04, 0.365));
+        // the antenna is shared, and its two pieces are equally frozen
+        assert_eq!(HELMET_ANTENNA[0].pos, (0.13, 1.22, 0.0));
+        assert_eq!(HELMET_ANTENNA[1].pos, (0.13, 1.30, 0.0));
+        assert_eq!(HELMET_ANTENNA[1].scale, (0.035, 0.035, 0.035));
+    }
+
+    /// §8.1: the array type on `ForgePreview::helmets` is `N_HELMETS`, not
+    /// `HELMET_CHOICES.len()` (rustc crashes on the latter here - see the
+    /// const's doc). That decoupling is exactly the kind that rots, so it
+    /// is pinned.
+    #[test]
+    fn helmet_library_is_the_declared_size() {
+        assert_eq!(HELMET_CHOICES.len(), N_HELMETS);
+    }
+
+    /// §8.1: every piece of every helmet sits inside the socket envelope.
+    ///
+    /// This is what makes the library safe to extend. A new entry gets
+    /// checked for the three things hand-placed geometry actually gets
+    /// wrong - sunk into the head, floating above it, or poking out wide
+    /// enough to show through cover - without anyone opening the game.
+    ///
+    /// A leaning piece is measured by its ROTATED extent, not its resting
+    /// one: a tilted box reaches further than its scale suggests, and
+    /// checking the unrotated box would pass geometry that visibly clips.
+    #[test]
+    fn helmet_pieces_stay_in_the_socket_envelope() {
+        for (name, pieces) in HELMET_CHOICES {
+            assert!(!pieces.is_empty(), "{name} has no geometry");
+            for (i, p) in pieces.iter().chain(HELMET_ANTENNA.iter()).enumerate() {
+                let (hx, hy, hz) = (p.scale.0 * 0.5, p.scale.1 * 0.5, p.scale.2 * 0.5);
+                // rotated half-extents: exact for a box, conservative for
+                // the cylinder and sphere, which are inscribed in one
+                let (cp, sp) = (p.pitch.cos().abs(), p.pitch.sin().abs());
+                let (cr, sr) = (p.roll.cos().abs(), p.roll.sin().abs());
+                let ry = hy * cp * cr + hz * sp + hx * sr;
+                let rx = hx * cr + hy * sr;
+                let rz = hz * cp + hy * sp;
+                let (lo, hi) = (p.pos.1 - ry, p.pos.1 + ry);
+                assert!(
+                    lo >= HELMET_Y_MIN,
+                    "{name} piece {i} sinks into the head shell: {lo} < {HELMET_Y_MIN}"
+                );
+                assert!(
+                    hi <= HELMET_Y_MAX,
+                    "{name} piece {i} floats above the fighter: {hi} > {HELMET_Y_MAX}"
+                );
+                let reach = (p.pos.0.abs() + rx).max(p.pos.2.abs() + rz);
+                assert!(
+                    reach <= HELMET_XZ_MAX,
+                    "{name} piece {i} reaches {reach} wide, past {HELMET_XZ_MAX} -                      it would show through cover the player thinks hides them"
+                );
+            }
+        }
+    }
+
+    /// §8.1: the five must actually look different. A library whose
+    /// entries share a silhouette is four wasted menu rows - and the
+    /// stated reason for the feature was that TINT washes out at range
+    /// and SHAPE does not.
+    ///
+    /// Measured as a SAMPLED OUTLINE - how wide the helmet is at each of
+    /// sixteen heights, which is what a distant player's eye integrates -
+    /// rather than as a bounding box. The difference is not academic: the
+    /// first version of this test compared bounding boxes and called VISOR
+    /// and CREST identical, when one is a brow-and-cheeks helm and the
+    /// other is a bare dome under a tall blade. They occupy a similar box
+    /// while looking nothing alike, and a test that measures the box would
+    /// have had me distort real geometry to satisfy a bad proxy.
+    ///
+    /// The shared antenna is excluded: every helmet has it, so it adds the
+    /// same value to every profile and can only mask a real difference.
+    #[test]
+    fn the_five_helmets_have_distinct_silhouettes() {
+        const BANDS: usize = 16;
+        let outline = |pieces: &[HelmetPiece]| {
+            let mut w = [0.0_f32; BANDS];
+            for (b, slot) in w.iter_mut().enumerate() {
+                let y = HELMET_Y_MIN
+                    + (HELMET_Y_MAX - HELMET_Y_MIN) * (b as f32 + 0.5) / BANDS as f32;
+                for p in pieces {
+                    let hy = p.scale.1 * 0.5;
+                    if (p.pos.1 - hy..=p.pos.1 + hy).contains(&y) {
+                        *slot = slot.max(p.pos.0.abs() + p.scale.0 * 0.5);
+                    }
+                }
+            }
+            w
+        };
+        let all: Vec<_> = HELMET_CHOICES.iter().map(|(n, p)| (*n, outline(p))).collect();
+        for (i, (na, a)) in all.iter().enumerate() {
+            for (nb, b) in &all[i + 1..] {
+                let d: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum();
+                assert!(
+                    d > 0.30,
+                    "{na} and {nb} have near-identical outlines ({d}) - at range                      a player could not tell them apart"
+                );
+            }
+        }
+    }
+
     #[test]
     fn save_then_load_round_trips_through_the_real_filesystem() {
         let slot = 99; // a slot no real save will ever use
-        let p = ForgeProfile { hat: 2, tunic: 1, melee_axe: true, grenade_preset: 1 };
+        let p = ForgeProfile { hat: 2, tunic: 1, melee_axe: true, grenade_preset: 1, helmet: 3 };
         forge_save(slot, &p).expect("save must succeed");
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
@@ -18764,7 +19192,8 @@ mod forge_tests {
     fn apply_to_selected_only_touches_the_forges_own_fields() {
         let mut sel = Selected::default();
         sel.map = MapKind::Bailey; // untouched by the Forge - must survive
-        let p = ForgeProfile { hat: 3, tunic: 0, melee_axe: true, grenade_preset: 3 };
+        let p =
+            ForgeProfile { hat: 3, tunic: 0, melee_axe: true, grenade_preset: 3, helmet: 1 };
         p.apply_to(&mut sel);
         assert_eq!(sel.hat, 3);
         assert_eq!(sel.tunic, 0);
