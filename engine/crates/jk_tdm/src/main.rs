@@ -1962,7 +1962,13 @@ fn carry_offset(
 /// off-eye.
 fn vm_carry(wk: GunKind) -> (Vec3, f32) {
     match wk {
-        GunKind::Bow => (Vec3::new(-0.10, -0.16, -0.36), 0.0),
+        // §owner: the bow went HORIZONTAL, so its bounding shape turned
+        // ninety degrees - it is now wide where it used to be tall. At
+        // the old 0.36 m carry a 0.7 m span filled the bottom third of
+        // the screen. Pushed out and centred, the way a bow is actually
+        // held, and it now leaves the sight line clear rather than
+        // putting a limb through it.
+        GunKind::Bow => (Vec3::new(-0.02, -0.17, -0.66), 0.0),
         GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
         GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
         GunKind::M249 => (Vec3::new(0.13, -0.14, -0.42), 0.0),
@@ -5490,15 +5496,54 @@ fn spawn_weapon_model(
             push_red_dot(&mut parts, 0.1265, 0.0, 0.098); // feed cover 0.098
         }
         GunKind::Bow => {
-            // hard-surface war bow: dark blocky limbs, mid riser, light tips
-            parts.push(wp(false, Tone::Dark, (0.0, 0.24, 0.03), -0.30, (0.028, 0.46, 0.045)));
-            parts.push(wp(false, Tone::Dark, (0.0, -0.24, 0.03), 0.30, (0.028, 0.46, 0.045)));
-            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.01), 0.0, (0.035, 0.15, 0.055)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.455, -0.04), -0.30, (0.032, 0.05, 0.05)));
-            parts.push(wp(false, Tone::Light, (0.0, -0.455, -0.04), 0.30, (0.032, 0.05, 0.05)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, -0.09), 0.0, (0.008, 0.82, 0.008)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.10, 0.02), 0.0, (0.038, 0.02, 0.058)));
-            parts.push(wd(false, Tone::Light, (0.0, -0.10, 0.02), 0.0, (0.038, 0.02, 0.058)));
+            // §owner: the war bow is held HORIZONTAL, and it CURVES.
+            //
+            // It used to be two straight blocks stacked vertically, which
+            // read as a pole rather than a bow and put the upper limb
+            // through the shooter's sight line. Limbs now run left and
+            // right, and each is built from three shortening segments
+            // that step backward in z - a real recurve profile rather
+            // than one tilted slab, which is what makes the shape read as
+            // SPRUNG rather than rigid.
+            //
+            // The riser stays at the origin so `weapon_hand_specs`' grip
+            // socket (0, 0, 0.03) and the nock at the string's centre are
+            // both untouched by the reorientation.
+            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.012), 0.0, (0.052, 0.115, 0.058)));
+            // grip swell above and below the shelf, so the riser is not a
+            // plain brick
+            parts.push(wp(false, Tone::Dark, (0.0, 0.075, 0.012), 0.0, (0.040, 0.05, 0.050)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.075, 0.012), 0.0, (0.040, 0.05, 0.050)));
+            for side in [-1.0_f32, 1.0] {
+                // three segments per limb: each shorter, thinner, and
+                // further back than the last - the curve
+                for (dx, dz, w, h, d) in [
+                    (0.115, 0.000, 0.150, 0.030, 0.044),
+                    (0.235, -0.030, 0.120, 0.026, 0.038),
+                    (0.330, -0.072, 0.090, 0.022, 0.032),
+                ] {
+                    parts.push(wp(
+                        false,
+                        Tone::Dark,
+                        (side * dx, 0.0, 0.012 + dz),
+                        0.0,
+                        (w, h, d),
+                    ));
+                }
+                // the light tip / string nock at the end of the recurve
+                parts.push(wp(
+                    false,
+                    Tone::Light,
+                    (side * 0.392, 0.0, -0.088),
+                    0.0,
+                    (0.040, 0.026, 0.028),
+                ));
+            }
+            // the string, tip to tip across the back
+            parts.push(wp(false, Tone::Light, (0.0, 0.0, -0.098), 0.0, (0.78, 0.007, 0.007)));
+            // ADS-only: the arrow shelf and a sighting mark on the riser
+            parts.push(wd(false, Tone::Light, (0.028, 0.030, 0.030), 0.0, (0.030, 0.010, 0.062)));
+            parts.push(wd(false, Tone::Reticle, (0.0, 0.052, 0.044), 0.0, (0.006, 0.006, 0.006)));
         }
         GunKind::Spear => {
             // war spear: dark shaft, light flat blade, black collar + butt
