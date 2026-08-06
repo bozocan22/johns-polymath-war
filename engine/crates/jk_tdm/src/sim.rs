@@ -556,10 +556,14 @@ pub fn gun(kind: GunKind) -> GunSpec {
             spread: 0.004,
             spread_move: 0.018,
             kick: 0.0016,
-            damage: 34.0,
+            // §owner: the war bow is a WAR bow. At 34 it needed three
+            // clean hits on an unarmoured man while every rifle needed
+            // four sloppy ones - the slowest weapon in the game was also
+            // the least decisive. Two torso hits now, or one to the head.
+            damage: 46.0,
             // §4 (Brief II): 52 m/s at gravity ×0.42 — 0.69 m of drop at
             // 30 m, near point-and-click inside 20 m
-            projectile: Some((52.0 * MISSILE_SPEED_MULT, 34.0)),
+            projectile: Some((52.0 * MISSILE_SPEED_MULT, 46.0)),
             zoom_deg: 45.0,
             ..base
         },
@@ -573,11 +577,15 @@ pub fn gun(kind: GunKind) -> GunSpec {
             spread: 0.006,
             spread_move: 0.015,
             kick: 0.0024,
-            // §3.2 (Brief VII v2): 85 body base - ×2 head, ×0.75 legs,
+            // §3.2 (Brief VII v2): body base - ×2 head, ×0.75 legs,
             // applied at hit resolution (SPEAR_HEAD_MULT/LEG_MULT).
-            damage: 85.0,
+            // §owner: raised from 85. A thrown javelin is a committed,
+            // single-shot, wind-up weapon that leaves you empty-handed -
+            // it should end an unarmoured man outright, or the whole
+            // commitment is a bad trade.
+            damage: 105.0,
             // §3.1 (Brief VII v2): 22 m/s full-throw, gravity ×0.72.
-            projectile: Some((22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA, 85.0)),
+            projectile: Some((22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA, 105.0)),
             zoom_deg: 50.0,
             ..base
         },
@@ -1594,6 +1602,11 @@ pub struct Fighter {
     /// §A: Mech Brace held - wide stance, near-stationary, damped recoil.
     /// Deliberately a separate field from `brace`: see the constants.
     pub mech_brace: bool,
+    /// §owner MECH SHIELD: the barrier's remaining pool. Falls as it
+    /// eats hits, comes back after a lull. Zero = collapsed.
+    pub mech_shield_hp: f32,
+    /// Time since the barrier last took a hit, for the recharge delay.
+    pub mech_shield_quiet_t: f32,
     /// §C: which hull mount the trigger currently drives. Both mounts
     /// are always present on a live chassis - this is a targeting mode,
     /// not an inventory slot (see `MechWeapon`).
@@ -2287,6 +2300,31 @@ pub const ROCKET_DMG: f32 = 290.0;
 pub const ROCKET_DMG_INFANTRY: f32 = 50.0;
 pub const ROCKET_SHIELD_BLOCK_CAP: f32 = 0.5;
 pub const MECH_BRACE_ROCKET_RESIST: f32 = 0.6;
+
+/// §owner MECH SHIELD: a deployable frontal barrier, distinct from the
+/// BRACE stance.
+///
+/// Brace is a posture - it damps recoil and shrugs rockets but you still
+/// eat every round. The shield is a POOL: it swallows damage outright
+/// until it collapses, then has to come back. That makes it a tool for
+/// CROSSING ground rather than for standing in it, which is the one
+/// thing a 600-hull walker could not previously do.
+///
+/// Deliberately reuses the infantry shield key while piloting - exactly
+/// the precedent the crouch->brace repurpose already set. Same intent
+/// ("get behind something"), different hardware.
+pub const MECH_SHIELD_HP: f32 = 280.0;
+/// Front arc only, same cone the infantry plate uses - flanking a
+/// shielded mech is the counterplay, and it is the same counterplay
+/// the game already teaches against a shieldwall.
+pub const MECH_SHIELD_ARC_COS: f32 = 0.5;
+/// Seconds after the pool empties (or after the last hit) before it
+/// starts coming back, then the rate it returns at.
+pub const MECH_SHIELD_RECHARGE_DELAY_S: f32 = 3.2;
+pub const MECH_SHIELD_RECHARGE_PER_S: f32 = 46.0;
+/// A raised barrier is a wall, not a firing position: the mech walks at
+/// this fraction of its pace and its mounts are cold.
+pub const MECH_SHIELD_SPEED_MULT: f32 = 0.55;
 pub const ROCKET_PN_N: f32 = 3.0;
 pub const ROCKET_PROX_M: f32 = 1.2;
 pub const ROCKET_SOLDIER_KILL_M: f32 = 2.0;
@@ -3702,6 +3740,8 @@ impl TdmSim {
                     mech_plates_dropped: 0,
                     brace: false,
                     mech_brace: false,
+                    mech_shield_hp: MECH_SHIELD_HP,
+                    mech_shield_quiet_t: 0.0,
                     mech_weapon: MechWeapon::Gatling,
                     gatling_heat: 0.0,
                     gatling_vent_t: 0.0,
@@ -3978,6 +4018,17 @@ impl TdmSim {
             f.shield_dip_t = (f.shield_dip_t - DT).max(0.0);
             f.pod_cd = (f.pod_cd - DT).max(0.0);
             f.lock_warn_t = (f.lock_warn_t - DT).max(0.0);
+            // §owner MECH SHIELD: the barrier comes back after a lull.
+            // The delay is what stops it being free - a mech pinned by
+            // steady fire never gets it back, so the pool rewards
+            // BREAKING contact rather than tanking through.
+            if f.mech_shield_hp < MECH_SHIELD_HP {
+                f.mech_shield_quiet_t += DT;
+                if f.mech_shield_quiet_t >= MECH_SHIELD_RECHARGE_DELAY_S {
+                    f.mech_shield_hp =
+                        (f.mech_shield_hp + MECH_SHIELD_RECHARGE_PER_S * DT).min(MECH_SHIELD_HP);
+                }
+            }
             // §7: minigun barrels and heat. `spin_cmd` is the trigger
             // hold-timer (refreshed by try_fire, drained here): live →
             // barrels climb and heat holds; expired → wind down + cool.
@@ -4582,6 +4633,11 @@ impl TdmSim {
                 // does, so a Warden in a chassis is slow twice over -
                 // which is correct: both facts are true about him.
                 speed *= class_spec(f.class).move_mult;
+                // §owner MECH SHIELD: a raised barrier is a wall you
+                // walk behind, not a stance you fight from
+                if f.in_mech() && f.shield_up {
+                    speed *= MECH_SHIELD_SPEED_MULT;
+                }
                 // §7.4: power stride OVERRIDES the walk pace outright -
                 // 110% of soldier run speed is the point, not 110% ON
                 // TOP of the 85% walk multiplier just applied above.
@@ -6148,7 +6204,12 @@ impl TdmSim {
                 || f.ammo == 0
                 || !f.alive()
                 || f.roll_t > 0.0 // no shooting mid-somersault
-                || f.shield_up // the shield takes both hands
+                // §owner: the plate takes both hands - EXCEPT for a
+                // sidearm, which is a one-handed weapon and always was.
+                // Turtling used to mean total disarmament, so raising the
+                // shield was a decision to stop playing; a pistol behind
+                // the plate is the whole point of carrying one.
+                || (f.shield_up && gun(f.gun).class != GunClass::Secondary)
                 || f.knife_phase > 0.0 // §5: the blade owns both hands too
                 || f.flip_t > 0.0 // §4.2: a flip is PURE mobility
                 || f.flip_used // ...and the gun returns on landing recovery
@@ -6527,6 +6588,9 @@ impl TdmSim {
         {
             let f = &self.fighters[i];
             if !f.in_mech()
+                // §owner MECH SHIELD: the mounts are cold behind a
+                // raised barrier - it is a wall, not a firing port
+                || f.shield_up
                 || f.mech_weapon != MechWeapon::Gatling
                 || !f.alive()
                 || f.gatling_cd > 0.0
@@ -6590,6 +6654,7 @@ impl TdmSim {
         {
             let f = &self.fighters[i];
             if !f.in_mech()
+                || f.shield_up
                 || f.mech_weapon != MechWeapon::Autocannon
                 || !f.alive()
                 || f.autocannon_cd > 0.0
@@ -6636,6 +6701,7 @@ impl TdmSim {
         {
             let f = &self.fighters[p];
             if !f.in_mech()
+                || f.shield_up
                 || f.mech_weapon != MechWeapon::Rockets
                 || !f.alive()
                 || f.pod_ammo == 0
@@ -8224,6 +8290,19 @@ impl TdmSim {
                 // honestly rather than faked with fake per-part hits.)
                 if f.mech_plates_dropped != 0 {
                     d *= MECH_EXPOSED_DMG_MULT;
+                }
+                // §owner MECH SHIELD: a raised barrier swallows the round
+                // before the hull sees it, but only from the FRONT - the
+                // same arc the infantry plate uses, so flanking it is the
+                // counterplay the game already teaches. Overflow carries
+                // through: the shot that breaks the barrier still lands
+                // whatever it had left, rather than being erased by a
+                // pool with 1 point in it.
+                if f.shield_up && front && f.mech_shield_hp > 0.0 {
+                    let absorbed = d.min(f.mech_shield_hp);
+                    f.mech_shield_hp -= absorbed;
+                    f.mech_shield_quiet_t = 0.0;
+                    d -= absorbed;
                 }
                 f.hull = (f.hull - d).max(0.0);
                 f.last_dmg_at = self.t;
@@ -10151,6 +10230,92 @@ mod tests {
         );
     }
 
+    /// §owner MECH SHIELD: the barrier eats front damage, only front
+    /// damage, and has to come back on its own terms.
+    #[test]
+    fn the_mech_barrier_covers_the_front_and_has_to_recover() {
+        let rig = || -> TdmSim {
+            let mut s = range(0xB0DD);
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_transition_t = 0.0;
+            f.yaw = 0.0; // facing +z
+            f.shield_up = true;
+            // the live enemy is disarmed: this measures a BARRIER, and a
+            // bot plinking the front would keep resetting the recharge
+            // timer the last case is trying to observe
+            s.fighters[1].ammo = 0;
+            s.fighters[1].reserve = 0;
+            s.fighters[1].slot_ammo = [(0, 0); 3];
+            s
+        };
+        // a round from the FRONT is swallowed - hull untouched
+        let mut s = rig();
+        let hull0 = s.fighters[0].hull;
+        let pool0 = s.fighters[0].mech_shield_hp;
+        s.apply_plain_damage(1, 0, 120.0, [0.0, 1.0, 12.0], false, false);
+        assert_eq!(
+            s.fighters[0].hull, hull0,
+            "a raised barrier must keep the round off the hull"
+        );
+        assert!(
+            s.fighters[0].mech_shield_hp < pool0,
+            "the barrier must actually spend its pool"
+        );
+
+        // the same round from BEHIND ignores it - flanking is the counter
+        let mut s = rig();
+        let hull0 = s.fighters[0].hull;
+        s.apply_plain_damage(1, 0, 120.0, [0.0, 1.0, -12.0], false, false);
+        assert!(
+            s.fighters[0].hull < hull0,
+            "a barrier must not protect the back - flanking is the answer"
+        );
+
+        // overflow carries: a hit bigger than what is left still lands
+        let mut s = rig();
+        s.fighters[0].mech_shield_hp = 10.0;
+        let hull0 = s.fighters[0].hull;
+        s.apply_plain_damage(1, 0, 200.0, [0.0, 1.0, 12.0], false, false);
+        assert_eq!(s.fighters[0].mech_shield_hp, 0.0, "the barrier collapses");
+        assert!(
+            s.fighters[0].hull < hull0,
+            "the shot that breaks the barrier must still land what it had left"
+        );
+
+        // and it will not regrow while it is still being shot
+        let mut s = rig();
+        s.fighters[0].mech_shield_hp = 50.0;
+        for _ in 0..(SIM_HZ as usize / 2) {
+            s.fighters[0].mech_shield_quiet_t = 0.0; // as if hit every tick
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.fighters[0].mech_shield_hp <= 50.0,
+            "a barrier under steady fire must not regrow - breaking contact              is what earns it back"
+        );
+        // left alone, it does come back
+        let mut s = rig();
+        s.fighters[0].mech_shield_hp = 50.0;
+        for _ in 0..(SIM_HZ as f32 * (MECH_SHIELD_RECHARGE_DELAY_S + 1.0)) as usize {
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.fighters[0].mech_shield_hp > 50.0,
+            "left alone the barrier must regrow"
+        );
+
+        // a raised barrier is a wall, not a firing port
+        let mut s = rig();
+        s.fighters[0].mech_rounds = MECH_ROUNDS;
+        s.fighters[0].mech_weapon = MechWeapon::Gatling;
+        assert!(
+            !s.try_fire_gatling(0, [0.0, 0.0, 1.0]),
+            "the mounts must be cold behind a raised barrier"
+        );
+    }
+
     /// Climb checklist test 1+2: grip drains under hold, recovers under
     /// release - ASYMMETRICALLY, per [S-02] - and zero grip detaches
     /// involuntarily.
@@ -10433,8 +10598,15 @@ mod tests {
     }
 
     /// §owner: the mech's FRONT is winnable now. Ten AWM body shots or
-    /// about fourteen spears through the front arc fell a chassis -
+    /// about a dozen spears through the front arc fell a chassis -
     /// derived from the live constants so a retune moves this test.
+    ///
+    /// It has already moved once: raising the javelin from 85 to 105
+    /// took the spear count from ~14 to ~11. That is the intended
+    /// direction (a committed single-shot throw should matter), and 11
+    /// is still more javelins than a soldier can carry, so a chassis
+    /// cannot be soloed with them - which is the property this band
+    /// actually protects.
     #[test]
     fn mech_front_falls_to_the_owner_targets() {
         let awm = gun(GunKind::Awm).damage * (1.0 - MECH_RED_FRONT);
@@ -10443,8 +10615,16 @@ mod tests {
         let spear = gun(GunKind::Spear).damage * (1.0 - MECH_RED_FRONT);
         let spear_hits = (MECH_HULL / spear).ceil() as u32;
         assert!(
-            (13..=20).contains(&spear_hits),
+            (10..=18).contains(&spear_hits),
             "spear front hits in the owner band: {spear_hits}"
+        );
+        // the property that matters more than the exact count: felling a
+        // chassis from the front must still cost more javelins than one
+        // soldier carries
+        let carried = gun(GunKind::Spear).mag + gun(GunKind::Spear).reserve;
+        assert!(
+            spear_hits > carried,
+            "a chassis must not be solo-able on one loadout of javelins:              {spear_hits} needed, {carried} carried"
         );
         // the arcs still ORDER: front > side > rear protection
         assert!(MECH_RED_FRONT > MECH_RED_SIDE && MECH_RED_SIDE > 0.0);

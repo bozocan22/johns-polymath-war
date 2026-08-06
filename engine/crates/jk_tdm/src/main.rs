@@ -13406,6 +13406,27 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         // simulated, neither was ever on screen, so the
                         // pilot was flying half blind.
                         let brace = if p.mech_brace { "  [BRACED]" } else { "" };
+                        // §owner MECH SHIELD: the barrier's pool. Shown
+                        // whenever it is raised OR still regrowing, so
+                        // the pilot can see both what is left and when it
+                        // is safe to push again.
+                        let barrier = if p.shield_up || p.mech_shield_hp < sim::MECH_SHIELD_HP {
+                            let n = ((p.mech_shield_hp / sim::MECH_SHIELD_HP) * 10.0)
+                                .round()
+                                .clamp(0.0, 10.0) as i32;
+                            let bar: String =
+                                (0..10).map(|i| if i < n { '#' } else { '.' }).collect();
+                            let tag = if !p.shield_up {
+                                "REGROW"
+                            } else if p.mech_shield_hp > 0.0 {
+                                "BARRIER"
+                            } else {
+                                "COLLAPSED"
+                            };
+                            format!("  {tag} [{bar}]")
+                        } else {
+                            String::new()
+                        };
                         // ten segments of stride heat: full bar = ready,
                         // empty = still cooling. Shown only once it is
                         // actually spent, so a fresh chassis stays clean.
@@ -13422,7 +13443,7 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                             String::new()
                         };
                         format!("
-MECH  HULL {:.0}  PWR {:.0}{brace}{stride}", p.hull, p.armor)
+MECH  HULL {:.0}  PWR {:.0}{brace}{barrier}{stride}", p.hull, p.armor)
                     }
                     ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
