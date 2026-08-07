@@ -1,4 +1,4 @@
-# What is missing / not built yet — 2026-08-07 (rev 4)
+# What is missing / not built yet — 2026-08-07 (rev 5)
 
 Compiled from `BACKLOG.md`, `THOR_LOG.md`'s ranked findings, and session
 knowledge. Ordering inside each tier is Thor's ranking rule: an item
@@ -11,7 +11,17 @@ emblem) and are wired through the splash, menus, and seal footers.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-1. **HUD award toasts for a resource economy** — the toast system
+1. **Bot logic for the support chassis.** A bot that boards a scout mech
+   fires plasma and never heals — `bot_think` has no support pass, so
+   the repair beam is a player-only verb. It needs a rule of the shape
+   "if a squadmate's hull is low and I can see them, beam them instead
+   of shooting", which is a genuine new branch in the bot brain rather
+   than a tweak to an existing one.
+2. **A second repair-beam pool.** One pool serves the whole field, so
+   with two support mechs live the second beam is not drawn. Cheap to
+   lift (a pool per fighter), listed so it is a decision rather than a
+   surprise.
+3. **HUD award toasts for a resource economy** — the toast system
    itself shipped (kills/assists/parries/streaks). §4.3's *resource*
    awards still have no economy in TDM/KOTH to award from, so this
    waits on a mode that has one rather than being faked.
@@ -27,6 +37,17 @@ emblem) and are wired through the splash, menus, and seal footers.
    toes and a three-part trunk to hang plates from — but it is 24 new
    models, so it is content work with a code shape rather than the
    reverse.
+
+### Closed 2026-08-07 (the art + second-chassis pass)
+
+| Item | How it closed |
+|---|---|
+| **Heavy mech was a slab** | Hull worn at 85% as a uniform root scale (uniform because the hull is full of rotated cylinders and a non-uniform parent scale shears every one — and every hardpoint moves inboard for free). ~120 new parts buy the size back as MASS: armour layering with shadow gaps, pistons as rod-in-barrel, louvre runs, a five-layer reactor core with conduits leaving it, joint collars. Head went from a box with a slit to segmented armour + optic pods + sensor clusters + comms blades, with the ×2 visor slit untouched. Arms went from bare hardpoints to a pauldron→elbow→cradle chain. Legs got a knee cap, calf mass and an attitude thruster. |
+| **Both hull mounts were placeholders** | The turret gained spinner-mounted clamps and muzzle collars, a STATIC drive housing (the drive does not spin, the thing it drives does — most of what makes a gatling read right), a heat-sink stack with a glowing seam, a belt box with gold feed links, and a partial cowl open below. The launcher gained a ribbed casing, mouth jaws, backblast vents, a feed arm mid-travel and a boxed seeker head. |
+| **Mech barrier had no visual** | An arm-mounted folding emitter (three petals, 0.18 s deploy) projecting an 8.5%-alpha fill plus a bright hex LATTICE of real geometry. That split is the answer to a contradiction in the brief — "transparent to the pilot" and "visible to enemies" cannot both come from one translucent sheet. A test pins the gap between the two alphas. |
+| **Maps were small** | Every map +25%, applied centrally: POSITIONS scale, extents and heights do not. Plus an infill pass (outer ring at three height bands, mid-field stepping stones, angled flank lanes) because a bigger map is a worse map empty. |
+| **AGILE SUPPORT MECH** | A second `ArmorSet`, not a flag — a third of the hull, faster than a man on foot, plasma that never runs out but overheats (hard lockout), a repair beam that mends allied CHASSIS only, and a ×2.4 vulnerability to spears and arrows that gives those two weapons something to beat. Digitigrade ~60-part frame. Its own pads on the flanks. |
+| **Repair beam was invisible** | The sim publishes `repair_target`; the client draws a segmented shaft plus travelling packets. Two layers because a glowing line says a connection exists and only moving packets say something is being CARRIED — and a beam aimed at a teammate that looks like a weapon makes people dodge their own medic. |
 
 ### Closed 2026-08-07
 
