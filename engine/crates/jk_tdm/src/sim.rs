@@ -2458,7 +2458,25 @@ impl Fighter {
     }
     /// Is this fighter currently piloting a live chassis?
     pub fn in_mech(&self) -> bool {
-        self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0
+        self.armor_set.is_mech() && self.hull > 0.0
+    }
+
+    /// §owner AGILE SUPPORT MECH: is this the LIGHT chassis?
+    ///
+    /// Named rather than compared inline, because "is a mech" and "is
+    /// the heavy one" are two different questions and the code that
+    /// wants the second is code that would silently do the wrong thing
+    /// for the first.
+    pub fn in_scout_mech(&self) -> bool {
+        self.armor_set == ArmorSet::ScoutMech && self.hull > 0.0
+    }
+
+    /// The hull this fighter's chassis spawns with.
+    pub fn mech_hull_max(&self) -> f32 {
+        match self.armor_set {
+            ArmorSet::ScoutMech => SCOUT_HULL,
+            _ => MECH_HULL,
+        }
     }
     /// §6: apply crouch INTENT. A mech never crouches - `height()`
     /// returns the chassis height unconditionally for a live mech, so a
@@ -2788,6 +2806,11 @@ pub enum PickupKind {
     Ammo,
     /// §6: equips the Robot Suit (power core full).
     RobotArmor,
+    /// §owner AGILE SUPPORT MECH: equips the LIGHT chassis. Its own pad
+    /// kind rather than a flag on the heavy one, because a player
+    /// walking to a pad is choosing which machine to be, and a pad that
+    /// gave you one of two would make that a coin toss.
+    ScoutArmor,
     /// §6: equips Folk Armor (mail + plate, Shieldwall Brace).
     FolkArmor,
     /// §6: equips Pyro Armor (fire immunity, Flame Projector).
@@ -3368,6 +3391,33 @@ pub enum ArmorSet {
     RobotSuit,
     /// The light counterweight: fast, quiet, self-healing. No abilities.
     Recon,
+    /// §owner AGILE SUPPORT MECH: the second chassis.
+    ///
+    /// A walker like `RobotSuit` and nothing else about it is the same.
+    /// Where the heavy is a wall that shoots, this is a runner that keeps
+    /// the wall standing: a third of the hull, faster than a man on foot,
+    /// a plasma cannon that never runs out but overheats, and a beam that
+    /// puts hull back into whoever is taking the fire.
+    ///
+    /// It is a separate SET rather than a flag on `RobotSuit` because
+    /// every number about it differs - armour, pace, hull, mounts, and
+    /// what it is afraid of - and a boolean would have meant a branch at
+    /// every one of those.
+    ScoutMech,
+}
+
+impl ArmorSet {
+    /// Is this set a WALKER - a piloted chassis rather than worn kit?
+    ///
+    /// The two mechs share the whole chassis vocabulary: no crouching, a
+    /// hull pool instead of armour, mount weapons instead of carried
+    /// ones, committal entry and exit. Everything that asked
+    /// `== RobotSuit` to mean "in a mech" asks this instead, which is
+    /// what stopped the second chassis from having to be retro-fitted
+    /// into thirty comparisons one at a time.
+    pub fn is_mech(self) -> bool {
+        matches!(self, ArmorSet::RobotSuit | ArmorSet::ScoutMech)
+    }
 }
 
 /// §6.1: flat per-zone reduction applied AFTER the zone multiplier, with
@@ -3419,8 +3469,70 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
             move_mult: 1.10,
             explosive_resist: 0.0,
         },
+        // §owner AGILE SUPPORT MECH: a chassis that survives by not
+        // being hit. Roughly HALF the heavy's flat reduction, and the
+        // only mech that moves faster than the man who got into it - the
+        // brief's "relies on mobility instead of durability", expressed
+        // in the two numbers that decide it.
+        ArmorSet::ScoutMech => ArmorSpec {
+            flat_head: 10.0,
+            flat_torso: 26.0,
+            flat_limb: 26.0,
+            move_mult: 1.18,
+            explosive_resist: 0.0,
+        },
     }
 }
+
+// ---- §owner AGILE SUPPORT MECH -------------------------------------------
+//
+// The second chassis. Everything below is a number the heavy already has
+// and this one needed a different answer to.
+
+/// Hull pool. A third of the heavy's 600 - it is not meant to trade.
+pub const SCOUT_HULL: f32 = 210.0;
+/// Scale, against the heavy's chassis. Slimmer and shorter, so it reads
+/// as a different silhouette from across a map rather than a repaint.
+pub const SCOUT_SCALE: f32 = 1.42;
+/// §owner WEAKNESS: what a spear or an arrow does to it.
+///
+/// The brief asks for "very vulnerable to spears, very vulnerable to
+/// arrows", and this is the whole of that. It is a MULTIPLIER on the
+/// war weapons specifically, not a general fragility, because the point
+/// is to give the two weapons that lose to a heavy chassis something
+/// they beat - a bow that is useless against every mech is a bow nobody
+/// brings to a mech fight.
+pub const SCOUT_WAR_WEAPON_MULT: f32 = 2.4;
+
+/// PLASMA: the primary. No magazine, no reserve, no reload - a heat
+/// budget instead, and the trigger stops working when you spend it.
+///
+/// Heat per shot and the cool rate are set so a disciplined pilot fires
+/// forever and a panicking one locks themself out for two seconds. The
+/// numbers are deliberately kinder than the gatling's: that mount vents
+/// as a punishment for holding the trigger, and this one is the weapon's
+/// entire ammunition model, so it has to be livable.
+pub const PLASMA_HEAT_PER_SHOT: f32 = 0.062;
+pub const PLASMA_COOL_PER_S: f32 = 0.34;
+pub const PLASMA_FIRE_PERIOD: f32 = 0.16;
+pub const PLASMA_DAMAGE: f32 = 26.0;
+pub const PLASMA_SPEED: f32 = 68.0;
+/// Overheat lockout: at 1.0 heat the mount vents and refuses to fire
+/// until it has run down.
+pub const PLASMA_VENT_S: f32 = 2.0;
+
+/// REPAIR BEAM: the secondary, and the reason this chassis exists.
+pub const REPAIR_RANGE_M: f32 = 26.0;
+/// Hull per second put into the target. Slower than a rifle removes it,
+/// so a support mech extends a fight rather than deciding one.
+pub const REPAIR_PER_S: f32 = 42.0;
+/// How wide a cone the beam will grab an ally in. Generous - the beam
+/// is a support verb, not a skill shot, and fighting the reticle to
+/// heal someone is not interesting.
+pub const REPAIR_ARC_COS: f32 = 0.90;
+/// The beam draws from the same heat budget the cannon does, so a pilot
+/// cannot both suppress and sustain at full rate. One mount, one budget.
+pub const REPAIR_HEAT_PER_S: f32 = 0.16;
 
 /// §6.1 damage floor: no set reduces a hit below this fraction of the
 /// gun's BASE damage — otherwise players stop aiming.
@@ -3478,6 +3590,36 @@ pub enum MechWeapon {
     /// autocannon mount still exists on the enum for the BOT brain,
     /// which picks its mount by range, not by number key.
     Rockets,
+    /// §owner AGILE SUPPORT MECH: the plasma cannon. Fires forever and
+    /// overheats; see `PLASMA_HEAT_PER_SHOT`.
+    Plasma,
+    /// §owner AGILE SUPPORT MECH: the repair beam. Puts hull into an
+    /// ally rather than damage into an enemy - the one mount in the game
+    /// whose trigger is aimed at your own side.
+    Repair,
+}
+
+impl MechWeapon {
+    /// The mounts a chassis actually carries. The two mechs share the
+    /// enum and share NOTHING else: a heavy cannot heal and a scout
+    /// cannot put a rocket downrange, and the weapon strip is built from
+    /// this rather than from a hand-written list per HUD.
+    pub fn for_set(s: ArmorSet) -> &'static [MechWeapon] {
+        match s {
+            ArmorSet::ScoutMech => &[MechWeapon::Plasma, MechWeapon::Repair],
+            _ => &[MechWeapon::Gatling, MechWeapon::Rockets],
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            MechWeapon::Gatling => "TURRET",
+            MechWeapon::Autocannon => "AUTOCANNON",
+            MechWeapon::Rockets => "ROCKETS",
+            MechWeapon::Plasma => "PLASMA",
+            MechWeapon::Repair => "REPAIR",
+        }
+    }
 }
 /// Gatling: SUPPRESSION. Every number is set against the man-portable
 /// minigun, because that is the weapon a player will compare it to.
@@ -4383,6 +4525,17 @@ impl TdmSim {
                 respawn_t: 0.0,
             });
         }
+        // §owner AGILE SUPPORT MECH: two light pads, on the flanks the
+        // heavy pads do not use. Deliberately OFF the centre structure -
+        // a support unit wants to arrive from the side of a fight, and
+        // the pad placement is the first thing that says so.
+        for pos in [[-19.0_f32, 0.0, 14.0], [19.0, 0.0, -14.0]] {
+            pickups.push(Pickup {
+                kind: PickupKind::ScoutArmor,
+                pos,
+                respawn_t: 0.0,
+            });
+        }
         for (kind, x, z) in [
             (PickupKind::Health, -19.0, 14.0),
             (PickupKind::Health, 19.0, -14.0),
@@ -4879,7 +5032,22 @@ impl TdmSim {
                     f.gatling_heat = 0.0; // a vent always clears the mount
                 }
             } else if f.gatling_trigger_t <= 0.0 {
-                f.gatling_heat = (f.gatling_heat - GATLING_HEAT_DECAY * DT).max(0.0);
+                // §owner AGILE SUPPORT MECH: the cool rate belongs to the
+                // MOUNT, not to the field.
+                //
+                // The two chassis share `gatling_heat` because a chassis
+                // runs one mount at a time and one budget is the honest
+                // model - but they emphatically do not share a rate. The
+                // gatling's decay is ~9.5/s, sized against a weapon that
+                // banks whole units of heat per second; the plasma banks
+                // 0.39/s, so under the gatling's rate its heat was erased
+                // faster than it could ever build and the cannon could
+                // not overheat at all. The test caught exactly that.
+                let cool = match f.mech_weapon {
+                    MechWeapon::Plasma | MechWeapon::Repair => PLASMA_COOL_PER_S,
+                    _ => GATLING_HEAT_DECAY,
+                };
+                f.gatling_heat = (f.gatling_heat - cool * DT).max(0.0);
             }
             f.autocannon_cd = (f.autocannon_cd - DT).max(0.0);
             // §3: the spear releases at the END of the windup, on the
@@ -5165,6 +5333,25 @@ impl TdmSim {
                             } else {
                                 f.reserve += gun(f.gun).mag * 2;
                             }
+                        }
+                        PickupKind::ScoutArmor => {
+                            // §owner AGILE SUPPORT MECH: boards the light
+                            // chassis. No power core and no belt - it
+                            // has neither, and leaving the heavy's
+                            // fields set would have shown a pilot a
+                            // power bar for a system they do not carry.
+                            let f = &mut self.fighters[i];
+                            f.armor_set = ArmorSet::ScoutMech;
+                            f.hull = SCOUT_HULL;
+                            f.armor = 0.0;
+                            f.mech_rounds = 0;
+                            f.pod_ammo = 0;
+                            f.fuel = 0.0;
+                            f.mech_weapon = MechWeapon::Plasma;
+                            f.gatling_heat = 0.0;
+                            f.gatling_vent_t = 0.0;
+                            f.mech_transition_t = MECH_ENTER_S;
+                            f.crouch = false;
                         }
                         PickupKind::RobotArmor => {
                             // §11: the pad now grants the MECH chassis
@@ -5764,6 +5951,12 @@ impl TdmSim {
                         }
                         MechWeapon::Rockets => {
                             self.try_fire_rocket(p, cmd.aim);
+                        }
+                        MechWeapon::Plasma => {
+                            self.try_fire_plasma(p, cmd.aim);
+                        }
+                        MechWeapon::Repair => {
+                            self.tick_repair_beam(p, cmd.aim);
                         }
                     }
                 }
@@ -7526,6 +7719,138 @@ impl TdmSim {
     /// a dumb-fire straight down the aim line. Same gates the old
     /// release-fire had: a tube in the pod, the relaunch cooldown, and
     /// no launching mid power stride.
+    /// §owner AGILE SUPPORT MECH: the PLASMA cannon.
+    ///
+    /// No magazine, no reserve, no reload. The only thing standing
+    /// between the pilot and an infinite trigger is HEAT, which is the
+    /// brief's whole ask - "fires continuously without ammunition
+    /// limits, uses a heat system instead of ammo, cannot fire while
+    /// overheated".
+    ///
+    /// It reuses the gatling's heat FIELDS rather than growing a second
+    /// pair. A chassis has one mount live at a time, so one heat budget
+    /// is the honest model - and it is what makes the repair beam cost
+    /// something, since both draw from it.
+    pub fn try_fire_plasma(&mut self, p: usize, aim: [f32; 3]) -> bool {
+        {
+            let f = &self.fighters[p];
+            if !f.in_mech() || f.stagger_t > 0.0 {
+                return false;
+            }
+            // VENTING is a hard lockout, not a slowdown. A weapon that
+            // merely got worse when hot would be one you always hold
+            // down; a weapon that stops is one you learn to feather.
+            if f.gatling_vent_t > 0.0 || f.gatling_cd > 0.0 {
+                return false;
+            }
+        }
+        let o = self.muzzle_origin(p);
+        let d = normalize(aim);
+        let team = self.fighters[p].team;
+        self.next_missile_id += 1;
+        let id = self.next_missile_id;
+        // A plasma bolt is an ARROW as far as the missile integrator is
+        // concerned - a fast projectile that hits a body and stops. It
+        // is not a spear (no stick, no recovery) and it does not pierce,
+        // which is what `pierces_left: 0` says.
+        self.missiles.push(Missile {
+            id,
+            pos: o,
+            vel: [d[0] * PLASMA_SPEED, d[1] * PLASMA_SPEED, d[2] * PLASMA_SPEED],
+            team,
+            shooter: p,
+            damage: PLASMA_DAMAGE,
+            is_spear: false,
+            stuck_t: None,
+            embedded: false,
+            pierces_left: 0,
+            pierced: Vec::new(),
+            power: 1.0, // no draw curve: a capacitor is charged or it is not
+        });
+        let f = &mut self.fighters[p];
+        f.gatling_cd = PLASMA_FIRE_PERIOD;
+        f.gatling_trigger_t = PLASMA_FIRE_PERIOD;
+        f.gatling_heat += PLASMA_HEAT_PER_SHOT;
+        if f.gatling_heat >= 1.0 {
+            f.gatling_heat = 1.0;
+            f.gatling_vent_t = PLASMA_VENT_S;
+        }
+        true
+    }
+
+    /// §owner AGILE SUPPORT MECH: the REPAIR beam.
+    ///
+    /// The one trigger in the game aimed at your own side. Held, not
+    /// tapped: it runs per tick while the button is down, picks the ally
+    /// the pilot is looking at, and pours hull into them.
+    ///
+    /// It repairs a CHASSIS, not a person. Putting health into infantry
+    /// would make this a healer in a shooter that has no healing, and
+    /// would break the one-life-per-respawn economy every other system
+    /// is written against; putting hull into a walker extends a machine
+    /// that was always meant to be extended, and the heavy chassis is
+    /// exactly the thing that wants a friend behind it.
+    ///
+    /// Returns the target it is currently working on, so the client can
+    /// draw a beam to it without re-deriving the choice.
+    pub fn tick_repair_beam(&mut self, p: usize, aim: [f32; 3]) -> Option<usize> {
+        let (from, team, ok) = {
+            let f = &self.fighters[p];
+            (
+                self.muzzle_origin(p),
+                f.team,
+                f.in_mech() && f.stagger_t <= 0.0 && f.gatling_vent_t <= 0.0,
+            )
+        };
+        if !ok {
+            return None;
+        }
+        let d = normalize(aim);
+        // the ally most directly under the reticle, inside the arc and
+        // the range. Nearest-to-centre rather than nearest-in-space: the
+        // pilot is pointing AT someone, and the one they meant is the one
+        // the beam should find.
+        let mut best: Option<(usize, f32)> = None;
+        for (j, g) in self.fighters.iter().enumerate() {
+            if j == p || g.team != team || !g.alive() {
+                continue;
+            }
+            // only a chassis can be repaired, and only a damaged one
+            if !g.in_mech() || g.hull >= g.mech_hull_max() {
+                continue;
+            }
+            let to = [
+                g.pos[0] - from[0],
+                g.pos[1] + g.height() * 0.5 - from[1],
+                g.pos[2] - from[2],
+            ];
+            let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+            if dist > REPAIR_RANGE_M || dist < 1e-3 {
+                continue;
+            }
+            let cos = (to[0] * d[0] + to[1] * d[1] + to[2] * d[2]) / dist;
+            if cos < REPAIR_ARC_COS {
+                continue;
+            }
+            if best.map_or(true, |(_, bc)| cos > bc) {
+                best = Some((j, cos));
+            }
+        }
+        let (j, _) = best?;
+        let cap = self.fighters[j].mech_hull_max();
+        let g = &mut self.fighters[j];
+        g.hull = (g.hull + REPAIR_PER_S * DT).min(cap);
+        // the beam costs the same budget the cannon spends, so a pilot
+        // cannot suppress and sustain at once
+        let f = &mut self.fighters[p];
+        f.gatling_heat = (f.gatling_heat + REPAIR_HEAT_PER_S * DT).min(1.0);
+        if f.gatling_heat >= 1.0 {
+            f.gatling_vent_t = PLASMA_VENT_S;
+        }
+        f.gatling_trigger_t = 0.08; // keeps the client's beam FX alive
+        Some(j)
+    }
+
     pub fn try_fire_rocket(&mut self, p: usize, aim: [f32; 3]) -> bool {
         {
             let f = &self.fighters[p];
@@ -8142,8 +8467,25 @@ impl TdmSim {
                 d *= 1.0 - block;
                 shielded = block > 0.0;
             }
-            // §6.1 flats + floor (projectiles are flat-torso damage)
-            d = self.apply_armor(j, d, dmg * zone_mult, HitZone::Torso, Some(from_dir));
+            // §6.1 flats + floor (projectiles are flat-torso damage).
+            //
+            // §owner AGILE SUPPORT MECH: `true` in the last slot is the
+            // WAR-WEAPON flag, and this is the only site that sets it -
+            // a spear and an arrow are exactly the two things that
+            // arrive here. It is the light chassis's stated weakness,
+            // and it exists to give these two weapons a target: against
+            // the heavy they are close to useless, and a weapon with
+            // nothing to beat is a weapon nobody carries.
+            d = self.apply_armor_tagged(
+                j,
+                d,
+                dmg * zone_mult,
+                HitZone::Torso,
+                Some(from_dir),
+                false,
+                false,
+                true,
+            );
             let assist_candidate = self.record_hit_get_assist(i, j);
             self.credit_damage(i, j, d);
             self.fighters[j].health -= d;
@@ -8486,7 +8828,7 @@ impl TdmSim {
                 continue;
             }
             let d =
-                self.apply_armor_tagged(j, raw, raw, HitZone::Torso, Some(from), false, false);
+                self.apply_armor_tagged(j, raw, raw, HitZone::Torso, Some(from), false, false, false);
             let f = &mut self.fighters[j];
             f.health -= d;
             f.last_dmg_at = now;
@@ -8533,6 +8875,7 @@ impl TdmSim {
                         TOXIC_DPS * 0.25,
                         HitZone::Torso,
                         Some(tp),
+                        false,
                         false,
                         false,
                     );
@@ -9034,7 +9377,7 @@ impl TdmSim {
         zone: HitZone,
         from: Option<[f32; 3]>,
     ) -> f32 {
-        self.apply_armor_tagged(j, dmg, base, zone, from, false, false)
+        self.apply_armor_tagged(j, dmg, base, zone, from, false, false, false)
     }
 
     /// §4.5 (BRIEF VIII): call once per hit, BEFORE checking whether
@@ -9097,9 +9440,43 @@ impl TdmSim {
         from: Option<[f32; 3]>,
         explosive: bool,
         fire: bool,
+        // §owner: a SPEAR or an ARROW. Only the light chassis cares.
+        war_weapon: bool,
     ) -> f32 {
+        // §owner AGILE SUPPORT MECH: the LIGHT chassis, and its weakness.
+        //
+        // Deliberately NOT the heavy's model. Angle armour is a reward
+        // for pointing a thick front at the shooter, and this chassis has
+        // no thick front to point - it survives by not being where the
+        // shot went. So no arc, no visor bonus: hull soaks, and that is
+        // all.
+        //
+        // The WAR WEAPONS bite it. `SCOUT_WAR_WEAPON_MULT` exists to give
+        // the spear and the bow something they beat: against the heavy
+        // they are close to useless, and a weapon with no target is a
+        // weapon nobody picks up. Flagged by the CALLER rather than
+        // sniffed here, because by this point the gun is long gone and
+        // only the number survives.
         {
             let v = &self.fighters[j];
+            if v.armor_set == ArmorSet::ScoutMech && v.hull > 0.0 {
+                let mut d = dmg;
+                if war_weapon {
+                    d *= SCOUT_WAR_WEAPON_MULT;
+                }
+                let f = &mut self.fighters[j];
+                let absorbed = d.min(f.hull);
+                f.hull -= absorbed;
+                let through = d - absorbed;
+                if f.hull <= 0.0 {
+                    // the chassis fails and drops its pilot, exactly as
+                    // the heavy's does
+                    f.hull = 0.0;
+                    f.armor_set = ArmorSet::None;
+                    f.health = f.health.min(MECH_EJECT_HP);
+                }
+                return through;
+            }
             if v.armor_set == ArmorSet::RobotSuit && v.hull > 0.0 {
                 let mut red = 0.0;
                 let mut front = false;
@@ -9250,7 +9627,7 @@ impl TdmSim {
         }
         // §11: blasts carry their direction — the mech's arc model reads
         // the blast position; fire and explosives use their bypass rules
-        d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire);
+        d = self.apply_armor_tagged(victim, d, dmg, HitZone::Torso, Some(at), explosive, fire, false);
         let assist_candidate = self.record_hit_get_assist(src, victim);
         self.credit_damage(src, victim, d);
         self.fighters[victim].health -= d;
@@ -10060,6 +10437,15 @@ impl TdmSim {
                             }
                             MechWeapon::Autocannon => {
                                 self.try_fire_autocannon(i, aim);
+                            }
+                            // §owner AGILE SUPPORT MECH: a bot in the
+                            // light chassis shoots plasma. It never
+                            // selects REPAIR here - healing is not a
+                            // response to seeing an enemy, and the
+                            // support pass in `bot_think` owns that
+                            // decision on its own terms.
+                            MechWeapon::Plasma | MechWeapon::Repair => {
+                                self.try_fire_plasma(i, aim);
                             }
                             // §C.7: the bot brain never SELECTS the pod
                             // (its mount choice is range-driven, above),
@@ -11562,6 +11948,197 @@ mod tests {
         assert!(bounded && overwatched, "a 5v5 must actually bound at some point");
         assert!(moved, "a bounding squad still has to cross ground");
         assert!(shots > 0, "a bounding squad still has to put rounds down");
+    }
+
+    /// §owner AGILE SUPPORT MECH: it is a mech, and it is not the
+    /// heavy one.
+    ///
+    /// The whole point of a second chassis is CONTRAST. If it ends up
+    /// merely a bit different it is a variant, and a variant is not
+    /// worth a class.
+    #[test]
+    fn the_scout_chassis_contrasts_with_the_heavy_one() {
+        assert!(ArmorSet::ScoutMech.is_mech(), "it walks, so it is a mech");
+        assert!(ArmorSet::RobotSuit.is_mech());
+        assert!(!ArmorSet::Folk.is_mech(), "worn kit is not a chassis");
+
+        let scout = armor_spec(ArmorSet::ScoutMech);
+        let heavy = armor_spec(ArmorSet::RobotSuit);
+        assert!(
+            SCOUT_HULL < MECH_HULL * 0.5,
+            "at {SCOUT_HULL} vs {MECH_HULL} it is still a brawler"
+        );
+        assert!(
+            scout.flat_torso < heavy.flat_torso * 0.6,
+            "lower armour is the trade it pays for the speed"
+        );
+        assert!(
+            scout.move_mult > 1.0,
+            "the only mech that outruns the man who got into it - {} \
+             would be a slow support unit, which is a contradiction",
+            scout.move_mult
+        );
+        assert!(scout.move_mult > heavy.move_mult * 1.3);
+        // and the mounts do not overlap AT ALL. A heavy cannot heal and
+        // a scout cannot put a rocket downrange.
+        let s = MechWeapon::for_set(ArmorSet::ScoutMech);
+        let h = MechWeapon::for_set(ArmorSet::RobotSuit);
+        assert!(s.iter().all(|w| !h.contains(w)), "the mounts must not overlap");
+        assert!(s.contains(&MechWeapon::Plasma) && s.contains(&MechWeapon::Repair));
+        assert!(h.contains(&MechWeapon::Gatling) && h.contains(&MechWeapon::Rockets));
+    }
+
+    /// §owner: the PLASMA cannon's heat budget replaces ammunition, and
+    /// the lockout is a lockout.
+    #[test]
+    fn plasma_never_runs_out_but_it_does_overheat() {
+        let mut s = range(0x9101);
+        let f = &mut s.fighters[0];
+        f.armor_set = ArmorSet::ScoutMech;
+        f.hull = SCOUT_HULL;
+        f.mech_weapon = MechWeapon::Plasma;
+        // it fires with an EMPTY carried inventory - that is the whole
+        // "no ammunition limits" claim, and the failure it guards is a
+        // mount silently gated on the pilot's rifle rounds
+        s.fighters[0].ammo = 0;
+        s.fighters[0].reserve = 0;
+        let mut shots = 0;
+        let mut overheated_at = None;
+        for tick in 0..600 {
+            if s.try_fire_plasma(0, [0.0, 0.0, 1.0]) {
+                shots += 1;
+            } else if s.fighters[0].gatling_vent_t > 0.0 && overheated_at.is_none() {
+                overheated_at = Some(tick);
+            }
+            s.step(PlayerCmd::default());
+        }
+        assert!(shots > 10, "only {shots} shots - the cannon is gated on something");
+        let vent_tick = overheated_at.expect("holding the trigger must overheat it");
+        assert!(vent_tick > 10, "it overheated almost immediately");
+        // while VENTING the trigger does nothing at all - not less, not
+        // slower. A weapon that merely got worse when hot is one you
+        // always hold down.
+        s.fighters[0].gatling_vent_t = PLASMA_VENT_S;
+        s.fighters[0].gatling_cd = 0.0;
+        assert!(
+            !s.try_fire_plasma(0, [0.0, 0.0, 1.0]),
+            "a vented mount must refuse outright"
+        );
+        // and it recovers on its own.
+        //
+        // The chassis is re-armed first: 600 ticks of a live range is
+        // long enough for the other fighter to shoot this hull down, and
+        // a dismounted pilot cannot fire a mount for reasons that have
+        // nothing to do with heat. Without this the test was asserting
+        // "the vent cleared" and measuring "the mech survived".
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_weapon = MechWeapon::Plasma;
+            f.gatling_vent_t = 0.0;
+            f.gatling_heat = 0.0;
+            f.gatling_cd = 0.0;
+            f.stagger_t = 0.0;
+        }
+        assert!(s.try_fire_plasma(0, [0.0, 0.0, 1.0]), "it must come back");
+    }
+
+    /// §owner: the REPAIR beam puts hull into an ALLY chassis, and into
+    /// nothing else.
+    #[test]
+    fn the_repair_beam_mends_allied_chassis_only() {
+        let mut s = TdmSim::new(cfg(0x9102, 3, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        // the medic
+        s.fighters[0].team = Team::Blue;
+        s.fighters[0].armor_set = ArmorSet::ScoutMech;
+        s.fighters[0].hull = SCOUT_HULL;
+        s.fighters[0].mech_weapon = MechWeapon::Repair;
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[0].yaw = 0.0;
+        // a hurt ally in a heavy chassis, straight ahead
+        let ally = 1;
+        s.fighters[ally].team = Team::Blue;
+        s.fighters[ally].armor_set = ArmorSet::RobotSuit;
+        s.fighters[ally].hull = 100.0;
+        s.fighters[ally].pos = [0.0, 0.0, 10.0];
+
+        let before = s.fighters[ally].hull;
+        let hit = s.tick_repair_beam(0, [0.0, 0.0, 1.0]);
+        assert_eq!(hit, Some(ally), "the beam must find the ally it is aimed at");
+        assert!(s.fighters[ally].hull > before, "and actually mend them");
+        // it never exceeds the target's OWN cap - a scout must not be
+        // able to inflate a heavy past its hull
+        s.fighters[ally].hull = MECH_HULL;
+        assert_eq!(s.tick_repair_beam(0, [0.0, 0.0, 1.0]), None, "a full hull is not a target");
+
+        // an ENEMY chassis is not a target, however well aimed
+        s.fighters[ally].hull = 100.0;
+        s.fighters[ally].team = Team::Red;
+        assert_eq!(s.tick_repair_beam(0, [0.0, 0.0, 1.0]), None, "it must not mend the enemy");
+        // nor is INFANTRY - this is a chassis repair, not a healer in a
+        // shooter that has no healing
+        s.fighters[ally].team = Team::Blue;
+        s.fighters[ally].armor_set = ArmorSet::None;
+        s.fighters[ally].hull = 0.0;
+        s.fighters[ally].health = 10.0;
+        assert_eq!(s.tick_repair_beam(0, [0.0, 0.0, 1.0]), None, "infantry is not repairable");
+        // and it costs HEAT, from the same budget the cannon spends
+        s.fighters[ally].armor_set = ArmorSet::RobotSuit;
+        s.fighters[ally].hull = 100.0;
+        s.fighters[0].gatling_heat = 0.0;
+        s.tick_repair_beam(0, [0.0, 0.0, 1.0]);
+        assert!(
+            s.fighters[0].gatling_heat > 0.0,
+            "healing must draw on the same budget as shooting, or a pilot \
+             can suppress and sustain at once for free"
+        );
+    }
+
+    /// §owner: the war weapons BITE the light chassis.
+    #[test]
+    fn spears_and_arrows_tear_through_the_scout_mech() {
+        let plain = |set: ArmorSet, war: bool| -> f32 {
+            let mut s = range(0x9103);
+            s.fighters[1].armor_set = set;
+            s.fighters[1].hull = if set.is_mech() { SCOUT_HULL.max(MECH_HULL) } else { 0.0 };
+            let before = s.fighters[1].hull;
+            s.apply_armor_tagged(
+                1,
+                100.0,
+                100.0,
+                HitZone::Torso,
+                Some([0.0, 1.0, -10.0]),
+                false,
+                false,
+                war,
+            );
+            before - s.fighters[1].hull
+        };
+        let gun = plain(ArmorSet::ScoutMech, false);
+        let spear = plain(ArmorSet::ScoutMech, true);
+        assert!(
+            spear > gun * 2.0,
+            "a spear must hurt far more than a bullet: {spear} vs {gun}"
+        );
+        assert!(
+            (spear / gun - SCOUT_WAR_WEAPON_MULT).abs() < 0.01,
+            "the multiplier must arrive intact"
+        );
+        // and the HEAVY chassis is unaffected - the weakness belongs to
+        // one machine, or it is just a global buff to two weapons
+        let heavy_gun = plain(ArmorSet::RobotSuit, false);
+        let heavy_spear = plain(ArmorSet::RobotSuit, true);
+        assert!(
+            (heavy_spear - heavy_gun).abs() < 0.01,
+            "the heavy must not feel this at all"
+        );
     }
 
     /// §owner MAP EXPANSION: every map is 25% bigger, and the things
@@ -15411,7 +15988,9 @@ mod tests {
             let fired = match w {
                 MechWeapon::Gatling => s.try_fire_gatling(0, [0.0, 0.0, -1.0]),
                 MechWeapon::Autocannon => s.try_fire_autocannon(0, [0.0, 0.0, -1.0]),
-                MechWeapon::Rockets => unreachable!("this rig drives the gun mounts only"),
+                MechWeapon::Rockets | MechWeapon::Plasma | MechWeapon::Repair => {
+                    unreachable!("this rig drives the heavy gun mounts only")
+                }
             };
             assert!(fired, "{w:?} must fire");
             let z = |id: u32| s.zombies.iter().find(|z| z.id == id).expect("zombie alive");
@@ -15653,7 +16232,9 @@ mod tests {
             let fired = match w {
                 MechWeapon::Gatling => s.try_fire_gatling(0, aim),
                 MechWeapon::Autocannon => s.try_fire_autocannon(0, aim),
-                MechWeapon::Rockets => unreachable!("this rig drives the gun mounts only"),
+                MechWeapon::Rockets | MechWeapon::Plasma | MechWeapon::Repair => {
+                    unreachable!("this rig drives the heavy gun mounts only")
+                }
             };
             assert!(fired, "the mount must fire");
             assert_eq!(s.fighters[0].hits_dealt, 1, "the round must connect");

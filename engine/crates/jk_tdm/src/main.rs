@@ -2043,6 +2043,9 @@ struct FighterRig {
     /// the always-carried shield, shown raised on the left arm
     shield: Entity,
     armor_rig: Entity,
+    /// §owner AGILE SUPPORT MECH: the light chassis, hung beside the
+    /// heavy one and swapped by Visibility.
+    scout_rig: Entity,
     /// D.1: mech leg armour roots, [left, right] x [thigh, shin, foot] -
     /// parented to the REAL leg bones so the plating walks with the gait.
     mech_leg_armor: [[Entity; 3]; 2],
@@ -4350,6 +4353,7 @@ fn pickup_prompt(kind: PickupKind) -> &'static str {
         PickupKind::Health => "HEALTH PACK",
         PickupKind::Ammo => "AMMO CACHE",
         PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
+        PickupKind::ScoutArmor => "SCOUT CHASSIS - walk over to board  (1: PLASMA, no ammo - 2: REPAIR BEAM - fast, thin, and spears hurt)",
         PickupKind::FolkArmor => "FOLK ARMOR - walk over to equip  (hold C: shieldwall brace)",
         PickupKind::PyroArmor => "PYRO ARMOR - walk over to equip  (hold C: flame projector)",
         PickupKind::ReconWeave => "RECON WEAVE - walk over to equip  (fast, quiet, self-healing)",
@@ -4365,6 +4369,10 @@ fn equip_hint(set: ArmorSet) -> &'static str {
         ArmorSet::Pyro => "PYRO ARMOR EQUIPPED - hold C: FLAME PROJECTOR - fireproof",
         ArmorSet::RobotSuit => "MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
+        // §owner AGILE SUPPORT MECH: the hint names the two things a
+        // pilot has to know that the heavy's does not - the cannon has
+        // no ammo, and the beam is pointed at friends.
+        ArmorSet::ScoutMech => "SCOUT MECH BOARDED - 1: PLASMA (heat, no ammo) - 2: REPAIR BEAM - U: DISMOUNT",
     }
 }
 
@@ -6289,6 +6297,9 @@ fn shot_clock(f: &Fighter) -> f32 {
             sim::MechWeapon::Autocannon => f.autocannon_cd,
             // §C.7: the pod's cycle is the relaunch cooldown
             sim::MechWeapon::Rockets => f.pod_cd,
+            // §owner: both scout mounts ride the shared heat budget's
+            // own cycle - see 	ry_fire_plasma.
+            sim::MechWeapon::Plasma | sim::MechWeapon::Repair => f.gatling_cd,
         }
     } else {
         f.fire_cd
@@ -7108,6 +7119,142 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit, see_through: bool
         .entity(fist)
         .insert(Transform::from_xyz(0.0, -0.02, -0.08))
         .set_parent(root);
+    root
+}
+
+/// §owner AGILE SUPPORT MECH: the light chassis.
+///
+/// Built against the heavy as its opposite in every line. Where that one
+/// is a slab with hardpoints, this is a FRAME - a narrow spine, an
+/// exposed drive core, limbs that are visibly linkages rather than
+/// armoured blocks, and plating that covers the places a shot is likely
+/// to land instead of everywhere.
+///
+/// Around sixty parts, and the count is not the point: the point is that
+/// nothing here is a solid mass. Every element is either a strut, a
+/// linkage, a thin plate over a gap, or a piece of the power system, and
+/// the gaps between them are what make it read as light from across a
+/// map. A smaller version of the heavy would have read as a heavy that
+/// was far away.
+fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let cube = || kit.cube.clone();
+    let cyl = || kit.cyl.clone();
+    let ball = || kit.ball.clone();
+    let mut part = |mesh: Handle<Mesh>,
+                    mat: Handle<StandardMaterial>,
+                    tr: Vec3,
+                    rot: Quat,
+                    sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(root);
+    };
+
+    // ---- SPINE: the whole machine hangs off one narrow beam -----------
+    part(cube(), kit.mech_metal.clone(), Vec3::new(0.0, 0.52, -0.02), Quat::IDENTITY, Vec3::new(0.16, 0.62, 0.18));
+    part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.86, -0.02), Quat::IDENTITY, Vec3::new(0.22, 0.14, 0.24));
+    // vertebra rings up the beam - a spine, not a post
+    for k in 0..4 {
+        part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.34 + k as f32 * 0.15, -0.02),
+            Quat::IDENTITY, Vec3::new(0.21, 0.030, 0.23));
+    }
+
+    // ---- CHEST: a cage, not a box. Two thin plates and the core -------
+    part(cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.66, 0.20), Quat::from_rotation_x(-0.22), Vec3::new(0.46, 0.34, 0.045));
+    part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.66, 0.235), Quat::from_rotation_x(-0.22), Vec3::new(0.30, 0.16, 0.020));
+    part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.62, -0.22), Quat::from_rotation_x(0.18), Vec3::new(0.38, 0.30, 0.040));
+    // the DRIVE CORE, exposed between them - this chassis wears its
+    // power plant where the heavy hides one
+    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.60, 0.0), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.24, 0.26, 0.24));
+    part(cyl(), kit.core_glow.clone(), Vec3::new(0.0, 0.60, 0.0), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.28, 0.17));
+    for k in 0..6 {
+        let a = k as f32 * std::f32::consts::TAU / 6.0;
+        part(cube(), kit.mech_metal.clone(), Vec3::new(a.cos() * 0.145, 0.60 + a.sin() * 0.145, 0.0),
+            Quat::from_rotation_z(a), Vec3::new(0.055, 0.028, 0.30));
+    }
+    // radiator fins off the back of the core - the heat model, on the model
+    for k in -2i32..=2 {
+        part(cube(), kit.mech_metal.clone(), Vec3::new(k as f32 * 0.055, 0.62, -0.30),
+            Quat::IDENTITY, Vec3::new(0.016, 0.22, 0.14));
+    }
+
+    // ---- HEAD: a single sweeping optic on a slim collar ---------------
+    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.96, -0.02), Quat::IDENTITY, Vec3::new(0.10, 0.10, 0.10));
+    part(ball(), kit.mech_khaki.clone(), Vec3::new(0.0, 1.06, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.22, 0.30));
+    part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 1.12, -0.02), Quat::from_rotation_x(-0.30), Vec3::new(0.26, 0.045, 0.16));
+    // the visor - ONE slit, same weak-point vocabulary the heavy uses
+    part(cube(), kit.mech_red.clone(), Vec3::new(0.0, 1.055, 0.155), Quat::IDENTITY, Vec3::new(0.20, 0.030, 0.02));
+    for sd in [-1.0_f32, 1.0] {
+        part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.13, 1.14, -0.12), Quat::from_rotation_z(sd * 0.4), Vec3::new(0.012, 0.20, 0.030));
+        part(ball(), kit.core_glow.clone(), Vec3::new(sd * 0.10, 1.02, 0.13), Quat::IDENTITY, Vec3::splat(0.022));
+    }
+
+    // ---- SHOULDERS + ARMS: visible linkages, thin plates --------------
+    for sd in [-1.0_f32, 1.0] {
+        part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.30, 0.78, 0.0), Quat::IDENTITY, Vec3::splat(0.115));
+        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.355, 0.80, 0.0), Quat::from_rotation_z(sd * 0.25), Vec3::new(0.13, 0.16, 0.22));
+        // upper arm as a strut with the actuator alongside, not a block
+        part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.375, 0.62, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.055, 0.30, 0.055));
+        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.435, 0.64, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.032, 0.24, 0.032));
+        part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.40, 0.46, 0.03), Quat::IDENTITY, Vec3::splat(0.085));
+        // forearm plate - covers the outside only, open inboard
+        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.445, 0.34, 0.04), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.045, 0.26, 0.14));
+        part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.395, 0.34, 0.04), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.048, 0.26, 0.048));
+    }
+
+    // ---- HIPS + LEGS: DIGITIGRADE - the whole silhouette read ---------
+    //
+    // A backward-jointed leg is the single clearest way to say "this one
+    // runs" without a single animation playing. The heavy is
+    // plantigrade: it stands like a building. This stands like a bird.
+    part(cyl(), kit.mech_metal.clone(), Vec3::new(0.0, 0.22, -0.02), Quat::IDENTITY, Vec3::new(0.34, 0.10, 0.30));
+    for sd in [-1.0_f32, 1.0] {
+        // hip ball + thigh strut, angled forward
+        part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.17, 0.20, 0.0), Quat::IDENTITY, Vec3::splat(0.115));
+        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.185, 0.06, 0.05), Quat::from_rotation_x(-0.22), Vec3::new(0.115, 0.30, 0.16));
+        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.245, 0.06, 0.02), Quat::from_rotation_x(-0.22), Vec3::new(0.038, 0.28, 0.038));
+        // KNEE forward, then the shank sweeping BACK - the digitigrade
+        // break, and the reason this thing reads as fast standing still
+        part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.10, 0.13), Quat::IDENTITY, Vec3::splat(0.105));
+        part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(sd * 0.185, -0.09, 0.185), Quat::from_rotation_x(-0.35), Vec3::new(0.115, 0.14, 0.055));
+        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.185, -0.26, 0.03), Quat::from_rotation_x(0.42), Vec3::new(0.095, 0.34, 0.13));
+        part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.24, -0.05), Quat::from_rotation_x(0.42), Vec3::new(0.030, 0.30, 0.030));
+        // ANKLE well back, then a long digitigrade foot forward
+        part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.42, -0.10), Quat::IDENTITY, Vec3::splat(0.085));
+        part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(sd * 0.185, -0.48, 0.03), Quat::from_rotation_x(0.10), Vec3::new(0.10, 0.055, 0.30));
+        part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.505, 0.16), Quat::IDENTITY, Vec3::new(0.11, 0.030, 0.09));
+        // and a thruster in the calf - this one really does need to jink
+        part(cyl(), kit.mech_khaki_dk.clone(), Vec3::new(sd * 0.185, -0.16, -0.15), Quat::from_rotation_x(0.42), Vec3::new(0.075, 0.11, 0.075));
+        part(cyl(), kit.core_glow.clone(), Vec3::new(sd * 0.185, -0.235, -0.20), Quat::from_rotation_x(0.42), Vec3::new(0.048, 0.020, 0.048));
+    }
+
+    // ---- MOUNTS: plasma right, repair left ----------------------------
+    // Plasma: a slim emitter with coil rings and a lit throat.
+    part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.445, 0.30, 0.34), Quat::IDENTITY, Vec3::new(0.11, 0.11, 0.42));
+    for k in 0..4 {
+        part(cyl(), kit.mech_metal.clone(), Vec3::new(0.445, 0.30, 0.22 + k as f32 * 0.085),
+            Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.135, 0.030, 0.135));
+    }
+    part(cyl(), kit.core_glow.clone(), Vec3::new(0.445, 0.30, 0.55), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.070, 0.030, 0.070));
+    part(cube(), kit.med_glow.clone(), Vec3::new(0.445, 0.365, 0.30), Quat::IDENTITY, Vec3::new(0.018, 0.012, 0.30));
+    // Repair: a wider dish with an emitter node in it - it PROJECTS,
+    // where the cannon FIRES, and the silhouette should say which is which
+    part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.445, 0.30, 0.30), Quat::IDENTITY, Vec3::new(0.12, 0.12, 0.30));
+    part(cyl(), kit.mech_khaki_lt.clone(), Vec3::new(-0.445, 0.30, 0.46), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.055, 0.22));
+    part(cyl(), kit.mech_shadow.clone(), Vec3::new(-0.445, 0.30, 0.475), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.16, 0.040, 0.16));
+    part(ball(), kit.core_glow.clone(), Vec3::new(-0.445, 0.30, 0.49), Quat::IDENTITY, Vec3::splat(0.075));
+    for k in 0..4 {
+        let a = k as f32 * std::f32::consts::TAU / 4.0 + 0.78;
+        part(cube(), kit.mech_metal.clone(), Vec3::new(-0.445 + a.cos() * 0.115, 0.30 + a.sin() * 0.115, 0.44),
+            Quat::from_rotation_z(a), Vec3::new(0.075, 0.022, 0.075));
+    }
     root
 }
 
@@ -8762,6 +8909,31 @@ fn spawn_mech_leg_armor(
 /// Spawn the floating model shown over a pickup pad.
 fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind) -> Entity {
     match kind {
+        // §owner AGILE SUPPORT MECH: the light pad reads as a CHASSIS
+        // like the heavy one, but slim and lit - a narrow frame with a
+        // glowing core between two struts. Same family, different
+        // machine, legible at pad distance.
+        PickupKind::ScoutArmor => {
+            let root = commands
+                .spawn((Transform::from_xyz(0.0, 1.0, 0.0), Visibility::default()))
+                .id();
+            for (mesh, mat, tr, sc) in [
+                (kit.cube.clone(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.10, 0.44, 0.12)),
+                (kit.cube.clone(), kit.mech_khaki_lt.clone(), Vec3::new(-0.17, 0.02, 0.0), Vec3::new(0.055, 0.34, 0.09)),
+                (kit.cube.clone(), kit.mech_khaki_lt.clone(), Vec3::new(0.17, 0.02, 0.0), Vec3::new(0.055, 0.34, 0.09)),
+                (kit.ball.clone(), kit.core_glow.clone(), Vec3::new(0.0, 0.06, 0.0), Vec3::splat(0.115)),
+                (kit.cube.clone(), kit.mech_metal.clone(), Vec3::new(0.0, -0.22, 0.04), Vec3::new(0.26, 0.035, 0.20)),
+            ] {
+                commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(mat),
+                        Transform::from_translation(tr).with_scale(sc),
+                    ))
+                    .set_parent(root);
+            }
+            root
+        }
         PickupKind::Health => {
             let root = commands
                 .spawn((Transform::from_xyz(0.0, 1.0, 0.0), Visibility::default()))
@@ -9621,6 +9793,16 @@ fn spawn_fighter_rigs(
                 Visibility::Hidden,
             ))
             .set_parent(torso);
+        // §owner AGILE SUPPORT MECH: the second chassis, hung beside the
+        // first and swapped by Visibility. Same trick as the helmets and
+        // the class silhouettes - building one at boarding time would
+        // fight the material and layer latches every other rig here has
+        // had to work around.
+        let scout_rig = spawn_scout_chassis(commands, kit);
+        commands
+            .entity(scout_rig)
+            .insert((Transform::IDENTITY, Visibility::Hidden))
+            .set_parent(torso);
         commands.entity(root).insert(barrier);
         commands.entity(root).insert(FighterRig {
             phase: 0.0,
@@ -9654,6 +9836,7 @@ fn spawn_fighter_rigs(
             weapons,
             shield,
             armor_rig,
+            scout_rig,
             mech_leg_armor: [la_l.roots, la_r.roots],
             mech_detach_70: [hull_det.skirt_l, hull_det.skirt_r, la_l.thigh_plate],
             mech_detach_40: [la_l.shin_plate, hull_det.drum_r, hull_det.antenna],
@@ -12091,6 +12274,10 @@ fn input_and_step(
                 // §C.7: a launch is a THUMP, not a crack - between the
                 // two gun mounts, nearer the belt than the cannon
                 sim::MechWeapon::Rockets => 0.0110,
+                // a plasma bolt leaves with no mass behind it; the beam
+                // has no impulse at all
+                sim::MechWeapon::Plasma => 0.0009,
+                sim::MechWeapon::Repair => 0.0,
             }
         } else {
             gun(p.gun).kick
@@ -13418,12 +13605,24 @@ fn sync_fighters(
                 Visibility::Hidden
             };
         }
+        // §owner AGILE SUPPORT MECH: and the light chassis while THAT is.
+        // Exactly one of the two can be visible, which is why both are
+        // written from the same rmor_set rather than one of them
+        // toggling on in_mech.
+        if let Ok((_, mut v)) = parts.get_mut(rig.scout_rig) {
+            *v = if f.armor_set == ArmorSet::ScoutMech {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
         // The mech is HEADLESS and ARMLESS - a walking weapons platform,
         // not a big soldier (Brief VIII-B D.1). Transforms still animate;
         // only visibility gates, so the band and connectivity tests are
         // untouched. `neck` is the head pivot: head shell, eyes and hat
         // are its descendants and inherit the hide.
-        let suit = f.armor_set == ArmorSet::RobotSuit;
+        // both chassis hide the soldier underneath them
+        let suit = f.armor_set.is_mech();
         let body_vis = if suit {
             Visibility::Hidden
         } else {
@@ -15107,6 +15306,9 @@ fn fp_viewmodel(
                 sim::MechWeapon::Gatling => sim::GATLING_FIRE_PERIOD,
                 sim::MechWeapon::Autocannon => sim::AUTOCANNON_CYCLE_S,
                 sim::MechWeapon::Rockets => sim::POD_RELAUNCH_S,
+                sim::MechWeapon::Plasma | sim::MechWeapon::Repair => {
+                    sim::PLASMA_FIRE_PERIOD
+                }
             },
         )
     } else {
@@ -16000,6 +16202,9 @@ fn sfx_system(
                 sim::MechWeapon::Autocannon => &sfx.shot_sniper,
                 // a launch is a shotgun-class thump, not a rifle report
                 sim::MechWeapon::Rockets => &sfx.shot_shotgun,
+                // plasma is the lightest report the mech palette has;
+                // the beam is continuous and gets no per-shot sound
+                sim::MechWeapon::Plasma | sim::MechWeapon::Repair => &sfx.shot_mp5,
             }
         } else {
             shot_sound(&sfx, p.gun)
@@ -16346,6 +16551,20 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                 if p.shield_up && !p.in_mech() { "  [SHIELD]" } else { "" },
                 match p.armor_set {
                     ArmorSet::None => String::new(),
+                    // §owner AGILE SUPPORT MECH: its own vitals line.
+                    // A scout pilot needs HULL and HEAT and nothing
+                    // else - it has no power core, no brace, no
+                    // barrier and no stride, so borrowing the heavy's
+                    // readout would have printed four dead fields.
+                    ArmorSet::ScoutMech => {
+                        let hot = (p.gatling_heat * 100.0).round();
+                        let vent = if p.gatling_vent_t > 0.0 {
+                            "  [VENTING]"
+                        } else {
+                            ""
+                        };
+                        format!("\nSCOUT  HULL {:.0}  HEAT {hot:.0}%{vent}", p.hull)
+                    }
                     ArmorSet::RobotSuit => {
                         // §4.6: chassis VITALS only - the mounts own the
                         // bottom-right corner, the dismount bind lives on
