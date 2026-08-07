@@ -93,12 +93,37 @@ pub mod signal {
     /// Warm against the cold shell, and the same gold the player's own
     /// minimap marker uses, so "my side" is one colour idea.
     pub const ALLY_ACCENT: Color = Color::srgb(0.95, 0.78, 0.28);
-    /// Enemy body shell — dark oxide red. Low luminance: the enemy is
-    /// the dark shape, always.
-    pub const ENEMY: Color = Color::srgb(0.42, 0.11, 0.09);
-    /// Enemy accent — hot orange, emissive. The only strongly glowing
-    /// thing on a body, so a muzzle-lit enemy still reads as enemy.
-    pub const ENEMY_ACCENT: Color = Color::srgb(1.00, 0.45, 0.10);
+    /// §owner TEAM IDENTITY: the ally STRUCTURAL tone — clean mid grey.
+    ///
+    /// The third role, and the one that makes white-and-gold read as
+    /// "advanced military" rather than as a parade uniform. Gold is an
+    /// accent and stays scarce; grey is what the joints, frames and
+    /// mechanisms are made of. Without it every non-white surface had to
+    /// be gold, and a machine that is a third gold reads as a trophy.
+    pub const ALLY_STEEL: Color = Color::srgb(0.55, 0.58, 0.62);
+
+    /// Enemy body shell — near-black iron with a red cast.
+    ///
+    /// §owner TEAM IDENTITY moved this DOWN, from a dark oxide red to
+    /// something much closer to black. The signal rule below is a
+    /// luminance rule, so darkening the enemy strengthens it rather than
+    /// risking it: the gap between the brightest thing on the field and
+    /// the darkest is now wider than it was.
+    pub const ENEMY: Color = Color::srgb(0.15, 0.055, 0.05);
+    /// Enemy accent — hot RED, emissive.
+    ///
+    /// Was orange. Red is what the owner asked for and it costs nothing
+    /// here, because the ally/enemy split has never rested on hue: it
+    /// rests on a bright cold body against a dark body with one glowing
+    /// line. Red against gold still separates by luminance AND by hue,
+    /// and red against a near-black shell is a stronger contrast than
+    /// orange was against oxide.
+    pub const ENEMY_ACCENT: Color = Color::srgb(1.00, 0.13, 0.10);
+    /// §owner TEAM IDENTITY: the enemy STRUCTURAL tone — dark industrial
+    /// metal. The mirror of `ALLY_STEEL`, and deliberately much darker,
+    /// so the two factions differ in their FRAMES and not only in their
+    /// paint.
+    pub const ENEMY_STEEL: Color = Color::srgb(0.19, 0.18, 0.19);
 
     /// Which side a fighter is on **from the viewer's seat**.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -120,6 +145,14 @@ pub mod signal {
             match self {
                 Side::Ally => ALLY_ACCENT,
                 Side::Enemy => ENEMY_ACCENT,
+            }
+        }
+        /// §owner TEAM IDENTITY: the STRUCTURAL tone - frames, joints,
+        /// mechanisms. Grey for us, dark industrial metal for them.
+        pub fn steel(self) -> Color {
+            match self {
+                Side::Ally => ALLY_STEEL,
+                Side::Enemy => ENEMY_STEEL,
             }
         }
         /// Linear RGB triple of `accent`, for the many call sites that

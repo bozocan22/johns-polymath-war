@@ -3389,7 +3389,15 @@ pub enum ArmorSet {
     None,
     /// Mail and plate; Shieldwall Brace (hold F).
     Folk,
-    /// Heat plate; fire immunity + Flame Projector (hold C).
+    /// RETIRED as a wearable set. §owner MECHANICAL MEDIC took its
+    /// slot on the pad rotation: the owner asked for the Pyro role to
+    /// be replaced by a support-focused mech, and a flamethrower and a
+    /// repair beam are the same slot answered two ways.
+    ///
+    /// The variant SURVIVES rather than being deleted, because it is
+    /// still what a fire pool and the flame projector check against,
+    /// and ripping it out would have meant rewriting the burn model to
+    /// close a cosmetic gap. Nothing spawns it any more.
     Pyro,
     /// The grounded walker chassis; side-step (Q) + Repulsor Blast (C),
     /// running on a power core. (Flight was deleted in Brief VI §4.3 -
@@ -3475,16 +3483,19 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
             move_mult: 1.10,
             explosive_resist: 0.0,
         },
-        // §owner AGILE SUPPORT MECH: a chassis that survives by not
-        // being hit. Roughly HALF the heavy's flat reduction, and the
-        // only mech that moves faster than the man who got into it - the
-        // brief's "relies on mobility instead of durability", expressed
-        // in the two numbers that decide it.
+        // §owner MECHANICAL MEDIC: a chassis that survives by not being
+        // hit. Roughly HALF the heavy's flat reduction, and the FASTEST
+        // machine in the game - "relies on mobility instead of
+        // durability", expressed in the two numbers that decide it.
+        //
+        // 1.28 is deliberately 15% clear of the Recon weave's 1.10, the
+        // quickest thing a soldier can wear. "Fastest mech" is not worth
+        // stating if a man on foot can outrun it.
         ArmorSet::ScoutMech => ArmorSpec {
             flat_head: 10.0,
             flat_torso: 26.0,
             flat_limb: 26.0,
-            move_mult: 1.18,
+            move_mult: 1.28,
             explosive_resist: 0.0,
         },
     }
@@ -4549,7 +4560,10 @@ impl TdmSim {
             (PickupKind::Ammo, 19.0, 14.0),
             // §6: the armor sets are LOOT — walk over a pad to suit up
             (PickupKind::FolkArmor, 0.0, 19.0),
-            (PickupKind::PyroArmor, 0.0, -19.0),
+            // §owner MECHANICAL MEDIC replaces the Pyro on the pad
+            // rotation. Same slot in the map's economy, a support
+            // chassis instead of a flamethrower.
+            (PickupKind::ScoutArmor, 0.0, -19.0),
             (PickupKind::ReconWeave, -19.0, 0.0),
             // §7 (Brief IV): the M134 pad — the mirror of Recon's spot
             (PickupKind::Minigun, 19.0, 0.0),

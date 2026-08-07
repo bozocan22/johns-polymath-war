@@ -3430,6 +3430,31 @@ struct ModelKit {
     /// cell edges drawn through it. See where they are built.
     barrier_fill: Handle<StandardMaterial>,
     barrier_edge: Handle<StandardMaterial>,
+    /// §owner TEAM IDENTITY: the PLATE ARMOUR, per side.
+    ///
+    /// The 24-piece harness shipped in one fixed material set for both
+    /// factions - so the single most visible thing a soldier wears said
+    /// nothing about whose side he was on, and two plated men at range
+    /// were the same silhouette in the same colours.
+    ///
+    /// Four roles, mirrored:
+    ///   SHELL  the plate body      white / near-black iron
+    ///   TRIM   the bright lip      gold  / red, emissive
+    ///   STEEL  frames and cops     grey  / dark metal
+    ///   RIVET  fasteners           dark on both, so the fine detail
+    ///                              reads as shadow on either faction
+    ///
+    /// The trim is emissive on the ENEMY only. That asymmetry is the
+    /// team-signal rule, not an oversight: allies are bright bodies with
+    /// a warm accent, enemies are dark bodies with one GLOWING line, and
+    /// a glow is what makes a near-black plate legible at all in the
+    /// dust fog.
+    plate_shell: Handle<StandardMaterial>,
+    plate_shell_foe: Handle<StandardMaterial>,
+    plate_trim: Handle<StandardMaterial>,
+    plate_trim_foe: Handle<StandardMaterial>,
+    plate_steel: Handle<StandardMaterial>,
+    plate_steel_foe: Handle<StandardMaterial>,
     /// §owner AGILE SUPPORT MECH: its own palette, per side.
     ///
     /// The light chassis does NOT wear the heavy's khaki. It is a
@@ -9548,6 +9573,11 @@ struct LimbMeshes {
 /// One soldier's full material set. `emblem_center` is gold for the
 /// player, the dark joint gloss for everyone else.
 struct SoldierLook {
+    /// §owner TEAM IDENTITY: which side this soldier is on, from the
+    /// VIEWER's seat. Carried on the look rather than passed beside it,
+    /// because every material choice downstream needs it and an extra
+    /// argument is an extra thing to get the wrong way round.
+    ally: bool,
     shell: Handle<StandardMaterial>,
     shell2: Handle<StandardMaterial>,
     accent: Handle<StandardMaterial>,
@@ -9609,13 +9639,21 @@ fn spawn_armor_plates(
             ))
             .set_parent(parent);
     };
-    // the three materials every plate is made of: the shell, the bright
-    // trim that edges it, and the dark rivets
-    let shell = kit.armor_dark.clone();
-    let trim = kit.gold.clone();
+    // §owner TEAM IDENTITY: the four materials every plate is made of,
+    // picked by FACTION.
+    //
+    // This is what the harness was missing: it shipped in one fixed set
+    // for both sides, so the most visible thing a soldier wears said
+    // nothing about whose side he was on. Picked once here, so every
+    // piece below names the ROLE it is using and the two factions
+    // cannot drift into different shapes.
+    let ally = look.ally;
+    let shell = if ally { kit.plate_shell.clone() } else { kit.plate_shell_foe.clone() };
+    let trim = if ally { kit.plate_trim.clone() } else { kit.plate_trim_foe.clone() };
+    let steel = if ally { kit.plate_steel.clone() } else { kit.plate_steel_foe.clone() };
+    // rivets stay dark on both sides - fine detail should read as
+    // shadow, and a faction-coloured fastener is a fastener nobody sees
     let rivet = kit.grey_black.clone();
-    let steel = kit.steel.clone();
-    let _ = look;
 
     let mut out = [Entity::PLACEHOLDER; sim::ARMOR_PIECES];
     let mut set = |i: usize, e: Entity| out[i] = e;
@@ -10316,6 +10354,7 @@ fn spawn_fighter_rigs(
         };
         let hat = materials.add(metal(hat_c, 0.05, 0.85));
         let look = SoldierLook {
+            ally,
             shell: shell.clone(),
             shell2: shell2.clone(),
             accent: accent.clone(),
@@ -10785,43 +10824,106 @@ fn setup(
         // roughness and every emissive STRENGTH and differ only in hue,
         // so the machine reads as one design in two liveries rather than
         // as two machines.
+        // §owner TEAM IDENTITY: the PLATE ARMOUR. See the field docs.
+        //
+        // The plate is a shade off the pure body colour on both sides -
+        // slightly warmer white, slightly redder black - so a plated
+        // soldier reads as ARMOURED rather than as painted. Same
+        // faction, different material, which is what layered kit does.
+        plate_shell: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.88, 0.89, 0.92),
+            metallic: 0.55,
+            perceptual_roughness: 0.30,
+            ..default()
+        }),
+        plate_shell_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.13, 0.045, 0.045),
+            metallic: 0.65,
+            perceptual_roughness: 0.42,
+            ..default()
+        }),
+        plate_trim: materials.add(StandardMaterial {
+            base_color: branding::signal::ALLY_ACCENT,
+            metallic: 0.85,
+            perceptual_roughness: 0.22,
+            // a faint lift only. Gold on white does not need help to be
+            // seen, and a glowing ally would fight the enemy's own tell.
+            emissive: LinearRgba::new(0.35, 0.26, 0.08, 1.0),
+            ..default()
+        }),
+        plate_trim_foe: materials.add(StandardMaterial {
+            base_color: branding::signal::ENEMY_ACCENT,
+            metallic: 0.35,
+            perceptual_roughness: 0.30,
+            // REAL emission. On a near-black plate this line is the only
+            // thing carrying at range, and it is the enemy's whole
+            // signal.
+            emissive: LinearRgba::new(3.2, 0.30, 0.22, 1.0),
+            ..default()
+        }),
+        plate_steel: materials.add(StandardMaterial {
+            base_color: branding::signal::ALLY_STEEL,
+            metallic: 0.70,
+            perceptual_roughness: 0.32,
+            ..default()
+        }),
+        plate_steel_foe: materials.add(StandardMaterial {
+            base_color: branding::signal::ENEMY_STEEL,
+            metallic: 0.70,
+            perceptual_roughness: 0.38,
+            ..default()
+        }),
+        // §owner TEAM IDENTITY: the medic wears its FACTION, not a
+        // livery of its own.
+        //
+        // It had light purple / white / baby blue against red / deep
+        // purple, which read well on its own and badly beside everything
+        // else - a fourth and fifth colour idea on a field that already
+        // had two. The chassis now takes the same three roles every
+        // other asset does: BODY, STEEL, ACCENT. What makes it read as a
+        // medic instead of as a soldier is its silhouette and its lights,
+        // which is the right thing to carry that job.
         scout_hull: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.68, 0.58, 0.86), // light purple
+            base_color: branding::signal::ALLY, // white
             metallic: 0.25,
             perceptual_roughness: 0.42,
             ..default()
         }),
         scout_hull_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.80, 0.24, 0.24), // red
-            metallic: 0.25,
-            perceptual_roughness: 0.42,
+            base_color: branding::signal::ENEMY, // near-black iron
+            metallic: 0.35,
+            perceptual_roughness: 0.50,
             ..default()
         }),
         scout_plate: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.93, 0.93, 0.96), // white
-            metallic: 0.15,
+            base_color: branding::signal::ALLY_STEEL, // grey frame
+            metallic: 0.35,
             perceptual_roughness: 0.38,
             ..default()
         }),
         scout_plate_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.36, 0.18, 0.44), // deep purple
-            metallic: 0.15,
-            perceptual_roughness: 0.38,
+            base_color: branding::signal::ENEMY_STEEL, // dark metal
+            metallic: 0.45,
+            perceptual_roughness: 0.44,
             ..default()
         }),
         // the LIGHT LINES. Emissive, so they hold their colour when the
         // chassis is in shadow - which is where a fast machine spends
         // most of its time, and exactly when you most need to know whose
         // it is.
+        // the LIGHT LINES carry the accent - gold for us, red for them -
+        // and they are emissive, because a fast machine spends most of
+        // its time in shadow and that is exactly when you most need to
+        // know whose it is.
         scout_line: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.62, 0.86, 1.0), // baby blue
-            emissive: LinearRgba::new(0.9, 2.0, 3.0, 1.0),
+            base_color: branding::signal::ALLY_ACCENT,
+            emissive: LinearRgba::new(2.6, 1.9, 0.7, 1.0),
             perceptual_roughness: 0.30,
             ..default()
         }),
         scout_line_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.72, 0.42, 0.95), // purple
-            emissive: LinearRgba::new(2.0, 0.7, 3.0, 1.0),
+            base_color: branding::signal::ENEMY_ACCENT,
+            emissive: LinearRgba::new(3.4, 0.35, 0.25, 1.0),
             perceptual_roughness: 0.30,
             ..default()
         }),
@@ -10996,6 +11098,9 @@ fn setup(
         };
         let joint = materials.add(metal(Color::srgb_u8(0x17, 0x19, 0x1D), 0.85, 0.22));
         let look = SoldierLook {
+            // the Forge turntable is always YOUR soldier, so it always
+            // wears the ally livery
+            ally: true,
             shell: materials.add(metal(branding::signal::ALLY, 0.0, 0.42)),
             shell2: materials.add(metal(shade(branding::signal::ALLY, 0.92), 0.0, 0.45)),
             accent: {
