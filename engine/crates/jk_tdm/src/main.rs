@@ -7498,6 +7498,15 @@ struct MechBarrier {
 
 /// How far the emitter petals swing out when the barrier deploys.
 const BARRIER_PETAL_DEG: f32 = 62.0;
+/// §owner SHIELD PASS: how much bigger the barrier got.
+///
+/// It projected a 1.7 m disc, which on a 3 m chassis covered the torso
+/// and left the legs and the pauldrons in the open - a barrier you have
+/// to crouch behind is one a mech cannot use, since a mech cannot
+/// crouch. 1.55x puts it at roughly 2.6 m: wide enough to cover the
+/// machine holding it, and still narrow enough that flanking it is the
+/// counter rather than out-ranging it.
+const BARRIER_SCALE: f32 = 1.55;
 /// Deploy/stow time. Fast - the brief asks for a shield that "deploys
 /// quickly during combat", and a barrier you have to plan half a second
 /// ahead of is one you die behind.
@@ -7601,6 +7610,75 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
         petals[i] = petal;
     }
 
+    // ---- §owner SHIELD PASS: the OUTER FRAME and its emitters --------
+    //
+    // The barrier was three petals and a lens. A shield that size needs
+    // a structure to be projected FROM, or it reads as a hologram with
+    // nothing holding it up - so the emitter gets a real frame: a heavy
+    // spine down the arm, a forward brace, and a ring of emitter nodes
+    // that sit where the field's rim will be.
+    //
+    // The nodes are the piece that ties the hardware to the effect. Each
+    // one is a housing with a lit throat, arranged on the same circle
+    // the hex lattice ends on, so when the field comes up it visibly
+    // grows FROM them rather than appearing in front of them.
+    {
+        // spine + forward brace
+        for (mat, pos, rot, sc) in [
+            (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, -0.14), Quat::IDENTITY, Vec3::new(0.16, 0.22, 0.20)),
+            (kit.mech_metal.clone(), Vec3::new(0.0, 0.0, 0.09), Quat::from_rotation_x(0.20), Vec3::new(0.075, 0.075, 0.34)),
+            (kit.mech_khaki.clone(), Vec3::new(0.0, -0.11, 0.02), Quat::IDENTITY, Vec3::new(0.20, 0.045, 0.36)),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(mat),
+                    Transform { translation: pos, rotation: rot, scale: sc },
+                ))
+                .set_parent(root);
+        }
+        // the emitter ring - six nodes on the field's own rim circle
+        let rim = 0.80 * BARRIER_SCALE;
+        for k in 0..6 {
+            let a = k as f32 * std::f32::consts::TAU / 6.0 + 0.52;
+            let (x, y) = (a.cos() * rim, a.sin() * rim);
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: Vec3::new(x, y, 0.245),
+                        rotation: Quat::from_rotation_z(a),
+                        scale: Vec3::new(0.13, 0.075, 0.10),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.barrier_edge.clone()),
+                    Transform {
+                        translation: Vec3::new(x, y, 0.30),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.055, 0.020, 0.055),
+                    },
+                ))
+                .set_parent(root);
+            // the conduit feeding each node from the projector hub
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(x * 0.55, y * 0.55, 0.235),
+                        rotation: Quat::from_rotation_z(a),
+                        scale: Vec3::new(0.030, 0.028, rim * 0.95),
+                    },
+                ))
+                .set_parent(root);
+        }
+    }
+
     // THE FIELD - a group so one Visibility and one scale animate it all
     let field = commands
         .spawn((
@@ -7617,7 +7695,7 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
             Transform {
                 translation: Vec3::ZERO,
                 rotation: Quat::from_rotation_x(FRAC_PI_2),
-                scale: Vec3::new(1.70, 0.012, 1.70),
+                scale: Vec3::new(1.70 * BARRIER_SCALE, 0.012, 1.70 * BARRIER_SCALE),
             },
         ))
         .set_parent(field);
@@ -7629,11 +7707,11 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
     // which is what gives the barrier a hexagonal rim rather than a
     // circle with a grid stamped on it.
     const CELL: f32 = 0.235;
-    for q in -4i32..=4 {
-        for r in -4i32..=4 {
+    for q in -7i32..=7 {
+        for r in -7i32..=7 {
             let cx = CELL * 1.5 * q as f32;
             let cy = CELL * (3.0_f32).sqrt() * (r as f32 + q as f32 * 0.5);
-            if (cx * cx + cy * cy).sqrt() > 0.80 {
+            if (cx * cx + cy * cy).sqrt() > 0.80 * BARRIER_SCALE {
                 continue;
             }
             for k in 0..6 {
@@ -8989,7 +9067,10 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                     },
                 ))
                 .set_parent(root);
-            // forearm cradle - the piece the weapon actually sits in
+            // forearm cradle - the piece the weapon actually sits in.
+            // LARGE, per the brief's "large armored forearms": it is the
+            // widest thing on the arm, which is what makes the limb read
+            // as industrial rather than as a strut with a gun on it.
             commands
                 .spawn((
                     Mesh3d(cube()),
@@ -8997,8 +9078,143 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                     Transform {
                         translation: Vec3::new(sd * 0.645, 0.145, 0.30),
                         rotation: Quat::from_rotation_x(-0.10),
-                        scale: Vec3::new(0.155, 0.14, 0.34),
+                        scale: Vec3::new(0.205, 0.19, 0.40),
                     },
+                ))
+                .set_parent(root);
+            // ---- §owner ARM PASS: the articulation -------------------
+            //
+            // "Proper articulated shoulders, functional elbows,
+            // mechanical wrists." The arm had a pauldron, a member and a
+            // knuckle; what it lacked was the HARDWARE that makes a
+            // joint look like it could move - the ring a shoulder
+            // rotates in, the twin rams that drive an elbow, and a wrist
+            // that is a separate part rather than the place the forearm
+            // happens to end.
+            //
+            // Static geometry, as before: the mounts fire on their own
+            // clocks and the arm exists to make that legible. But a
+            // joint that LOOKS driven reads as capable of moving, and
+            // that is the whole ask.
+
+            // SHOULDER: a rotation ring the pauldron sits in, plus its
+            // drive housing behind
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.615, 0.50, 0.06),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.33, 0.075, 0.33),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform::from_xyz(sd * 0.60, 0.50, -0.18)
+                        .with_scale(Vec3::new(0.17, 0.17, 0.14)),
+                ))
+                .set_parent(root);
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                commands
+                    .spawn((
+                        Mesh3d(ball()),
+                        MeshMaterial3d(kit.mech_shadow.clone()),
+                        Transform::from_xyz(
+                            sd * 0.655,
+                            0.50 + a.sin() * 0.125,
+                            0.06 + a.cos() * 0.125,
+                        )
+                        .with_scale(Vec3::splat(0.025)),
+                    ))
+                    .set_parent(root);
+            }
+            // ELBOW: twin rams either side of the knuckle, angled so
+            // they visibly pull the forearm closed
+            for es in [-1.0_f32, 1.0] {
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.655 + es * 0.085, 0.235, 0.08),
+                            rotation: Quat::from_rotation_x(0.55),
+                            scale: Vec3::new(0.045, 0.19, 0.045),
+                        },
+                    ))
+                    .set_parent(root);
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.655 + es * 0.085, 0.155, 0.135),
+                            rotation: Quat::from_rotation_x(0.55),
+                            scale: Vec3::new(0.026, 0.14, 0.026),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+            // WRIST: its own segment between forearm and weapon - a
+            // collar, a pivot pin, and the cable loop that crosses it
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.645, 0.145, 0.50),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.17, 0.055, 0.17),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.645, 0.145, 0.50),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.085, 0.20, 0.085),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.545, 0.175, 0.42),
+                        rotation: Quat::from_rotation_x(0.35),
+                        scale: Vec3::new(0.030, 0.22, 0.030),
+                    },
+                ))
+                .set_parent(root);
+            // forearm VENTS and a maintenance hatch, so the biggest
+            // plate on the arm is not the emptiest surface on the mech
+            for k in 0..4 {
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.745, 0.145, 0.22 + k as f32 * 0.048),
+                            rotation: Quat::from_rotation_x(0.30),
+                            scale: Vec3::new(0.020, 0.11, 0.030),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                    Transform::from_xyz(sd * 0.645, 0.245, 0.30)
+                        .with_scale(Vec3::new(0.13, 0.014, 0.20)),
                 ))
                 .set_parent(root);
             // and the strap plates that clamp it
@@ -22130,6 +22346,19 @@ mod segment_tests {
             "the lattice must dominate the fill by a wide margin, or the \
              barrier reads as a smudge from both sides"
         );
+        // §owner SHIELD PASS: it has to actually COVER the machine
+        // holding it. The mech is ~3 m and cannot crouch, so a barrier
+        // sized for a torso leaves the legs and pauldrons in the open -
+        // and "get lower behind it" is not available to a chassis.
+        let span = 1.70 * BARRIER_SCALE;
+        assert!(
+            span > 2.4,
+            "a {span:.2} m field does not cover a 3 m mech that cannot duck"
+        );
+        // but not so wide it becomes a wall. Flanking is the counter;
+        // out-ranging it must not have to be.
+        assert!(span < 3.4, "a {span:.2} m field is a building, not a shield");
+
         // and the deploy has to be combat-fast. A barrier you have to
         // raise half a second early is one you die behind.
         assert!(
