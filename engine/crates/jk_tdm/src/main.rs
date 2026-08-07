@@ -804,6 +804,23 @@ fn segment_data(s: Segment) -> SegmentData {
 }
 
 /// §B.4's non-length proportions, as fractions of total height H.
+/// §owner MECH REFIT: the hull is built at full size and worn at 85%.
+///
+/// "Reduce the box-shaped main body by ~15% while maintaining its heavy
+/// appearance" - and those two halves are answered separately. This
+/// constant is the first half; the DENSITY pass in `spawn_armor_rig` is
+/// the second. A slab is heavy because it is big, which is the cheap
+/// kind; a machine is heavy because every surface on it is doing a job,
+/// and that survives being made smaller.
+///
+/// Applied as a UNIFORM scale on the rig root rather than by editing a
+/// hundred plate coordinates. Uniform matters: the hull is full of
+/// rotated cylinders, and a non-uniform parent scale shears every one of
+/// them. It also means every hardpoint - shoulder housings, rocket pod,
+/// gatling arm - moves inboard by exactly the same factor for free,
+/// where hand-editing would have left them floating off a narrower hull.
+const MECH_HULL_SCALE: f32 = 0.85;
+
 /// The waist - where the trunk meets the legs, in root space.
 ///
 /// Named because §B.2's trunk split made it load-bearing in two places
@@ -7281,6 +7298,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         .id();
     let cube = || kit.cube.clone();
     let cyl = || kit.cyl.clone();
+    let ball = || kit.ball.clone();
     // (mesh, material, translation, rotation, scale) - torso-local
     let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 53] = [
         // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
@@ -7465,6 +7483,471 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 .set_parent(root);
         }
     }
+    // ---- §owner MECH REFIT: the DENSITY pass ---------------------------
+    //
+    // The hull reads 15% smaller (see `MECH_HULL_SCALE`), and everything
+    // below is what buys that size back as MASS rather than volume. A
+    // slab is heavy because it is big; a machine is heavy because every
+    // surface on it is doing a job. The brief for this pass was armour
+    // layering, pistons, hydraulics, vents, cooling, energy conduits and
+    // joints, and each of those is a group here rather than a scatter of
+    // greebles - a detail you cannot name is a detail that reads as
+    // noise.
+    //
+    // Everything is torso-local and cosmetic. None of it touches the
+    // angle-armour model, the visor weak point, or the plate-detach
+    // stages: `mech_red` still appears exactly once on the whole machine,
+    // and that is the visor slit.
+    {
+        // ARMOUR LAYERING - a second skin standing proud of the slab,
+        // with a shadow gap behind each panel. Layering is what stops a
+        // box being a box: the eye reads the STEP, not the plate.
+        for (px, py, pz, sx, sy, sz) in [
+            // front glacis, upper and lower, with a rolled lip between
+            (0.0_f32, 0.60_f32, 0.556_f32, 0.72_f32, 0.20_f32, 0.030_f32),
+            (0.0, 0.40, 0.556, 0.80, 0.16, 0.030),
+            // flank panels, inboard of the shoulder housings
+            (-0.40, 0.50, 0.28, 0.14, 0.34, 0.34),
+            (0.40, 0.50, 0.28, 0.14, 0.34, 0.34),
+            // rear deck plate
+            (0.0, 0.60, -0.44, 0.62, 0.22, 0.030),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                    Transform::from_xyz(px, py, pz).with_scale(Vec3::new(sx, sy, sz)),
+                ))
+                .set_parent(root);
+            // the shadow gap that makes it read as a separate plate
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform::from_xyz(px, py, pz - sz.signum() * 0.012)
+                        .with_scale(Vec3::new(sx * 1.04, sy * 1.06, sz * 0.5)),
+                ))
+                .set_parent(root);
+        }
+        // the ROLLED LIP along the top edge - a chamfer, so the hull has
+        // a horizon line instead of a corner
+        for (lz, ang) in [(0.50_f32, -0.62_f32), (-0.40, 0.62)] {
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: Vec3::new(0.0, 0.715, lz),
+                        rotation: Quat::from_rotation_x(ang),
+                        scale: Vec3::new(0.96, 0.09, 0.05),
+                    },
+                ))
+                .set_parent(root);
+        }
+
+        // ENERGY CONDUITS - glowing lines from the core out to the
+        // hardpoints. They are the reason the core reads as a POWER
+        // source rather than a light: a reactor with nothing leaving it
+        // is a lamp.
+        for sd in [-1.0_f32, 1.0] {
+            // core -> shoulder, in two dog-legged runs
+            for (cx, cy, cz, sx, sy, sz) in [
+                (sd * 0.20, 0.545, 0.545, 0.20, 0.016, 0.014),
+                (sd * 0.315, 0.50, 0.545, 0.016, 0.11, 0.014),
+                (sd * 0.315, 0.445, 0.42, 0.016, 0.014, 0.27),
+            ] {
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.med_glow.clone()),
+                        Transform::from_xyz(cx, cy, cz)
+                            .with_scale(Vec3::new(sx, sy, sz)),
+                    ))
+                    .set_parent(root);
+            }
+            // armoured cable trunk running the flank, half-sunk
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.50, 0.33, -0.10),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.045, 0.22, 0.045),
+                    },
+                ))
+                .set_parent(root);
+        }
+
+        // COOLING - louvre stacks on both flanks and a radiator block
+        // over the reactor. Real vents are a RUN of thin slats with dark
+        // behind them; one grille texture would read as a sticker.
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform::from_xyz(sd * 0.47, 0.60, -0.16)
+                        .with_scale(Vec3::new(0.055, 0.20, 0.30)),
+                ))
+                .set_parent(root);
+            for k in 0..5 {
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(
+                                sd * 0.485,
+                                0.535 + k as f32 * 0.033,
+                                -0.16,
+                            ),
+                            rotation: Quat::from_rotation_x(0.35),
+                            scale: Vec3::new(0.040, 0.012, 0.30),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+        }
+
+        // HYDRAULICS - the waist rams that carry the hull's cantilever,
+        // and the shoulder-root actuators. A piston is a POLISHED ROD in
+        // a dark cylinder: two parts, or it is just a peg.
+        for sd in [-1.0_f32, 1.0] {
+            for (bx, by, bz, ang, len) in [
+                (0.30_f32, 0.30_f32, -0.30_f32, 0.30_f32, 0.26_f32),
+                (0.46, 0.42, 0.30, -0.22, 0.22),
+            ] {
+                // barrel
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * bx, by, bz),
+                            rotation: Quat::from_rotation_x(ang),
+                            scale: Vec3::new(0.055, len, 0.055),
+                        },
+                    ))
+                    .set_parent(root);
+                // the bright rod emerging from it
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(
+                                sd * bx,
+                                by + len * 0.52,
+                                bz - ang.sin() * len * 0.52,
+                            ),
+                            rotation: Quat::from_rotation_x(ang),
+                            scale: Vec3::new(0.030, len * 0.55, 0.030),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+        }
+
+        // MECHANICAL JOINTS - collar rings where the arms and hips
+        // pivot, so the limbs look SOCKETED rather than glued on.
+        for (jx, jy, jz, r) in [
+            (-0.60_f32, 0.42_f32, 0.06_f32, 0.145_f32),
+            (0.60, 0.42, 0.06, 0.145),
+            (0.0, 0.02, 0.02, 0.235),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(jx, jy, jz),
+                        rotation: if jy > 0.2 {
+                            Quat::from_rotation_z(FRAC_PI_2)
+                        } else {
+                            Quat::IDENTITY
+                        },
+                        scale: Vec3::new(r, 0.045, r),
+                    },
+                ))
+                .set_parent(root);
+            // bolt heads around the collar
+            for k in 0..6 {
+                let a = k as f32 * std::f32::consts::TAU / 6.0;
+                let (ox, oy) = (a.cos() * r * 0.72, a.sin() * r * 0.72);
+                let pos = if jy > 0.2 {
+                    Vec3::new(jx, jy + oy, jz + ox)
+                } else {
+                    Vec3::new(jx + ox, jy + 0.03, jz + oy)
+                };
+                commands
+                    .spawn((
+                        Mesh3d(ball()),
+                        MeshMaterial3d(kit.mech_shadow.clone()),
+                        Transform::from_translation(pos)
+                            .with_scale(Vec3::splat(0.026)),
+                    ))
+                    .set_parent(root);
+            }
+        }
+
+        // THE SENSOR HEAD - a combat command unit, not a helmet.
+        //
+        // It was a khaki box with a red slit. The slit STAYS exactly as
+        // it was, because it is the x2 weak point and a gameplay promise;
+        // everything here is built around it rather than competing with
+        // it. Nothing added is `mech_red`.
+        {
+            // armour segmentation: a browplate, a jaw, and a split down
+            // the crown, so the head reads as assembled from pieces
+            for (px, py, pz, sx, sy, sz, mat) in [
+                (0.0_f32, 1.045_f32, 0.02_f32, 0.52_f32, 0.035_f32, 0.50_f32, kit.mech_khaki_lt.clone()),
+                (0.0, 0.775, 0.06, 0.46, 0.045, 0.42, kit.mech_khaki_dk.clone()),
+                (0.0, 0.90, 0.02, 0.045, 0.30, 0.52, kit.mech_khaki_dk.clone()),
+            ] {
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(mat),
+                        Transform::from_xyz(px, py, pz)
+                            .with_scale(Vec3::new(sx, sy, sz)),
+                    ))
+                    .set_parent(root);
+            }
+            for sd in [-1.0_f32, 1.0] {
+                // main OPTIC pod: housing, barrel, and a lit aperture -
+                // three parts, because a camera is a lens in a tube and
+                // a single glowing dot is a light
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        Transform::from_xyz(sd * 0.235, 0.985, 0.20)
+                            .with_scale(Vec3::new(0.11, 0.09, 0.16)),
+                    ))
+                    .set_parent(root);
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.235, 0.985, 0.29),
+                            rotation: Quat::from_rotation_x(FRAC_PI_2),
+                            scale: Vec3::new(0.075, 0.06, 0.075),
+                        },
+                    ))
+                    .set_parent(root);
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(kit.core_glow.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.235, 0.985, 0.322),
+                            rotation: Quat::from_rotation_x(FRAC_PI_2),
+                            scale: Vec3::new(0.045, 0.012, 0.045),
+                        },
+                    ))
+                    .set_parent(root);
+                // secondary sensor cluster - three small lenses in a
+                // stepped bracket, the "many eyes" read
+                for (k, ly) in [(0usize, 0.845_f32), (1, 0.885), (2, 0.925)] {
+                    commands
+                        .spawn((
+                            Mesh3d(ball()),
+                            MeshMaterial3d(if k == 1 {
+                                kit.core_glow.clone()
+                            } else {
+                                kit.mech_shadow.clone()
+                            }),
+                            Transform::from_xyz(sd * 0.30, ly, 0.255)
+                                .with_scale(Vec3::splat(0.030)),
+                        ))
+                        .set_parent(root);
+                }
+                // cooling louvres in the cheek
+                for k in 0..3 {
+                    commands
+                        .spawn((
+                            Mesh3d(cube()),
+                            MeshMaterial3d(kit.mech_metal.clone()),
+                            Transform {
+                                translation: Vec3::new(
+                                    sd * 0.315,
+                                    0.95 + k as f32 * 0.038,
+                                    0.05,
+                                ),
+                                rotation: Quat::from_rotation_x(0.35),
+                                scale: Vec3::new(0.022, 0.010, 0.24),
+                            },
+                        ))
+                        .set_parent(root);
+                }
+                // COMMS: a swept blade antenna off each crown corner
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform {
+                            translation: Vec3::new(sd * 0.22, 1.135, -0.10),
+                            rotation: Quat::from_rotation_z(sd * 0.30),
+                            scale: Vec3::new(0.016, 0.20, 0.055),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+        }
+
+        // THE ARMS - a real shoulder-to-weapon chain.
+        //
+        // The hull carried its guns on bare hardpoints: a housing, then
+        // the weapon, with nothing between them. That is what made the
+        // machine read as a turret on legs. Each side gets a socketed
+        // pauldron, an upper arm, an elbow block and a forearm cradle, so
+        // the weapon is HELD rather than bolted to a wall.
+        //
+        // Cosmetic and STATIC - these are not animated bones. The mech's
+        // mounts fire on their own clocks and the arm exists to make that
+        // legible, which is why it is built along the line the weapon
+        // already sits on rather than being given joints nothing drives.
+        for sd in [-1.0_f32, 1.0] {
+            // pauldron: a curved cap over the shoulder collar, with a
+            // dark rim so it reads as a separate shell
+            commands
+                .spawn((
+                    Mesh3d(ball()),
+                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    Transform::from_xyz(sd * 0.635, 0.50, 0.06)
+                        .with_scale(Vec3::new(0.28, 0.30, 0.44)),
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform::from_xyz(sd * 0.70, 0.375, 0.06)
+                        .with_scale(Vec3::new(0.10, 0.055, 0.42)),
+                ))
+                .set_parent(root);
+            // upper arm - a boxed member angled down and forward
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.66, 0.30, 0.10),
+                        rotation: Quat::from_rotation_z(sd * 0.10),
+                        scale: Vec3::new(0.17, 0.24, 0.20),
+                    },
+                ))
+                .set_parent(root);
+            // its actuator, riding the outside of the member
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.755, 0.30, 0.10),
+                        rotation: Quat::from_rotation_x(0.18),
+                        scale: Vec3::new(0.042, 0.24, 0.042),
+                    },
+                ))
+                .set_parent(root);
+            // ELBOW - a metal knuckle with a visible pivot pin, the one
+            // place the arm is allowed to look like it bends
+            commands
+                .spawn((
+                    Mesh3d(ball()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform::from_xyz(sd * 0.655, 0.175, 0.13)
+                        .with_scale(Vec3::splat(0.115)),
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(cyl()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.655, 0.175, 0.13),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.075, 0.135, 0.075),
+                    },
+                ))
+                .set_parent(root);
+            // forearm cradle - the piece the weapon actually sits in
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.645, 0.145, 0.30),
+                        rotation: Quat::from_rotation_x(-0.10),
+                        scale: Vec3::new(0.155, 0.14, 0.34),
+                    },
+                ))
+                .set_parent(root);
+            // and the strap plates that clamp it
+            for cz in [0.20_f32, 0.38] {
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_metal.clone()),
+                        Transform::from_xyz(sd * 0.645, 0.145, cz)
+                            .with_scale(Vec3::new(0.175, 0.16, 0.022)),
+                    ))
+                    .set_parent(root);
+            }
+        }
+
+        // THE CORE - a layered reactor, not a light on a wall.
+        //
+        // Five concentric elements so it reads as DEPTH: a sunk housing,
+        // a dark well, a metal iris, the lens itself, and a containment
+        // ring standing proud of the glacis. The glow is `core_glow`,
+        // the same emissive the antenna tip uses, so the machine has one
+        // energy colour and not two.
+        {
+            let cz = 0.556;
+            for (mat, r, z, h) in [
+                (kit.mech_khaki_dk.clone(), 0.20_f32, cz - 0.014, 0.030_f32),
+                (kit.mech_shadow.clone(), 0.155, cz + 0.002, 0.022),
+                (kit.mech_metal.clone(), 0.125, cz + 0.012, 0.018),
+                (kit.core_glow.clone(), 0.088, cz + 0.020, 0.016),
+            ] {
+                commands
+                    .spawn((
+                        Mesh3d(cyl()),
+                        MeshMaterial3d(mat),
+                        Transform {
+                            translation: Vec3::new(0.0, 0.545, z),
+                            rotation: Quat::from_rotation_x(FRAC_PI_2),
+                            scale: Vec3::new(r * 2.0, h, r * 2.0),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+            // containment segments around the lens - eight blocks with
+            // gaps, which is what makes it a machine iris and not a dial
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0 + 0.39;
+                commands
+                    .spawn((
+                        Mesh3d(cube()),
+                        MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                        Transform {
+                            translation: Vec3::new(
+                                a.cos() * 0.165,
+                                0.545 + a.sin() * 0.165,
+                                cz + 0.014,
+                            ),
+                            rotation: Quat::from_rotation_z(a),
+                            scale: Vec3::new(0.075, 0.036, 0.028),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+        }
+    }
+
     // gatling dressing: two clamp rings around the barrel cluster and a
     // gold feed-link chute arcing from the ammo box into the housing
     // (gold matches the ammo-pickup vocabulary)
@@ -7647,6 +8130,64 @@ fn spawn_mech_leg_armor(
         Vec3::new(0.0, -0.075, 0.082), Quat::from_rotation_x(0.30), Vec3::new(0.10, 0.016, 0.012));
     part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
         Vec3::new(0.0, -0.235, 0.045), Quat::from_rotation_x(0.25), Vec3::new(0.035, 0.10, 0.035));
+    // ---- §owner MECH REFIT: the LEG density pass ------------------------
+    //
+    // Same argument as the hull. The leg was a raked plate a side and two
+    // pistons; a walking machine's leg is where all the load goes, and it
+    // should be the busiest part of it.
+    {
+        // THIGH: a second armour layer standing off the main plate, and
+        // the hip actuator that drives it
+        part(commands, t_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+            Vec3::new(side * 0.118, -0.06, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.020, 0.13, 0.20));
+        part(commands, t_root, kit.cube.clone(), kit.mech_shadow.clone(),
+            Vec3::new(side * 0.104, -0.06, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.010, 0.145, 0.215));
+        // hip ram, barrel + rod
+        part(commands, t_root, kit.cyl.clone(), kit.mech_khaki_dk.clone(),
+            Vec3::new(side * -0.05, -0.10, -0.075), Quat::from_rotation_x(-0.30), Vec3::new(0.048, 0.22, 0.048));
+        part(commands, t_root, kit.cyl.clone(), kit.mech_metal.clone(),
+            Vec3::new(side * -0.05, -0.20, -0.045), Quat::from_rotation_x(-0.30), Vec3::new(0.026, 0.14, 0.026));
+        // inner thigh cabling, half-sunk
+        part(commands, t_root, kit.cyl.clone(), kit.mech_shadow.clone(),
+            Vec3::new(side * -0.075, -0.14, 0.02), Quat::from_rotation_x(-0.20), Vec3::new(0.030, 0.26, 0.030));
+
+        // KNEE: a real cap over the joint, with a pivot boss either side.
+        // The knee is the one silhouette landmark on a leg and it was a
+        // hazard stripe on a flat plate.
+        part(commands, s_root, kit.ball.clone(), kit.mech_khaki.clone(),
+            Vec3::new(0.0, -0.005, 0.075), Quat::IDENTITY, Vec3::new(0.175, 0.16, 0.165));
+        part(commands, s_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+            Vec3::new(0.0, 0.045, 0.10), Quat::from_rotation_x(-0.35), Vec3::new(0.15, 0.055, 0.09));
+        for bs in [-1.0_f32, 1.0] {
+            part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
+                Vec3::new(bs * 0.088, -0.005, 0.055), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.075, 0.028, 0.075));
+        }
+
+        // SHIN: layered armour, a calf mass at the back so the leg is not
+        // a slat, and a heat vent stack
+        part(commands, s_root, kit.cube.clone(), kit.mech_khaki.clone(),
+            Vec3::new(0.0, -0.155, -0.055), Quat::from_rotation_x(-0.12), Vec3::new(0.135, 0.22, 0.09));
+        part(commands, s_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+            Vec3::new(0.0, -0.20, 0.082), Quat::from_rotation_x(0.30), Vec3::new(0.10, 0.10, 0.020));
+        for k in 0..3 {
+            part(commands, s_root, kit.cube.clone(), kit.mech_metal.clone(),
+                Vec3::new(0.0, -0.11 - k as f32 * 0.038, -0.10), Quat::from_rotation_x(0.30), Vec3::new(0.10, 0.010, 0.045));
+        }
+        // ANKLE: a proper joint ring, not a bare cylinder
+        part(commands, s_root, kit.cyl.clone(), kit.mech_shadow.clone(),
+            Vec3::new(0.0, -0.275, 0.03), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.10, 0.14, 0.10));
+
+        // STABILISER THRUSTER on the outer calf - the mech does not fly,
+        // and this is not a jet: it is the attitude jet a top-heavy
+        // walker needs to not fall over when it plants a foot hard. A
+        // dark bell with a lit throat, angled down and out.
+        part(commands, s_root, kit.cyl.clone(), kit.mech_khaki_dk.clone(),
+            Vec3::new(side * 0.105, -0.115, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.075, 0.11, 0.075));
+        part(commands, s_root, kit.cyl.clone(), kit.mech_shadow.clone(),
+            Vec3::new(side * 0.128, -0.165, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.058, 0.03, 0.058));
+        part(commands, s_root, kit.cyl.clone(), kit.core_glow.clone(),
+            Vec3::new(side * 0.133, -0.178, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.038, 0.012, 0.038));
+    }
     // FOOT: wide pad, rear spur, and the cleat rows. Do NOT smooth them.
     part(commands, f_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
         Vec3::new(0.0, -0.03, 0.05), Quat::IDENTITY, Vec3::new(0.17, 0.045, 0.30));
@@ -8510,7 +9051,10 @@ fn spawn_fighter_rigs(
         let la_r = spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0);
         commands
             .entity(armor_rig)
-            .insert((Transform::IDENTITY, Visibility::Hidden))
+            .insert((
+                Transform::from_scale(Vec3::splat(MECH_HULL_SCALE)),
+                Visibility::Hidden,
+            ))
             .set_parent(torso);
         commands.entity(root).insert(FighterRig {
             phase: 0.0,
