@@ -11,32 +11,27 @@ emblem) and are wired through the splash, menus, and seal footers.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-1. **Bot logic for the support chassis.** A bot that boards a scout mech
-   fires plasma and never heals — `bot_think` has no support pass, so
-   the repair beam is a player-only verb. It needs a rule of the shape
-   "if a squadmate's hull is low and I can see them, beam them instead
-   of shooting", which is a genuine new branch in the bot brain rather
-   than a tweak to an existing one.
-2. **A second repair-beam pool.** One pool serves the whole field, so
-   with two support mechs live the second beam is not drawn. Cheap to
-   lift (a pool per fighter), listed so it is a decision rather than a
-   surprise.
-3. **HUD award toasts for a resource economy** — the toast system
+*(Audited 2026-08-07 against the code. Three items on this list had
+already been built and were still sitting here as open — bot support
+logic, per-piece armour geometry, and the second beam pool. A stale
+"missing" list is worse than none: it sends the next session to rebuild
+finished work. What follows is what is actually left.)*
+
+1. **Armour damage STATES** (Brief IX §C). The 24 plates are
+   equippable, visible, and a missing one exposes its segment — but a
+   WORN one has no condition. The brief's four-stage table (Fresh →
+   Scuffed → Cracked → Severed, with a plate detaching on the next hit)
+   needs per-piece HP, which needs the hit path to resolve which *piece*
+   it struck rather than which zone. A real extension of
+   `apply_hit_dmg`, not a polish pass.
+2. **HUD award toasts for a resource economy** — the toast system
    itself shipped (kills/assists/parries/streaks). §4.3's *resource*
    awards still have no economy in TDM/KOTH to award from, so this
    waits on a mode that has one rather than being faked.
-2. **Armour damage STATES** (Brief IX §C). The 24 plates are equippable
-   and a missing one exposes its segment — but a worn one has no
-   condition. The brief's four-stage table (Fresh → Scuffed → Cracked →
-   Severed, with a plate detaching on the next hit) needs per-piece HP,
-   which needs the hit path to know which *piece* it struck rather than
-   which zone. That is the next real step, not a polish pass.
-3. **Per-piece armour GEOMETRY.** The plates are a stat model with a
-   Forge grid; the soldier's mesh does not change when you strip a
-   gauntlet. Now cheap in principle — §B.1's rig has real clavicles,
-   toes and a three-part trunk to hang plates from — but it is 24 new
-   models, so it is content work with a code shape rather than the
-   reverse.
+3. **Audio for the new systems.** Plasma, the repair beam, the barrier
+   deploying and the precision charge all use borrowed sounds from the
+   soldier arsenal. They are placeholders and are marked as such at the
+   call sites.
 
 ### Closed 2026-08-07 (the art + second-chassis pass)
 

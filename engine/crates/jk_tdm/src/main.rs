@@ -7668,6 +7668,12 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
 /// live. Beams that are not running are parked hidden.
 #[derive(Resource)]
 struct RepairBeamVis {
+    /// One set per beam that can be live at once. See `REPAIR_BEAMS`.
+    beams: Vec<RepairBeamSet>,
+}
+
+/// One drawable beam.
+struct RepairBeamSet {
     /// The shaft segments - a chain of short bars laid end to end along
     /// the beam, which is what lets it BEND toward a moving target
     /// without a mesh that has to be rebuilt.
@@ -7681,13 +7687,27 @@ struct RepairBeamVis {
     landing: Entity,
 }
 
+/// How many beams can be drawn at once.
+///
+/// It was ONE - a single pool for the whole field, so a second medic's
+/// beam simply did not exist on screen. That is fine as a stated
+/// limitation and wrong as a shipped one: a support class whose signature
+/// verb is invisible when two of them play together is a class that
+/// punishes teams for using it.
+///
+/// Four is the honest ceiling rather than one-per-fighter: there are two
+/// medic pads a map, so four covers both teams fielding both, and a pool
+/// per fighter would build sixteen sets of geometry for a verb most of
+/// them can never use.
+const REPAIR_BEAMS: usize = 4;
+
 const REPAIR_SEGMENTS: usize = 14;
 const REPAIR_PACKETS: usize = 5;
 
 fn spawn_repair_beam_vis(
     commands: &mut Commands,
     kit: &ModelKit,
-) -> RepairBeamVis {
+) -> RepairBeamSet {
     let shaft = (0..REPAIR_SEGMENTS)
         .map(|_| {
             commands
@@ -7720,7 +7740,16 @@ fn spawn_repair_beam_vis(
             Visibility::Hidden,
         ))
         .id();
-    RepairBeamVis { shaft, packets, landing }
+    RepairBeamSet { shaft, packets, landing }
+}
+
+/// Build every beam the field can draw at once.
+fn spawn_repair_beams(commands: &mut Commands, kit: &ModelKit) -> RepairBeamVis {
+    RepairBeamVis {
+        beams: (0..REPAIR_BEAMS)
+            .map(|_| spawn_repair_beam_vis(commands, kit))
+            .collect(),
+    }
 }
 
 /// Point the beam at whatever the sim says is being mended.
@@ -7738,26 +7767,34 @@ fn repair_beam_sync(
 ) {
     let Some(vis) = vis else { return };
     let tnow = time.elapsed_secs();
-    // the first live beam on the field owns the pool. With two support
-    // mechs the second is not drawn - a limitation worth stating plainly
-    // rather than hiding, and cheap to lift by growing the pool per
-    // fighter if a match ever fields more than one medic a side.
-    let live = game.sim.fighters.iter().enumerate().find_map(|(i, f)| {
-        let t = f.repair_target;
-        if t >= 0 && f.in_mech() {
-            game.sim.fighters.get(t as usize).map(|g| (i, g))
-        } else {
-            None
+    // every beam the sim says is live, up to the pool's size. Was "the
+    // first one only", which meant a second medic's beam did not exist.
+    let live: Vec<(usize, usize)> = game
+        .sim
+        .fighters
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let t = f.repair_target;
+            (t >= 0 && f.in_mech() && (t as usize) < game.sim.fighters.len())
+                .then_some((i, t as usize))
+        })
+        .take(REPAIR_BEAMS)
+        .collect();
+    // park every set the field is not using this frame
+    for (k, set) in vis.beams.iter().enumerate() {
+        if k < live.len() {
+            continue;
         }
-    });
-    let Some((i, target)) = live else {
-        for e in vis.shaft.iter().chain(vis.packets.iter()).chain([&vis.landing]) {
+        for e in set.shaft.iter().chain(set.packets.iter()).chain([&set.landing]) {
             if let Ok((_, mut v)) = q.get_mut(*e) {
                 *v = Visibility::Hidden;
             }
         }
-        return;
-    };
+    }
+    for (slot, (i, tj)) in live.into_iter().enumerate() {
+    let vis = &vis.beams[slot];
+    let target = &game.sim.fighters[tj];
     let src = &game.sim.fighters[i];
     // from the repair dish on the chassis's left arm, to the target's
     // centre of mass
@@ -7808,6 +7845,7 @@ fn repair_beam_sync(
         t.translation = to;
         t.scale = Vec3::splat(0.55 + (tnow * 7.0).sin() * 0.06);
         *v = Visibility::Visible;
+    }
     }
 }
 
@@ -11148,7 +11186,7 @@ fn setup(
         // §owner AGILE SUPPORT MECH: the shared repair-beam pool. Built
         // here with the rest of the one-time visual scaffolding, so it
         // exists before any chassis can be boarded.
-        let beam = spawn_repair_beam_vis(&mut commands, &kit);
+        let beam = spawn_repair_beams(&mut commands, &kit);
         commands.insert_resource(beam);
         commands.insert_resource(ForgePreview {
             image,
