@@ -4297,6 +4297,17 @@ struct BannerText;
 #[derive(Component)]
 struct CrosshairRoot;
 
+/// §owner MECH SENSOR OVERLAY: one bar of the optic housing - a corner
+/// bracket or a rail. All of them are driven together.
+#[derive(Component)]
+struct MechHudPiece;
+
+/// §owner MECH SENSOR OVERLAY: one bar of the target-acquisition
+/// bracket. Four of them make an open box round whoever is under the
+/// crosshair.
+#[derive(Component)]
+struct MechTargetBracket;
+
 /// §4.6: one drawn piece of the crosshair. `idx` 0..3 are the arms
 /// (top/right/bottom/left) and 4 is the centre dot; `outline` marks the
 /// dark backing rect that sits behind the fill.
@@ -6166,6 +6177,7 @@ fn main() {
                 spin_minigun_barrels,
                 spin_mech_turret_barrels,
                 mech_barrier_sync,
+                mech_hud_sync,
                 repair_beam_sync,
                 bow_string_sync,
                 grenade_arc,
@@ -7736,6 +7748,121 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
         }
     }
     (root, MechBarrier { petals, field })
+}
+
+/// §owner MECH SENSOR OVERLAY: the optic housing, and the target box.
+///
+/// Both hang off the same fact - whether the player is in a chassis -
+/// and both are tinted by WHICH chassis, because the two machines
+/// should not feel like the same cockpit with different numbers in it.
+/// The heavy reads amber-industrial; the medic reads cool white.
+///
+/// TARGET ACQUISITION is a real lock, not a decoration: it walks the
+/// enemies the sim knows about, keeps the one nearest the crosshair
+/// inside a tolerance, and projects it to screen. If nothing qualifies
+/// the bracket goes away rather than parking somewhere - a reticle that
+/// lingers on empty ground teaches the player to distrust it.
+fn mech_hud_sync(
+    game: Res<Game>,
+    cam_ctl: Res<CamCtl>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cam_q: Query<(&Camera, &GlobalTransform), With<MainCam>>,
+    mut housing: Query<&mut BackgroundColor, (With<MechHudPiece>, Without<MechTargetBracket>)>,
+    mut bracket: Query<
+        (&mut Node, &mut BackgroundColor),
+        (With<MechTargetBracket>, Without<MechHudPiece>),
+    >,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let inside = p.in_mech() && p.alive();
+    // the housing tint. Amber for the heavy, cool white for the medic -
+    // one glance at the frame should say which machine you are in.
+    let (hr, hg, hb) = if p.in_scout_mech() {
+        (0.72, 0.86, 0.95)
+    } else {
+        (0.95, 0.72, 0.28)
+    };
+    let a = if inside { 0.42 } else { 0.0 };
+    for mut bg in &mut housing {
+        *bg = BackgroundColor(Color::srgba(hr, hg, hb, a));
+    }
+
+    // ---- target acquisition -------------------------------------------
+    let mut placed = false;
+    if inside {
+        if let (Ok(win), Ok((cam, cam_tf))) = (windows.get_single(), cam_q.get_single()) {
+            let (sy, cy) = cam_ctl.yaw.sin_cos();
+            let pitch = cam_ctl.pitch;
+            let look = Vec3::new(sy * pitch.cos(), -pitch.sin(), cy * pitch.cos());
+            let eye = Vec3::new(p.pos[0], p.pos[1] + p.height() * 0.85, p.pos[2]);
+            // the enemy closest to the aim LINE, not to the mech - the
+            // bracket answers "what am I pointing at", and the nearest
+            // body in space is frequently not it
+            let mut best: Option<(usize, f32)> = None;
+            for (j, g) in game.sim.fighters.iter().enumerate() {
+                if g.team == p.team || !g.alive() || g.protect_t > 0.0 {
+                    continue;
+                }
+                let to = Vec3::new(g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]) - eye;
+                let d = to.length();
+                if d < 1.0 || d > 90.0 {
+                    continue;
+                }
+                let cos = to.normalize().dot(look);
+                if cos < 0.985 {
+                    continue; // outside the acquisition cone
+                }
+                if best.map_or(true, |(_, bc)| cos > bc) {
+                    best = Some((j, cos));
+                }
+            }
+            if let Some((j, _)) = best {
+                let g = &game.sim.fighters[j];
+                let head = Vec3::new(g.pos[0], g.pos[1] + g.height(), g.pos[2]);
+                let foot = Vec3::new(g.pos[0], g.pos[1], g.pos[2]);
+                if let (Ok(hs), Ok(fs)) = (
+                    cam.world_to_viewport(cam_tf, head),
+                    cam.world_to_viewport(cam_tf, foot),
+                ) {
+                    let (w, h) = (win.width().max(1.0), win.height().max(1.0));
+                    // size the box off the target's own on-screen height,
+                    // so a distant enemy gets a small bracket and a close
+                    // one a large - the box is a measurement, not a badge
+                    let ph = (fs.y - hs.y).abs().clamp(14.0, 400.0);
+                    let bw = ph * 0.62;
+                    let cx = (hs.x + fs.x) * 0.5;
+                    let cyp = (hs.y + fs.y) * 0.5;
+                    let (l, t) = ((cx - bw * 0.5) / w * 100.0, (cyp - ph * 0.5) / h * 100.0);
+                    let (pw, phh) = (bw / w * 100.0, ph / h * 100.0);
+                    let bar = (2.0_f32).max(ph * 0.10) / h * 100.0;
+                    let barw = (2.0_f32).max(ph * 0.10) / w * 100.0;
+                    // four short bars: top, left, bottom, right - an OPEN
+                    // box, so the thing being framed stays visible
+                    let corners = [
+                        (l, t, pw * 0.34, bar),
+                        (l, t, barw, phh * 0.30),
+                        (l, t + phh - bar, pw * 0.34, bar),
+                        (l + pw - barw, t, barw, phh * 0.30),
+                    ];
+                    for ((mut node, mut bg), (bl, bt, bwp, bhp)) in
+                        (&mut bracket).into_iter().zip(corners)
+                    {
+                        node.left = Val::Percent(bl);
+                        node.top = Val::Percent(bt);
+                        node.width = Val::Percent(bwp);
+                        node.height = Val::Percent(bhp);
+                        *bg = BackgroundColor(Color::srgba(hr, hg, hb, 0.92));
+                    }
+                    placed = true;
+                }
+            }
+        }
+    }
+    if !placed {
+        for (_, mut bg) in &mut bracket {
+            *bg = BackgroundColor(Color::NONE);
+        }
+    }
 }
 
 /// §owner AGILE SUPPORT MECH: the repair beam, drawn.
@@ -11522,6 +11649,91 @@ fn setup(
         HealthVignette,
         HudRoot,
     ));
+    // ---- §owner MECH SENSOR OVERLAY ------------------------------------
+    //
+    // "Futuristic robotic interface styling" - and the way to get that
+    // without a single new texture is to frame the VIEW rather than
+    // decorate the corners. A pilot is looking through a machine, and a
+    // machine's optics have a housing: corner brackets, a rail top and
+    // bottom, and a tint that says you are behind glass.
+    //
+    // It is deliberately thin. Everything here sits at the screen EDGE
+    // or is a hairline, because the one thing a mech HUD must not do is
+    // eat the middle of the frame - that is where the fight is, and the
+    // chassis already fills the lower third with its own geometry.
+    //
+    // Shown only in a chassis, and tinted by WHICH chassis: the heavy
+    // reads amber-industrial, the medic cool-white. `mech_hud_sync`
+    // drives both from the same fighter state the vitals line reads.
+    for (i, (l, r, t, b, w, h)) in [
+        // four corner brackets, as two bars each
+        (Some(2.0_f32), None, Some(6.0_f32), None, 5.2_f32, 0.22_f32),
+        (Some(2.0), None, Some(6.0), None, 0.30, 4.0),
+        (None, Some(2.0), Some(6.0), None, 5.2, 0.22),
+        (None, Some(2.0), Some(6.0), None, 0.30, 4.0),
+        (Some(2.0), None, None, Some(6.0), 5.2, 0.22),
+        (Some(2.0), None, None, Some(6.0), 0.30, 4.0),
+        (None, Some(2.0), None, Some(6.0), 5.2, 0.22),
+        (None, Some(2.0), None, Some(6.0), 0.30, 4.0),
+        // top and bottom rails - hairlines across the full width
+        (Some(8.0), None, Some(5.6), None, 84.0, 0.10),
+        (Some(8.0), None, None, Some(5.6), 84.0, 0.10),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _ = i;
+        let mut node = Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(w),
+            height: Val::Percent(h),
+            ..default()
+        };
+        if let Some(v) = l {
+            node.left = Val::Percent(v);
+        }
+        if let Some(v) = r {
+            node.right = Val::Percent(v);
+        }
+        if let Some(v) = t {
+            node.top = Val::Percent(v);
+        }
+        if let Some(v) = b {
+            node.bottom = Val::Percent(v);
+        }
+        commands.spawn((
+            node,
+            BackgroundColor(Color::NONE),
+            GlobalZIndex(18),
+            MechHudPiece,
+            HudRoot,
+        ));
+    }
+    // TARGET ACQUISITION - a bracket that snaps to the enemy under the
+    // crosshair. Four short bars forming an open box, so it frames a
+    // target without covering it.
+    for (l, t, w, h) in [
+        (0.0_f32, 0.0_f32, 1.6_f32, 0.16_f32),
+        (0.0, 0.0, 0.22, 1.2),
+        (0.0, 0.0, 1.6, 0.16),
+        (0.0, 0.0, 0.22, 1.2),
+    ] {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(l),
+                top: Val::Percent(t),
+                width: Val::Percent(w),
+                height: Val::Percent(h),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            GlobalZIndex(19),
+            MechTargetBracket,
+            HudRoot,
+        ));
+    }
+
     // §5.3 flash whiteout overlay (UI, quantised alpha steps)
     commands.spawn((
         Node {
