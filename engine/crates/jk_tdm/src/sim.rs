@@ -2154,6 +2154,12 @@ pub struct Fighter {
     /// §owner SQUAD AI: which half of a bounding pair this bot is in.
     /// Derived, like the role, from the clock and index order.
     pub bound_phase: BoundPhase,
+    /// §owner PLASMA BOW: the precision shot's own cooldown, and how
+    /// far the current charge has run. Separate from the rapid mount's
+    /// gatling_cd because the two modes cycle independently - firing
+    /// rapid must not eat the precision timer, and vice versa.
+    pub plasma_cd: f32,
+    pub plasma_charge_t: f32,
     /// §owner AGILE SUPPORT MECH: who the repair beam is currently
     /// mending, or -1. Published so the client can DRAW the beam without
     /// re-deriving the choice - two independent answers to "who is being
@@ -3529,7 +3535,34 @@ pub const SCOUT_WAR_WEAPON_MULT: f32 = 2.4;
 /// numbers are deliberately kinder than the gatling's: that mount vents
 /// as a punishment for holding the trigger, and this one is the weapon's
 /// entire ammunition model, so it has to be livable.
-pub const PLASMA_HEAT_PER_SHOT: f32 = 0.062;
+/// Tuned so THREE SECONDS of held fire reaches the vent, which is the
+/// number the brief names. Derived rather than guessed: at a 0.16 s
+/// period that is 6.25 shots a second, so 1.0 / (6.25 * 3.0) = 0.053.
+pub const PLASMA_HEAT_PER_SHOT: f32 = 0.053;
+
+// ---- the two FIRING MODES ------------------------------------------------
+//
+// A support weapon with one trigger is a weapon that does one thing, and
+// the medic's job changes second to second: suppress a push, then thread
+// a shot into whoever is about to kill the man it is healing. So RAPID
+// on the trigger, PRECISION on the right button.
+//
+// They share the heat budget on purpose. The precision shot is not free
+// because you were not shooting - it costs a large slice of the same
+// pool, so a pilot who empties the budget on suppression cannot then
+// also land the big one.
+
+/// Precision: one heavy bolt, flat and fast, on its own long cooldown.
+pub const PLASMA_PRECISION_DAMAGE: f32 = 95.0;
+pub const PLASMA_PRECISION_SPEED: f32 = 130.0;
+/// The brief's "approximately 5-6 second cooldown".
+pub const PLASMA_PRECISION_CD_S: f32 = 5.5;
+/// How long the shot takes to charge before it goes. Long enough to be
+/// a commitment and to read as a wind-up from outside, short enough that
+/// it is a shot rather than a ritual.
+pub const PLASMA_CHARGE_S: f32 = 0.85;
+/// What a charged shot costs from the shared heat pool - a third of it.
+pub const PLASMA_PRECISION_HEAT: f32 = 0.34;
 pub const PLASMA_COOL_PER_S: f32 = 0.34;
 pub const PLASMA_FIRE_PERIOD: f32 = 0.16;
 pub const PLASMA_DAMAGE: f32 = 26.0;
@@ -3633,7 +3666,7 @@ impl MechWeapon {
             MechWeapon::Gatling => "TURRET",
             MechWeapon::Autocannon => "AUTOCANNON",
             MechWeapon::Rockets => "ROCKETS",
-            MechWeapon::Plasma => "PLASMA",
+            MechWeapon::Plasma => "PLASMA BOW",
             MechWeapon::Repair => "REPAIR",
         }
     }
@@ -4674,6 +4707,8 @@ impl TdmSim {
                     bound_phase: BoundPhase::Free,
                     suppress_t: 0.0,
                     suppress_from: [0.0, 0.0, 0.0],
+                    plasma_cd: 0.0,
+                    plasma_charge_t: 0.0,
                     repair_target: -1,
                     fear: 0.0,
                     routing: false,
@@ -5051,6 +5086,7 @@ impl TdmSim {
             // the client's beam vanishes the frame the pilot lets go
             // rather than hanging on a stale index.
             f.repair_target = -1;
+            f.plasma_cd = (f.plasma_cd - DT).max(0.0);
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
                 if f.gatling_vent_t <= 0.0 {
@@ -5981,11 +6017,26 @@ impl TdmSim {
                         MechWeapon::Plasma => {
                             self.try_fire_plasma(p, cmd.aim);
                         }
+                        // (precision rides RMB and is stepped below,
+                        // outside the `shoot` gate - it has to run every
+                        // tick to charge, and on the ticks the trigger
+                        // is NOT down)
                         MechWeapon::Repair => {
                             self.tick_repair_beam(p, cmd.aim);
                         }
                     }
                 }
+                // §owner PLASMA BOW mode 2. OUTSIDE the `shoot` gate,
+                // and called every tick whether or not RMB is down: a
+                // charge has to advance while held and collapse the
+                // instant it is not, and a call that only ran on the
+                // held ticks could never see the release.
+                //
+                // `ads` is RMB. On the heavy chassis that button
+                // pre-aims the rocket pod; on this one it draws the bow,
+                // which is the same idea - the right button is where a
+                // mech's considered shot lives.
+                self.step_plasma_precision(p, cmd.aim, cmd.ads);
             } else if self.fighters[p].gun == GunKind::Bow {
                 self.step_bow_draw(p, cmd.aim, cmd.shoot);
             } else if self.fighters[p].gun == GunKind::Spear {
@@ -7799,6 +7850,76 @@ impl TdmSim {
         f.gatling_heat += PLASMA_HEAT_PER_SHOT;
         if f.gatling_heat >= 1.0 {
             f.gatling_heat = 1.0;
+            f.gatling_vent_t = PLASMA_VENT_S;
+        }
+        true
+    }
+
+    /// §owner PLASMA BOW, mode 2: the PRECISION shot.
+    ///
+    /// Held on the right button, it CHARGES; at full charge it looses
+    /// one heavy bolt and goes on a long cooldown. Releasing early
+    /// abandons the charge and costs nothing, which is what makes it a
+    /// commitment rather than a tax - you can start one, see the fight
+    /// change, and let it go.
+    ///
+    /// Call every tick with whether the button is down. Returns true on
+    /// the tick the bolt actually leaves.
+    pub fn step_plasma_precision(&mut self, p: usize, aim: [f32; 3], held: bool) -> bool {
+        let ready = {
+            let f = &self.fighters[p];
+            f.in_mech()
+                && f.mech_weapon == MechWeapon::Plasma
+                && f.stagger_t <= 0.0
+                && f.gatling_vent_t <= 0.0
+                && f.plasma_cd <= 0.0
+        };
+        if !held || !ready {
+            // abandoning a charge is free, and instant - a wind-up you
+            // have to wait out after letting go would punish the read
+            // this mode exists to reward
+            self.fighters[p].plasma_charge_t = 0.0;
+            return false;
+        }
+        {
+            let f = &mut self.fighters[p];
+            f.plasma_charge_t += DT;
+            if f.plasma_charge_t < PLASMA_CHARGE_S {
+                return false;
+            }
+            f.plasma_charge_t = 0.0;
+        }
+        let o = self.muzzle_origin(p);
+        let d = normalize(aim);
+        let team = self.fighters[p].team;
+        self.next_missile_id += 1;
+        let id = self.next_missile_id;
+        self.missiles.push(Missile {
+            id,
+            pos: o,
+            vel: [
+                d[0] * PLASMA_PRECISION_SPEED,
+                d[1] * PLASMA_PRECISION_SPEED,
+                d[2] * PLASMA_PRECISION_SPEED,
+            ],
+            team,
+            shooter: p,
+            damage: PLASMA_PRECISION_DAMAGE,
+            is_spear: false,
+            stuck_t: None,
+            embedded: false,
+            // it PIERCES, unlike the rapid bolt. A shot that costs five
+            // seconds and a third of the heat pool should go through the
+            // man it hits.
+            pierces_left: 1,
+            pierced: Vec::new(),
+            power: 1.0,
+        });
+        let f = &mut self.fighters[p];
+        f.plasma_cd = PLASMA_PRECISION_CD_S;
+        f.gatling_trigger_t = 0.20;
+        f.gatling_heat = (f.gatling_heat + PLASMA_PRECISION_HEAT).min(1.0);
+        if f.gatling_heat >= 1.0 {
             f.gatling_vent_t = PLASMA_VENT_S;
         }
         true
@@ -12101,7 +12222,22 @@ mod tests {
         s.fighters[0].reserve = 0;
         let mut shots = 0;
         let mut overheated_at = None;
-        for tick in 0..600 {
+        // five seconds. It was 600 raw ticks, which stopped covering the
+        // window the moment `PLASMA_HEAT_PER_SHOT` was tuned to put the
+        // vent at the brief's three seconds - a fixture expressed in
+        // ticks cannot follow a constant expressed in seconds.
+        for tick in 0..(SIM_HZ as usize * 5) {
+            // keep the chassis on its feet. The scout has 210 hull and
+            // the range's other fighter is live, so five seconds is long
+            // enough to lose it - and a dismounted pilot cannot fire a
+            // mount for reasons that have nothing to do with heat. This
+            // measures a HEAT MODEL, so everything else is pinned.
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = ArmorSet::ScoutMech;
+                f.hull = SCOUT_HULL;
+                f.stagger_t = 0.0;
+            }
             if s.try_fire_plasma(0, [0.0, 0.0, 1.0]) {
                 shots += 1;
             } else if s.fighters[0].gatling_vent_t > 0.0 && overheated_at.is_none() {
@@ -12139,6 +12275,102 @@ mod tests {
             f.stagger_t = 0.0;
         }
         assert!(s.try_fire_plasma(0, [0.0, 0.0, 1.0]), "it must come back");
+    }
+
+    /// §owner PLASMA BOW: three seconds of held fire, then the vent.
+    ///
+    /// The brief names the number, so the constant is DERIVED from the
+    /// fire period rather than guessed at and this is what pins the two
+    /// together - change the cadence and the overheat window moves with
+    /// it or this fails.
+    #[test]
+    fn holding_the_plasma_trigger_overheats_in_about_three_seconds() {
+        let ticks_to_vent = (1.0 / PLASMA_HEAT_PER_SHOT) * PLASMA_FIRE_PERIOD;
+        assert!(
+            (ticks_to_vent - 3.0).abs() < 0.25,
+            "held fire vents in {ticks_to_vent:.2}s, the brief says about 3"
+        );
+        // and it comes back on its own - "automatically cools down after
+        // overheating" is a promise that the pilot never has to do
+        // anything to recover
+        assert!(PLASMA_VENT_S > 0.0 && PLASMA_VENT_S < 4.0);
+        assert!(PLASMA_COOL_PER_S > 0.0, "a mount that never cools is an ammo count");
+    }
+
+    /// §owner PLASMA BOW mode 2: the precision shot charges, commits,
+    /// and can be abandoned for free.
+    #[test]
+    fn the_precision_shot_charges_and_can_be_let_go() {
+        let mut s = range(0x9201);
+        let arm = |s: &mut TdmSim| {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_weapon = MechWeapon::Plasma;
+            f.plasma_cd = 0.0;
+            f.plasma_charge_t = 0.0;
+            f.gatling_heat = 0.0;
+            f.gatling_vent_t = 0.0;
+            f.stagger_t = 0.0;
+        };
+        arm(&mut s);
+        let aim = [0.0, 0.0, 1.0];
+        // it does NOT fire instantly - the charge is the commitment
+        assert!(!s.step_plasma_precision(0, aim, true), "it must not be a tap");
+        // holding through the charge fires exactly once
+        let mut fired = 0;
+        for _ in 0..(SIM_HZ as usize * 2) {
+            if s.step_plasma_precision(0, aim, true) {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 1, "two seconds of holding must produce ONE bolt, not {fired}");
+        assert!(s.fighters[0].plasma_cd > 4.0, "and put it on a long cooldown");
+        // it costs the SHARED heat pool, so suppression and the big shot
+        // compete for the same budget
+        assert!(s.fighters[0].gatling_heat > 0.3);
+
+        // letting go mid-charge abandons it, instantly and for free
+        arm(&mut s);
+        for _ in 0..20 {
+            s.step_plasma_precision(0, aim, true);
+        }
+        assert!(s.fighters[0].plasma_charge_t > 0.0, "the charge must have started");
+        s.step_plasma_precision(0, aim, false);
+        assert_eq!(s.fighters[0].plasma_charge_t, 0.0, "release must clear it");
+        assert_eq!(s.fighters[0].plasma_cd, 0.0, "and cost nothing");
+
+        // a VENTED mount refuses to charge at all
+        arm(&mut s);
+        s.fighters[0].gatling_vent_t = PLASMA_VENT_S;
+        for _ in 0..(SIM_HZ as usize) {
+            assert!(!s.step_plasma_precision(0, aim, true));
+        }
+        assert_eq!(s.fighters[0].plasma_charge_t, 0.0, "a vented mount must not even wind up");
+    }
+
+    /// The two modes are genuinely different weapons, not one weapon at
+    /// two settings.
+    #[test]
+    fn rapid_and_precision_trade_against_each_other() {
+        assert!(
+            PLASMA_PRECISION_DAMAGE > PLASMA_DAMAGE * 3.0,
+            "the charged shot has to be worth five seconds"
+        );
+        assert!(
+            PLASMA_PRECISION_SPEED > PLASMA_SPEED,
+            "and flatter, or 'longer range' means nothing"
+        );
+        // but it is not free: a third of the heat pool per shot, so a
+        // pilot who empties the budget suppressing cannot also land it
+        assert!(
+            PLASMA_PRECISION_HEAT > PLASMA_HEAT_PER_SHOT * 5.0,
+            "a precision shot must cost real heat, or rapid fire is \
+             strictly worse than tapping the big one"
+        );
+        assert!(PLASMA_PRECISION_HEAT < 0.5, "but not half the pool in one press");
+        // and the cooldown is the brief's 5-6 s band
+        assert!((5.0..=6.0).contains(&PLASMA_PRECISION_CD_S));
     }
 
     /// §owner: the REPAIR beam puts hull into an ALLY chassis, and into

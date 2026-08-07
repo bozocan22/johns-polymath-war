@@ -4495,7 +4495,7 @@ fn pickup_prompt(kind: PickupKind) -> &'static str {
         PickupKind::Health => "HEALTH PACK",
         PickupKind::Ammo => "AMMO CACHE",
         PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
-        PickupKind::ScoutArmor => "SCOUT CHASSIS - walk over to board  (1: PLASMA, no ammo - 2: REPAIR BEAM - fast, thin, and spears hurt)",
+        PickupKind::ScoutArmor => "MECHANICAL MEDIC - walk over to board  (plasma bow: no ammo, RMB charges a precision shot - 2: repair beam - fastest mech, thin, and spears hurt)",
         PickupKind::FolkArmor => "FOLK ARMOR - walk over to equip  (hold C: shieldwall brace)",
         PickupKind::PyroArmor => "PYRO ARMOR - walk over to equip  (hold C: flame projector)",
         PickupKind::ReconWeave => "RECON WEAVE - walk over to equip  (fast, quiet, self-healing)",
@@ -4514,7 +4514,7 @@ fn equip_hint(set: ArmorSet) -> &'static str {
         // §owner AGILE SUPPORT MECH: the hint names the two things a
         // pilot has to know that the heavy's does not - the cannon has
         // no ammo, and the beam is pointed at friends.
-        ArmorSet::ScoutMech => "SCOUT MECH BOARDED - 1: PLASMA (heat, no ammo) - 2: REPAIR BEAM - U: DISMOUNT",
+        ArmorSet::ScoutMech => "MECHANICAL MEDIC BOARDED - LMB: plasma bow (heat, no ammo) - RMB: charged PRECISION shot - 2: REPAIR BEAM - U: DISMOUNT",
     }
 }
 
@@ -17350,13 +17350,31 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                     // barrier and no stride, so borrowing the heavy's
                     // readout would have printed four dead fields.
                     ArmorSet::ScoutMech => {
+                        // §owner MECHANICAL MEDIC's vitals. HULL, HEAT,
+                        // and the precision shot's own clock - the three
+                        // numbers this pilot actually decides on. No
+                        // power core, no brace, no barrier: it has none
+                        // of them, and printing dead fields is worse
+                        // than printing nothing.
                         let hot = (p.gatling_heat * 100.0).round();
                         let vent = if p.gatling_vent_t > 0.0 {
-                            "  [VENTING]"
+                            "  [VENTING]".to_string()
+                        } else if p.plasma_charge_t > 0.0 {
+                            // the CHARGE is the one piece of state a
+                            // player is actively waiting on, so it gets
+                            // a bar rather than a number
+                            let n = ((p.plasma_charge_t / sim::PLASMA_CHARGE_S) * 8.0)
+                                .round()
+                                .clamp(0.0, 8.0) as i32;
+                            let bar: String =
+                                (0..8).map(|i| if i < n { '#' } else { '.' }).collect();
+                            format!("  CHARGE [{bar}]")
+                        } else if p.plasma_cd > 0.0 {
+                            format!("  PRECISION {:.1}s", p.plasma_cd)
                         } else {
-                            ""
+                            "  PRECISION READY".to_string()
                         };
-                        format!("\nSCOUT  HULL {:.0}  HEAT {hot:.0}%{vent}", p.hull)
+                        format!("\nMEDIC  HULL {:.0}  HEAT {hot:.0}%{vent}", p.hull)
                     }
                     ArmorSet::RobotSuit => {
                         // §4.6: chassis VITALS only - the mounts own the
