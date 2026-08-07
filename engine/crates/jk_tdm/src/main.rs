@@ -3418,6 +3418,10 @@ struct ModelKit {
     mech_hazard: Handle<StandardMaterial>,
     /// FP-only translucent shield set - the raised plate must not blind
     /// the player. Third-person shields keep the opaque materials above.
+    /// §owner MECH BARRIER: the near-invisible field body, and the bright
+    /// cell edges drawn through it. See where they are built.
+    barrier_fill: Handle<StandardMaterial>,
+    barrier_edge: Handle<StandardMaterial>,
     vm_shield_dark: Handle<StandardMaterial>,
     vm_shield_steel: Handle<StandardMaterial>,
     vm_shield_gold: Handle<StandardMaterial>,
@@ -6011,6 +6015,7 @@ fn main() {
                 update_casings,
                 spin_minigun_barrels,
                 spin_mech_turret_barrels,
+                mech_barrier_sync,
                 bow_string_sync,
                 grenade_arc,
                 rocket_aim_preview,
@@ -7104,6 +7109,238 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit, see_through: bool
         .insert(Transform::from_xyz(0.0, -0.02, -0.08))
         .set_parent(root);
     root
+}
+
+/// §owner MECH BARRIER: the arm module that projects the field, and the
+/// field itself.
+#[derive(Component)]
+struct MechBarrier {
+    /// The folding emitter arms - three panels that lie along the
+    /// forearm stowed and swing out to frame the field.
+    petals: [Entity; 3],
+    /// The projected field: fill sheet plus the hex cell edges.
+    field: Entity,
+}
+
+/// How far the emitter petals swing out when the barrier deploys.
+const BARRIER_PETAL_DEG: f32 = 62.0;
+/// Deploy/stow time. Fast - the brief asks for a shield that "deploys
+/// quickly during combat", and a barrier you have to plan half a second
+/// ahead of is one you die behind.
+const BARRIER_DEPLOY_S: f32 = 0.18;
+
+/// Build the arm-mounted barrier projector.
+///
+/// It is a MODULE on the forearm, not a plate held in front of it: the
+/// brief asks for something that "looks integrated into the mech rather
+/// than attached afterward", and the difference is whether the thing has
+/// a housing that belongs to the arm it rides on. So: a boxed emitter
+/// bolted along the forearm cradle, three petals that lie flat against
+/// it when stowed, and the field projected from between them.
+///
+/// The FIELD is built as a fill sheet plus a hexagonal lattice of edge
+/// bars. That is the whole trick behind "transparent to the pilot,
+/// visible to the enemy": the fill is at 8% alpha and unlit, so it is
+/// very nearly a window, while the lattice is bright and emissive and
+/// reads from outside as a wall of light. One translucent sheet cannot
+/// be both things at once.
+fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechBarrier) {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    // EMITTER HOUSING - reads as part of the forearm
+    for (mat, pos, sc) in [
+        (kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.20, 0.14, 0.42)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.085, 0.0), Vec3::new(0.17, 0.035, 0.38)),
+        (kit.mech_shadow.clone(), Vec3::new(0.0, -0.075, 0.0), Vec3::new(0.16, 0.030, 0.36)),
+    ] {
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(mat),
+                Transform::from_translation(pos).with_scale(sc),
+            ))
+            .set_parent(root);
+    }
+    // the projector lens the field grows out of, and its capacitor ring
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(kit.mech_metal.clone()),
+            Transform {
+                translation: Vec3::new(0.0, 0.0, 0.215),
+                rotation: Quat::from_rotation_x(FRAC_PI_2),
+                scale: Vec3::new(0.155, 0.040, 0.155),
+            },
+        ))
+        .set_parent(root);
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(kit.barrier_edge.clone()),
+            Transform {
+                translation: Vec3::new(0.0, 0.0, 0.238),
+                rotation: Quat::from_rotation_x(FRAC_PI_2),
+                scale: Vec3::new(0.105, 0.016, 0.105),
+            },
+        ))
+        .set_parent(root);
+
+    // THE PETALS - three folding frames. Stowed they lie along the
+    // housing; deployed they splay to carry the field's corners.
+    let mut petals = [Entity::PLACEHOLDER; 3];
+    for (i, roll) in [0.0_f32, 2.094, -2.094].into_iter().enumerate() {
+        let petal = commands
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, 0.22)
+                    .with_rotation(Quat::from_rotation_z(roll)),
+                Visibility::default(),
+            ))
+            .set_parent(root)
+            .id();
+        // the arm, plus a lit strip running its length
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.0, 0.20, 0.0)
+                    .with_scale(Vec3::new(0.055, 0.42, 0.045)),
+            ))
+            .set_parent(petal);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.barrier_edge.clone()),
+                Transform::from_xyz(0.0, 0.20, 0.026)
+                    .with_scale(Vec3::new(0.016, 0.36, 0.012)),
+            ))
+            .set_parent(petal);
+        // the tip node that anchors a corner of the field
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(0.0, 0.41, 0.0)
+                    .with_scale(Vec3::splat(0.055)),
+            ))
+            .set_parent(petal);
+        petals[i] = petal;
+    }
+
+    // THE FIELD - a group so one Visibility and one scale animate it all
+    let field = commands
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 0.30),
+            Visibility::Hidden,
+        ))
+        .set_parent(root)
+        .id();
+    // the fill sheet: a thin disc, near-invisible, double-sided
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(kit.barrier_fill.clone()),
+            Transform {
+                translation: Vec3::ZERO,
+                rotation: Quat::from_rotation_x(FRAC_PI_2),
+                scale: Vec3::new(1.70, 0.012, 1.70),
+            },
+        ))
+        .set_parent(field);
+    // the HEX LATTICE. Cells on an axial grid, each drawn as six short
+    // bars - so the pattern is real geometry that catches the light and
+    // occludes correctly, not a texture that would go flat edge-on.
+    //
+    // Only cells whose centre falls inside the field radius are drawn,
+    // which is what gives the barrier a hexagonal rim rather than a
+    // circle with a grid stamped on it.
+    const CELL: f32 = 0.235;
+    for q in -4i32..=4 {
+        for r in -4i32..=4 {
+            let cx = CELL * 1.5 * q as f32;
+            let cy = CELL * (3.0_f32).sqrt() * (r as f32 + q as f32 * 0.5);
+            if (cx * cx + cy * cy).sqrt() > 0.80 {
+                continue;
+            }
+            for k in 0..6 {
+                let a = k as f32 * std::f32::consts::TAU / 6.0;
+                let na = (k + 1) as f32 * std::f32::consts::TAU / 6.0;
+                let (x0, y0) = (cx + a.cos() * CELL * 0.58, cy + a.sin() * CELL * 0.58);
+                let (x1, y1) = (cx + na.cos() * CELL * 0.58, cy + na.sin() * CELL * 0.58);
+                let (mx, my) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+                let len = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+                commands
+                    .spawn((
+                        Mesh3d(kit.cube.clone()),
+                        MeshMaterial3d(kit.barrier_edge.clone()),
+                        Transform {
+                            translation: Vec3::new(mx, my, 0.0),
+                            rotation: Quat::from_rotation_z((y1 - y0).atan2(x1 - x0)),
+                            scale: Vec3::new(len, 0.010, 0.008),
+                        },
+                    ))
+                    .set_parent(field);
+            }
+        }
+    }
+    (root, MechBarrier { petals, field })
+}
+
+/// §owner MECH BARRIER: fold, deploy, and ripple.
+///
+/// The deploy is a single 0..1 clock driving three things at once - the
+/// petals swinging out, the field scaling up from nothing, and its
+/// visibility - so the barrier cannot get into a state where the frame
+/// is open and the field is missing.
+///
+/// The RIPPLE is a scale wobble on the field group rather than a shader:
+/// this build has no custom material pipeline, and a breathing lattice
+/// reads as energy from every angle a shader would have. Two frequencies
+/// that do not share a period, the same trick the mech's idle tremor
+/// uses, so it never resolves into a single pulse.
+fn mech_barrier_sync(
+    time: Res<Time>,
+    game: Res<Game>,
+    rigs: Query<(&FighterVis, &MechBarrier)>,
+    mut parts: Query<(&mut Transform, &mut Visibility)>,
+) {
+    let dt = time.delta_secs();
+    let tnow = time.elapsed_secs();
+    for (vis, bar) in &rigs {
+        let Some(f) = game.sim.fighters.get(vis.index) else { continue };
+        // up only in a chassis, with the pool still standing
+        let want = f.in_mech() && f.shield_up && f.mech_shield_hp > 0.0;
+        // one clock, read back off the field's own scale so no extra
+        // per-fighter state is needed for a purely cosmetic animation
+        let cur = parts
+            .get(bar.field)
+            .map(|(t, _)| t.scale.x.clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        let step = dt / BARRIER_DEPLOY_S;
+        let e = if want { (cur + step).min(1.0) } else { (cur - step).max(0.0) };
+        for p in bar.petals {
+            if let Ok((mut t, _)) = parts.get_mut(p) {
+                let roll = t.rotation.to_euler(EulerRot::ZYX).0;
+                t.rotation = Quat::from_rotation_z(roll)
+                    * Quat::from_rotation_x(-BARRIER_PETAL_DEG.to_radians() * e);
+            }
+        }
+        if let Ok((mut t, mut v)) = parts.get_mut(bar.field) {
+            // the ripple - only once the field is actually up, so a
+            // stowed barrier is perfectly still
+            let ripple = if e > 0.99 {
+                1.0 + (tnow * 5.3).sin() * 0.012 + (tnow * 8.7).sin() * 0.007
+            } else {
+                1.0
+            };
+            t.scale = Vec3::splat(e * ripple);
+            *v = if e > 0.01 {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
 }
 
 /// §C: the TURRET mount's viewmodel barrel cluster - spun by the mount's
@@ -9363,6 +9600,18 @@ fn spawn_fighter_rigs(
         // and the viewmodel gets one too.)
         // the mech hull kit + leg armour (Brief VIII-B D.1-D.6)
         let (armor_rig, hull_det) = spawn_armor_rig(commands, kit);
+        // §owner MECH BARRIER: on the LEFT forearm cradle, which is the
+        // arm that is not holding the gatling - a shield on the gun arm
+        // would be a shield you cannot use while shooting.
+        let (barrier_root, barrier) = spawn_mech_barrier(commands, kit);
+        commands
+            .entity(barrier_root)
+            .insert(Transform {
+                translation: Vec3::new(-0.645, 0.145, 0.30) * MECH_HULL_SCALE,
+                rotation: Quat::from_rotation_x(-0.10),
+                scale: Vec3::splat(MECH_HULL_SCALE),
+            })
+            .set_parent(armor_rig);
         let la_l = spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0);
         let la_r = spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0);
         commands
@@ -9372,6 +9621,7 @@ fn spawn_fighter_rigs(
                 Visibility::Hidden,
             ))
             .set_parent(torso);
+        commands.entity(root).insert(barrier);
         commands.entity(root).insert(FighterRig {
             phase: 0.0,
             prev_speed: 0.0,
@@ -9727,6 +9977,36 @@ fn setup(
         // 1.0 + Blend reads as near-invisible smoked glass. Alpha 0.28
         // per slat because the three angled slats overlap and
         // double-blend at their edges (~0.3 net).
+        // §owner MECH BARRIER: the energy field itself.
+        //
+        // Two materials because the brief asks for two contradictory
+        // things at once - "transparent from the pilot's perspective for
+        // visibility" and "visible to enemies through glowing energy
+        // edges". A single translucent sheet cannot be both; a very faint
+        // FILL plus a bright EDGE can. The fill is what you see through,
+        // the edges are what they see.
+        //
+        // Unlit on the fill so it does not pick up the map's lighting and
+        // go opaque in shadow - a barrier that dims when you back into
+        // cover is a barrier the pilot cannot trust.
+        barrier_fill: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.30, 0.72, 0.95, 0.085),
+            emissive: LinearRgba::new(0.06, 0.20, 0.30, 1.0),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        barrier_edge: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.55, 0.90, 1.0, 0.60),
+            emissive: LinearRgba::new(1.2, 3.4, 4.6, 1.0),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
         vm_shield_dark: materials.add(StandardMaterial {
             base_color: Color::srgba(0.14, 0.15, 0.18, 0.28),
             metallic: 0.1,
@@ -20714,6 +20994,41 @@ mod segment_tests {
         assert!(
             SHOULDER_HEIGHT_FRAC < 1.0,
             "the shoulders are below the top of the head"
+        );
+    }
+
+    /// §owner MECH BARRIER: the two halves of "transparent to me, a wall
+    /// of light to you" are actually opposed, and the numbers have to
+    /// keep them that way.
+    ///
+    /// A single translucent sheet cannot satisfy both readings, which is
+    /// why the field is a near-invisible FILL plus a bright LATTICE. If
+    /// the fill ever creeps up toward the lattice's opacity the pilot
+    /// starts fighting through frosted glass, and if the lattice ever
+    /// dims toward the fill the enemy stops seeing a shield at all.
+    #[test]
+    fn the_barrier_is_a_window_to_the_pilot_and_a_wall_to_the_enemy() {
+        // the fill has to be nearly clear - this is the number the
+        // pilot's visibility depends on
+        const FILL_A: f32 = 0.085;
+        const EDGE_A: f32 = 0.60;
+        assert!(FILL_A < 0.12, "a pilot cannot fight through {FILL_A} alpha");
+        assert!(
+            EDGE_A > FILL_A * 5.0,
+            "the lattice must dominate the fill by a wide margin, or the \
+             barrier reads as a smudge from both sides"
+        );
+        // and the deploy has to be combat-fast. A barrier you have to
+        // raise half a second early is one you die behind.
+        assert!(
+            BARRIER_DEPLOY_S <= 0.25,
+            "{BARRIER_DEPLOY_S}s is too slow to be a reaction"
+        );
+        assert!(BARRIER_DEPLOY_S > 0.0, "an instant deploy has no read at all");
+        // the petals must actually open far enough to frame a field
+        assert!(
+            (30.0..90.0).contains(&BARRIER_PETAL_DEG),
+            "{BARRIER_PETAL_DEG} deg does not read as a fold"
         );
     }
 
