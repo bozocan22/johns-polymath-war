@@ -4305,6 +4305,12 @@ struct CrosshairRoot;
 #[derive(Component)]
 struct MechHudPiece;
 
+/// §owner the two bars that open away from the crosshair as a precision
+/// shot winds up. See the spawn site for why the charge is reported a
+/// third time when two corners already carry it.
+#[derive(Component)]
+struct PrecisionChargeMark;
+
 /// §owner MECH SENSOR OVERLAY: one bar of the target-acquisition
 /// bracket. Four of them make an open box round whoever is under the
 /// crosshair.
@@ -4636,13 +4642,42 @@ struct CapBeat {
     press: &'static [CapKey],
     release: &'static [CapKey],
     look: Option<(f32, f32)>,
+    /// §owner CAMERA ORBIT, radians, capture-only - swings the boom
+    /// around the subject WITHOUT turning the subject.
+    ///
+    /// Added because a beat named "side-on" had been producing rear
+    /// views for its whole life and nobody noticed. `look` turns the
+    /// PLAYER, and the third-person boom is rigidly behind the player,
+    /// so the subject rotates with the camera and the view never
+    /// changes. There is no yaw you can pass that yields a profile.
+    ///
+    /// That is not a small gap: a model is judged on its SILHOUETTE,
+    /// and the only rear-three-quarter this rig could produce is the
+    /// one angle that hides anything extending backwards - which is
+    /// exactly where a light chassis puts the parts that distinguish
+    /// it. Every model pass from here needs a real profile.
+    orbit: Option<f32>,
     snap: Option<&'static str>,
     end: bool,
 }
 const NO_KEYS: &[CapKey] = &[];
 const fn beat(t: f32) -> CapBeat {
-    CapBeat { t, press: NO_KEYS, release: NO_KEYS, look: None, snap: None, end: false }
+    CapBeat {
+        t,
+        press: NO_KEYS,
+        release: NO_KEYS,
+        look: None,
+        orbit: None,
+        snap: None,
+        end: false,
+    }
 }
+
+/// The capture orbit, in radians, applied to the third-person boom only.
+/// Zero in every normal run - this resource exists so the rig can look at
+/// a model from a side a player's own camera never reaches.
+#[derive(Resource, Default)]
+struct CaptureOrbit(f32);
 
 // §0: prove third-person-by-default, then what first person actually
 // looks like at rest, aiming, and mid-spray. Top-level `const` - a
@@ -4714,23 +4749,41 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
 /// then the plasma bow held long enough to overheat.
 const MEDIC_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((0.0, 0.06)), ..beat(0.4) },
-    CapBeat { snap: Some("01-medic-third-person"), ..beat(1.4) },
-    CapBeat { look: Some((2.4, 0.05)), ..beat(1.8) },
-    CapBeat { snap: Some("02-medic-side-on"), ..beat(2.6) },
-    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(3.0) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(3.1) },
-    CapBeat { look: Some((0.0, 0.04)), ..beat(3.3) },
-    CapBeat { snap: Some("03-medic-cockpit"), ..beat(4.0) },
+    CapBeat { snap: Some("01-medic-rear"), ..beat(1.4) },
+    // §owner ORBIT, not `look`. The old beat here turned the player 2.4
+    // rad and called the result "side-on"; the boom turned with them and
+    // it was a rear view every time. These three walk the camera round a
+    // stationary machine - profile, front three-quarter, front - which
+    // is the only way to see a silhouette that extends backwards.
+    CapBeat { orbit: Some(FRAC_PI_2), ..beat(1.8) },
+    CapBeat { snap: Some("02-medic-profile"), ..beat(2.4) },
+    CapBeat { orbit: Some(PI * 0.72), ..beat(2.6) },
+    CapBeat { snap: Some("03-medic-front-quarter"), ..beat(3.1) },
+    CapBeat { orbit: Some(PI), ..beat(3.3) },
+    CapBeat { snap: Some("04-medic-front"), ..beat(3.8) },
+    CapBeat { orbit: Some(0.0), ..beat(3.9) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(4.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(4.1) },
+    CapBeat { look: Some((0.0, 0.04)), ..beat(4.3) },
+    CapBeat { snap: Some("05-medic-cockpit"), ..beat(4.8) },
     // hold the trigger through the three-second overheat
-    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(4.2) },
-    CapBeat { snap: Some("04-plasma-firing"), ..beat(5.4) },
-    CapBeat { snap: Some("05-plasma-venting"), ..beat(7.6) },
-    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(7.8) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(5.0) },
+    CapBeat { snap: Some("06-plasma-firing"), ..beat(6.2) },
+    CapBeat { snap: Some("07-plasma-venting"), ..beat(8.4) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(8.6) },
     // and the charged precision shot on RMB
-    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(10.0) },
-    CapBeat { snap: Some("06-precision-charging"), ..beat(10.5) },
-    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(11.0) },
-    CapBeat { end: true, ..beat(11.6) },
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(10.8) },
+    CapBeat { snap: Some("08-precision-charging"), ..beat(11.3) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(11.8) },
+    // and the support half of the kit: switch to the beam, look at the
+    // hurt machine the boarding hook parked alongside, and hold it
+    CapBeat { press: &[CapKey::K(KeyCode::Digit2)], ..beat(12.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit2)], ..beat(12.1) },
+    CapBeat { look: Some((1.2, 0.02)), ..beat(12.2) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(12.4) },
+    CapBeat { snap: Some("09-repair-beam"), ..beat(13.0) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(13.2) },
+    CapBeat { end: true, ..beat(13.8) },
 ];
 
 const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
@@ -5311,6 +5364,10 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
         return;
     }
     let p = game.sim.player;
+    let (team, at) = {
+        let f = &game.sim.fighters[p];
+        (f.team, f.pos)
+    };
     if let Some(f) = game.sim.fighters.get_mut(p) {
         f.armor_set = sim::ArmorSet::ScoutMech;
         f.hull = sim::SCOUT_HULL;
@@ -5318,6 +5375,23 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
         f.health = MAX_HEALTH;
         f.respawn_t = 0.0;
         f.crouch = false;
+    }
+    // §owner and a PATIENT: the repair beam only takes an allied MECH
+    // under 85% hull, and a fresh match contains no such thing - so the
+    // beam and its green bracket had no way to appear in a capture at
+    // all. Put one hurt machine within arm's reach of the medic.
+    //
+    // Placed by hand rather than by waiting for the match to produce one
+    // naturally: a script that waits on combat to reach a state is a
+    // script that captures a different frame every run.
+    if let Some(k) = (0..game.sim.fighters.len())
+        .find(|&k| k != p && game.sim.fighters[k].team == team && game.sim.fighters[k].alive())
+    {
+        let g = &mut game.sim.fighters[k];
+        g.armor_set = sim::ArmorSet::ScoutMech;
+        g.mech_transition_t = 0.0;
+        g.hull = sim::SCOUT_HULL * 0.34;
+        g.pos = [at[0] + 3.4, at[1], at[2] + 1.2];
     }
 }
 
@@ -5332,6 +5406,7 @@ fn capture_input_driver(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut buttons: ResMut<ButtonInput<MouseButton>>,
     mut cam: ResMut<CamCtl>,
+    mut orbit: ResMut<CaptureOrbit>,
 ) {
     let Some(name) = cap.script.clone() else { return };
     cap.t += time.delta_secs();
@@ -5353,6 +5428,12 @@ fn capture_input_driver(
         if let Some((yaw, pitch)) = b.look {
             cam.yaw = yaw;
             cam.pitch = pitch;
+        }
+        // a beat that sets orbit HOLDS it until another beat changes it,
+        // so a script can take three angles of one pose without
+        // restating the orbit on every intervening beat
+        if let Some(o) = b.orbit {
+            orbit.0 = o;
         }
         // queue this beat's snap/end for the screenshot driver instead of
         // letting it infer them from the cursor - a frame that passes
@@ -6084,6 +6165,7 @@ fn main() {
         .init_state::<GameState>()
         // §0 (Brief VII): the capture helper - inert unless JK_CAPTURE is set
         .init_resource::<CaptureMode>()
+        .init_resource::<CaptureOrbit>()
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
         // menu capture runs in the MENU states, not Playing
@@ -7605,8 +7687,21 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit, ally: bool) -> E
     }
 
     // ---- CHEST: a cage, not a box. Two thin plates and the core -------
-    part(cube(), hull.clone(), Vec3::new(0.0, 0.66, 0.20), Quat::from_rotation_x(-0.22), Vec3::new(0.46, 0.34, 0.045));
-    part(cube(), plate.clone(), Vec3::new(0.0, 0.66, 0.235), Quat::from_rotation_x(-0.22), Vec3::new(0.30, 0.16, 0.020));
+    // §owner This was ONE 46cm plate, and it sealed the chest shut from
+    // the front - so the exposed drive core, the whole reason this
+    // silhouette differs from the heavy's, was only ever visible in
+    // profile. Nobody fights a machine in profile.
+    //
+    // Two halves with a slot between them instead. Same coverage either
+    // side of centre, same weight of plate, and the core now reads from
+    // the one angle a player actually sees this chassis from.
+    for sd in [-1.0_f32, 1.0] {
+        part(cube(), hull.clone(), Vec3::new(sd * 0.135, 0.66, 0.20), Quat::from_rotation_x(-0.22), Vec3::new(0.19, 0.34, 0.045));
+        part(cube(), plate.clone(), Vec3::new(sd * 0.125, 0.66, 0.235), Quat::from_rotation_x(-0.22), Vec3::new(0.115, 0.16, 0.020));
+        // the slot edge, chamfered inboard - an opening with a lip reads
+        // as designed, an opening without one reads as a missing part
+        part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.042, 0.66, 0.205), Quat::from_rotation_x(-0.22) * Quat::from_rotation_y(sd * -0.5), Vec3::new(0.016, 0.32, 0.075));
+    }
     part(cube(), plate.clone(), Vec3::new(0.0, 0.62, -0.22), Quat::from_rotation_x(0.18), Vec3::new(0.38, 0.30, 0.040));
     // the DRIVE CORE, exposed between them - this chassis wears its
     // power plant where the heavy hides one
@@ -7625,19 +7720,41 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit, ally: bool) -> E
 
     // ---- HEAD: a single sweeping optic on a slim collar ---------------
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.96, -0.02), Quat::IDENTITY, Vec3::new(0.10, 0.10, 0.10));
-    part(ball(), hull.clone(), Vec3::new(0.0, 1.06, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.22, 0.30));
-    part(cube(), plate.clone(), Vec3::new(0.0, 1.12, -0.02), Quat::from_rotation_x(-0.30), Vec3::new(0.26, 0.045, 0.16));
+    // §owner The skull WAS a wide pale ball, and in a third-person
+    // capture it read as a HUMAN HEAD - in exactly the hull white the
+    // soldiers' heads are, standing in a line right behind it. That is
+    // the one silhouette this machine must never borrow.
+    //
+    // A sensor pod instead, and the whole trick is one proportion:
+    // LONGER FRONT-TO-BACK THAN IT IS WIDE. That single ratio is what
+    // separates a bird's head from a person's at any distance, at any
+    // resolution, in any light - and it costs nothing to hold.
+    part(ball(), kit.mech_metal.clone(), Vec3::new(0.0, 1.05, 0.02), Quat::from_rotation_x(-0.20), Vec3::new(0.21, 0.19, 0.34));
+    part(cube(), hull.clone(), Vec3::new(0.0, 1.10, 0.03), Quat::from_rotation_x(-0.26), Vec3::new(0.19, 0.075, 0.30));
+    // the CREST - a thin fin swept back off the crown, and the far end
+    // of the same line the counterweight boom starts at the tail
+    part(cube(), plate.clone(), Vec3::new(0.0, 1.10, -0.155), Quat::from_rotation_x(0.55), Vec3::new(0.030, 0.070, 0.22));
     // the visor - ONE slit, same weak-point vocabulary the heavy uses
-    part(cube(), kit.mech_red.clone(), Vec3::new(0.0, 1.055, 0.155), Quat::IDENTITY, Vec3::new(0.20, 0.030, 0.02));
+    part(cube(), kit.mech_red.clone(), Vec3::new(0.0, 1.02, 0.175), Quat::IDENTITY, Vec3::new(0.17, 0.030, 0.02));
     for sd in [-1.0_f32, 1.0] {
+        // cheek plates canted inboard, pinching the pod towards the
+        // visor - a taper reads as fast where a constant width reads
+        // as a container
+        part(cube(), plate.clone(), Vec3::new(sd * 0.100, 1.03, 0.06), Quat::from_rotation_y(sd * 0.28), Vec3::new(0.020, 0.10, 0.24));
         part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.13, 1.14, -0.12), Quat::from_rotation_z(sd * 0.4), Vec3::new(0.012, 0.20, 0.030));
-        part(ball(), line.clone(), Vec3::new(sd * 0.10, 1.02, 0.13), Quat::IDENTITY, Vec3::splat(0.022));
+        part(ball(), line.clone(), Vec3::new(sd * 0.085, 1.00, 0.165), Quat::IDENTITY, Vec3::splat(0.022));
     }
 
     // ---- SHOULDERS + ARMS: visible linkages, thin plates --------------
     for sd in [-1.0_f32, 1.0] {
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.30, 0.78, 0.0), Quat::IDENTITY, Vec3::splat(0.115));
-        part(cube(), hull.clone(), Vec3::new(sd * 0.355, 0.80, 0.0), Quat::from_rotation_z(sd * 0.25), Vec3::new(0.13, 0.16, 0.22));
+        // §owner The shoulder cap was a BOX, which is the heavy's answer
+        // and reads as mass however small you make it. A swept pauldron
+        // instead: thin, raked down and back, and trailed by a fin. The
+        // joint underneath stays visible, which is the point - this
+        // chassis covers its mechanism, it does not enclose it.
+        part(cube(), hull.clone(), Vec3::new(sd * 0.365, 0.815, -0.01), Quat::from_rotation_z(sd * 0.42) * Quat::from_rotation_x(0.16), Vec3::new(0.075, 0.15, 0.26));
+        part(cube(), plate.clone(), Vec3::new(sd * 0.345, 0.755, -0.13), Quat::from_rotation_z(sd * 0.42) * Quat::from_rotation_x(0.62), Vec3::new(0.030, 0.10, 0.17));
         // upper arm as a strut with the actuator alongside, not a block
         part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.375, 0.62, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.055, 0.30, 0.055));
         part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.435, 0.64, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.032, 0.24, 0.032));
@@ -7820,6 +7937,45 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit, ally: bool) -> E
         ] {
             part(ball(), line.clone(), Vec3::new(lx, ly, lz), Quat::IDENTITY, Vec3::splat(0.016));
         }
+    }
+
+    // ---- §owner COUNTERWEIGHT BOOM ------------------------------------
+    //
+    // A backward-jointed leg puts the mass forward of the hip, and every
+    // real runner built that way carries something behind to balance it.
+    // The frame had nothing back there, which is why it read hunched
+    // rather than poised - all the visual weight was in front of the
+    // ankles with nothing answering it.
+    //
+    // It is also the cheapest identity this chassis can own. The heavy
+    // is a vertical column, symmetric front to back; NOTHING in that
+    // silhouette extends behind the hips. A boom makes the two machines
+    // distinguishable as pure shape, at any range, with the detail
+    // resolved away entirely - which is the only test a silhouette has
+    // to pass.
+    // First pass ran it DOWN and back at -0.34 rad and stopped at 53cm,
+    // which put it behind the calves at knee height - in profile it read
+    // as another dark lump among the leg hardware, which is the one
+    // thing a silhouette part must not do. Nearly horizontal and 20cm
+    // longer instead, so it breaks the outline against open sky.
+    part(cube(), kit.mech_metal.clone(), Vec3::new(0.0, 0.235, -0.20), Quat::from_rotation_x(0.16), Vec3::new(0.10, 0.11, 0.20));
+    part(cyl(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.215, -0.38), Quat::from_rotation_x(FRAC_PI_2 - 0.13), Vec3::new(0.075, 0.34, 0.075));
+    // and in HULL colour, not metal - the boom carries the team read out
+    // to the end of the silhouette, where it does the most work
+    part(cube(), hull.clone(), Vec3::new(0.0, 0.175, -0.60), Quat::from_rotation_x(-0.13), Vec3::new(0.13, 0.14, 0.26));
+    part(cube(), plate.clone(), Vec3::new(0.0, 0.245, -0.60), Quat::from_rotation_x(-0.13), Vec3::new(0.075, 0.030, 0.24));
+    // the mass at the end of it, and the vent that says the mass is a
+    // battery rather than a lump of lead
+    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.145, -0.72), Quat::from_rotation_x(FRAC_PI_2 - 0.13), Vec3::new(0.125, 0.11, 0.125));
+    part(cyl(), line.clone(), Vec3::new(0.0, 0.135, -0.775), Quat::from_rotation_x(FRAC_PI_2 - 0.13), Vec3::new(0.060, 0.030, 0.060));
+    for k in 0..3 {
+        part(cube(), kit.mech_metal.clone(), Vec3::new(0.0, 0.255 - k as f32 * 0.032, -0.52 - k as f32 * 0.012),
+            Quat::from_rotation_x(-0.13), Vec3::new(0.14, 0.010, 0.075));
+    }
+    // stays running back from the hip ring - a boom needs bracing, and
+    // the bracing is what stops it reading as a tail glued on
+    for sd in [-1.0_f32, 1.0] {
+        part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.075, 0.20, -0.31), Quat::from_rotation_x(FRAC_PI_2 - 0.24) * Quat::from_rotation_z(sd * 0.16), Vec3::new(0.022, 0.28, 0.022));
     }
 
     // ---- MOUNTS: plasma right, repair left ----------------------------
@@ -8120,6 +8276,14 @@ fn mech_hud_sync(
         (&mut Node, &mut BackgroundColor),
         (With<MechTargetBracket>, Without<MechHudPiece>),
     >,
+    mut charge_mark: Query<
+        (&mut Node, &mut BackgroundColor),
+        (
+            With<PrecisionChargeMark>,
+            Without<MechTargetBracket>,
+            Without<MechHudPiece>,
+        ),
+    >,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let inside = p.in_mech() && p.alive();
@@ -8136,6 +8300,17 @@ fn mech_hud_sync(
     }
 
     // ---- target acquisition -------------------------------------------
+    //
+    // §owner MEDIC: with the repair beam selected the bracket frames the
+    // ALLY the beam would take, in green, instead of an enemy in the
+    // hull tint. Same four bars, same sizing, one different question.
+    //
+    // The target comes from `sim.repair_candidate` - the very function
+    // the beam itself uses - rather than from a lookalike search here.
+    // A support weapon whose HUD points at a different friend than the
+    // beam picks is worse than no HUD: it teaches the pilot a rule the
+    // game does not follow.
+    let repairing = p.in_scout_mech() && p.mech_weapon == sim::MechWeapon::Repair;
     let mut placed = false;
     if inside {
         if let (Ok(win), Ok((cam, cam_tf))) = (windows.get_single(), cam_q.get_single()) {
@@ -8147,21 +8322,29 @@ fn mech_hud_sync(
             // bracket answers "what am I pointing at", and the nearest
             // body in space is frequently not it
             let mut best: Option<(usize, f32)> = None;
-            for (j, g) in game.sim.fighters.iter().enumerate() {
-                if g.team == p.team || !g.alive() || g.protect_t > 0.0 {
-                    continue;
-                }
-                let to = Vec3::new(g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]) - eye;
-                let d = to.length();
-                if d < 1.0 || d > 90.0 {
-                    continue;
-                }
-                let cos = to.normalize().dot(look);
-                if cos < 0.985 {
-                    continue; // outside the acquisition cone
-                }
-                if best.map_or(true, |(_, bc)| cos > bc) {
-                    best = Some((j, cos));
+            if repairing {
+                // no aim cone: the beam has none either. It takes the
+                // most hurt ally in range and line of sight WHEREVER the
+                // pilot happens to be looking, and the bracket has to
+                // report that or it is reporting a different weapon.
+                best = game.sim.repair_candidate(game.sim.player).map(|j| (j, 1.0));
+            } else {
+                for (j, g) in game.sim.fighters.iter().enumerate() {
+                    if g.team == p.team || !g.alive() || g.protect_t > 0.0 {
+                        continue;
+                    }
+                    let to = Vec3::new(g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]) - eye;
+                    let d = to.length();
+                    if d < 1.0 || d > 90.0 {
+                        continue;
+                    }
+                    let cos = to.normalize().dot(look);
+                    if cos < 0.985 {
+                        continue; // outside the acquisition cone
+                    }
+                    if best.map_or(true, |(_, bc)| cos > bc) {
+                        best = Some((j, cos));
+                    }
                 }
             }
             if let Some((j, _)) = best {
@@ -8192,6 +8375,11 @@ fn mech_hud_sync(
                         (l, t + phh - bar, pw * 0.34, bar),
                         (l + pw - barw, t, barw, phh * 0.30),
                     ];
+                    // green for a friend under the beam, hull tint for a
+                    // target. Nothing else about the bracket changes -
+                    // the pilot learns ONE shape and reads its colour.
+                    let (br, bgc, bb) =
+                        if repairing { (0.36, 0.92, 0.44) } else { (hr, hg, hb) };
                     for ((mut node, mut bg), (bl, bt, bwp, bhp)) in
                         (&mut bracket).into_iter().zip(corners)
                     {
@@ -8199,7 +8387,7 @@ fn mech_hud_sync(
                         node.top = Val::Percent(bt);
                         node.width = Val::Percent(bwp);
                         node.height = Val::Percent(bhp);
-                        *bg = BackgroundColor(Color::srgba(hr, hg, hb, 0.92));
+                        *bg = BackgroundColor(Color::srgba(br, bgc, bb, 0.92));
                     }
                     placed = true;
                 }
@@ -8210,6 +8398,39 @@ fn mech_hud_sync(
         for (_, mut bg) in &mut bracket {
             *bg = BackgroundColor(Color::NONE);
         }
+    }
+
+    // ---- §owner precision charge, at the crosshair ---------------------
+    let charge = if inside && p.in_scout_mech() {
+        (p.plasma_charge_t / sim::PLASMA_CHARGE_S).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    for (k, (mut node, mut bg)) in (&mut charge_mark).into_iter().enumerate() {
+        if charge <= 0.0 {
+            *bg = BackgroundColor(Color::NONE);
+            continue;
+        }
+        // the gap opens from 0.9% to 3.4% of screen width either side.
+        // It never closes to nothing: a mark that starts at the crosshair
+        // is indistinguishable from the crosshair, and the first frames
+        // of a wind-up are exactly when the pilot needs to know it began.
+        let gap = 0.9 + charge * 2.5;
+        let side = if k == 0 { -1.0 } else { 1.0 };
+        node.left = Val::Percent(50.0 + side * gap - if side < 0.0 { 0.55 } else { 0.0 });
+        node.top = Val::Percent(49.75);
+        node.width = Val::Percent(0.55);
+        node.height = Val::Percent(0.5);
+        // white while winding, and full green at the top of the charge -
+        // the release point is a THRESHOLD, not a gradient, so the
+        // colour has to snap rather than fade or it reports "nearly" and
+        // "now" as the same thing
+        let ready = charge >= 1.0;
+        *bg = BackgroundColor(if ready {
+            Color::srgba(0.42, 0.98, 0.50, 0.98)
+        } else {
+            Color::srgba(0.90, 0.94, 1.0, 0.55 + charge * 0.40)
+        });
     }
 }
 
@@ -12078,6 +12299,35 @@ fn setup(
             BackgroundColor(Color::NONE),
             GlobalZIndex(19),
             MechTargetBracket,
+            HudRoot,
+        ));
+    }
+    // §owner PRECISION CHARGE, at the crosshair.
+    //
+    // The charge was already reported twice - a bar in the vitals panel
+    // and a percentage in the weapon corner - and both are in a corner.
+    // A pilot winding up a 95-damage shot at a moving target is looking
+    // at the CENTRE of the screen and will not glance away to find out
+    // whether the shot is ready; that is the whole point of a charged
+    // weapon. So the same number, a third time, where the eye already is.
+    //
+    // Two bars that grow OUTWARD from the crosshair rather than a ring:
+    // this HUD has no circle primitive, and a widening gate reads as
+    // "building" more honestly than a filling line anyway - it is the
+    // shape the shot's own power is taking.
+    for _ in 0..2 {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: Val::Percent(0.0),
+                height: Val::Percent(0.0),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            GlobalZIndex(19),
+            PrecisionChargeMark,
             HudRoot,
         ));
     }
@@ -15985,6 +16235,7 @@ fn camera_system(
     mut cam_ctl: ResMut<CamCtl>,
     cam_tuning: Res<CameraTuning>,
     settings: Res<GameSettings>,
+    cap_orbit: Res<CaptureOrbit>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainCam>>,
 ) {
     cam_ctl.recoil = (cam_ctl.recoil - time.delta_secs() * 5.0).max(0.0);
@@ -16072,7 +16323,18 @@ fn camera_system(
     let lift = cam_tuning.tp_up + (0.22 - cam_tuning.tp_up) * ads_e;
     let right_amt = cam_tuning.tp_right + (cam_tuning.tp_right_aim - cam_tuning.tp_right) * ads_e;
     let bp = cam_ctl.pitch.clamp(-1.2, 1.2);
-    let bfwd = Vec3::new(sy * bp.cos(), -bp.sin(), cy * bp.cos());
+    let mut bfwd = Vec3::new(sy * bp.cos(), -bp.sin(), cy * bp.cos());
+    // §owner capture orbit: swing the BOOM around the subject without
+    // touching the player's facing. Applied here and nowhere else - the
+    // eye, the aim ray and `fwd` all stay on the true yaw, so a capture
+    // still shoots where the pilot is pointing while the camera watches
+    // from the side. Zero outside a capture, so this is a no-op in play.
+    let mut screen_right = screen_right;
+    if cap_orbit.0 != 0.0 {
+        let ro = Quat::from_rotation_y(cap_orbit.0);
+        bfwd = ro * bfwd;
+        screen_right = ro * screen_right;
+    }
     // §10: auto-mirror the shoulder when hugging a wall on the camera
     // side - peeking left out of cover must not bury the camera in it
     let want = if game
@@ -16239,7 +16501,16 @@ fn camera_system(
     // one line that already owns vertical camera offset.
     tf.translation.y -=
         (land_offset + mech_bob.abs() * 0.5 + mech_brace_drop - hull_breath) * (1.0 - pe * 0.6);
-    let look = tf.translation + fwd;
+    // §owner an orbited capture camera must AIM at the subject too.
+    // Moving the boom alone leaves the camera still facing along the
+    // pilot's yaw, so the machine walks straight out of frame - which is
+    // what the first orbited capture produced: a clean shot of the
+    // scenery next to the thing under test.
+    let look = if cap_orbit.0 != 0.0 {
+        anchor
+    } else {
+        tf.translation + fwd
+    };
     tf.look_at(look, Vec3::Y);
     // the head tilts with the lean - first person only
     tf.rotate_local_z(p.lean * 0.10 * (1.0 - pe));
@@ -22326,6 +22597,40 @@ mod camera_v2_tests {
         assert_eq!(torso_aim_offset(90.0), 60.0, "clamped at +60deg");
         assert_eq!(torso_aim_offset(-90.0), -60.0, "clamped at -60deg");
         assert_eq!(torso_aim_offset(60.0), 60.0, "exactly at the boundary passes through");
+    }
+
+    /// `capture_input_driver` advances a single cursor while the NEXT
+    /// beat's `t` has passed, so a script whose times run backwards
+    /// silently fires the out-of-order beat in the same frame as its
+    /// predecessor - two beats collapse into one instant and the shot
+    /// they were separating is taken at the wrong moment.
+    ///
+    /// I got this wrong pushing the medic's orbit beats in ahead of its
+    /// firing beats, and the failure is quiet: the script still runs,
+    /// still writes every PNG, and only the CONTENT is wrong. Cheap to
+    /// pin for every script at once, so pin it for every script at once.
+    #[test]
+    fn every_capture_script_runs_forwards_in_time() {
+        for name in [
+            "baseline", "medic", "bow_draw", "bow_draw_fp", "mech_scale",
+            "mech_fp", "shield_fp", "sights_a", "arrow_flight", "melee_dirs",
+            "class_line", "minigun_check", "traversal", "map_lap",
+        ] {
+            let script = capture_script(name);
+            assert!(!script.is_empty(), "{name}: script resolved to nothing");
+            for w in script.windows(2) {
+                assert!(
+                    w[1].t >= w[0].t,
+                    "{name}: beat at t={} follows t={} - times must not go backwards",
+                    w[1].t,
+                    w[0].t,
+                );
+            }
+            assert!(
+                script.last().map(|b| b.end).unwrap_or(false),
+                "{name}: last beat must set `end`, or the capture never exits",
+            );
+        }
     }
 
     #[test]

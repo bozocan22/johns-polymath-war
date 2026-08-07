@@ -33,6 +33,16 @@ finished work. What follows is what is actually left.)*
    soldier arsenal. They are placeholders and are marked as such at the
    call sites.
 
+### Closed 2026-08-07 (the medic pass — model, HUD, and three bugs)
+
+| Item | How it closed |
+|---|---|
+| **The repair beam could not be selected at all** | `cmd.slot` was hardcoded `0 => Gatling, 1 => Rockets` — the HEAVY's mounts, applied to every chassis. In a medic, whose strip reads PLASMA BOW [1] / REPAIR BEAM [2], pressing 2 set ROCKETS and the validity guard reverted it the same tick, so the support half of the chassis was unreachable while the HUD advertised it by name and number. Split brain: the strip renders from `for_set` and this handler carried its own copy of the list. One source now, and the index comes from the same slice the HUD draws, so slot N *is* the mount labelled N. Found by a capture; every existing mount test passed throughout because they all assign `mech_weapon` directly and none press a key. |
+| **The capture rig could not photograph a side** | A beat named `02-medic-side-on` had produced rear views for its whole life: `look` turns the PLAYER and the third-person boom is rigidly behind the player, so the subject rotates with the camera and no yaw yields a profile. `CapBeat.orbit` swings the boom around a stationary subject (and re-aims at the anchor, which the first attempt did not — it photographed the scenery beside the machine). Capture-only and inert in play. Also pinned: beat times must not run backwards, and every script's last beat must set `end`. |
+| **The medic model read as a small heavy** | Four changes, each paid for by an angle the rig could not previously take. Head: a pale ball that read as a human skull in the soldiers' own white → a raked sensor pod, longer front-to-back than wide (the one proportion that separates a bird's head from a person's at any distance). Chest: one 46 cm plate sealing the front, so the exposed core showed only in profile → two halves with a chamfered slot. Shoulders: box caps → swept pauldrons with trailing fins. And a COUNTERWEIGHT BOOM behind the hips — the heavy is a vertical column with nothing behind it, so a boom separates the two machines as pure shape with all detail resolved away. |
+| **Medic HUD had no support readout** | The target bracket frames the ally the beam would take, in green, from `Sim::repair_candidate` — the function the beam itself calls, made `pub` for that reason rather than letting the HUD run a lookalike search. Precision charge also renders at the crosshair now: both prior readouts sit in corners, and a pilot winding up a 95-damage shot is looking at centre screen. Colour snaps at full charge instead of fading, because the release point is a threshold. |
+| **The beam could not appear in a capture** | It only takes an allied MECH under 85% hull, which a fresh match never contains. The boarding hook parks one hurt machine in reach — by hand, because a script that waits on combat to reach a state captures a different frame every run. |
+
 ### Closed 2026-08-07 (the art + second-chassis pass)
 
 | Item | How it closed |

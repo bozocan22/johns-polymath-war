@@ -5623,14 +5623,35 @@ impl TdmSim {
             // SWITCH_S he can neither see nor use.
             if let Some(s) = cmd.slot {
                 if self.fighters[p].in_mech() {
-                    // §C.7: the PILOT's strip is two mounts - TURRET and
-                    // ROCKETS. The autocannon is bot hardware now; giving
-                    // it a third key would contradict the two-slot strip
-                    // the HUD teaches.
-                    match s {
-                        0 => self.fighters[p].mech_weapon = MechWeapon::Gatling,
-                        1 => self.fighters[p].mech_weapon = MechWeapon::Rockets,
-                        _ => {}
+                    // §C.7: the PILOT's strip is two mounts. The
+                    // autocannon is bot hardware; giving it a third key
+                    // would contradict the strip the HUD teaches.
+                    //
+                    // §owner This was a hardcoded `0 => Gatling,
+                    // 1 => Rockets` - the HEAVY's mounts, on every
+                    // chassis. So in a medic, whose strip reads PLASMA
+                    // BOW [1] / REPAIR BEAM [2], pressing 2 set ROCKETS:
+                    // a mount that machine does not have. The per-tick
+                    // validity guard then reverted it, which is the only
+                    // reason it looked like nothing happened rather than
+                    // like a medic firing missiles.
+                    //
+                    // The REPAIR BEAM was therefore unselectable. Not
+                    // awkward to select - impossible. The whole support
+                    // half of the chassis was unreachable, the HUD
+                    // advertised it by name and number, and every test
+                    // passed: they all drive `mech_weapon` directly and
+                    // none of them press a key.
+                    //
+                    // Textbook split brain. The strip is rendered from
+                    // `for_set`; this handler kept its own copy of the
+                    // list and the two drifted the moment a second
+                    // chassis existed. One source now - and because the
+                    // index comes from the same slice the HUD draws,
+                    // slot N is by construction the mount labelled N.
+                    let strip = MechWeapon::for_set(self.fighters[p].armor_set);
+                    if let Some(&w) = strip.get(s as usize) {
+                        self.fighters[p].mech_weapon = w;
                     }
                 } else {
                     self.switch_slot(p, s as usize);
@@ -10142,7 +10163,13 @@ impl TdmSim {
     ///
     /// Pure and rng-free, like every other squad rule here, so a replay
     /// heals the same men in the same order.
-    fn repair_candidate(&self, i: usize) -> Option<usize> {
+    /// `pub` because the HUD frames whoever this returns. That is not a
+    /// convenience: the pilot has to be shown the SAME target the beam
+    /// will actually take, and the only way to guarantee that is for the
+    /// bracket and the beam to ask one function. A HUD that runs its own
+    /// "probably this ally" search is a second opinion, and a second
+    /// opinion is a bug waiting for the two to disagree.
+    pub fn repair_candidate(&self, i: usize) -> Option<usize> {
         let f = &self.fighters[i];
         let from = [f.pos[0], f.pos[1] + f.height() * 0.55, f.pos[2]];
         let mut best: Option<(usize, f32)> = None;
@@ -12303,6 +12330,67 @@ mod tests {
             MechWeapon::Autocannon,
             "the guard must not disarm the bot's own range pick"
         );
+    }
+
+    /// §owner The number keys must select the mount the STRIP labels
+    /// with that number, in whatever chassis the pilot is sitting in.
+    ///
+    /// This is the test that was missing, and its absence is the whole
+    /// story of the bug. `cmd.slot` was hardcoded `0 => Gatling,
+    /// 1 => Rockets` - the heavy's mounts, applied to every chassis - so
+    /// in a Mechanical Medic, whose strip reads PLASMA BOW [1] / REPAIR
+    /// BEAM [2], pressing 2 set ROCKETS, and the validity guard reverted
+    /// it on the same tick. The repair beam was not awkward to select;
+    /// it was IMPOSSIBLE, and the support half of the chassis was dead.
+    ///
+    /// Every mount test in this file passed throughout, because they all
+    /// assign `mech_weapon` directly and not one of them presses a key.
+    /// A capture caught it: the strip said REPAIR BEAM [2], the script
+    /// pressed 2, and the viewmodel stayed a plasma bow.
+    ///
+    /// So this drives `slot` through `step` like a player would, and it
+    /// asserts against `for_set` rather than against named variants -
+    /// pin the RELATIONSHIP, and a third chassis inherits the guarantee
+    /// instead of needing its own test.
+    #[test]
+    fn a_number_key_selects_the_mount_the_strip_labels_with_it() {
+        for set in [ArmorSet::RobotSuit, ArmorSet::ScoutMech] {
+            let strip = MechWeapon::for_set(set);
+            for (idx, want) in strip.iter().enumerate() {
+                let mut s = range(0xA401);
+                let p = s.player;
+                {
+                    let f = &mut s.fighters[p];
+                    f.armor_set = set;
+                    f.hull = if set == ArmorSet::ScoutMech { SCOUT_HULL } else { MECH_HULL };
+                    f.mech_transition_t = 0.0;
+                    // start on the OTHER mount so a no-op cannot pass
+                    f.mech_weapon = strip[(idx + 1) % strip.len()];
+                }
+                s.step(PlayerCmd { slot: Some(idx as u8), ..Default::default() });
+                assert_eq!(
+                    s.fighters[p].mech_weapon, *want,
+                    "{set:?}: key {} must select {want:?}, the mount the strip prints there",
+                    idx + 1,
+                );
+            }
+            // and a key past the end of the strip changes nothing rather
+            // than clearing the mount or wrapping round to the first
+            let mut s = range(0xA402);
+            let p = s.player;
+            {
+                let f = &mut s.fighters[p];
+                f.armor_set = set;
+                f.hull = if set == ArmorSet::ScoutMech { SCOUT_HULL } else { MECH_HULL };
+                f.mech_transition_t = 0.0;
+                f.mech_weapon = strip[0];
+            }
+            s.step(PlayerCmd { slot: Some(strip.len() as u8), ..Default::default() });
+            assert_eq!(
+                s.fighters[p].mech_weapon, strip[0],
+                "{set:?}: a key past the end of the strip must be inert",
+            );
+        }
     }
 
     /// §owner: the PLASMA cannon's heat budget replaces ammunition, and
