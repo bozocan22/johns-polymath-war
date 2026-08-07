@@ -682,6 +682,205 @@ const CHAIN_ONSET_OFFSETS: [f32; 8] =
 const JAVELIN_ANCHOR_S: [(usize, f32); 4] =
     [(0, 0.000), (3, 0.040), (4, 0.070), (7, 0.130)];
 
+// ---- §B THE 20-SEGMENT MASS-BEARING BODY ---------------------------------
+//
+// Brief VIII-B §B: "a human body is 14-16 rigid segments, and every one has
+// published mass, length, and inertia data" - extended to 20 by splitting
+// the trunk in three and adding clavicles and toes.
+//
+// This table is the DATA half (§B.3 mass fractions, §B.4 lengths, §B.5
+// inertia). It is worth landing on its own, ahead of any rig surgery,
+// because it is the half that makes the other half checkable: §B.6 asks
+// for a mass-closure test and a proportion test, and neither needs a
+// single new bone to exist. It also settles the argument §B.5 actually
+// cares about - "spring stiffness per segment is DERIVED from mass, not
+// hand-guessed - that single change removes most of the 'why does this
+// arm feel wrong' tuning loop."
+//
+// Sources are the standard body-segment-parameter models the brief names:
+// Dempster 1955 / Winter 1990 / de Leva 1996. Nothing here is invented;
+// where the brief gives a number this table carries the brief's number.
+
+/// One rigid, mass-bearing segment. Fingers are deliberately absent -
+/// they are a sub-rig on the hands (§2), and counting them would push
+/// this past fifty and miss the point of the list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Segment {
+    HeadNeck,
+    Thorax,
+    Lumbar,
+    Pelvis,
+    ClavicleL,
+    ClavicleR,
+    UpperArmL,
+    UpperArmR,
+    ForearmL,
+    ForearmR,
+    HandL,
+    HandR,
+    ThighL,
+    ThighR,
+    ShankL,
+    ShankR,
+    FootL,
+    FootR,
+    ToeL,
+    ToeR,
+}
+
+const N_SEGMENTS: usize = 20;
+
+/// §B.1's table, in its own order: trunk from the head down, then the
+/// arm chain, then the leg chain.
+const SEGMENTS: [Segment; N_SEGMENTS] = [
+    Segment::HeadNeck,
+    Segment::Thorax,
+    Segment::Lumbar,
+    Segment::Pelvis,
+    Segment::ClavicleL,
+    Segment::ClavicleR,
+    Segment::UpperArmL,
+    Segment::UpperArmR,
+    Segment::ForearmL,
+    Segment::ForearmR,
+    Segment::HandL,
+    Segment::HandR,
+    Segment::ThighL,
+    Segment::ThighR,
+    Segment::ShankL,
+    Segment::ShankR,
+    Segment::FootL,
+    Segment::FootR,
+    Segment::ToeL,
+    Segment::ToeR,
+];
+
+/// What the standard models publish about one segment.
+struct SegmentData {
+    name: &'static str,
+    /// §B.3: fraction of total body mass, for THIS segment (not the pair).
+    mass_frac: f32,
+    /// §B.4: length as a fraction of total height H. Zero for the trunk
+    /// segments and the clavicle, which §B.4 does not give a long axis
+    /// for - it gives shoulder width, hip width and shoulder height
+    /// instead, and inventing lengths for them to fill the column would
+    /// be fabricating data the brief deliberately did not state.
+    len_frac: f32,
+    /// §B.5: centre of mass along the segment, from the PROXIMAL joint.
+    com_frac: f32,
+    /// §B.5: radius of gyration about the segment's own CoM, as a
+    /// fraction of its length. This is the number that makes a heavy limb
+    /// FEEL heavy - resistance to being whipped is m·(k·L)².
+    gyration_frac: f32,
+}
+
+fn segment_data(s: Segment) -> SegmentData {
+    use Segment::*;
+    // the pairs share a row - a left thigh and a right thigh are the same
+    // segment on opposite sides, and giving them separate numbers would
+    // be an invitation for them to drift apart
+    match s {
+        HeadNeck => SegmentData { name: "head_neck", mass_frac: 0.081, len_frac: 0.0, com_frac: 0.5, gyration_frac: 0.303 },
+        // §B.3: trunk 0.497 total, split thorax 0.216 / lumbar 0.139 /
+        // pelvis 0.142 - and the clavicles are CARVED FROM the thorax
+        // ("~0.005 (carve from thorax)"), not added beside it, which is
+        // what keeps the whole-body sum at exactly 1.000.
+        Thorax => SegmentData { name: "thorax", mass_frac: 0.216 - 0.010, len_frac: 0.0, com_frac: 0.5, gyration_frac: 0.33 },
+        Lumbar => SegmentData { name: "lumbar", mass_frac: 0.139, len_frac: 0.0, com_frac: 0.5, gyration_frac: 0.33 },
+        Pelvis => SegmentData { name: "pelvis", mass_frac: 0.142, len_frac: 0.0, com_frac: 0.5, gyration_frac: 0.33 },
+        ClavicleL | ClavicleR => SegmentData { name: "clavicle", mass_frac: 0.005, len_frac: 0.0, com_frac: 0.5, gyration_frac: 0.33 },
+        UpperArmL | UpperArmR => SegmentData { name: "upper_arm", mass_frac: 0.028, len_frac: 0.186, com_frac: 0.436, gyration_frac: 0.322 },
+        ForearmL | ForearmR => SegmentData { name: "forearm", mass_frac: 0.016, len_frac: 0.146, com_frac: 0.430, gyration_frac: 0.303 },
+        HandL | HandR => SegmentData { name: "hand", mass_frac: 0.006, len_frac: 0.108, com_frac: 0.506, gyration_frac: 0.297 },
+        ThighL | ThighR => SegmentData { name: "thigh", mass_frac: 0.100, len_frac: 0.245, com_frac: 0.433, gyration_frac: 0.323 },
+        ShankL | ShankR => SegmentData { name: "shank", mass_frac: 0.0465, len_frac: 0.246, com_frac: 0.433, gyration_frac: 0.302 },
+        // §B.3 splits the foot: hindfoot 0.011 / toe 0.0035. §B.4 gives
+        // one foot LENGTH of 0.152 H for the pair, split here in the same
+        // proportion the mass is - the forefoot is about a quarter of the
+        // foot, which is also what makes the toe-off lever the right size.
+        FootL | FootR => SegmentData { name: "foot", mass_frac: 0.011, len_frac: 0.152 * 0.75, com_frac: 0.50, gyration_frac: 0.475 },
+        ToeL | ToeR => SegmentData { name: "toe", mass_frac: 0.0035, len_frac: 0.152 * 0.25, com_frac: 0.50, gyration_frac: 0.475 },
+    }
+}
+
+/// §B.4's non-length proportions, as fractions of total height H.
+/// §B.2: how much of the trunk's twist the LUMBAR carries, the thorax
+/// taking the remainder.
+///
+/// Below half on purpose. Human axial rotation is not evenly distributed
+/// - the thoracic spine contributes appreciably more range than the
+/// lumbar, which is built to resist twist far more than it permits it.
+/// A 50/50 split would read as a body hinged at the belt.
+const LUMBAR_TWIST_SHARE: f32 = 0.38;
+
+/// §B.1 #19-20: how far the forefoot plantar-flexes at full toe-off.
+///
+/// 40 degrees. Human sprint toe-off runs to roughly 25-30 deg of
+/// metatarsophalangeal extension plus the ankle's own plantar flexion;
+/// this rig hinges the whole forefoot at one joint, so it carries the
+/// combined angle rather than the joint's own.
+const TOE_OFF_MAX: f32 = 40.0 * PI / 180.0;
+
+/// §B.1 #19-20: the forefoot's plantar flexion at a point in the gait.
+///
+/// Pure, and extracted for the same reason `carry_offset` is: §B.6 asks
+/// for a toe-off test - "assert the toe segment rotates through its
+/// plantar-flexion range at contact-exit; no toe rotation means the run
+/// is still a glide" - and a test that has to stand up Bevy to sample one
+/// angle is a test nobody will keep.
+///
+/// `phase` is the leg's own gait phase (the rig's phase plus the leg's
+/// half-cycle offset); `amp` is the speed fraction. Rectified and
+/// squared: a toe PUSHES and never pulls, and the square is what makes
+/// the drive a snap at the end of stance instead of a slow roll across
+/// the whole cycle.
+fn toe_off_angle(phase: f32, amp: f32) -> f32 {
+    ((phase - FRAC_PI_2).sin().max(0.0).powi(2) * TOE_OFF_MAX * amp)
+        .clamp(0.0, TOE_OFF_MAX)
+}
+
+const SHOULDER_WIDTH_FRAC: f32 = 0.259;
+const HIP_WIDTH_FRAC: f32 = 0.191;
+const SHOULDER_HEIGHT_FRAC: f32 = 0.818;
+
+/// The height the rig is actually built at, in metres.
+///
+/// §B.4 gives every length as a fraction of H and works its example at
+/// H = 1.8 m. This is the H the proportion test measures the LIVE rig
+/// against, so it has to be the rig's real height rather than a nominal
+/// one - see `the_rig_matches_the_published_proportions`.
+const RIG_HEIGHT_M: f32 = 1.8;
+
+/// §B.5: a segment's resistance to being whipped about its proximal
+/// joint - `m·(k·L)²`, in body-mass × H² units.
+///
+/// The whole point of the inertia column. A spring driving a segment
+/// should be stiffer for a heavier, longer one, and this is the number
+/// that says by how much - so `derived_spring_k` can stop guessing.
+fn segment_inertia(s: Segment) -> f32 {
+    let d = segment_data(s);
+    let r = d.gyration_frac * d.len_frac;
+    d.mass_frac * r * r
+}
+
+/// §B.5: spring stiffness for a segment, DERIVED from its inertia.
+///
+/// A critically-damped spring's stiffness for a target natural frequency
+/// is `k = I·ω²`. So one tuning knob - the frequency you want the segment
+/// to settle at - replaces a per-segment guess, and the mass model
+/// supplies the rest. A forearm and a thigh driven at the same frequency
+/// get different k because they ARE different, which is exactly the
+/// "why does this arm feel wrong" loop §B.5 says this removes.
+///
+/// Returned in the same units the existing `damped_spring` constants use,
+/// scaled by `SPRING_K_REFERENCE` so the numbers land in the range this
+/// file already works in rather than in body-mass·H² units nobody can
+/// read.
+const SPRING_K_REFERENCE: f32 = 1.0e4;
+fn derived_spring_k(s: Segment, omega: f32) -> f32 {
+    segment_inertia(s) * omega * omega * SPRING_K_REFERENCE
+}
+
 /// Peak angular-velocity multiplier per segment. Indices 0..=2 are
 /// MEASURED: the thorax/pelvis peak angular-velocity ratio of 1.43 is
 /// the mean of four marker-based pitching datasets; lumbar = sqrt(1.43)
@@ -980,6 +1179,8 @@ struct Selected {
     tunic: usize,
     /// §8.1: the helmet SHAPE, orthogonal to `hat` (which is its tint).
     helmet: usize,
+    /// §C tier 2: the plate assembled in the Forge.
+    armor: sim::ArmorLoadout,
     /// §6/§8 (Brief IV): melee slot choice + grenade budget preset
     melee_axe: bool,
     grenade_preset: usize,
@@ -1003,6 +1204,9 @@ struct ForgeProfile {
     /// §8.1. Added AFTER slots shipped, which is why `from_line` treats it
     /// as optional - see there.
     helmet: usize,
+    /// §C tier 2: the plate bitmask. Added after the helmet, same
+    /// optional-trailing-field treatment and the same reason.
+    armor: u32,
 }
 
 impl ForgeProfile {
@@ -1013,6 +1217,7 @@ impl ForgeProfile {
             melee_axe: sel.melee_axe,
             grenade_preset: sel.grenade_preset,
             helmet: sel.helmet,
+            armor: sel.armor.0,
         }
     }
     fn apply_to(&self, sel: &mut Selected) {
@@ -1021,26 +1226,36 @@ impl ForgeProfile {
         sel.helmet = self.helmet;
         sel.melee_axe = self.melee_axe;
         sel.grenade_preset = self.grenade_preset;
+        sel.armor = sim::ArmorLoadout(self.armor);
     }
-    /// A compact one-line format - no serde dependency needed for four
-    /// A compact one-line format - no serde dependency needed for five
-    /// small fields. `hat,tunic,melee_axe,grenade_preset,helmet`.
+    /// A compact one-line format - no serde dependency needed for six
+    /// small fields. `hat,tunic,melee_axe,grenade_preset,helmet,armor`.
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{}",
-            self.hat, self.tunic, self.melee_axe as u8, self.grenade_preset, self.helmet
+            "{},{},{},{},{},{}",
+            self.hat,
+            self.tunic,
+            self.melee_axe as u8,
+            self.grenade_preset,
+            self.helmet,
+            self.armor
         )
     }
-    /// Parses both the four-field format that shipped and the five-field
-    /// one that adds the helmet.
+    /// Parses every format that has shipped: the original four fields,
+    /// the five with a helmet, and the six with a harness.
     ///
-    /// The trailing field is OPTIONAL rather than required because slot
-    /// files already exist on disk from before §8.1, and the alternative -
-    /// rejecting them - would silently wipe someone's saved profiles the
-    /// first time they launched an updated build. A missing helmet reads as
-    /// index 0, the FIELD CAP, which is exactly the shape those profiles
-    /// were wearing when they were written. Everything up to the comma
-    /// count is still strict: a malformed field is still `None`.
+    /// Trailing fields are OPTIONAL rather than required because slot
+    /// files already exist on disk from before each of them, and the
+    /// alternative - rejecting them - would silently wipe someone's saved
+    /// profiles the first time they launched an updated build. A missing
+    /// helmet reads as index 0, the FIELD CAP; a missing harness reads as
+    /// LINE's default plate. Both are exactly what those profiles were
+    /// wearing when they were written.
+    ///
+    /// Everything up to the comma count is still strict: a malformed
+    /// field is still `None`. A field that is PRESENT and garbage is an
+    /// error, and only an ABSENT one is a default - otherwise this would
+    /// quietly accept a corrupt file as an old one.
     fn from_line(s: &str) -> Option<Self> {
         let mut it = s.trim().split(',');
         Some(ForgeProfile {
@@ -1050,6 +1265,10 @@ impl ForgeProfile {
             grenade_preset: it.next()?.parse().ok()?,
             helmet: match it.next() {
                 None => 0,
+                Some(v) => v.trim().parse().ok()?,
+            },
+            armor: match it.next() {
+                None => sim::default_harness(sim::Class::Line).0,
                 Some(v) => v.trim().parse().ok()?,
             },
         })
@@ -1081,6 +1300,9 @@ impl Default for Selected {
             hat: 0,
             tunic: 0,
             helmet: 0,
+            // the class default, so a player who never opens the armour
+            // rows is exactly as fast and as tough as before they existed
+            armor: sim::default_harness(sim::Class::Line),
             melee_axe: false,
             grenade_preset: 0,
         }
@@ -1765,6 +1987,12 @@ struct FighterRig {
     arm_r: [Entity; 3],
     /// §1.3: the gun is parented HERE on the spine - the gun leads, the
     /// hands follow via two-bone IK. Never parented to a hand.
+    /// §B.1 #19-20: the forefeet, [left, right] - the toe-off snap.
+    toes: [Entity; 2],
+    /// §B.2: the twist segment between pelvis and thorax.
+    lumbar: Entity,
+    /// §B.1 #5-6: the shoulder girdle, [left, right].
+    clavicles: [Entity; 2],
     weapon_root: Entity,
     /// held weapon models, indexed by `weapon_slot`
     weapons: [Entity; N_WEAPONS],
@@ -4929,52 +5157,63 @@ fn capture_menus(
             snap(&mut commands, "02-soldier-page");
             *stage = 3;
         }
+        // §C tier 2: the ARMOURY. A page with no capture is a page that
+        // can break unseen - which is exactly what happened to the two
+        // frames named in `capture_dir`'s comment above.
         3 if *t > 2.8 => {
-            page.0 = IntroPage::MATCH;
+            page.0 = IntroPage::ARMOURY;
             *stage = 4;
         }
         4 if *t > 3.6 => {
-            snap(&mut commands, "03-match-page");
+            snap(&mut commands, "03-armoury-page");
             *stage = 5;
         }
         5 if *t > 4.0 => {
-            next.set(GameState::Settings);
+            page.0 = IntroPage::MATCH;
             *stage = 6;
         }
-        6 if *t > 5.0 => {
-            snap(&mut commands, "04-settings");
+        6 if *t > 4.8 => {
+            snap(&mut commands, "04-match-page");
             *stage = 7;
+        }
+        7 if *t > 5.2 => {
+            next.set(GameState::Settings);
+            *stage = 8;
+        }
+        8 if *t > 6.2 => {
+            snap(&mut commands, "05-settings");
+            *stage = 9;
         }
         // The pause menu had NO capture coverage at all - it was the one
         // surface nothing could prove, which is exactly why it was chosen
         // to pilot the new design vocabulary.
-        7 if *t > 5.6 => {
+        9 if *t > 6.6 => {
             next.set(GameState::Paused);
-            *stage = 8;
+            *stage = 10;
         }
-        8 if *t > 6.6 => {
-            snap(&mut commands, "05-pause");
-            *stage = 9;
+        10 if *t > 7.6 => {
+            snap(&mut commands, "06-pause");
+            *stage = 11;
         }
         // Manual and Controls had no capture coverage at all - the same
         // hole the pause menu sat in until it became the pilot surface.
-        9 if *t > 7.2 => {
+        11 if *t > 8.2 => {
             next.set(GameState::Manual);
-            *stage = 10;
-        }
-        10 if *t > 8.2 => {
-            snap(&mut commands, "06-manual");
-            *stage = 11;
-        }
-        11 if *t > 8.8 => {
-            next.set(GameState::Controls);
             *stage = 12;
         }
-        12 if *t > 9.8 => {
-            snap(&mut commands, "07-controls");
+        12 if *t > 9.2 => {
+            snap(&mut commands, "07-manual");
             *stage = 13;
         }
-        13 if *t > 10.6 => std::process::exit(0),
+        13 if *t > 9.8 => {
+            next.set(GameState::Controls);
+            *stage = 14;
+        }
+        14 if *t > 10.8 => {
+            snap(&mut commands, "08-controls");
+            *stage = 15;
+        }
+        15 if *t > 11.6 => std::process::exit(0),
         _ => {}
     }
 }
@@ -5101,14 +5340,25 @@ pub struct IntroPage(pub u8);
 impl IntroPage {
     pub const TITLE: u8 = 0;
     pub const SOLDIER: u8 = 1;
-    pub const MATCH: u8 = 2;
-    pub const LAST: u8 = 2;
+    /// §C tier 2: the armoury - 24 plates, four rows, and the weight.
+    ///
+    /// Its OWN page rather than five more rows on SOLDIER, because
+    /// SOLDIER already runs past the bottom of a 1080p plate: the class,
+    /// three weapon slots, melee, grenades, three cosmetic rows, the
+    /// Forge save/load block and the loadout spec fill it. Five more
+    /// would have pushed the Forge buttons off the screen, and a save
+    /// button you cannot reach is worse than an armour grid you have to
+    /// click Next to see.
+    pub const ARMOURY: u8 = 2;
+    pub const MATCH: u8 = 3;
+    pub const LAST: u8 = 3;
 
     /// Heading for each page - the question the page answers.
     pub fn heading(self) -> &'static str {
         match self.0 {
             Self::MATCH => "CHOOSE YOUR BATTLE",
             Self::SOLDIER => "EQUIP YOUR SOLDIER",
+            Self::ARMOURY => "PLATE YOUR SOLDIER",
             _ => "",
         }
     }
@@ -5124,6 +5374,9 @@ impl IntroPage {
             Self::TITLE => "ENTER - continue    -    ESC menu > RULES & MANUAL",
             Self::MATCH => "the battlefield, the mode, and how hard it pushes back    -    CLICK A MODE TO DEPLOY",
             Self::SOLDIER => "the shield always rides in its own slot (4 raises it)",
+            Self::ARMOURY => {
+                "every plate is optional - what you leave off is lighter, and softer where it was"
+            }
             _ => "",
         }
     }
@@ -5276,6 +5529,20 @@ enum CosmeticSlot {
 /// One appearance pill: which slot, and which index within it.
 #[derive(Component, Clone, Copy)]
 struct CosmeticButton(CosmeticSlot, usize);
+
+/// §C tier 2: one plate in the Forge's armour grid.
+///
+/// A TOGGLE, not a pick - which is why it cannot ride `pill_row`'s
+/// selection convention unchanged. Every other row in the Forge is "one
+/// of these", so exactly one pill is lit; here every pill is independent
+/// and any number can be lit at once. The visual language survives
+/// because "lit = you have this" is what a lit pill already meant.
+#[derive(Component, Clone, Copy)]
+struct ArmorButton(sim::ArmorPiece);
+
+/// The live weight readout under the armour grid.
+#[derive(Component)]
+struct ArmorWeightText;
 
 /// §6 (Brief IV): melee slot pick - false = knife, true = axe.
 #[derive(Component, Clone, Copy)]
@@ -5617,6 +5884,7 @@ fn main() {
                 intro_map_buttons,
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
+                intro_armor_buttons,
                 intro_class_buttons,
                 intro_score_buttons,
                 intro_melee_buttons,
@@ -7561,8 +7829,18 @@ struct SoldierParts {
     root: Entity,
     leg_l: [Entity; 3],
     leg_r: [Entity; 3],
+    /// §B.1 #19-20: the forefeet, [left, right].
+    toes: [Entity; 2],
+    /// §B.2: the twist segment, between the pelvis (root) and the thorax.
+    lumbar: Entity,
+    /// §B.2: the THORAX. Named `torso` throughout for continuity - it is
+    /// the same pivot at the same height that the single trunk segment
+    /// used to be, and renaming forty call sites would have obscured what
+    /// this change actually did.
     torso: Entity,
     head: Entity,
+    /// §B.1 #5-6: the shoulder girdle, [left, right]. The arms hang here.
+    clavicles: [Entity; 2],
     arm_l: [Entity; 3],
     arm_r: [Entity; 3],
     weapon_root: Entity,
@@ -7623,6 +7901,7 @@ fn spawn_soldier_body(
     // Every joint is a visible dark gap; the KNEE is the signature - a
     // glossy dark dome sitting proud of the shin.
     let mut legs = [[Entity::PLACEHOLDER; 3]; 2];
+    let mut toes = [Entity::PLACEHOLDER; 2];
     for (li, lx) in [(-0.11_f32), 0.11].into_iter().enumerate() {
         let thigh = commands
             .spawn((Transform::from_xyz(lx, 0.63, 0.0), Visibility::default()))
@@ -7673,22 +7952,64 @@ fn spawn_soldier_body(
                 Transform::from_scale(Vec3::new(0.09, 0.07, 0.09)),
             ))
             .set_parent(foot);
+        // the HINDFOOT shell - shortened at the front to make room for a
+        // forefoot that can now hinge away from it
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(look.shell.clone()),
-                Transform::from_xyz(0.0, -0.025, 0.05)
-                    .with_scale(Vec3::new(0.14, 0.09, 0.22)),
+                Transform::from_xyz(0.0, -0.025, 0.025)
+                    .with_scale(Vec3::new(0.14, 0.09, 0.17)),
             ))
             .set_parent(foot);
+        // §B.1 #19-20 THE TOE / FOREFOOT. "The toe-off snap the sprint
+        // spec requires" - and until it existed the sprint could not have
+        // one, because there was nothing forward of the ankle to push
+        // off. §B.6's toe-off test is the proof it landed.
+        //
+        // Hinged at the ball of the foot, so plantar flexion rotates the
+        // forefoot about the same line a real one does.
+        let toe = commands
+            .spawn((Transform::from_xyz(0.0, -0.03, 0.105), Visibility::default()))
+            .set_parent(foot)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.shell2.clone()),
+                Transform::from_xyz(0.0, 0.005, 0.035)
+                    .with_scale(Vec3::new(0.13, 0.07, 0.10)),
+            ))
+            .set_parent(toe);
         legs[li] = [thigh, shin, foot];
+        toes[li] = toe;
     }
     let [leg_l, leg_r] = legs;
-    // TORSO: pelvis → abdomen → chest shells (0.63 → 1.19 world),
-    // shoulder yoke 1.19 → 1.476, all under one animated pivot
-    let torso = commands
+    // §B.2 THE THREE-PART TRUNK - "the critical fix".
+    //
+    //   root/PELVIS  -> LUMBAR -> THORAX
+    //
+    // The rig had two effective trunk segments: `root` carries the leg
+    // yaw and `torso` carried an additive yaw on top, so hip-shoulder
+    // separation was already non-zero. What it did NOT have was anything
+    // BETWEEN them, so the entire twist happened at one joint - a spine
+    // that behaved like a hinge. §B.2 calls the lumbar "the twist
+    // segment: this is what makes hip-shoulder separation possible", and
+    // possible is not the same as distributed.
+    //
+    // The lumbar sits at IDENTITY and takes a share of the separation in
+    // `sync_fighters`, so the coil is spread over two joints. The thorax
+    // keeps the pivot the old torso had, at exactly its old height, which
+    // is what makes this a pure insertion: every shell, socket, arm and
+    // head below hangs off the thorax at the local offsets it always had,
+    // so an unposed rig is untouched geometry.
+    let lumbar = commands
         .spawn((Transform::from_xyz(0.0, 0.63, 0.0), Visibility::default()))
         .set_parent(root)
+        .id();
+    let torso = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .set_parent(lumbar)
         .id();
     commands
         .spawn((
@@ -7811,10 +8132,29 @@ fn spawn_soldier_body(
     // ARMS: shoulder → elbow → wrist off the yoke, every joint a dark
     // ball in a visible gap, white shell segments, mitten hands
     let mut arms = [[Entity::PLACEHOLDER; 3]; 2];
+    let mut clavs = [Entity::PLACEHOLDER; 2];
     for (ai, ax) in [(-SHOULDER_X), SHOULDER_X].into_iter().enumerate() {
-        let upper = commands
+        // §B.1 #5-6 THE CLAVICLE. "The shoulder must TRAVEL, not just
+        // rotate - throwing and recoil both need it."
+        //
+        // The travel already existed as a spring (`FighterRig::clav`),
+        // but it was applied to the IK TARGET and nowhere else, so the
+        // solver aimed at a moving shoulder while the arm still hung off
+        // a fixed one. Making it a real bone is what closes that gap: the
+        // arm is parented HERE, so when the girdle moves, everything
+        // downstream of it moves too - which is what a shoulder girdle
+        // is for.
+        //
+        // Its rest transform carries the offset the arm used to carry, so
+        // an unanimated rig is in exactly the pose it was before.
+        let clav = commands
             .spawn((Transform::from_xyz(ax, 0.62, 0.02), Visibility::default()))
             .set_parent(torso)
+            .id();
+        clavs[ai] = clav;
+        let upper = commands
+            .spawn((Transform::IDENTITY, Visibility::default()))
+            .set_parent(clav)
             .id();
         commands
             .spawn((
@@ -7894,8 +8234,11 @@ fn spawn_soldier_body(
         root,
         leg_l,
         leg_r,
+        toes,
+        lumbar,
         torso,
         head,
+        clavicles: clavs,
         arm_l,
         arm_r,
         weapon_root,
@@ -8056,8 +8399,11 @@ fn spawn_fighter_rigs(
             root,
             leg_l,
             leg_r,
+            toes,
+            lumbar,
             torso,
             head,
+            clavicles,
             arm_l,
             arm_r,
             weapon_root,
@@ -8113,6 +8459,9 @@ fn spawn_fighter_rigs(
             neck: head,
             arm_l,
             arm_r,
+            toes,
+            lumbar,
+            clavicles,
             weapon_root,
             weapons,
             shield,
@@ -10980,23 +11329,35 @@ fn sync_fighters(
         // legs: thigh (hip), shin (knee), foot (ankle) per side.
         // Sign convention: +X rotation swings the limb BACKWARD, so knees
         // fold positive and a raised thigh is negative.
-        for (leg, off) in [(rig.leg_l, 0.0_f32), (rig.leg_r, PI)] {
+        for (li, (leg, off)) in [(rig.leg_l, 0.0_f32), (rig.leg_r, PI)]
+            .into_iter()
+            .enumerate()
+        {
             let (thigh, shin, foot);
+            // §B.1 #19-20: plantar flexion of the forefoot, positive =
+            // toes pushing DOWN and back.
+            let mut toe;
             if rolling {
                 // tucked ball
                 thigh = -1.55;
                 shin = 2.30;
                 foot = -0.55;
+                toe = 0.0;
             } else if f.crouch && !airborne {
                 // half-squat under the §0.2-tuned crouch lean
                 thigh = -0.85;
                 shin = 1.55;
                 foot = -0.42;
+                toe = 0.0;
             } else if airborne {
                 // jump tuck
                 thigh = -0.85;
                 shin = 1.50;
                 foot = -0.40;
+                // the forefoot POINTS in the air. Free of the ground it
+                // has nothing to push against, and a flat foot mid-jump
+                // is the tell that a leg is a prop.
+                toe = TOE_OFF_MAX * 0.45;
             } else {
                 // the gait: elliptical foot path (60% stance / 40% swing
                 // read), knee bends hardest on recovery, and the ankle
@@ -11016,6 +11377,21 @@ fn sync_fighters(
                 foot = -(thigh + shin) * 0.55
                     + (rig.phase + off - 1.2).sin() * 0.20 * amp
                     + (rig.phase + off + 0.6).sin() * 0.22 * amp; // ankle roll
+                // §B.1 #19-20 TOE-OFF. "No toe rotation means the run is
+                // still a glide" - and it was, because there was nothing
+                // forward of the ankle to push with.
+                //
+                // The snap fires at CONTACT EXIT: the instant the heel
+                // has left and the whole body is going over the ball of
+                // the foot. That is the back of the stance phase, which
+                // in this gait's phase convention is where the leg is
+                // furthest behind - so the drive is keyed to the same
+                // sine the stride is, a quarter-cycle late, and rectified
+                // because a toe pushes and never pulls.
+                //
+                // Scaled by `amp`, so a walk gets a roll and only a real
+                // sprint gets a snap.
+                toe = toe_off_angle(rig.phase + off, amp);
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[0]) {
                 t.translation.y = hip_y;
@@ -11031,6 +11407,12 @@ fn sync_fighters(
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[2]) {
                 t.rotation = Quat::from_rotation_x(foot);
+            }
+            // the forefoot. Clamped at the joint rather than at every
+            // source, so no branch above can hyperextend a toe.
+            toe = toe.clamp(0.0, TOE_OFF_MAX);
+            if let Ok((mut t, _)) = parts.get_mut(rig.toes[li]) {
+                t.rotation = Quat::from_rotation_x(toe);
             }
         }
         // §3.4: recoil is a BODY event with staggered peaks - the wrist
@@ -11193,6 +11575,24 @@ fn sync_fighters(
             };
             dmg + burn + ls.boom_flinch_t * 0.5 + ls.suppress_t * 0.3
         };
+        // §B.2 THE TRUNK, IN THREE.
+        //
+        // The whole twist used to land on one joint. It is split here:
+        // the LUMBAR takes `LUMBAR_TWIST_SHARE` of the yaw the trunk is
+        // asked for and the THORAX takes the rest, so a coil bends
+        // through a spine instead of pivoting on a hinge. Their sum is
+        // exactly what the single joint carried before, which is what
+        // keeps the separation test - and the ±60° additive-aim contract
+        // it guards - reading the same total.
+        //
+        // Position and pitch stay on the thorax. Only the TWIST is shared
+        // out: the lumbar is the twist segment §B.2 names, and giving it
+        // a share of the sway and the breathing bob as well would be
+        // double-counting motion the thorax already applies.
+        let trunk_yaw = 0.045 * rig.phase.sin() * amp + spear_yaw + torso_aim;
+        if let Ok((mut t, _)) = parts.get_mut(rig.lumbar) {
+            t.rotation = Quat::from_rotation_y(trunk_yaw * LUMBAR_TWIST_SHARE);
+        }
         if let Ok((mut t, _)) = parts.get_mut(rig.torso) {
             // §1.4 pelvis layers: lateral sway toward the stance foot,
             // pelvis yaw with the spine counter-rotating most of it back
@@ -11205,13 +11605,27 @@ fn sync_fighters(
             t.translation.x = 0.048 * rig.phase.sin() * amp + wshift;
             // §5.2: `torso_aim` puts the shoulders back on the aim that
             // the legs have not caught up to yet - the turn-in-place read
-            t.rotation = Quat::from_rotation_y(
-                0.045 * rig.phase.sin() * amp + spear_yaw + torso_aim,
-            )
+            t.rotation = Quat::from_rotation_y(trunk_yaw * (1.0 - LUMBAR_TWIST_SHARE))
                 * Quat::from_rotation_x(
                     (torso_pitch + flinch + 0.07 * settle + relaxed_e * 0.05).min(0.185),
                 )
                 * Quat::from_rotation_z(sway_r);
+        }
+        // §B.1 #5-6: the shoulder girdle TRAVELS. `rig.clav` is the same
+        // spring it always was; what is new is that it now moves a BONE
+        // the arm hangs from, rather than only nudging an IK target the
+        // arm was solved toward. The rest offset is baked into the
+        // clavicle's spawn transform, so this is a pure delta.
+        // Added the SAME to both sides, not mirrored - `clav` is a
+        // shift of the whole girdle (the shoulders travelling together
+        // through a turn or a throw), which is why `sh_l` and `sh_r` both
+        // add it unmodified. Mirroring it here would have the shoulders
+        // shrugging toward each other instead.
+        for (ci, sign) in [(0usize, -1.0_f32), (1, 1.0)] {
+            if let Ok((mut t, _)) = parts.get_mut(rig.clavicles[ci]) {
+                let c = if rig.clav.is_nan() { Vec3::ZERO } else { rig.clav };
+                t.translation = Vec3::new(sign * SHOULDER_X, 0.62, 0.02) + c;
+            }
         }
         // §1.1 the neck aims: head pitch follows the view (×0.75, capped
         // so head geometry stays inside its band), minus part of the
@@ -16085,6 +16499,51 @@ fn open_intro(
                 ));
             });
 
+            // ---- ARMOURY page ------------------------------------------
+            // §C tier 2: four rows, one per body region, in the order a
+            // harness goes on. Grouped by REGION rather than listed as 24
+            // flat pills, because the decision a player is actually
+            // making is regional - "do I want my arms covered" - and
+            // because one row of 24 would be illegible at the pill widths
+            // every other row on these pages uses.
+            let arm = OnIntroPage(IntroPage::ARMOURY);
+            for (label, zone) in [
+                ("HEAD", sim::HitZone::Head),
+                ("TORSO", sim::HitZone::Torso),
+                ("ARMS", sim::HitZone::Arms),
+                ("LEGS", sim::HitZone::Legs),
+            ] {
+                let pieces: Vec<(&str, ArmorButton)> = sim::ArmorPiece::ALL
+                    .iter()
+                    .filter(|p| p.zone() == zone)
+                    .map(|p| (p.name(), ArmorButton(*p)))
+                    .collect();
+                menu_ui::pill_row(b, label, &pieces, arm);
+            }
+            // The number that makes the grid a DECISION rather than a
+            // row of switches. Without a live weight read against the
+            // ceiling every plate looks free, and the only sensible play
+            // is to wear all of it.
+            b.spawn((
+                Text::new(String::new()),
+                TextFont { font_size: menu_ui::T_DATA, ..default() },
+                TextColor(branding::palette::GOLD),
+                Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
+                ArmorWeightText,
+                arm,
+            ));
+            b.spawn((
+                Text::new(
+                    "a bare segment takes 25% more where the plate is missing.\n\
+                     over the ceiling, every kilo costs 0.15 m/s."
+                        .to_string(),
+                ),
+                TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                TextColor(branding::palette::PARCHMENT_DIM),
+                Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
+                arm,
+            ));
+
             // ---- MATCH page --------------------------------------------
             let mtch = OnIntroPage(IntroPage::MATCH);
             let maps: Vec<(&str, MapButton)> = MapKind::ALL
@@ -16302,6 +16761,7 @@ fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState
         class: sel.class,
         melee_axe: sel.melee_axe,
         grenade_preset: sel.grenade_preset,
+        armor_pieces: Some(sel.armor),
     });
     game.accum = 0.0;
     game.last_t = 0.0;
@@ -16443,10 +16903,77 @@ fn intro_forge_buttons(
                 sel.hat = roll(HAT_CHOICES.len());
                 sel.tunic = roll(TUNIC_CHOICES.len());
                 sel.helmet = roll(HELMET_CHOICES.len());
+                // §C tier 2: roll the harness too - but only DOWN from
+                // the class default, never up past the ceiling. A
+                // randomize that could hand you a movement penalty would
+                // be a button that makes you worse, and the player did
+                // not ask to be gambled with; they asked for a look.
+                {
+                    let mut a = sim::default_harness(sel.class);
+                    for p in sim::ArmorPiece::ALL {
+                        if a.has(p) && roll(3) == 0 {
+                            a.set(p, false);
+                        }
+                    }
+                    sel.armor = a;
+                }
                 toast.text = "FORGE: fate rolled".to_string();
                 toast.t = 1.8;
             }
         }
+    }
+}
+
+/// §C tier 2: the armour grid - toggles, and the weight they cost.
+///
+/// A TOGGLE, unlike every other row on this page. That is why the press
+/// handler flips a bit instead of assigning one, and why the paint pass
+/// asks `has` rather than comparing against a single chosen value.
+///
+/// The press must fire on the RISING edge. Every picker row on this page
+/// can safely assign on `Pressed` every frame it is held - assigning the
+/// same value twice is a no-op - but a toggle held for ten frames would
+/// flip ten times and land on whichever parity the frame rate happened to
+/// produce. `Local<Option<Entity>>` remembers which pill is mid-press.
+fn intro_armor_buttons(
+    mut q: Query<
+        (Entity, &Interaction, &ArmorButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
+    mut held: Local<Option<Entity>>,
+    mut sel: ResMut<Selected>,
+    mut readout: Query<&mut Text, With<ArmorWeightText>>,
+) {
+    let mut pressed_now = None;
+    for (e, i, ab, _, _) in &mut q {
+        if *i == Interaction::Pressed {
+            pressed_now = Some(e);
+            if *held != Some(e) {
+                sel.armor.toggle(ab.0);
+            }
+        }
+    }
+    *held = pressed_now;
+    for (_, i, ab, mut bg, mut border) in &mut q {
+        paint(
+            &mut bg,
+            &mut border,
+            sel.armor.has(ab.0),
+            *i == Interaction::Hovered,
+        );
+    }
+    // the live cost. Stated as the penalty in m/s rather than as a bare
+    // overage in kg, because m/s is the unit the player experiences and
+    // kg is the unit the spreadsheet does.
+    for mut t in &mut readout {
+        let kg = sel.armor.weight_kg();
+        let budget = sim::class_spec(sel.class).weight_budget_kg;
+        let pen = sim::armor_weight_movement_penalty(kg, budget);
+        **t = if pen > 0.0 {
+            format!("PLATE {kg:.1} / {budget:.0} kg   OVER by {:.1} kg - move -{pen:.2} m/s", kg - budget)
+        } else {
+            format!("PLATE {kg:.1} / {budget:.0} kg   {:.1} kg spare - no penalty", budget - kg)
+        };
     }
 }
 
@@ -16536,8 +17063,16 @@ fn intro_class_buttons(
     mut sel: ResMut<Selected>,
 ) {
     for (i, cb, _, _) in &mut q {
-        if *i == Interaction::Pressed {
+        if *i == Interaction::Pressed && sel.class != cb.0 {
             sel.class = cb.0;
+            // §C tier 2: the harness follows the class. Each class has
+            // its own weight ceiling, so a LINE harness carried onto a
+            // SKIRMISHER is instantly 22 kg against a 20 kg budget - the
+            // player would be handed a penalty by a button that says
+            // nothing about armour. Resetting to the new class's default
+            // always lands under budget, and anything they had built is
+            // one click from being rebuilt on a body that can carry it.
+            sel.armor = sim::default_harness(cb.0);
         }
     }
     for (i, cb, mut bg, mut border) in &mut q {
@@ -19034,6 +19569,279 @@ mod bow_string_tests {
     }
 }
 
+/// §B.6 (Brief VIII-B): the 20-segment body's own completion gate.
+///
+/// The data half. Three of the brief's five tests need no new bone -
+/// segment count, mass closure, and proportions - which is exactly why
+/// the table lands before the rig surgery does.
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    /// §B.6 segment-count test: all 20 named segments, each once.
+    #[test]
+    fn the_body_exposes_all_twenty_segments() {
+        assert_eq!(SEGMENTS.len(), N_SEGMENTS);
+        assert_eq!(N_SEGMENTS, 20);
+        for s in SEGMENTS {
+            assert_eq!(
+                SEGMENTS.iter().filter(|q| **q == s).count(),
+                1,
+                "{s:?} is listed twice"
+            );
+        }
+        // and the composition is the brief's: one head, three trunk, and
+        // eight mirrored pairs
+        let singles = SEGMENTS
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    Segment::HeadNeck | Segment::Thorax | Segment::Lumbar | Segment::Pelvis
+                )
+            })
+            .count();
+        assert_eq!(singles, 4, "head plus a THREE-part trunk");
+        assert_eq!((N_SEGMENTS - singles) % 2, 0, "everything else is a pair");
+        assert_eq!((N_SEGMENTS - singles) / 2, 8, "eight mirrored pairs");
+    }
+
+    /// §B.6 mass-closure test: the whole body sums to 1.000 ± 0.001.
+    ///
+    /// This is the test that catches the trap in §B.3's own wording. The
+    /// clavicle is "~0.005 (carve from thorax)" - CARVE, not add. Two
+    /// clavicles bolted on beside a full-weight thorax put the body at
+    /// 1.010, a 1% error that would never show up as anything but a
+    /// vaguely wrong-feeling ragdoll.
+    #[test]
+    fn the_segment_masses_close_to_one_whole_body() {
+        let total: f32 = SEGMENTS.into_iter().map(|s| segment_data(s).mass_frac).sum();
+        assert!(
+            (total - 1.0).abs() < 0.001,
+            "body mass sums to {total}, not 1.000 - the clavicles are carved \
+             FROM the thorax, not added beside it"
+        );
+        // the brief's own arithmetic, checked limb group by limb group
+        let group = |f: fn(Segment) -> bool| -> f32 {
+            SEGMENTS
+                .into_iter()
+                .filter(|s| f(*s))
+                .map(|s| segment_data(s).mass_frac)
+                .sum()
+        };
+        let trunk = group(|s| {
+            matches!(
+                s,
+                Segment::Thorax
+                    | Segment::Lumbar
+                    | Segment::Pelvis
+                    | Segment::ClavicleL
+                    | Segment::ClavicleR
+            )
+        });
+        assert!((trunk - 0.497).abs() < 0.001, "trunk is {trunk}, brief says 0.497");
+        let one_arm = segment_data(Segment::UpperArmL).mass_frac
+            + segment_data(Segment::ForearmL).mass_frac
+            + segment_data(Segment::HandL).mass_frac;
+        assert!((one_arm - 0.050).abs() < 0.001, "an arm is {one_arm}, brief says 0.050");
+        let one_leg = segment_data(Segment::ThighL).mass_frac
+            + segment_data(Segment::ShankL).mass_frac
+            + segment_data(Segment::FootL).mass_frac
+            + segment_data(Segment::ToeL).mass_frac;
+        assert!((one_leg - 0.161).abs() < 0.001, "a leg is {one_leg}, brief says 0.161");
+        // and no segment is weightless - a zero-mass segment would get a
+        // zero-stiffness spring and hang limp
+        for s in SEGMENTS {
+            assert!(segment_data(s).mass_frac > 0.0, "{s:?} has no mass");
+        }
+    }
+
+    /// A mirrored pair is the SAME segment on two sides - same mass,
+    /// same length, same inertia.
+    #[test]
+    fn a_left_segment_weighs_what_its_right_twin_does() {
+        for (l, r) in [
+            (Segment::ClavicleL, Segment::ClavicleR),
+            (Segment::UpperArmL, Segment::UpperArmR),
+            (Segment::ForearmL, Segment::ForearmR),
+            (Segment::HandL, Segment::HandR),
+            (Segment::ThighL, Segment::ThighR),
+            (Segment::ShankL, Segment::ShankR),
+            (Segment::FootL, Segment::FootR),
+            (Segment::ToeL, Segment::ToeR),
+        ] {
+            let (a, b) = (segment_data(l), segment_data(r));
+            assert_eq!(a.name, b.name, "{l:?} and {r:?} are the same segment");
+            assert_eq!(a.mass_frac, b.mass_frac);
+            assert_eq!(a.len_frac, b.len_frac);
+            assert_eq!(segment_inertia(l), segment_inertia(r));
+        }
+    }
+
+    /// §B.6 proportion test: the published lengths, at the brief's own
+    /// worked height.
+    ///
+    /// "At H = 1.8m: upper arm 33cm, forearm 26cm, thigh 44cm, shank
+    /// 44cm, foot 27cm." Those five numbers are the brief checking its
+    /// own table, so they are the right thing to check ours against - a
+    /// fraction transcribed one digit wrong survives inspection and fails
+    /// here.
+    #[test]
+    fn the_published_lengths_land_where_the_brief_says_they_do() {
+        let cm = |s: Segment| segment_data(s).len_frac * RIG_HEIGHT_M * 100.0;
+        for (s, want) in [
+            (Segment::UpperArmL, 33.0_f32),
+            (Segment::ForearmL, 26.0),
+            (Segment::ThighL, 44.0),
+            (Segment::ShankL, 44.0),
+        ] {
+            let got = cm(s);
+            assert!(
+                (got - want).abs() < 1.0,
+                "{s:?} is {got:.1} cm at H={RIG_HEIGHT_M}, brief says {want}"
+            );
+        }
+        // the foot is split hindfoot/toe, so the brief's 27 cm is the SUM
+        let foot = cm(Segment::FootL) + cm(Segment::ToeL);
+        assert!(
+            (foot - 27.0).abs() < 1.0,
+            "hindfoot + toe is {foot:.1} cm, brief says 27"
+        );
+        // §B.4's other three proportions are stated, not derived
+        assert!((SHOULDER_WIDTH_FRAC * RIG_HEIGHT_M - 0.466).abs() < 0.01);
+        assert!(SHOULDER_WIDTH_FRAC > HIP_WIDTH_FRAC, "shoulders are wider than hips");
+        assert!(
+            SHOULDER_HEIGHT_FRAC < 1.0,
+            "the shoulders are below the top of the head"
+        );
+    }
+
+    /// §B.6 toe-off test: "assert the toe segment rotates through its
+    /// plantar-flexion range at contact-exit - no toe rotation means the
+    /// run is still a glide."
+    ///
+    /// It WAS a glide. There was nothing forward of the ankle, so the
+    /// foot left the ground as a flat plate and the whole sprint pushed
+    /// off nothing. This is the test that proves segments #19-20 landed.
+    #[test]
+    fn the_sprint_actually_pushes_off_its_toes() {
+        // sweep a full cycle at sprint amplitude
+        let mut peak = 0.0_f32;
+        let mut peak_at = 0.0_f32;
+        let n = 720;
+        for i in 0..n {
+            let ph = i as f32 / n as f32 * std::f32::consts::TAU;
+            let a = toe_off_angle(ph, 1.0);
+            assert!(a >= 0.0, "a toe pushes, it never pulls: {a} at {ph}");
+            assert!(a <= TOE_OFF_MAX + 1e-6, "hyperextended to {a}");
+            if a > peak {
+                peak = a;
+                peak_at = ph;
+            }
+        }
+        assert!(
+            (peak - TOE_OFF_MAX).abs() < 1e-3,
+            "the toe must reach its full range somewhere in the cycle, got \
+             {:.1} of {:.1} degrees",
+            peak.to_degrees(),
+            TOE_OFF_MAX.to_degrees()
+        );
+        // ...and reach it at CONTACT EXIT - the back of the stance, a
+        // quarter-cycle after the leg's rearmost point, not at mid-swing
+        assert!(
+            (peak_at - PI).abs() < 0.2,
+            "toe-off peaks at phase {peak_at:.2}, expected the back of \
+             stance near {PI:.2}"
+        );
+        // a STANDING fighter has flat feet. A toe that stayed cocked at a
+        // standstill would be the no-bounce contract broken in a new place
+        for i in 0..64 {
+            let ph = i as f32 * 0.31;
+            assert_eq!(toe_off_angle(ph, 0.0), 0.0, "a standing toe must be flat");
+        }
+        // and a WALK gets a roll where a sprint gets a snap
+        let walk = (0..n)
+            .map(|i| toe_off_angle(i as f32 / n as f32 * std::f32::consts::TAU, 0.25))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            walk < peak * 0.5,
+            "a walk must not toe off like a sprint: {walk} vs {peak}"
+        );
+    }
+
+    /// §B.2: the trunk twist is SHARED between lumbar and thorax, and the
+    /// two still sum to exactly what one joint used to carry.
+    ///
+    /// The sum is the load-bearing half. Hip-shoulder separation and the
+    /// §6.2 ±60° additive-aim contract are both stated against the TOTAL
+    /// trunk yaw, so splitting it must not change that total - only where
+    /// along the spine it happens.
+    #[test]
+    fn the_trunk_twist_is_shared_but_conserved() {
+        assert!(
+            LUMBAR_TWIST_SHARE > 0.0,
+            "a lumbar with no share is the hinge this replaced"
+        );
+        assert!(
+            LUMBAR_TWIST_SHARE < 0.5,
+            "the thoracic spine out-rotates the lumbar - an even split \
+             reads as a body hinged at the belt"
+        );
+        for yaw in [-1.2_f32, -0.4, 0.0, 0.3, 0.9] {
+            let lumbar = yaw * LUMBAR_TWIST_SHARE;
+            let thorax = yaw * (1.0 - LUMBAR_TWIST_SHARE);
+            assert!(
+                (lumbar + thorax - yaw).abs() < 1e-6,
+                "the split changed the total at {yaw}"
+            );
+            // and they twist the SAME way - opposed shares would be a
+            // counter-rotation nobody asked for
+            if yaw != 0.0 {
+                assert_eq!(lumbar.signum(), thorax.signum());
+            }
+        }
+    }
+
+    /// §B.5: stiffness comes OUT of the mass model, and it orders the
+    /// segments the way physical intuition does.
+    ///
+    /// The claim being made is not that any particular number is right -
+    /// it is that the numbers are no longer independent. A thigh is
+    /// heavier and longer than a forearm, so at one shared frequency it
+    /// must come back stiffer, and nobody has to decide that by feel.
+    #[test]
+    fn spring_stiffness_is_derived_from_mass_not_guessed() {
+        const W: f32 = 14.0; // the ω the viewmodel sway already runs at
+        let k = |s: Segment| derived_spring_k(s, W);
+        assert!(
+            k(Segment::ThighL) > k(Segment::ForearmL),
+            "a thigh must be stiffer to drive than a forearm: {} vs {}",
+            k(Segment::ThighL),
+            k(Segment::ForearmL)
+        );
+        assert!(
+            k(Segment::UpperArmL) > k(Segment::HandL),
+            "an upper arm must be stiffer than a hand"
+        );
+        assert!(
+            k(Segment::ShankL) > k(Segment::ToeL),
+            "a shank must be stiffer than a toe"
+        );
+        // it scales as ω², the standard relation - so the ONE knob left
+        // is a frequency, which is a thing a person can reason about
+        let a = derived_spring_k(Segment::ThighL, W);
+        let b = derived_spring_k(Segment::ThighL, W * 2.0);
+        assert!((b / a - 4.0).abs() < 1e-3, "k must go as omega squared");
+        // and every segment with a real length gets a real stiffness -
+        // a zero would be a limb that never comes back
+        for s in SEGMENTS {
+            if segment_data(s).len_frac > 0.0 {
+                assert!(k(s) > 0.0, "{s:?} has no stiffness");
+            }
+        }
+    }
+}
+
 /// R4 - config externalization's completion gate (camera-tuning slice).
 #[cfg(test)]
 mod capture_path_tests {
@@ -19237,9 +20045,9 @@ mod forge_tests {
     #[test]
     fn profile_line_round_trips_every_field() {
         for p in [
-            ForgeProfile { hat: 0, tunic: 0, melee_axe: false, grenade_preset: 0, helmet: 0 },
-            ForgeProfile { hat: 3, tunic: 2, melee_axe: true, grenade_preset: 3, helmet: 4 },
-            ForgeProfile { hat: 1, tunic: 3, melee_axe: false, grenade_preset: 2, helmet: 2 },
+            ForgeProfile { hat: 0, tunic: 0, melee_axe: false, grenade_preset: 0, helmet: 0, armor: 0 },
+            ForgeProfile { hat: 3, tunic: 2, melee_axe: true, grenade_preset: 3, helmet: 4, armor: 0x00FF_FFFF },
+            ForgeProfile { hat: 1, tunic: 3, melee_axe: false, grenade_preset: 2, helmet: 2, armor: 0x0A5A },
         ] {
             let line = p.to_line();
             let back = ForgeProfile::from_line(&line).expect("must parse what it wrote");
@@ -19395,7 +20203,7 @@ mod forge_tests {
     #[test]
     fn save_then_load_round_trips_through_the_real_filesystem() {
         let slot = 99; // a slot no real save will ever use
-        let p = ForgeProfile { hat: 2, tunic: 1, melee_axe: true, grenade_preset: 1, helmet: 3 };
+        let p = ForgeProfile { hat: 2, tunic: 1, melee_axe: true, grenade_preset: 1, helmet: 3, armor: 0x00F0_F0F0 };
         forge_save(slot, &p).expect("save must succeed");
         let back = forge_load(slot).expect("load must find what was saved");
         assert_eq!(p, back);
@@ -20164,12 +20972,76 @@ mod forge_tests {
         assert_ne!(before, settings_label_text(SettingsButtonKind::InvertY, &s));
     }
 
+    /// §C tier 2: a slot file written before the harness field existed
+    /// still loads, and loads as PLATE rather than as a naked man.
+    ///
+    /// The same upgrade path the helmet field needed, and the same
+    /// failure if it were strict - except worse: a harness defaulting to
+    /// 0 would silently strip every saved profile, and the player would
+    /// discover it by dying faster than they used to.
+    #[test]
+    fn a_pre_armor_save_file_still_loads_as_plate() {
+        let five = "3,2,1,3,4"; // the helmet-era format
+        let p = ForgeProfile::from_line(five).expect("a five-field file must still load");
+        assert_eq!(p.helmet, 4);
+        assert_eq!(
+            p.armor,
+            sim::default_harness(sim::Class::Line).0,
+            "an absent harness must read as the class default, not as nothing"
+        );
+        assert!(
+            sim::ArmorLoadout(p.armor).weight_kg() > 0.0,
+            "loading an old profile must not undress the player"
+        );
+        // and the four-field original still works too
+        let four = ForgeProfile::from_line("1,1,0,2").expect("the original format");
+        assert_eq!(four.helmet, 0);
+        assert_eq!(four.armor, sim::default_harness(sim::Class::Line).0);
+        // a PRESENT but garbage harness is still an error - otherwise a
+        // corrupt file would be silently accepted as an old one
+        assert!(ForgeProfile::from_line("1,1,0,2,0,zzz").is_none());
+    }
+
+    /// Every plate in the library reaches the grid exactly once.
+    ///
+    /// The grid is built by filtering `ArmorPiece::ALL` per zone, so a
+    /// piece whose `zone()` fell outside the four rows would vanish from
+    /// the UI while still counting toward weight - equippable in a save
+    /// file, invisible in the Forge, and impossible to take off.
+    #[test]
+    fn every_plate_appears_in_exactly_one_forge_row() {
+        let rows = [
+            sim::HitZone::Head,
+            sim::HitZone::Torso,
+            sim::HitZone::Arms,
+            sim::HitZone::Legs,
+        ];
+        for p in sim::ArmorPiece::ALL {
+            let n = rows.iter().filter(|z| p.zone() == **z).count();
+            assert_eq!(n, 1, "{} appears in {n} rows, not 1", p.name());
+        }
+        let shown: usize = rows
+            .iter()
+            .map(|z| sim::ArmorPiece::ALL.iter().filter(|p| p.zone() == *z).count())
+            .sum();
+        assert_eq!(shown, sim::ARMOR_PIECES, "the grid must show the whole harness");
+        // and no two plates share a name - they are toggles, and a
+        // duplicate label is a toggle nobody can identify
+        for p in sim::ArmorPiece::ALL {
+            let same = sim::ArmorPiece::ALL
+                .iter()
+                .filter(|q| q.name() == p.name())
+                .count();
+            assert_eq!(same, 1, "{} is not a unique label", p.name());
+        }
+    }
+
     #[test]
     fn apply_to_selected_only_touches_the_forges_own_fields() {
         let mut sel = Selected::default();
         sel.map = MapKind::Bailey; // untouched by the Forge - must survive
         let p =
-            ForgeProfile { hat: 3, tunic: 0, melee_axe: true, grenade_preset: 3, helmet: 1 };
+            ForgeProfile { hat: 3, tunic: 0, melee_axe: true, grenade_preset: 3, helmet: 1, armor: 0x00AB_CDEF };
         p.apply_to(&mut sel);
         assert_eq!(sel.hat, 3);
         assert_eq!(sel.tunic, 0);

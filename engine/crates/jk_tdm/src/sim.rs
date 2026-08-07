@@ -98,12 +98,21 @@ pub fn approach_velocity(cur: [f32; 2], target: [f32; 2], dt: f32) -> [f32; 2] {
 }
 /// Brief IX-C "Armour Customization": -0.15 m/s per kg of equipped
 /// armour/weapon weight over a class's budget - the brief's exact rule,
-/// worked example included ("+4 kg over budget, -0.60 m/s"). Pure and
-/// currently UNWIRED to real movement: there is no per-piece weight-
-/// tracking system yet (the 26-piece Forge rebuild this needs is a
-/// separate, much larger deferral - see REPORT.md), so this captures
-/// the formula, ready to plug in once real equipped weight exists.
+/// worked example included ("+4 kg over budget, -0.60 m/s").
+///
+/// WIRED as of the segment-mapped armour: `ArmorLoadout::weight_kg` is
+/// the real equipped weight this was always waiting for, and both the
+/// player's movement ladder and the bots' pay it. It sat here pure and
+/// unreachable for long enough to be worth saying plainly - a formula
+/// with no caller is a comment that compiles.
 pub const ARMOR_WEIGHT_PENALTY_PER_KG: f32 = 0.15;
+/// However heavy you get, you still move. A subtractive penalty on a
+/// speed that other multipliers have already cut - crouching, ADS, a
+/// drained chassis - can otherwise reach zero or go NEGATIVE, and a
+/// negative speed is a fighter who walks backwards when he presses W.
+/// The floor is a fraction of the base run, not of the reduced speed, so
+/// it cannot itself be multiplied away.
+pub const ARMOR_WEIGHT_SPEED_FLOOR: f32 = 0.25;
 pub fn armor_weight_movement_penalty(equipped_kg: f32, budget_kg: f32) -> f32 {
     (equipped_kg - budget_kg).max(0.0) * ARMOR_WEIGHT_PENALTY_PER_KG
 }
@@ -1386,6 +1395,296 @@ pub enum Class {
     Marksman,
 }
 
+// ---- SEGMENT-MAPPED ARMOUR (Brief IX §C tier 2) --------------------------
+//
+// Armour was five whole-body PRESETS found as loot: you had a set or you
+// did not, and every part of you was equally protected by it. The brief
+// asks for plate you assemble piece by piece, where taking the gauntlets
+// off is a real decision with a real cost on the hand that then catches a
+// round.
+//
+// THE BRIEF'S OWN TABLE SUMS TO 24, NOT 26. Six singles (helmet, gorget,
+// cuirass front and back, fauld, pelvis plate) plus nine mirrored pairs
+// is 6 + 18 = 24, and the section is titled "26-piece" throughout. Built
+// as 24, because the table is the specification and the title is a label
+// on it; inventing two pieces to reach a round number would be building
+// to the label. Recorded here rather than silently reconciled.
+//
+// Every piece maps onto a `HitZone` THAT ALREADY EXISTS. That is the
+// whole reason this is a one-session change rather than a subsystem: the
+// hit path already resolves head / arms / torso / legs, so a missing
+// piece has somewhere to be missing FROM without a new geometry pass.
+
+/// One plate. Left/right pairs are separate variants because they are
+/// separately losable - the asymmetry after one pauldron goes is a thing
+/// you can see at range.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArmorPiece {
+    Helmet,
+    Gorget,
+    CuirassFront,
+    CuirassBack,
+    Fauld,
+    PelvisPlate,
+    PauldronL,
+    PauldronR,
+    RerebraceL,
+    RerebraceR,
+    VambraceL,
+    VambraceR,
+    GauntletL,
+    GauntletR,
+    TassetL,
+    TassetR,
+    CuisseL,
+    CuisseR,
+    PoleynL,
+    PoleynR,
+    GreaveL,
+    GreaveR,
+    SabatonL,
+    SabatonR,
+}
+
+impl ArmorPiece {
+    /// Every piece, in the order the Forge grid lists them: head down.
+    pub const ALL: [ArmorPiece; ARMOR_PIECES] = [
+        ArmorPiece::Helmet,
+        ArmorPiece::Gorget,
+        ArmorPiece::CuirassFront,
+        ArmorPiece::CuirassBack,
+        ArmorPiece::Fauld,
+        ArmorPiece::PelvisPlate,
+        ArmorPiece::PauldronL,
+        ArmorPiece::PauldronR,
+        ArmorPiece::RerebraceL,
+        ArmorPiece::RerebraceR,
+        ArmorPiece::VambraceL,
+        ArmorPiece::VambraceR,
+        ArmorPiece::GauntletL,
+        ArmorPiece::GauntletR,
+        ArmorPiece::TassetL,
+        ArmorPiece::TassetR,
+        ArmorPiece::CuisseL,
+        ArmorPiece::CuisseR,
+        ArmorPiece::PoleynL,
+        ArmorPiece::PoleynR,
+        ArmorPiece::GreaveL,
+        ArmorPiece::GreaveR,
+        ArmorPiece::SabatonL,
+        ArmorPiece::SabatonR,
+    ];
+
+    /// Brief IX §C's weight table, verbatim. Pair weights are PER PIECE -
+    /// the brief lists 1.0 kg x2 for a pauldron, so each one is 1.0.
+    pub fn weight_kg(self) -> f32 {
+        use ArmorPiece::*;
+        match self {
+            Helmet => 1.2,
+            Gorget => 0.8,
+            CuirassFront => 4.0,
+            CuirassBack => 3.0,
+            Fauld => 2.5,
+            PelvisPlate => 1.5,
+            PauldronL | PauldronR => 1.0,
+            RerebraceL | RerebraceR => 1.2,
+            VambraceL | VambraceR => 0.9,
+            GauntletL | GauntletR => 0.6,
+            TassetL | TassetR => 1.5,
+            CuisseL | CuisseR => 2.0,
+            PoleynL | PoleynR => 0.8,
+            GreaveL | GreaveR => 1.5,
+            SabatonL | SabatonR => 0.7,
+        }
+    }
+
+    /// Which hit zone this plate covers.
+    ///
+    /// The gorget is a throat plate and rides with the HEAD, not the
+    /// torso: the whole point of a gorget is that it protects the one
+    /// thing a cuirass cannot reach. The fauld and pelvis plate hang at
+    /// the waist and count as torso; tassets hang lower and cover the
+    /// upper thigh, so they count as legs.
+    pub fn zone(self) -> HitZone {
+        use ArmorPiece::*;
+        match self {
+            Helmet | Gorget => HitZone::Head,
+            CuirassFront | CuirassBack | Fauld | PelvisPlate => HitZone::Torso,
+            PauldronL | PauldronR | RerebraceL | RerebraceR | VambraceL | VambraceR
+            | GauntletL | GauntletR => HitZone::Arms,
+            TassetL | TassetR | CuisseL | CuisseR | PoleynL | PoleynR | GreaveL
+            | GreaveR | SabatonL | SabatonR => HitZone::Legs,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        use ArmorPiece::*;
+        match self {
+            Helmet => "HELMET",
+            Gorget => "GORGET",
+            CuirassFront => "CUIRASS FRONT",
+            CuirassBack => "CUIRASS BACK",
+            Fauld => "FAULD",
+            PelvisPlate => "PELVIS PLATE",
+            PauldronL => "PAULDRON L",
+            PauldronR => "PAULDRON R",
+            RerebraceL => "REREBRACE L",
+            RerebraceR => "REREBRACE R",
+            VambraceL => "VAMBRACE L",
+            VambraceR => "VAMBRACE R",
+            GauntletL => "GAUNTLET L",
+            GauntletR => "GAUNTLET R",
+            TassetL => "TASSET L",
+            TassetR => "TASSET R",
+            CuisseL => "CUISSE L",
+            CuisseR => "CUISSE R",
+            PoleynL => "POLEYN L",
+            PoleynR => "POLEYN R",
+            GreaveL => "GREAVE L",
+            GreaveR => "GREAVE R",
+            SabatonL => "SABATON L",
+            SabatonR => "SABATON R",
+        }
+    }
+}
+
+/// How many plates a full harness has. See the note above about 24 vs 26.
+pub const ARMOR_PIECES: usize = 24;
+
+/// Brief IX §C: an unarmoured SEGMENT takes this much more. Max HP is
+/// unchanged - bare places are simply fragile.
+pub const EXPOSED_SEGMENT_MULT: f32 = 1.25;
+
+/// Which plates are on, as one bit per `ArmorPiece::ALL` index.
+///
+/// A bitmask rather than 24 bools because it has to survive a save file
+/// and a network packet someday, and because "is this harness the same as
+/// that one" is then a single comparison.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ArmorLoadout(pub u32);
+
+impl Default for ArmorLoadout {
+    /// Fully plated - 33.4 kg, which is over EVERY class ceiling.
+    ///
+    /// This is the right default for the type and the wrong one for a
+    /// fighter, and the difference is worth stating because getting it
+    /// backwards is what the first version of this did. Defaulting the
+    /// TYPE to empty would make every unarmoured segment fragile the
+    /// moment the field existed; defaulting a FIGHTER to full puts every
+    /// class over budget and slows the entire game down by ~0.9 m/s.
+    ///
+    /// Fighters get `default_harness(class)` instead. See there.
+    fn default() -> Self {
+        ArmorLoadout((1u32 << ARMOR_PIECES) - 1)
+    }
+}
+
+/// What a class spawns wearing.
+///
+/// Brief IX §C's table has TWO columns - "default armour weight" and
+/// "weight ceiling" - and they are not the same number: 22/25 for
+/// Assault, 16/20 Scout, 28/32 Heavy, 20/24 Support. A fresh fighter
+/// wears the default, comfortably under his own ceiling, and the gap is
+/// the room the Forge gives you to add plate.
+///
+/// So a full harness is NOT the neutral state. It is a deliberate choice
+/// to be slow, available to every class and free to none - which is what
+/// makes stripping pieces a decision instead of a menu.
+///
+/// These lists are built to land on the brief's default weights, and
+/// `every_class_spawns_under_its_own_ceiling` checks both halves: under
+/// the ceiling, and near the stated default.
+pub fn default_harness(c: Class) -> ArmorLoadout {
+    use ArmorPiece::*;
+    let pieces: &[ArmorPiece] = match c {
+        // 22.0 kg of 25 - the full torso, arms at the shoulder, legs to
+        // the shin. No gauntlets, no sabatons: the baseline gives up its
+        // extremities first, as everyone does.
+        Class::Line => &[
+            Helmet, Gorget, CuirassFront, CuirassBack, Fauld, PelvisPlate,
+            PauldronL, PauldronR, CuisseL, CuisseR, GreaveL, GreaveR,
+        ],
+        // 15.7 kg of 20 - torso and shoulders, shins, and nothing else.
+        // The lightest harness in the game, on the class that pays for
+        // speed everywhere else too.
+        Class::Skirmisher => &[
+            Helmet, CuirassFront, CuirassBack, Fauld, PauldronL, PauldronR,
+            GreaveL, GreaveR,
+        ],
+        // 28.4 kg of 32 - everything but the gorget, gauntlets, poleyns
+        // and sabatons. The anchor wears nearly all of it and still has
+        // 3.6 kg of headroom, which is the only class that does.
+        Class::Warden => &[
+            Helmet, CuirassFront, CuirassBack, Fauld, PelvisPlate,
+            PauldronL, PauldronR, RerebraceL, RerebraceR, VambraceL, VambraceR,
+            TassetL, TassetR, CuisseL, CuisseR, GreaveL, GreaveR,
+        ],
+        // 20.5 kg of 24.
+        Class::Marksman => &[
+            Helmet, Gorget, CuirassFront, CuirassBack, Fauld,
+            PauldronL, PauldronR, CuisseL, CuisseR, GreaveL, GreaveR,
+        ],
+    };
+    let mut l = ArmorLoadout::EMPTY;
+    for p in pieces {
+        l.set(*p, true);
+    }
+    l
+}
+
+impl ArmorLoadout {
+    pub const EMPTY: ArmorLoadout = ArmorLoadout(0);
+
+    fn bit(p: ArmorPiece) -> u32 {
+        1u32 << ArmorPiece::ALL.iter().position(|q| *q == p).unwrap()
+    }
+
+    pub fn has(self, p: ArmorPiece) -> bool {
+        self.0 & Self::bit(p) != 0
+    }
+
+    pub fn set(&mut self, p: ArmorPiece, on: bool) {
+        if on {
+            self.0 |= Self::bit(p);
+        } else {
+            self.0 &= !Self::bit(p);
+        }
+    }
+
+    pub fn toggle(&mut self, p: ArmorPiece) {
+        let on = self.has(p);
+        self.set(p, !on);
+    }
+
+    /// Total plate weight carried.
+    pub fn weight_kg(self) -> f32 {
+        ArmorPiece::ALL
+            .into_iter()
+            .filter(|p| self.has(*p))
+            .map(|p| p.weight_kg())
+            .sum()
+    }
+
+    /// Incoming-damage multiplier for one zone: 1.0 fully plated, up to
+    /// `EXPOSED_SEGMENT_MULT` fully bare.
+    ///
+    /// Proportional rather than all-or-nothing, because a zone holds
+    /// between two and ten plates and a rule that only fired when EVERY
+    /// plate on a leg was gone would almost never fire. Losing one greave
+    /// should cost something on the very next hit that lands low.
+    pub fn zone_mult(self, zone: HitZone) -> f32 {
+        let (total, on) = ArmorPiece::ALL
+            .into_iter()
+            .filter(|p| p.zone() == zone)
+            .fold((0u32, 0u32), |(t, o), p| (t + 1, o + self.has(p) as u32));
+        if total == 0 {
+            return 1.0;
+        }
+        let bare = 1.0 - on as f32 / total as f32;
+        1.0 + bare * (EXPOSED_SEGMENT_MULT - 1.0)
+    }
+}
+
 /// What a class actually changes. Four multipliers, each hooked to a
 /// system that already existed - no new subsystem, so no new place for
 /// the numbers to drift out of sync with what the player feels.
@@ -1409,6 +1708,22 @@ pub struct ClassSpec {
     /// regardless: a Warden that stands when a Skirmisher runs is a
     /// difference the player can name.
     pub nerve_mult: f32,
+    /// §C tier 2: how much plate this class carries free. Past it,
+    /// `armor_weight_movement_penalty` bites at -0.15 m/s per kg.
+    ///
+    /// The brief names four classes of its own (Assault/Scout/Heavy/
+    /// Support) with ceilings of 25/20/32/24 kg. This game's four are
+    /// LINE/SKIRMISHER/WARDEN/MARKSMAN, which line up one-to-one by
+    /// temperament, so the brief's ceilings are carried over onto them
+    /// rather than a fifth set of classes being invented to hold them.
+    ///
+    /// A FULL harness is 33.4 kg, over EVERY ceiling including the
+    /// Warden's 32. Nobody wears all of it free, which is the design
+    /// working: full plate is a deliberate choice to be slow rather than
+    /// the obvious pick, and what you leave off is a decision instead of
+    /// a menu. What a class spawns in is `default_harness`, which sits
+    /// under the ceiling with room to add.
+    pub weight_budget_kg: f32,
     /// One line, shown on the class picker.
     pub blurb: &'static str,
 }
@@ -1430,6 +1745,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             spread_mult: 1.0,
             switch_mult: 1.0,
             nerve_mult: 1.0,
+            weight_budget_kg: 25.0,
             blurb: "the baseline - no bonus, no penalty, never wrong",
         },
         Class::Skirmisher => ClassSpec {
@@ -1439,6 +1755,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             spread_mult: 1.15,
             switch_mult: 0.72,
             nerve_mult: 0.78,
+            weight_budget_kg: 20.0,
             blurb: "fastest on foot and to the trigger - thin, and sprays",
         },
         Class::Warden => ClassSpec {
@@ -1448,6 +1765,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             spread_mult: 0.92,
             switch_mult: 1.28,
             nerve_mult: 1.35,
+            weight_budget_kg: 32.0,
             blurb: "soaks the most and shoots steady - slow to arrive",
         },
         Class::Marksman => ClassSpec {
@@ -1457,6 +1775,7 @@ pub fn class_spec(c: Class) -> ClassSpec {
             spread_mult: 0.70,
             switch_mult: 1.15,
             nerve_mult: 0.92,
+            weight_budget_kg: 24.0,
             blurb: "the tightest shot in the game - wants the FIRST one",
         },
     }
@@ -1483,6 +1802,11 @@ pub struct MatchConfig {
     /// §8 (Brief IV): index into GRENADE_PRESETS for the player's
     /// 6-point throwable budget.
     pub grenade_preset: usize,
+    /// §C tier 2: the plate the PLAYER assembled in the Forge. `None`
+    /// takes the class default, which is what every bot gets and what a
+    /// harness-unaware caller (the capture harness, older tests) should
+    /// keep getting rather than being silently stripped naked.
+    pub armor_pieces: Option<ArmorLoadout>,
 }
 
 impl Default for MatchConfig {
@@ -1498,6 +1822,7 @@ impl Default for MatchConfig {
             class: Class::Line,
             melee_axe: false,
             grenade_preset: 0,
+            armor_pieces: None,
         }
     }
 }
@@ -1593,6 +1918,14 @@ pub struct Fighter {
     /// §owner RETREAT: broken and pulling out. Hysteretic - see
     /// `RALLY_FEAR`.
     pub routing: bool,
+    /// §C tier 2: which plates this fighter is wearing.
+    ///
+    /// Defaults to the FULL harness, which is what keeps this change from
+    /// silently re-balancing everything that came before it: every
+    /// existing fighter was uniformly armoured, so full plate is the
+    /// no-op, and only a player who takes something OFF sees a
+    /// difference.
+    pub armor_pieces: ArmorLoadout,
     /// §owner: which of the four classes this fighter is fighting as.
     /// Set at spawn and kept for the match - `class_spec` turns it into
     /// the four multipliers that actually bite.
@@ -3902,6 +4235,7 @@ impl TdmSim {
                     suppress_from: [0.0, 0.0, 0.0],
                     fear: 0.0,
                     routing: false,
+                    armor_pieces: ArmorLoadout::default(),
                     class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
@@ -4020,8 +4354,21 @@ impl TdmSim {
         // health follows the class from the very first frame - a Warden
         // that spawned on 100 and only became tough on RESPAWN would be
         // a bug the player would feel exactly once.
+        //
+        // §C tier 2: so does the HARNESS, and for the same reason. Each
+        // class's default plate sits under its own weight ceiling, so a
+        // fresh fighter carries no movement penalty at all - the penalty
+        // is something you opt into in the Forge by adding.
         for f in fighters.iter_mut() {
             f.health = MAX_HEALTH * class_spec(f.class).health_mult;
+            f.armor_pieces = default_harness(f.class);
+        }
+        // and the player's Forge harness overrides his default, if he
+        // built one. Bots always wear their class default - a bot cannot
+        // open the Forge, so giving it a taste in plate would be a lie
+        // about where the choice came from.
+        if let Some(a) = cfg.armor_pieces {
+            fighters[0].armor_pieces = a;
         }
         TdmSim {
             cfg,
@@ -4823,6 +5170,17 @@ impl TdmSim {
                 // does, so a Warden in a chassis is slow twice over -
                 // which is correct: both facts are true about him.
                 speed *= class_spec(f.class).move_mult;
+                // §C tier 2: and the PLATE. Subtractive, in m/s, because
+                // the brief states it that way and because a multiplier
+                // would make the same kilo cost a sprinting man more than
+                // a walking one - the weight of a pauldron does not care
+                // how fast you were going.
+                speed = (speed
+                    - armor_weight_movement_penalty(
+                        f.armor_pieces.weight_kg(),
+                        class_spec(f.class).weight_budget_kg,
+                    ))
+                .max(MOVE_SPEED * ARMOR_WEIGHT_SPEED_FLOOR);
                 // §owner MECH SHIELD: a raised barrier is a wall you
                 // walk behind, not a stance you fight from
                 if f.in_mech() && f.shield_up {
@@ -7116,6 +7474,17 @@ impl TdmSim {
         let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
             && self.fighters[j].hull > 0.0;
         let mut dmg = base_dmg * if in_mech { 1.0 } else { zone.mult() };
+        // §C tier 2: a segment whose plate is missing is FRAGILE. Not a
+        // health change - max HP is untouched, per the brief - a bare
+        // place simply takes more.
+        //
+        // Skipped in a chassis for the same reason the zone multipliers
+        // are: the angle-armour model replaces proportional zones there,
+        // and a man inside a mech is not wearing his own pauldrons in any
+        // sense that matters to a round hitting the hull.
+        if !in_mech {
+            dmg *= self.fighters[j].armor_pieces.zone_mult(zone);
+        }
         let from = {
             let f = &self.fighters[i];
             [f.pos[0], f.pos[1] + EYE_REL, f.pos[2]]
@@ -9510,6 +9879,22 @@ impl TdmSim {
                 vel[0] * aspec.move_mult * cmul,
                 vel[1] * aspec.move_mult * cmul,
             ];
+            // §C tier 2: bots carry the same plate tax the player does.
+            // Scaled onto the velocity VECTOR rather than subtracted,
+            // because a bot's `vel` is already a direction times a speed
+            // and there is no scalar to take metres per second off - the
+            // ratio is the same penalty expressed in the units to hand.
+            {
+                let pen = armor_weight_movement_penalty(
+                    fm.armor_pieces.weight_kg(),
+                    class_spec(fm.class).weight_budget_kg,
+                );
+                if pen > 0.0 {
+                    let k = ((MOVE_SPEED - pen) / MOVE_SPEED)
+                        .max(ARMOR_WEIGHT_SPEED_FLOOR);
+                    vel = [vel[0] * k, vel[1] * k];
+                }
+            }
             if fm.armor_set == ArmorSet::RobotSuit && fm.armor <= 0.0 {
                 vel = [vel[0] * ROBOT_DRAINED_MOVE, vel[1] * ROBOT_DRAINED_MOVE];
             }
@@ -9686,14 +10071,41 @@ mod tests {
         //
         // Class-specific behaviour is proved by the tests that SET a
         // class deliberately (see `the_four_classes_trade_real_stats`).
+        //
+        // §C tier 2: the HARNESS is deliberately NOT pinned here, and the
+        // reason is worth writing down because the obvious move is wrong.
+        //
+        // Pinning it FULL would neutralise armour coverage, which is what
+        // the damage tests want - but full plate is 33.4 kg, over every
+        // class ceiling, so it would put a 1.26 m/s weight penalty on
+        // every MOVEMENT test in the file. The two neutralities pull
+        // opposite ways, and that tension is the feature, not a mistake
+        // in the fixture.
+        //
+        // So the range keeps the class's spawn harness, which carries no
+        // weight penalty and therefore leaves every movement measurement
+        // reading exactly what it read before armour existed. The damage
+        // tests that need uniform coverage call `plate_up` and say so.
         for f in s.fighters.iter_mut() {
             f.class = Class::Line;
             f.health = MAX_HEALTH;
+            f.armor_pieces = default_harness(Class::Line);
         }
         s.fighters[0].pos = [0.0, 0.0, -5.0];
         s.fighters[1].pos = [0.0, 0.0, 5.0];
         s.fighters[1].protect_t = 0.0;
         s
+    }
+
+    /// Put everyone in a FULL harness - for tests measuring WEAPONS,
+    /// where a bare segment would be an uncontrolled variable.
+    ///
+    /// It costs a movement penalty (33.4 kg is over every ceiling), which
+    /// is exactly why `range` does not do this for everybody.
+    fn plate_up(s: &mut TdmSim) {
+        for f in s.fighters.iter_mut() {
+            f.armor_pieces = ArmorLoadout::default();
+        }
     }
 
     /// Fire `shots` M4-style aimed rounds at a held target; returns hits
@@ -9799,6 +10211,8 @@ mod tests {
     #[test]
     fn shield_blocks_front_ignores_rear() {
         let mut s = range(6);
+        // full plate: this measures a WEAPON, so armour coverage must not vary
+        plate_up(&mut s);
         // victim: shield up, crouched, FACING the shooter (yaw π → −z).
         // Crouched height is 1.05, so torso shots land around y ≈ 0.55.
         s.fighters[1].shield_up = true;
@@ -11073,6 +11487,202 @@ mod tests {
         );
     }
 
+    /// §C tier 2: the piece table matches the brief's, INCLUDING the
+    /// place where the brief disagrees with itself.
+    ///
+    /// The section is titled "26-piece" throughout and its own weight
+    /// table lists 24 plates: six singles and nine mirrored pairs. Built
+    /// to the table, because the table is the specification and the title
+    /// is a label on it. Pinned here so the discrepancy is a recorded
+    /// decision rather than a thing someone rediscovers and "fixes" by
+    /// inventing two plates.
+    #[test]
+    fn the_harness_is_the_briefs_table_not_its_title() {
+        assert_eq!(ArmorPiece::ALL.len(), ARMOR_PIECES);
+        assert_eq!(ARMOR_PIECES, 24, "six singles plus nine mirrored pairs");
+        // every variant is listed exactly once
+        for p in ArmorPiece::ALL {
+            assert_eq!(
+                ArmorPiece::ALL.iter().filter(|q| **q == p).count(),
+                1,
+                "{p:?} appears twice in ALL - the bitmask indexes by position"
+            );
+        }
+        // the brief's weights, spot-checked at both extremes
+        assert_eq!(ArmorPiece::CuirassFront.weight_kg(), 4.0);
+        assert_eq!(ArmorPiece::GauntletL.weight_kg(), 0.6);
+        assert_eq!(
+            ArmorPiece::GauntletL.weight_kg(),
+            ArmorPiece::GauntletR.weight_kg(),
+            "a mirrored pair weighs the same on both sides"
+        );
+        // and a full harness is over EVERY ceiling - the fact the whole
+        // trade rests on
+        let full = ArmorLoadout::default().weight_kg();
+        assert!((full - 33.4).abs() < 0.01, "full plate is {full} kg, expected 33.4");
+        for c in Class::ALL {
+            assert!(
+                full > class_spec(c).weight_budget_kg,
+                "{:?} can wear everything free - then there is no decision",
+                c
+            );
+        }
+    }
+
+    /// Every class spawns UNDER its own ceiling, near the brief's stated
+    /// default weight.
+    ///
+    /// This is what keeps the whole feature a no-op until a player opts
+    /// in: a fresh fighter of any class carries zero movement penalty, so
+    /// nothing about the game moved until someone opened the Forge.
+    #[test]
+    fn every_class_spawns_under_its_own_ceiling() {
+        // (class, the brief's default weight)
+        for (c, want) in [
+            (Class::Line, 22.0_f32),
+            (Class::Skirmisher, 16.0),
+            (Class::Warden, 28.0),
+            (Class::Marksman, 20.0),
+        ] {
+            let w = default_harness(c).weight_kg();
+            let ceil = class_spec(c).weight_budget_kg;
+            assert!(
+                w <= ceil,
+                "{c:?} spawns at {w} kg over its own {ceil} kg ceiling"
+            );
+            assert!(
+                (w - want).abs() < 1.0,
+                "{c:?} spawns at {w} kg, the brief says about {want}"
+            );
+            assert_eq!(
+                armor_weight_movement_penalty(w, ceil),
+                0.0,
+                "{c:?} pays a penalty at spawn - the default has to be free"
+            );
+            // and there is real room to add, or the Forge grid is a
+            // read-only display
+            assert!(ceil - w > 2.0, "{c:?} has only {} kg of headroom", ceil - w);
+        }
+    }
+
+    /// A bare segment takes more, proportionally, and only its own.
+    #[test]
+    fn a_bare_segment_takes_more() {
+        let full = ArmorLoadout::default();
+        for z in [HitZone::Head, HitZone::Arms, HitZone::Torso, HitZone::Legs] {
+            assert_eq!(full.zone_mult(z), 1.0, "{z:?} plated must be neutral");
+        }
+        let bare = ArmorLoadout::EMPTY;
+        for z in [HitZone::Head, HitZone::Arms, HitZone::Torso, HitZone::Legs] {
+            assert!(
+                (bare.zone_mult(z) - EXPOSED_SEGMENT_MULT).abs() < 1e-6,
+                "{z:?} stripped must reach the full exposure multiplier"
+            );
+        }
+        // strip ONE arm plate: arms suffer, nothing else does
+        let mut one = full;
+        one.set(ArmorPiece::GauntletL, false);
+        assert!(one.zone_mult(HitZone::Arms) > 1.0);
+        assert_eq!(one.zone_mult(HitZone::Legs), 1.0, "a glove is not a boot");
+        assert_eq!(one.zone_mult(HitZone::Head), 1.0);
+        assert_eq!(one.zone_mult(HitZone::Torso), 1.0);
+        // and it is PROPORTIONAL - two gone hurts more than one
+        let mut two = one;
+        two.set(ArmorPiece::GauntletR, false);
+        assert!(
+            two.zone_mult(HitZone::Arms) > one.zone_mult(HitZone::Arms),
+            "an all-or-nothing rule would almost never fire: a leg holds \
+             five plates a side"
+        );
+        // every zone actually has plate mapped to it - a zone with none
+        // would be permanently neutral and silently unarmourable
+        for z in [HitZone::Head, HitZone::Arms, HitZone::Torso, HitZone::Legs] {
+            assert!(
+                ArmorPiece::ALL.into_iter().any(|p| p.zone() == z),
+                "{z:?} has no plate mapped to it"
+            );
+        }
+    }
+
+    /// Through the real damage path: the same shot on the same man hurts
+    /// more with the plate off.
+    #[test]
+    fn stripping_plate_is_felt_by_the_next_round_that_lands() {
+        let shot = |loadout: ArmorLoadout| -> f32 {
+            let mut s = range(0xA401);
+            s.fighters[1].armor_pieces = loadout;
+            let hp = s.fighters[1].health;
+            // a LEG hit - the zone the harness varies most over
+            s.apply_hit(0, 1, 0.2, [0.0, 0.2, 5.0]);
+            hp - s.fighters[1].health
+        };
+        let plated = shot(ArmorLoadout::default());
+        let mut stripped = ArmorLoadout::default();
+        for p in ArmorPiece::ALL {
+            if p.zone() == HitZone::Legs {
+                stripped.set(p, false);
+            }
+        }
+        let bare = shot(stripped);
+        assert!(
+            bare > plated,
+            "a bare leg took {bare} where a plated one took {plated}"
+        );
+        assert!(
+            (bare / plated - EXPOSED_SEGMENT_MULT).abs() < 0.01,
+            "the exposure multiplier must arrive intact through the damage \
+             path: {bare}/{plated}"
+        );
+    }
+
+    /// The weight penalty is WIRED, in both directions, for both the
+    /// player and the bots.
+    ///
+    /// `armor_weight_movement_penalty` sat pure and unreachable in this
+    /// file for a long time, with a comment saying so. A formula with no
+    /// caller is a comment that compiles; this is the test that makes it
+    /// a mechanism.
+    #[test]
+    fn plate_weight_actually_slows_you_down() {
+        // the brief's own worked example: +4 kg over budget, -0.60 m/s
+        assert!(
+            (armor_weight_movement_penalty(29.0, 25.0) - 0.60).abs() < 1e-5,
+            "the brief's worked example must hold"
+        );
+        assert_eq!(
+            armor_weight_movement_penalty(20.0, 25.0),
+            0.0,
+            "under budget is free, not a bonus"
+        );
+
+        // and it reaches real movement. Same fighter, same input, one
+        // wearing his class default and one in everything.
+        let run = |loadout: ArmorLoadout| -> f32 {
+            let mut s = range(0xA402);
+            s.fighters[0].armor_pieces = loadout;
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    sprint: true,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            let f = &s.fighters[0];
+            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
+        };
+        let light = run(default_harness(Class::Line));
+        let heavy = run(ArmorLoadout::default());
+        assert!(
+            heavy < light - 0.5,
+            "full plate must actually be slower: {heavy} vs {light} m/s"
+        );
+        // however heavy, he still moves FORWARD - a subtractive penalty
+        // on an already-multiplied speed can otherwise go negative, and a
+        // negative speed is a man who walks backwards when he presses W
+        assert!(heavy > 0.0, "the floor failed: {heavy} m/s");
+    }
+
     /// Bots that stand on each other die to one grenade. Spacing pushes
     /// them apart, and only within its own radius.
     #[test]
@@ -11504,6 +12114,8 @@ mod tests {
     fn thin_cover_wallbangs_thick_cover_protects() {
         let mut rig = |wall_far_z: f32, victim_z: f32| -> (f32, bool) {
             let mut s = range(0x77);
+            // full plate: this measures PENETRATION, not armour coverage
+            plate_up(&mut s);
             s.fighters[0].gun = GunKind::M4;
             s.fighters[0].ammo = 30;
             s.fighters[1].pos = [0.0, 0.0, victim_z];
@@ -13032,6 +13644,8 @@ mod tests {
     #[test]
     fn flips_force_uniform_zones_and_block_fire() {
         let mut s = range(121);
+        // full plate: this measures a WEAPON, so armour coverage must not vary
+        plate_up(&mut s);
         s.fighters[1].ammo = 0;
         s.fighters[1].reserve = 0;
         s.fighters[1].slot_ammo = [(0, 0); 3];
@@ -15351,6 +15965,9 @@ mod tests {
             f.reserve = 10;
         };
         let mut s = range(0xA3);
+        // full plate: the matrix is a claim about the WEAPON, and a bare
+        // leg would move the 86.25 it asserts
+        plate_up(&mut s);
         arm_awp(&mut s);
         s.fighters[1].ammo = 0;
         s.fighters[1].reserve = 0;

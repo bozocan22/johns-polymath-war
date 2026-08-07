@@ -1,4 +1,4 @@
-# What is missing / not built yet — 2026-08-06 (rev 3)
+# What is missing / not built yet — 2026-08-07 (rev 4)
 
 Compiled from `BACKLOG.md`, `THOR_LOG.md`'s ranked findings, and session
 knowledge. Ordering inside each tier is Thor's ranking rule: an item
@@ -11,24 +11,32 @@ emblem) and are wired through the splash, menus, and seal footers.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
-1. **Derive the screen-intrusion budgets from the geometry.** The three
-   profiles now exist and every weapon is swept under its own across
-   every sustained pose — but the bounded-part extents are still
-   *audited* off the model tables, not *measured* from them, so widening
-   a weapon model fails nothing. Unblocker: lift the `match kind` part
-   tables out of `spawn_weapon_model` into a pure
-   `weapon_parts(kind) -> Vec<WPart>` the tests can call. The Minigun's
-   barrel spinner is the one arm that spawns an entity mid-match and
-   will need splitting out.
-2. **HUD award toasts for a resource economy** — the toast system
+1. **HUD award toasts for a resource economy** — the toast system
    itself shipped (kills/assists/parries/streaks). §4.3's *resource*
    awards still have no economy in TDM/KOTH to award from, so this
    waits on a mode that has one rather than being faked.
-3. **A HUD read for suppression.** The mechanic landed; the player's
-   feedback is a viewmodel shake and nothing else. Whether that wants a
-   directional tell (which way the fire is coming from) is a design
-   question, not a gap — recorded so the decision is made rather than
-   defaulted into.
+2. **Armour damage STATES** (Brief IX §C). The 24 plates are equippable
+   and a missing one exposes its segment — but a worn one has no
+   condition. The brief's four-stage table (Fresh → Scuffed → Cracked →
+   Severed, with a plate detaching on the next hit) needs per-piece HP,
+   which needs the hit path to know which *piece* it struck rather than
+   which zone. That is the next real step, not a polish pass.
+3. **Per-piece armour GEOMETRY.** The plates are a stat model with a
+   Forge grid; the soldier's mesh does not change when you strip a
+   gauntlet. Now cheap in principle — §B.1's rig has real clavicles,
+   toes and a three-part trunk to hang plates from — but it is 24 new
+   models, so it is content work with a code shape rather than the
+   reverse.
+
+### Closed 2026-08-07
+
+| Item | How it closed |
+|---|---|
+| **Intrusion budgets were audited, not measured** | `weapon_parts(kind)` lifted out of `spawn_weapon_model` — the geometry is data now, so `weapon_bounded_extent` measures the budgets instead of transcribing them. The minigun's barrel cluster became a `spin` flag on the part, which was the one thing welding the table to `Commands`. Measurement immediately disagreed with the audit: the M249's carry handle is 0.192, not the 0.085 the comment claimed. It also caught the BOW clipping the crosshair circle when the grenade coil stacked on the draw — fixed by making the poses exclusive and dropping the bow's carry to -0.22. |
+| **Suppression had no HUD read** | The sim records the bearing of the last close round; the screen edge facing it lights pale gold. It reuses the DAMAGE flash's own strips rather than a new widget — suppression is the same information one step earlier, and a second directional element would teach the same idea twice. Red at 0.55 alpha, gold at 0.25, so a hit wins the strip on alpha alone with no priority rule. |
+| **Squad retreat** | The last quarter of squad AI, and the only part needing MEMORY — every other squad behaviour is re-derived each tick. `fear` flows in from witnessed falls, suppression, being outnumbered and your own blood; bleeds out over time and faster once contact breaks; crosses a threshold with hysteresis. Modelled on `jk_wall`'s morale pass, minus its rolled `rout_tolerance` — that comes from CLASS instead, making nerve a fifth thing the four classes trade. A broken man holds fire, keeps facing the enemy, and reloads. The player is never routed. |
+| **26-piece armour** (built as 24 — see below) | 24 plates, each mapped to a hit zone, each with the brief's weight. A bare segment takes ×1.25; total weight past the class ceiling costs 0.15 m/s per kg, which finally WIRES `armor_weight_movement_penalty` after it sat pure and unreachable. Its own Forge page, four rows by body region, with a live weight-against-ceiling readout. **The brief's own table sums to 24, not the 26 its title claims** — built to the table, recorded rather than reconciled by inventing two plates. |
+| **20-segment mass-bearing rig** | The data half (§B.3 mass, §B.4 length, §B.5 inertia) plus the three missing segment groups: a real **lumbar** between pelvis and thorax (the twist is shared 38/62 now, not landed on one hinge), **clavicle bones** the arms actually hang from (the girdle spring existed but only nudged an IK target), and **toes** — so the sprint pushes off something instead of gliding. All five of §B.6's tests are live, including the mass-closure one that catches the brief's own trap: the clavicles are carved FROM the thorax, not added beside it. Spring stiffness is `I·ω²` off the mass model rather than hand-guessed. |
 
 ### Closed 2026-08-06
 
@@ -77,13 +85,14 @@ emblem) and are wired through the splash, menus, and seal footers.
 
 Ranked by value, blockers first:
 
-- **26-piece armour**: the 4-CLASS half is built (see below); the
-  per-piece armour half is not. Today armour is 5 whole-body presets
-  found as loot, and a class is a separate standing pick.
-- **20-segment mass-bearing rig** (Steps 0, 2–7 remain): real
-  pelvis→lumbar→thorax trunk, clavicles, toe segments, mass-fraction /
-  CoM / radius-of-gyration data driving spring stiffness. Touches every
-  posing system in main.rs.
+- ~~**26-piece armour**~~ — **DONE 2026-08-07** as 24 plates (the
+  brief's table, not its title). What remains of §C is the damage-STATE
+  table and per-piece geometry; both are listed in tier 1 above.
+- ~~**20-segment mass-bearing rig**~~ — **DONE 2026-08-07**. All 20
+  segments exist as real transforms with published mass/length/inertia
+  behind them. The remaining rig work is *consuming* the data further:
+  ragdoll and hit-reaction impulse are the two §B.5 names as payoffs
+  that nothing reads yet.
 - **Castle map**: content work (geometry), not code. The intro's CASTLE
   BAILEY / CASTLE GARDENS entries select layouts of the existing arena
   blockout, not a real castle.

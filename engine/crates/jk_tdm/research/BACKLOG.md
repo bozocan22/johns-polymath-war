@@ -49,7 +49,10 @@ interesting. Blocked items are never researched "in preparation."
 | 19 | §5.4 spear running-throw bonus | Done | Built 2026-08-01 (`baf50ca`) | — |
 | 20 | §4.3 minimap enemy spotting | Done | Built 2026-08-01 (`5fbb3c7`) | — |
 | 21 | §4.1 bow full-draw hold sway | Done | Built 2026-08-01 (`054a283`) | — |
-| 22 | Derive the screen-intrusion budgets from the weapon geometry | Low | The three profiles and the per-weapon sweep landed 2026-08-06, but the bounded-part extents are AUDITED off the model tables rather than measured from them, so widening a model fails nothing. Recorded rather than left implicit, because an audited number that looks like a measurement is the exact shape of the false-passing test this repo has already been bitten by once | Unblocker: lift `spawn_weapon_model`'s `match kind` into a pure `weapon_parts(kind) -> Vec<WPart>`; the Minigun's spinner is the one arm that spawns an entity and needs splitting out |
+| 22 | Derive the screen-intrusion budgets from the weapon geometry | **Done 2026-08-07** | `weapon_parts(kind)` lifted out of `spawn_weapon_model`; `weapon_bounded_extent` measures. The audit it replaced was wrong by 2.3x on the tallest weapon | — |
+| 23 | Armour damage STATES (Brief IX §C) | High | The 24 plates equip and expose, but a worn plate has no condition. The brief's Fresh/Scuffed/Cracked/Severed table needs per-piece HP, which needs the hit path to resolve which PIECE was struck rather than which zone - a real extension of `apply_hit_dmg`, not a polish pass | `ArmorLoadout`, `apply_hit_dmg`'s zone resolution |
+| 24 | Per-piece armour GEOMETRY | Medium | The plates are a stat model with a Forge grid; the soldier's mesh is unchanged when you strip a gauntlet. Cheap in principle now that §B.1's rig has clavicles, toes and a three-part trunk to hang plates from - but it is 24 models, so it is content work wearing a code shape | `spawn_soldier_body`, the 20-segment rig |
+| 25 | Ragdoll + hit-reaction impulse from the mass model | Medium | §B.5 names both as the payoff for the inertia column, and the column now exists and is tested. Nothing reads it yet beyond `derived_spring_k` | `segment_data`, `segment_inertia` |
 
 ## Thor's audit (2026-08-01): 143 findings across all 9 briefs, full detail in `THOR_LOG.md`
 
