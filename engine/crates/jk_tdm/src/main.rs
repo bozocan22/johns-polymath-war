@@ -3578,6 +3578,98 @@ fn push_stock(parts: &mut Vec<WPart>, z_rear: f32, drop: f32) {
     parts.push(wp(false, Tone::Mid, (0.0, (0.035 - drop) * 0.5, z_rear - 0.018), 0.0, (0.030, drop + 0.13, 0.014)));
 }
 
+// ---- §owner GUN PASS: the shared surface vocabulary ---------------------
+//
+// Every firearm in the game was a stack of smooth boxes. At the ranges
+// a viewmodel is seen from that reads as unfinished, and in third
+// person it reads as nothing at all - a grey wedge.
+//
+// The fix is the same one the mech hull got: not MORE boxes, but the
+// features that tell you a box is a machined part. A real gun's surface
+// is panel breaks, fastener heads, cut-outs, and the places a hand or a
+// magazine goes. Five helpers, so every weapon gets the same vocabulary
+// and the arsenal reads as one armoury rather than ten separate props.
+//
+// All of it is `wp` (always-on) rather than `wd` (ADS-only): the
+// complaint was that guns look bad in BOTH views, and detail that only
+// appears when you aim does nothing for the third-person read.
+
+/// A machined PANEL LINE - a thin dark recess along the receiver flank.
+///
+/// The single highest-value greeble on a box: a slab with a groove in it
+/// stops being a slab, because the eye reads the shadow as a seam
+/// between two parts.
+fn push_panel_line(parts: &mut Vec<WPart>, y: f32, z0: f32, z1: f32, half_w: f32) {
+    parts.push(wp(
+        false,
+        Tone::Black,
+        (0.0, y, (z0 + z1) * 0.5),
+        0.0,
+        (half_w * 2.0 + 0.002, 0.005, z1 - z0),
+    ));
+}
+
+/// FASTENER HEADS along a line - the pins and screws that hold a
+/// receiver together. Small, dark, evenly spaced.
+fn push_bolts(parts: &mut Vec<WPart>, x: f32, y: f32, z0: f32, z1: f32, n: usize) {
+    for i in 0..n {
+        let t = if n == 1 { 0.5 } else { i as f32 / (n - 1) as f32 };
+        for sx in [-1.0_f32, 1.0] {
+            parts.push(wp(
+                false,
+                Tone::Black,
+                (sx * x, y, z0 + (z1 - z0) * t),
+                0.0,
+                (0.004, 0.011, 0.011),
+            ));
+        }
+    }
+}
+
+/// The EJECTION PORT and its charging handle - the two features that
+/// say which way a gun cycles, and the ones a player is most used to
+/// seeing on the right-hand side of a receiver.
+fn push_ejection_port(parts: &mut Vec<WPart>, x: f32, y: f32, z: f32, len: f32) {
+    // the cut-out itself: dark, inset
+    parts.push(wp(false, Tone::Black, (x, y, z), 0.0, (0.006, 0.030, len)));
+    // its lower lip, catching light
+    parts.push(wp(false, Tone::Light, (x, y - 0.020, z), 0.0, (0.007, 0.006, len)));
+    // charging handle, back and up from the port
+    parts.push(wp(false, Tone::Mid, (x * 1.25, y + 0.012, z - len * 0.75), 0.0, (0.022, 0.014, 0.036)));
+}
+
+/// A MAGAZINE's floorplate and witness slots - the underside a player
+/// sees every time the gun tips during a reload.
+fn push_mag_detail(parts: &mut Vec<WPart>, y_bot: f32, z: f32, w: f32, d: f32) {
+    parts.push(wp(false, Tone::Black, (0.0, y_bot, z), 0.0, (w * 1.10, 0.010, d * 1.10)));
+    parts.push(wp(false, Tone::Light, (0.0, y_bot - 0.006, z), 0.0, (w * 0.75, 0.006, d * 0.80)));
+    // two witness slots up the body
+    for k in 0..2 {
+        parts.push(wp(
+            false,
+            Tone::Black,
+            (w * 0.52, y_bot + 0.030 + k as f32 * 0.028, z),
+            0.0,
+            (0.004, 0.014, d * 0.45),
+        ));
+    }
+}
+
+/// FINGER GROOVES and a checkered face on a grip. A grip with no texture
+/// reads as a handle; a grip with three grooves reads as one that was
+/// designed around a hand.
+fn push_grip_detail(parts: &mut Vec<WPart>, x_face: f32, y: f32, z: f32, tilt: f32) {
+    for k in 0..3 {
+        parts.push(wp(
+            false,
+            Tone::Black,
+            (0.0, y - k as f32 * 0.026, z + 0.004),
+            tilt,
+            (x_face * 2.0 + 0.002, 0.006, 0.030),
+        ));
+    }
+}
+
 /// Muzzle device: a slightly wider dark block with a visible black bore
 /// recess poking out of it.
 fn push_muzzle(parts: &mut Vec<WPart>, y: f32, z: f32, w: f32) {
@@ -6685,12 +6777,25 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             parts.push(wp(false, Tone::Black, (0.0, 0.085, 0.15), 0.0, (0.008, 0.012, 0.01)));
             // 1x red dot on the slide - replaces the goalpost irons
             push_red_dot(&mut parts, 0.1075, -0.015, 0.079); // slide top 0.079
+            // §owner GUN PASS: slide serrations, port, grip, magazine
+            push_panel_line(&mut parts, 0.062, -0.02, 0.17, 0.023);
+            push_ejection_port(&mut parts, 0.024, 0.058, 0.10, 0.055);
+            for k in 0..5 {
+                parts.push(wp(false, Tone::Black, (0.0, 0.050, -0.040 + k as f32 * 0.011), 0.0, (0.049, 0.040, 0.004)));
+            }
+            push_grip_detail(&mut parts, 0.021, -0.020, -0.032, 0.18);
+            push_mag_detail(&mut parts, -0.112, -0.012, 0.021, 0.030);
         }
         GunKind::Deagle => {
             // the hand cannon: long light slide, heavy dark frame
             parts.push(wp(false, Tone::Light, (0.0, 0.055, 0.10), 0.0, (0.052, 0.075, 0.30)));
             parts.push(wp(false, Tone::Mid, (0.0, 0.096, 0.10), 0.0, (0.030, 0.012, 0.28)));
             parts.push(wp(false, Tone::Dark, (0.0, 0.0, 0.07), 0.0, (0.048, 0.05, 0.24)));
+            // §owner GUN PASS
+            push_panel_line(&mut parts, 0.070, -0.02, 0.22, 0.026);
+            push_ejection_port(&mut parts, 0.027, 0.062, 0.12, 0.065);
+            push_bolts(&mut parts, 0.025, 0.020, 0.00, 0.18, 3);
+            push_grip_detail(&mut parts, 0.023, -0.030, -0.040, 0.18);
             parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
             push_muzzle(&mut parts, 0.055, 0.27, 0.055);
             parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
@@ -6703,6 +6808,13 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             parts.push(wp(true, Tone::Dark, (0.0, 0.03, 0.28), FRAC_PI_2, (0.024, 0.18, 0.024)));
             push_muzzle(&mut parts, 0.03, 0.385, 0.036);
             parts.push(wp(false, Tone::Light, (0.0, -0.012, 0.16), 0.0, (0.052, 0.058, 0.14)));
+            // §owner GUN PASS: the handguard slots and the receiver seam
+            push_panel_line(&mut parts, 0.030, -0.06, 0.14, 0.027);
+            push_ejection_port(&mut parts, 0.028, 0.030, 0.02, 0.070);
+            push_bolts(&mut parts, 0.026, -0.010, -0.05, 0.10, 3);
+            for k in 0..4 {
+                parts.push(wp(false, Tone::Black, (0.0, -0.012, 0.115 + k as f32 * 0.026), 0.0, (0.055, 0.030, 0.006)));
+            }
             parts.push(wp(false, Tone::Dark, (0.0, -0.10, 0.10), 0.35, (0.032, 0.17, 0.06)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.07, -0.05), 0.2, (0.04, 0.11, 0.05)));
             // folded stock: flat end cap + side-folded strut hugging the
@@ -6721,6 +6833,14 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             parts.push(wp(true, Tone::Mid, (0.0, 0.045, 0.38), FRAC_PI_2, (0.028, 0.48, 0.028)));
             parts.push(wp(true, Tone::Dark, (0.0, -0.005, 0.36), FRAC_PI_2, (0.024, 0.42, 0.024)));
             parts.push(wp(false, Tone::Light, (0.0, -0.015, 0.30), 0.0, (0.054, 0.05, 0.16)));
+            // §owner GUN PASS: rail slots, port, mag, and the takedown pins
+            push_panel_line(&mut parts, 0.024, -0.08, 0.16, 0.026);
+            push_ejection_port(&mut parts, 0.027, 0.030, 0.06, 0.075);
+            push_bolts(&mut parts, 0.025, 0.000, -0.06, 0.12, 2);
+            push_mag_detail(&mut parts, -0.150, 0.020, 0.023, 0.036);
+            for k in 0..6 {
+                parts.push(wp(false, Tone::Black, (0.0, -0.015, 0.235 + k as f32 * 0.023), 0.0, (0.056, 0.035, 0.005)));
+            }
             parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
             parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
@@ -6730,6 +6850,11 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // the classic: long gas tube, big two-segment raked magazine
             parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.06), 0.0, (0.05, 0.085, 0.38)));
             parts.push(wp(false, Tone::Light, (0.0, 0.068, 0.0), 0.0, (0.048, 0.02, 0.22)));
+            // §owner GUN PASS: dust-cover seam, port, gas-block detail
+            push_panel_line(&mut parts, 0.040, -0.10, 0.16, 0.025);
+            push_ejection_port(&mut parts, 0.026, 0.042, 0.03, 0.080);
+            push_bolts(&mut parts, 0.024, 0.000, -0.08, 0.14, 4);
+            push_mag_detail(&mut parts, -0.145, 0.010, 0.024, 0.038);
             parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.44), FRAC_PI_2, (0.026, 0.36, 0.026)));
             parts.push(wp(true, Tone::Light, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
             parts.push(wp(false, Tone::Dark, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
@@ -6759,11 +6884,28 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
             parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.05), 0.0, (0.045, 0.08, 0.46)));
+            // §owner GUN PASS: the tube's bands, the pump, the loading gate
+            for k in 0..4 {
+                parts.push(wp(true, Tone::Black, (0.0, -0.035, -0.05 + k as f32 * 0.115), FRAC_PI_2, (0.040, 0.014, 0.040)));
+            }
+            push_panel_line(&mut parts, 0.030, -0.14, 0.10, 0.024);
+            parts.push(wp(false, Tone::Black, (0.024, 0.005, -0.02), 0.0, (0.006, 0.026, 0.075)));
+            for k in 0..5 {
+                parts.push(wp(false, Tone::Black, (0.0, -0.062, 0.10 + k as f32 * 0.020), 0.0, (0.050, 0.030, 0.006)));
+            }
             parts.push(wp(true, Tone::Mid, (0.0, 0.03, 0.55), FRAC_PI_2, (0.024, 0.55, 0.024)));
             push_muzzle(&mut parts, 0.03, 0.85, 0.036);
             parts.push(wp(true, Tone::Dark, (0.0, 0.10, 0.08), FRAC_PI_2, (0.055, 0.20, 0.055)));
             parts.push(wp(true, Tone::Black, (0.0, 0.10, 0.185), FRAC_PI_2, (0.045, 0.012, 0.045)));
             parts.push(wp(false, Tone::Light, (0.0, -0.02, -0.22), 0.0, (0.045, 0.11, 0.30)));
+            // §owner GUN PASS: bolt handle, action seam, cheek riser,
+            // and the thumbhole cut that makes a sniper stock read as one
+            push_panel_line(&mut parts, 0.036, -0.16, 0.14, 0.023);
+            parts.push(wp(true, Tone::Mid, (0.038, 0.030, -0.02), 0.0, (0.014, 0.075, 0.014)));
+            parts.push(wp(false, Tone::Black, (0.052, 0.030, -0.055), 0.0, (0.024, 0.024, 0.024)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.052, -0.20), 0.0, (0.047, 0.010, 0.16)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.02, -0.20), 0.0, (0.026, 0.070, 0.070)));
+            push_bolts(&mut parts, 0.023, -0.005, -0.10, 0.10, 3);
             parts.push(wp(false, Tone::Black, (0.0, -0.02, -0.375), 0.0, (0.048, 0.12, 0.02)));
             parts.push(wp(false, Tone::Dark, (0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
             parts.push(wp(false, Tone::Dark, (-0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
@@ -6814,6 +6956,22 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // the barrel so it shows THROUGH the rear aperture.
             parts.push(wp(false, Tone::Black, (0.0, 0.095, 0.62), 0.0, (0.008, 0.075, 0.01)));
             push_red_dot(&mut parts, 0.1265, 0.0, 0.098); // feed cover 0.098
+            // §owner GUN PASS: the belt, the feed-tray latch, and the
+            // barrel jacket slots - a support gun should read as the
+            // busiest weapon on the field, and it read as a grey brick
+            push_panel_line(&mut parts, 0.045, -0.20, 0.18, 0.038);
+            push_ejection_port(&mut parts, 0.039, 0.020, 0.02, 0.090);
+            push_bolts(&mut parts, 0.037, -0.030, -0.16, 0.16, 5);
+            // the belt hanging out of the box, in the ammo-gold vocabulary
+            for k in 0..5 {
+                parts.push(wp(false, Tone::Light, (0.030, -0.055 + k as f32 * 0.014, -0.06 + k as f32 * 0.020), 0.25, (0.020, 0.016, 0.026)));
+            }
+            // barrel jacket cooling slots
+            for k in 0..6 {
+                parts.push(wp(false, Tone::Black, (0.0, 0.040, 0.33 + k as f32 * 0.028), 0.0, (0.047, 0.028, 0.006)));
+            }
+            // feed-tray latch on the cover
+            parts.push(wp(false, Tone::Mid, (0.0, 0.112, -0.02), 0.0, (0.030, 0.016, 0.048)));
         }
         GunKind::Bow => {
             // §owner: the war bow is held HORIZONTAL, and it CURVES.
@@ -6940,6 +7098,18 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // the generic ADS shift and the player aimed by tracer alone.
             // The optic sits above the motor housing (top y 0.075).
             push_red_dot(&mut parts, 0.1120, -0.05, 0.075); // motor housing 0.075
+            // §owner GUN PASS: motor ribs, the feed chute, and a heat
+            // seam - it is the heaviest thing a soldier can carry and it
+            // should look like machinery, not a pipe bundle
+            for k in 0..6 {
+                let a = k as f32 * std::f32::consts::TAU / 6.0;
+                parts.push(wp(false, Tone::Black, (a.cos() * 0.075, a.sin() * 0.075 - 0.005, -0.05), 0.0, (0.020, 0.020, 0.16)));
+            }
+            push_panel_line(&mut parts, 0.055, -0.14, 0.02, 0.062);
+            parts.push(wp(false, Tone::Light, (0.062, -0.045, -0.05), 0.0, (0.020, 0.060, 0.14)));
+            for k in 0..4 {
+                parts.push(wp(false, Tone::Black, (0.0, -0.085, -0.12 + k as f32 * 0.030), 0.0, (0.100, 0.020, 0.008)));
+            }
         }
     }
     parts
@@ -19729,9 +19899,14 @@ mod band_tests {
             widest.0,
             widest.1
         );
+        // 0.085 as of the §owner GUN PASS - the motor ribs stand proud of
+        // the barrel cluster, which is 2 cm wider than the cluster alone
+        // was. Deliberate, and re-read against the sweep: the minigun's
+        // own carry clears the midline with room, so the wider motor
+        // costs nothing on screen.
         assert!(
-            (widest.1 - 0.065).abs() < 0.002,
-            "the minigun now reaches {:.4} left, not 0.065 - if that is \
+            (widest.1 - 0.085).abs() < 0.002,
+            "the minigun now reaches {:.4} left, not 0.085 - if that is \
              deliberate, move this number and re-read the sweep",
             widest.1
         );
