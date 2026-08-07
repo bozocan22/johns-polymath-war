@@ -3425,6 +3425,26 @@ struct ModelKit {
     /// cell edges drawn through it. See where they are built.
     barrier_fill: Handle<StandardMaterial>,
     barrier_edge: Handle<StandardMaterial>,
+    /// §owner AGILE SUPPORT MECH: its own palette, per side.
+    ///
+    /// The light chassis does NOT wear the heavy's khaki. It is a
+    /// different machine doing a different job and it should be
+    /// identifiable before you can make out its shape - which is the
+    /// same argument the team-signal palette already makes about
+    /// soldiers, applied one level up to the class of machine.
+    ///
+    /// FRIENDLY reads light purple over white with baby-blue light
+    /// lines; ENEMY reads red over deep purple. Both keep the SAME
+    /// silhouette and the same emissive placement, so what changes at a
+    /// distance is the hue and never the shape - a player should be able
+    /// to tell friend from foe without having to identify the model
+    /// first.
+    scout_hull: Handle<StandardMaterial>,
+    scout_hull_foe: Handle<StandardMaterial>,
+    scout_plate: Handle<StandardMaterial>,
+    scout_plate_foe: Handle<StandardMaterial>,
+    scout_line: Handle<StandardMaterial>,
+    scout_line_foe: Handle<StandardMaterial>,
     vm_shield_dark: Handle<StandardMaterial>,
     vm_shield_steel: Handle<StandardMaterial>,
     vm_shield_gold: Handle<StandardMaterial>,
@@ -7137,13 +7157,19 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit, see_through: bool
 /// the gaps between them are what make it read as light from across a
 /// map. A smaller version of the heavy would have read as a heavy that
 /// was far away.
-fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
+fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit, ally: bool) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
     let cube = || kit.cube.clone();
     let cyl = || kit.cyl.clone();
     let ball = || kit.ball.clone();
+    // the livery. Three roles - HULL, PLATE, LINE - picked once here so
+    // every part below names what it IS rather than what colour it is,
+    // and the two sides cannot drift into different silhouettes.
+    let hull = if ally { kit.scout_hull.clone() } else { kit.scout_hull_foe.clone() };
+    let plate = if ally { kit.scout_plate.clone() } else { kit.scout_plate_foe.clone() };
+    let line = if ally { kit.scout_line.clone() } else { kit.scout_line_foe.clone() };
     let mut part = |mesh: Handle<Mesh>,
                     mat: Handle<StandardMaterial>,
                     tr: Vec3,
@@ -7168,13 +7194,13 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
     }
 
     // ---- CHEST: a cage, not a box. Two thin plates and the core -------
-    part(cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.66, 0.20), Quat::from_rotation_x(-0.22), Vec3::new(0.46, 0.34, 0.045));
-    part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.66, 0.235), Quat::from_rotation_x(-0.22), Vec3::new(0.30, 0.16, 0.020));
-    part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.62, -0.22), Quat::from_rotation_x(0.18), Vec3::new(0.38, 0.30, 0.040));
+    part(cube(), hull.clone(), Vec3::new(0.0, 0.66, 0.20), Quat::from_rotation_x(-0.22), Vec3::new(0.46, 0.34, 0.045));
+    part(cube(), plate.clone(), Vec3::new(0.0, 0.66, 0.235), Quat::from_rotation_x(-0.22), Vec3::new(0.30, 0.16, 0.020));
+    part(cube(), plate.clone(), Vec3::new(0.0, 0.62, -0.22), Quat::from_rotation_x(0.18), Vec3::new(0.38, 0.30, 0.040));
     // the DRIVE CORE, exposed between them - this chassis wears its
     // power plant where the heavy hides one
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.60, 0.0), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.24, 0.26, 0.24));
-    part(cyl(), kit.core_glow.clone(), Vec3::new(0.0, 0.60, 0.0), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.28, 0.17));
+    part(cyl(), line.clone(), Vec3::new(0.0, 0.60, 0.0), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.28, 0.17));
     for k in 0..6 {
         let a = k as f32 * std::f32::consts::TAU / 6.0;
         part(cube(), kit.mech_metal.clone(), Vec3::new(a.cos() * 0.145, 0.60 + a.sin() * 0.145, 0.0),
@@ -7188,25 +7214,25 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
 
     // ---- HEAD: a single sweeping optic on a slim collar ---------------
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.96, -0.02), Quat::IDENTITY, Vec3::new(0.10, 0.10, 0.10));
-    part(ball(), kit.mech_khaki.clone(), Vec3::new(0.0, 1.06, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.22, 0.30));
-    part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 1.12, -0.02), Quat::from_rotation_x(-0.30), Vec3::new(0.26, 0.045, 0.16));
+    part(ball(), hull.clone(), Vec3::new(0.0, 1.06, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.22, 0.30));
+    part(cube(), plate.clone(), Vec3::new(0.0, 1.12, -0.02), Quat::from_rotation_x(-0.30), Vec3::new(0.26, 0.045, 0.16));
     // the visor - ONE slit, same weak-point vocabulary the heavy uses
     part(cube(), kit.mech_red.clone(), Vec3::new(0.0, 1.055, 0.155), Quat::IDENTITY, Vec3::new(0.20, 0.030, 0.02));
     for sd in [-1.0_f32, 1.0] {
         part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.13, 1.14, -0.12), Quat::from_rotation_z(sd * 0.4), Vec3::new(0.012, 0.20, 0.030));
-        part(ball(), kit.core_glow.clone(), Vec3::new(sd * 0.10, 1.02, 0.13), Quat::IDENTITY, Vec3::splat(0.022));
+        part(ball(), line.clone(), Vec3::new(sd * 0.10, 1.02, 0.13), Quat::IDENTITY, Vec3::splat(0.022));
     }
 
     // ---- SHOULDERS + ARMS: visible linkages, thin plates --------------
     for sd in [-1.0_f32, 1.0] {
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.30, 0.78, 0.0), Quat::IDENTITY, Vec3::splat(0.115));
-        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.355, 0.80, 0.0), Quat::from_rotation_z(sd * 0.25), Vec3::new(0.13, 0.16, 0.22));
+        part(cube(), hull.clone(), Vec3::new(sd * 0.355, 0.80, 0.0), Quat::from_rotation_z(sd * 0.25), Vec3::new(0.13, 0.16, 0.22));
         // upper arm as a strut with the actuator alongside, not a block
         part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.375, 0.62, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.055, 0.30, 0.055));
         part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.435, 0.64, 0.02), Quat::from_rotation_z(sd * 0.12), Vec3::new(0.032, 0.24, 0.032));
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.40, 0.46, 0.03), Quat::IDENTITY, Vec3::splat(0.085));
         // forearm plate - covers the outside only, open inboard
-        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.445, 0.34, 0.04), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.045, 0.26, 0.14));
+        part(cube(), plate.clone(), Vec3::new(sd * 0.445, 0.34, 0.04), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.045, 0.26, 0.14));
         part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.395, 0.34, 0.04), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.048, 0.26, 0.048));
     }
 
@@ -7219,21 +7245,21 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
     for sd in [-1.0_f32, 1.0] {
         // hip ball + thigh strut, angled forward
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.17, 0.20, 0.0), Quat::IDENTITY, Vec3::splat(0.115));
-        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.185, 0.06, 0.05), Quat::from_rotation_x(-0.22), Vec3::new(0.115, 0.30, 0.16));
+        part(cube(), hull.clone(), Vec3::new(sd * 0.185, 0.06, 0.05), Quat::from_rotation_x(-0.22), Vec3::new(0.115, 0.30, 0.16));
         part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.245, 0.06, 0.02), Quat::from_rotation_x(-0.22), Vec3::new(0.038, 0.28, 0.038));
         // KNEE forward, then the shank sweeping BACK - the digitigrade
         // break, and the reason this thing reads as fast standing still
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.10, 0.13), Quat::IDENTITY, Vec3::splat(0.105));
-        part(cube(), kit.mech_khaki_lt.clone(), Vec3::new(sd * 0.185, -0.09, 0.185), Quat::from_rotation_x(-0.35), Vec3::new(0.115, 0.14, 0.055));
-        part(cube(), kit.mech_khaki.clone(), Vec3::new(sd * 0.185, -0.26, 0.03), Quat::from_rotation_x(0.42), Vec3::new(0.095, 0.34, 0.13));
+        part(cube(), plate.clone(), Vec3::new(sd * 0.185, -0.09, 0.185), Quat::from_rotation_x(-0.35), Vec3::new(0.115, 0.14, 0.055));
+        part(cube(), hull.clone(), Vec3::new(sd * 0.185, -0.26, 0.03), Quat::from_rotation_x(0.42), Vec3::new(0.095, 0.34, 0.13));
         part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.24, -0.05), Quat::from_rotation_x(0.42), Vec3::new(0.030, 0.30, 0.030));
         // ANKLE well back, then a long digitigrade foot forward
         part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.42, -0.10), Quat::IDENTITY, Vec3::splat(0.085));
-        part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(sd * 0.185, -0.48, 0.03), Quat::from_rotation_x(0.10), Vec3::new(0.10, 0.055, 0.30));
+        part(cube(), plate.clone(), Vec3::new(sd * 0.185, -0.48, 0.03), Quat::from_rotation_x(0.10), Vec3::new(0.10, 0.055, 0.30));
         part(cube(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.505, 0.16), Quat::IDENTITY, Vec3::new(0.11, 0.030, 0.09));
         // and a thruster in the calf - this one really does need to jink
         part(cyl(), kit.mech_khaki_dk.clone(), Vec3::new(sd * 0.185, -0.16, -0.15), Quat::from_rotation_x(0.42), Vec3::new(0.075, 0.11, 0.075));
-        part(cyl(), kit.core_glow.clone(), Vec3::new(sd * 0.185, -0.235, -0.20), Quat::from_rotation_x(0.42), Vec3::new(0.048, 0.020, 0.048));
+        part(cyl(), line.clone(), Vec3::new(sd * 0.185, -0.235, -0.20), Quat::from_rotation_x(0.42), Vec3::new(0.048, 0.020, 0.048));
     }
 
     // ---- MOUNTS: plasma right, repair left ----------------------------
@@ -7243,14 +7269,14 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit) -> Entity {
         part(cyl(), kit.mech_metal.clone(), Vec3::new(0.445, 0.30, 0.22 + k as f32 * 0.085),
             Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.135, 0.030, 0.135));
     }
-    part(cyl(), kit.core_glow.clone(), Vec3::new(0.445, 0.30, 0.55), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.070, 0.030, 0.070));
-    part(cube(), kit.med_glow.clone(), Vec3::new(0.445, 0.365, 0.30), Quat::IDENTITY, Vec3::new(0.018, 0.012, 0.30));
+    part(cyl(), line.clone(), Vec3::new(0.445, 0.30, 0.55), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.070, 0.030, 0.070));
+    part(cube(), line.clone(), Vec3::new(0.445, 0.365, 0.30), Quat::IDENTITY, Vec3::new(0.018, 0.012, 0.30));
     // Repair: a wider dish with an emitter node in it - it PROJECTS,
     // where the cannon FIRES, and the silhouette should say which is which
     part(cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.445, 0.30, 0.30), Quat::IDENTITY, Vec3::new(0.12, 0.12, 0.30));
-    part(cyl(), kit.mech_khaki_lt.clone(), Vec3::new(-0.445, 0.30, 0.46), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.055, 0.22));
+    part(cyl(), plate.clone(), Vec3::new(-0.445, 0.30, 0.46), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.055, 0.22));
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(-0.445, 0.30, 0.475), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.16, 0.040, 0.16));
-    part(ball(), kit.core_glow.clone(), Vec3::new(-0.445, 0.30, 0.49), Quat::IDENTITY, Vec3::splat(0.075));
+    part(ball(), line.clone(), Vec3::new(-0.445, 0.30, 0.49), Quat::IDENTITY, Vec3::splat(0.075));
     for k in 0..4 {
         let a = k as f32 * std::f32::consts::TAU / 4.0 + 0.78;
         part(cube(), kit.mech_metal.clone(), Vec3::new(-0.445 + a.cos() * 0.115, 0.30 + a.sin() * 0.115, 0.44),
@@ -9950,7 +9976,7 @@ fn spawn_fighter_rigs(
         // the class silhouettes - building one at boarding time would
         // fight the material and layer latches every other rig here has
         // had to work around.
-        let scout_rig = spawn_scout_chassis(commands, kit);
+        let scout_rig = spawn_scout_chassis(commands, kit, ally);
         commands
             .entity(scout_rig)
             .insert((Transform::IDENTITY, Visibility::Hidden))
@@ -10324,6 +10350,50 @@ fn setup(
         // Unlit on the fill so it does not pick up the map's lighting and
         // go opaque in shadow - a barrier that dims when you back into
         // cover is a barrier the pilot cannot trust.
+        // §owner AGILE SUPPORT MECH's palette. The two sides share every
+        // roughness and every emissive STRENGTH and differ only in hue,
+        // so the machine reads as one design in two liveries rather than
+        // as two machines.
+        scout_hull: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.68, 0.58, 0.86), // light purple
+            metallic: 0.25,
+            perceptual_roughness: 0.42,
+            ..default()
+        }),
+        scout_hull_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.80, 0.24, 0.24), // red
+            metallic: 0.25,
+            perceptual_roughness: 0.42,
+            ..default()
+        }),
+        scout_plate: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.93, 0.93, 0.96), // white
+            metallic: 0.15,
+            perceptual_roughness: 0.38,
+            ..default()
+        }),
+        scout_plate_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.36, 0.18, 0.44), // deep purple
+            metallic: 0.15,
+            perceptual_roughness: 0.38,
+            ..default()
+        }),
+        // the LIGHT LINES. Emissive, so they hold their colour when the
+        // chassis is in shadow - which is where a fast machine spends
+        // most of its time, and exactly when you most need to know whose
+        // it is.
+        scout_line: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.62, 0.86, 1.0), // baby blue
+            emissive: LinearRgba::new(0.9, 2.0, 3.0, 1.0),
+            perceptual_roughness: 0.30,
+            ..default()
+        }),
+        scout_line_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.72, 0.42, 0.95), // purple
+            emissive: LinearRgba::new(2.0, 0.7, 3.0, 1.0),
+            perceptual_roughness: 0.30,
+            ..default()
+        }),
         barrier_fill: materials.add(StandardMaterial {
             base_color: Color::srgba(0.30, 0.72, 0.95, 0.085),
             emissive: LinearRgba::new(0.06, 0.20, 0.30, 1.0),

@@ -9958,6 +9958,47 @@ impl TdmSim {
         }
     }
 
+    /// §owner AGILE SUPPORT MECH: the ally this bot should be mending,
+    /// if any.
+    ///
+    /// The MOST hurt reachable squadmate, not the nearest: a support
+    /// unit's job is to keep the machine that is losing alive, and
+    /// picking by distance would have it topping up whoever happened to
+    /// be closest while the one under fire died.
+    ///
+    /// Pure and rng-free, like every other squad rule here, so a replay
+    /// heals the same men in the same order.
+    fn repair_candidate(&self, i: usize) -> Option<usize> {
+        let f = &self.fighters[i];
+        let from = [f.pos[0], f.pos[1] + f.height() * 0.55, f.pos[2]];
+        let mut best: Option<(usize, f32)> = None;
+        for (k, g) in self.fighters.iter().enumerate() {
+            if k == i || g.team != f.team || !g.alive() || !g.in_mech() {
+                continue;
+            }
+            let cap = g.mech_hull_max();
+            let frac = g.hull / cap;
+            // not worth crossing a battlefield for a scratch
+            if frac > 0.85 {
+                continue;
+            }
+            let dx = g.pos[0] - from[0];
+            let dz = g.pos[2] - from[2];
+            if (dx * dx + dz * dz).sqrt() > REPAIR_RANGE_M {
+                continue;
+            }
+            // and it has to be a shot the beam could actually make
+            let to = [dx, g.pos[1] + g.height() * 0.55 - from[1], dz];
+            if !self.los_clear(from, [from[0] + to[0], from[1] + to[1], from[2] + to[2]]) {
+                continue;
+            }
+            if best.map_or(true, |(_, bf)| frac < bf) {
+                best = Some((k, frac));
+            }
+        }
+        best.map(|(k, _)| k)
+    }
+
     /// §owner RETREAT: fighter `j` has just fallen - shake the men who
     /// were near enough to see it.
     ///
@@ -10370,12 +10411,41 @@ impl TdmSim {
                 } else {
                     false
                 };
-                if in_mech {
+                if in_mech && self.fighters[i].armor_set == ArmorSet::RobotSuit {
                     self.fighters[i].mech_weapon = if want_auto {
                         MechWeapon::Autocannon
                     } else {
                         MechWeapon::Gatling
                     };
+                }
+                // §owner AGILE SUPPORT MECH: the bot SUPPORT pass.
+                //
+                // A bot in the light chassis that only ever shot plasma
+                // would be a worse heavy mech - the repair beam is the
+                // entire reason the class exists, and a support unit that
+                // never supports is a reskin.
+                //
+                // The rule is deliberately one line of intent: if a
+                // squadmate's chassis is hurt and I can reach them, mend
+                // instead of shooting. It runs BEFORE the fire decision
+                // below, and swapping the mount is what makes that
+                // decision follow - `bot_act` fires whatever mount is
+                // selected, so choosing the mount IS choosing the verb.
+                if self.fighters[i].in_scout_mech() {
+                    let patient = self.repair_candidate(i);
+                    self.fighters[i].mech_weapon = if patient.is_some() {
+                        MechWeapon::Repair
+                    } else {
+                        MechWeapon::Plasma
+                    };
+                    // and it must AIM at the patient, or the beam's own
+                    // arc test will refuse the target the brain picked
+                    if let Some(k) = patient {
+                        let (a, b) = (self.muzzle_origin(i), self.fighters[k].pos);
+                        let h = self.fighters[k].height() * 0.55;
+                        let to = [b[0] - a[0], b[1] + h - a[1], b[2] - a[2]];
+                        self.tick_repair_beam(i, normalize(to));
+                    }
                 }
                 // §A parity, answered: a bot DOES brace, and only for the
                 // autocannon. `MECH_BRACE_RECOIL_DAMP` exists for exactly
@@ -12112,6 +12182,64 @@ mod tests {
             "healing must draw on the same budget as shooting, or a pilot \
              can suppress and sustain at once for free"
         );
+    }
+
+    /// §owner AGILE SUPPORT MECH: a BOT in the light chassis actually
+    /// supports.
+    ///
+    /// The gap this closes is the one a reskin would have shipped with:
+    /// a bot that only ever fires plasma is a worse heavy mech, and the
+    /// repair beam is the entire reason the class exists.
+    #[test]
+    fn a_bot_in_the_scout_chassis_mends_the_worst_hurt_ally() {
+        let mut s = TdmSim::new(cfg(0x9104, 3, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        let medic = 1usize;
+        s.fighters[medic].team = Team::Blue;
+        s.fighters[medic].armor_set = ArmorSet::ScoutMech;
+        s.fighters[medic].hull = SCOUT_HULL;
+        s.fighters[medic].pos = [0.0, 0.0, 0.0];
+        // two hurt allies at the same range: one scratched, one dying.
+        // The support unit's job is the one that is LOSING, so picking
+        // by distance would be the wrong rule and this fixture is built
+        // to tell the two apart.
+        let (scratched, dying) = (2usize, 3usize);
+        // 580/600 is 0.97 - genuinely a scratch, and above the 0.85
+        // threshold. The first version used 500, which is 0.83 and
+        // therefore a real patient, so the "a scratch is not worth
+        // crossing for" case was quietly measuring the wrong ally.
+        for (k, hull) in [(scratched, 580.0_f32), (dying, 60.0)] {
+            let g = &mut s.fighters[k];
+            g.team = Team::Blue;
+            g.armor_set = ArmorSet::RobotSuit;
+            g.hull = hull;
+        }
+        s.fighters[scratched].pos = [6.0, 0.0, 0.0];
+        s.fighters[dying].pos = [-6.0, 0.0, 0.0];
+        assert_eq!(
+            s.repair_candidate(medic),
+            Some(dying),
+            "the beam must go to the machine that is losing, not the nearest"
+        );
+        // a full ally is not a patient
+        s.fighters[dying].hull = MECH_HULL;
+        assert_eq!(s.repair_candidate(medic), None, "a scratch is not worth crossing for");
+        // nor is an ENEMY chassis, however hurt
+        s.fighters[dying].hull = 60.0;
+        s.fighters[dying].team = Team::Red;
+        assert_eq!(s.repair_candidate(medic), None);
+        // nor infantry
+        s.fighters[dying].team = Team::Blue;
+        s.fighters[dying].armor_set = ArmorSet::None;
+        s.fighters[dying].hull = 0.0;
+        assert_eq!(s.repair_candidate(medic), None);
+        // and out of range is out of range
+        s.fighters[dying].armor_set = ArmorSet::RobotSuit;
+        s.fighters[dying].hull = 60.0;
+        s.fighters[dying].pos = [-(REPAIR_RANGE_M + 10.0), 0.0, 0.0];
+        assert_eq!(s.repair_candidate(medic), None);
     }
 
     /// §owner: the war weapons BITE the light chassis.
