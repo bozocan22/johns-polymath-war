@@ -1517,6 +1517,45 @@ impl ArmorPiece {
         }
     }
 
+    /// The label the Forge grid puts on a pill.
+    ///
+    /// Shorter than `name` because the ROW already says which part of the
+    /// body this is - "SHOULDERS: PAULDRON L" spends four characters
+    /// repeating its own heading, and at six pills to a row that is what
+    /// pushed every label onto two lines. The pair suffix stays: which
+    /// side is the one thing the row cannot tell you.
+    ///
+    /// `name` is still the full form, for anywhere with room for it.
+    pub fn short_name(self) -> &'static str {
+        use ArmorPiece::*;
+        match self {
+            Helmet => "HELMET",
+            Gorget => "GORGET",
+            CuirassFront => "FRONT",
+            CuirassBack => "BACK",
+            Fauld => "FAULD",
+            PelvisPlate => "PELVIS",
+            PauldronL => "PAULDRON L",
+            PauldronR => "PAULDRON R",
+            RerebraceL => "REREBRACE L",
+            RerebraceR => "REREBRACE R",
+            VambraceL => "VAMBRACE L",
+            VambraceR => "VAMBRACE R",
+            GauntletL => "GAUNTLET L",
+            GauntletR => "GAUNTLET R",
+            TassetL => "TASSET L",
+            TassetR => "TASSET R",
+            CuisseL => "CUISSE L",
+            CuisseR => "CUISSE R",
+            PoleynL => "POLEYN L",
+            PoleynR => "POLEYN R",
+            GreaveL => "GREAVE L",
+            GreaveR => "GREAVE R",
+            SabatonL => "SABATON L",
+            SabatonR => "SABATON R",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         use ArmorPiece::*;
         match self {
@@ -1683,6 +1722,94 @@ impl ArmorLoadout {
         let bare = 1.0 - on as f32 / total as f32;
         1.0 + bare * (EXPOSED_SEGMENT_MULT - 1.0)
     }
+}
+
+/// §C tier 2: the five standard harnesses, so nobody has to click
+/// twenty-four switches to get dressed.
+///
+/// The grid is the fine control and it should stay - "remove both
+/// gauntlets" is the brief's own worked example, and that decision needs
+/// a per-plate toggle. But a player who does not care about plate should
+/// be able to say "heavy" and leave, and one who has been experimenting
+/// should be able to get back to sane in one click. A customiser with no
+/// presets is a customiser most people bounce off.
+///
+/// The ladder is monotone by WEIGHT: every step up is strictly more
+/// plate than the step below, which is what makes it a ladder rather
+/// than five opinions. `the_preset_ladder_only_ever_adds` pins that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArmorPreset {
+    /// Helmet and nothing else. The fastest a class can be.
+    Stripped,
+    /// Head and chest. Everything that covers a lung, nothing that does
+    /// not.
+    Light,
+    /// Whatever this CLASS spawns in - the only preset that varies by
+    /// who you are, because "standard" is a statement about a soldier
+    /// and not about a weight.
+    Standard,
+    /// Everything but the extremities - no gauntlets, no sabatons.
+    Heavy,
+    /// All twenty-four. Over every ceiling; a deliberate choice to be
+    /// slow.
+    Full,
+}
+
+impl ArmorPreset {
+    pub const ALL: [ArmorPreset; 5] = [
+        ArmorPreset::Stripped,
+        ArmorPreset::Light,
+        ArmorPreset::Standard,
+        ArmorPreset::Heavy,
+        ArmorPreset::Full,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ArmorPreset::Stripped => "STRIPPED",
+            ArmorPreset::Light => "LIGHT",
+            ArmorPreset::Standard => "STANDARD",
+            ArmorPreset::Heavy => "HEAVY",
+            ArmorPreset::Full => "FULL",
+        }
+    }
+}
+
+/// The harness a preset means, for a given class.
+pub fn preset_harness(p: ArmorPreset, c: Class) -> ArmorLoadout {
+    use ArmorPiece::*;
+    let mut l = ArmorLoadout::EMPTY;
+    match p {
+        ArmorPreset::Stripped => {
+            l.set(Helmet, true);
+        }
+        ArmorPreset::Light => {
+            for q in [Helmet, CuirassFront, CuirassBack, PauldronL, PauldronR] {
+                l.set(q, true);
+            }
+        }
+        ArmorPreset::Standard => l = default_harness(c),
+        ArmorPreset::Heavy => {
+            l = ArmorLoadout::default();
+            for q in [GauntletL, GauntletR, SabatonL, SabatonR] {
+                l.set(q, false);
+            }
+        }
+        ArmorPreset::Full => l = ArmorLoadout::default(),
+    }
+    l
+}
+
+/// Which preset a harness currently matches, if any.
+///
+/// So the picker can light the row a player is actually on, and go dark
+/// the moment they touch a single plate. A preset row that stayed lit
+/// while the harness underneath it had changed would be lying about
+/// what is equipped.
+pub fn preset_of(l: ArmorLoadout, c: Class) -> Option<ArmorPreset> {
+    ArmorPreset::ALL
+        .into_iter()
+        .find(|p| preset_harness(*p, c) == l)
 }
 
 /// What a class actually changes. Four multipliers, each hooked to a
@@ -11563,6 +11690,76 @@ mod tests {
             // read-only display
             assert!(ceil - w > 2.0, "{c:?} has only {} kg of headroom", ceil - w);
         }
+    }
+
+    /// §C tier 2: the presets form a real LADDER - every step up adds
+    /// plate and never swaps it.
+    ///
+    /// Five sets that merely differed would be five opinions. A ladder is
+    /// something a player can reason about without reading it: pick
+    /// further right, get more armour and less speed.
+    #[test]
+    fn the_preset_ladder_only_ever_adds() {
+        for c in Class::ALL {
+            let rungs: Vec<ArmorLoadout> = ArmorPreset::ALL
+                .into_iter()
+                .map(|p| preset_harness(p, c))
+                .collect();
+            for w in rungs.windows(2) {
+                let (lo, hi) = (w[0], w[1]);
+                assert!(
+                    hi.weight_kg() >= lo.weight_kg(),
+                    "{c:?}: the ladder goes DOWN somewhere - {} then {}",
+                    lo.weight_kg(),
+                    hi.weight_kg()
+                );
+                // and it is a SUPERSET, not a reshuffle of the same mass
+                for p in ArmorPiece::ALL {
+                    if lo.has(p) {
+                        assert!(
+                            hi.has(p),
+                            "{c:?}: {} is dropped going UP the ladder",
+                            p.name()
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                preset_harness(ArmorPreset::Full, c),
+                ArmorLoadout::default(),
+                "FULL must be every plate"
+            );
+            assert_eq!(
+                preset_harness(ArmorPreset::Standard, c),
+                default_harness(c),
+                "STANDARD must be what the class actually spawns in"
+            );
+            // STRIPPED is not naked - a bare head is a x4 multiplier
+            // waiting to happen, and a preset that hands one out is a
+            // trap rather than a choice
+            assert!(preset_harness(ArmorPreset::Stripped, c).has(ArmorPiece::Helmet));
+        }
+    }
+
+    /// The picker knows which rung you are on, and knows when you have
+    /// left it.
+    #[test]
+    fn the_preset_readout_goes_dark_when_a_plate_moves() {
+        let c = Class::Line;
+        for p in ArmorPreset::ALL {
+            assert_eq!(
+                preset_of(preset_harness(p, c), c),
+                Some(p),
+                "{p:?} must recognise its own harness"
+            );
+        }
+        let mut l = preset_harness(ArmorPreset::Heavy, c);
+        l.set(ArmorPiece::GauntletL, true);
+        assert_eq!(
+            preset_of(l, c),
+            None,
+            "a hand-built harness must not be reported as a preset"
+        );
     }
 
     /// A bare segment takes more, proportionally, and only its own.

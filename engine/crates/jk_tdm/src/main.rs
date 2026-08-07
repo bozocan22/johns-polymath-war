@@ -5571,6 +5571,44 @@ struct ArmorButton(sim::ArmorPiece);
 #[derive(Component)]
 struct ArmorWeightText;
 
+/// §C tier 2: one of the five standard harnesses.
+#[derive(Component, Clone, Copy)]
+struct ArmorPresetButton(sim::ArmorPreset);
+
+/// How the armour grid is LAID OUT, which is deliberately finer than
+/// how it is scored.
+///
+/// Damage resolves against four zones, and the first version of this
+/// page used those four as its rows - which put ten pills in LEGS and
+/// eight in ARMS against four in TORSO. Every label in the long rows
+/// wrapped to two lines and the page read as a wall.
+///
+/// The eye wants even rows and the hand wants to find a plate, so the
+/// grouping here is ANATOMICAL rather than mechanical: six rows of two
+/// to six. It changes nothing about what the pieces do - `ArmorPiece`
+/// still answers to `zone()` for damage - and a test pins that every
+/// plate appears in exactly one row, so a piece cannot go missing from
+/// the UI while still counting toward weight.
+/// How much of the armoury plate the pill rows may use.
+///
+/// The turntable card is absolutely positioned against the SCREEN, not
+/// the plate, and it overhangs the plate's right edge. Every other intro
+/// page gets away with full-width rows because none of them is long
+/// enough to reach under it; the armoury's six-pill rows are.
+const ARMOURY_ROW_W_PCT: f32 = 74.0;
+
+const ARMOUR_ROWS: [(&str, &[sim::ArmorPiece]); 6] = {
+    use sim::ArmorPiece::*;
+    [
+        ("HEAD", &[Helmet, Gorget]),
+        ("TORSO", &[CuirassFront, CuirassBack, Fauld, PelvisPlate]),
+        ("SHOULDERS", &[PauldronL, PauldronR, RerebraceL, RerebraceR]),
+        ("FOREARMS", &[VambraceL, VambraceR, GauntletL, GauntletR]),
+        ("THIGHS", &[TassetL, TassetR, CuisseL, CuisseR]),
+        ("SHINS", &[PoleynL, PoleynR, GreaveL, GreaveR, SabatonL, SabatonR]),
+    ]
+};
+
 /// §6 (Brief IV): melee slot pick - false = knife, true = axe.
 #[derive(Component, Clone, Copy)]
 struct MeleeButton(bool);
@@ -5912,6 +5950,7 @@ fn main() {
                 intro_loadout_buttons,
                 intro_cosmetic_buttons,
                 intro_armor_buttons,
+                intro_armor_preset_buttons,
                 intro_class_buttons,
                 intro_score_buttons,
                 intro_melee_buttons,
@@ -13325,51 +13364,60 @@ fn attach_turntable_card(
         return;
     }
     let Ok(root) = intro.get_single() else { return };
-    commands.entity(root).with_children(|p| {
-        p.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Percent(2.5),
-                top: Val::Percent(22.0),
-                width: Val::Px(264.0),
-                flex_direction: FlexDirection::Column,
-                border: UiRect::all(Val::Px(menu_ui::RULE_STAMP_PX)),
-                padding: UiRect::all(Val::Px(menu_ui::U3)),
-                row_gap: Val::Px(menu_ui::U2),
-                ..default()
-            },
-            BackgroundColor(menu_ui::shadow_a(menu_ui::PLATE_A)),
-            BorderColor(branding::palette::BRONZE),
-            BorderRadius::ZERO,
-            ZIndex(menu_ui::ZL_PLATE),
-            OnIntroPage(IntroPage::SOLDIER),
-            TurntableCard,
-        ))
-        .with_children(|card| {
-            menu_ui::eyebrow(card, "TURNTABLE");
-            card.spawn((
+    // One card per page that wants one. They share the SAME render
+    // target - the turntable is a single stage rendered to one texture,
+    // so a second card costs a UI node and nothing else. Only one page
+    // is ever visible, so they never both draw.
+    for (page, caption) in [
+        (IntroPage::SOLDIER, "your soldier, as equipped"),
+        (IntroPage::ARMOURY, "your soldier, under the plate"),
+    ] {
+        commands.entity(root).with_children(|p| {
+            p.spawn((
                 Node {
-                    width: Val::Px(236.0),
-                    height: Val::Px(236.0),
-                    border: UiRect::all(Val::Px(menu_ui::RULE_HAIR_PX)),
+                    position_type: PositionType::Absolute,
+                    right: Val::Percent(2.5),
+                    top: Val::Percent(22.0),
+                    width: Val::Px(264.0),
+                    flex_direction: FlexDirection::Column,
+                    border: UiRect::all(Val::Px(menu_ui::RULE_STAMP_PX)),
+                    padding: UiRect::all(Val::Px(menu_ui::U3)),
+                    row_gap: Val::Px(menu_ui::U2),
                     ..default()
                 },
-                BorderColor(menu_ui::gold_a(menu_ui::FRAME_INNER_A)),
-                ImageNode {
-                    image: fp.image.clone(),
-                    ..default()
-                },
-            ));
-            card.spawn((
-                Text::new("your soldier, as equipped"),
-                TextFont {
-                    font_size: menu_ui::T_MICRO,
-                    ..default()
-                },
-                TextColor(branding::palette::PARCHMENT_DIM),
-            ));
+                BackgroundColor(menu_ui::shadow_a(menu_ui::PLATE_A)),
+                BorderColor(branding::palette::BRONZE),
+                BorderRadius::ZERO,
+                ZIndex(menu_ui::ZL_PLATE),
+                OnIntroPage(page),
+                TurntableCard,
+            ))
+            .with_children(|card| {
+                menu_ui::eyebrow(card, "TURNTABLE");
+                card.spawn((
+                    Node {
+                        width: Val::Px(236.0),
+                        height: Val::Px(236.0),
+                        border: UiRect::all(Val::Px(menu_ui::RULE_HAIR_PX)),
+                        ..default()
+                    },
+                    BorderColor(menu_ui::gold_a(menu_ui::FRAME_INNER_A)),
+                    ImageNode {
+                        image: fp.image.clone(),
+                        ..default()
+                    },
+                ));
+                card.spawn((
+                    Text::new(caption.to_string()),
+                    TextFont {
+                        font_size: menu_ui::T_MICRO,
+                        ..default()
+                    },
+                    TextColor(branding::palette::PARCHMENT_DIM),
+                ));
+            });
         });
-    });
+    }
 }
 
 /// §7.2: stamp the whole turntable stage onto its layer once the spawn
@@ -16553,42 +16601,61 @@ fn open_intro(
             // because one row of 24 would be illegible at the pill widths
             // every other row on these pages uses.
             let arm = OnIntroPage(IntroPage::ARMOURY);
-            for (label, zone) in [
-                ("HEAD", sim::HitZone::Head),
-                ("TORSO", sim::HitZone::Torso),
-                ("ARMS", sim::HitZone::Arms),
-                ("LEGS", sim::HitZone::Legs),
-            ] {
-                let pieces: Vec<(&str, ArmorButton)> = sim::ArmorPiece::ALL
+            // Every armoury row lives in a column that stops short of the
+            // plate's right edge, because this is the one page with a
+            // turntable card overlapping it. The other pages' rows run
+            // full width and pass under the card harmlessly - their
+            // longest row ends before it - but six pills of plate names
+            // would run straight into the soldier.
+            b.spawn((
+                Node {
+                    width: Val::Percent(ARMOURY_ROW_W_PCT),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                arm,
+            ))
+            .with_children(|col| {
+                // The five standard harnesses LEAD the page. Anyone who
+                // does not want to think about plate should be able to
+                // answer the whole question in one click and page on; the
+                // grid below is for anyone who does.
+                let presets: Vec<(&str, ArmorPresetButton)> = sim::ArmorPreset::ALL
                     .iter()
-                    .filter(|p| p.zone() == zone)
-                    .map(|p| (p.name(), ArmorButton(*p)))
+                    .map(|p| (p.name(), ArmorPresetButton(*p)))
                     .collect();
-                menu_ui::pill_row(b, label, &pieces, arm);
-            }
-            // The number that makes the grid a DECISION rather than a
-            // row of switches. Without a live weight read against the
-            // ceiling every plate looks free, and the only sensible play
-            // is to wear all of it.
-            b.spawn((
-                Text::new(String::new()),
-                TextFont { font_size: menu_ui::T_DATA, ..default() },
-                TextColor(branding::palette::GOLD),
-                Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
-                ArmorWeightText,
-                arm,
-            ));
-            b.spawn((
-                Text::new(
-                    "a bare segment takes 25% more where the plate is missing.\n\
-                     over the ceiling, every kilo costs 0.15 m/s."
-                        .to_string(),
-                ),
-                TextFont { font_size: menu_ui::T_MICRO, ..default() },
-                TextColor(branding::palette::PARCHMENT_DIM),
-                Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
-                arm,
-            ));
+                menu_ui::pill_row(col, "PRESET", &presets, arm);
+                for (label, pieces) in ARMOUR_ROWS {
+                    let items: Vec<(&str, ArmorButton)> = pieces
+                        .iter()
+                        .map(|p| (p.short_name(), ArmorButton(*p)))
+                        .collect();
+                    menu_ui::pill_row(col, label, &items, arm);
+                }
+                // The number that makes the grid a DECISION rather than a
+                // row of switches. Without a live weight read against the
+                // ceiling every plate looks free, and the only sensible
+                // play is to wear all of it.
+                col.spawn((
+                    Text::new(String::new()),
+                    TextFont { font_size: menu_ui::T_DATA, ..default() },
+                    TextColor(branding::palette::GOLD),
+                    Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
+                    ArmorWeightText,
+                    arm,
+                ));
+                col.spawn((
+                    Text::new(
+                        "a bare segment takes 25% more where the plate is missing.\n\
+                         over the ceiling, every kilo costs 0.15 m/s."
+                            .to_string(),
+                    ),
+                    TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                    TextColor(branding::palette::PARCHMENT_DIM),
+                    Node { margin: UiRect::top(Val::Px(menu_ui::U2)), ..default() },
+                    arm,
+                ));
+            });
 
             // ---- MATCH page --------------------------------------------
             let mtch = OnIntroPage(IntroPage::MATCH);
@@ -17020,6 +17087,34 @@ fn intro_armor_buttons(
         } else {
             format!("PLATE {kg:.1} / {budget:.0} kg   {:.1} kg spare - no penalty", budget - kg)
         };
+    }
+}
+
+/// §C tier 2: the five standard harnesses.
+///
+/// A plain PICKER, unlike the grid it sits above - pressing one assigns
+/// a whole harness, so it can assign every frame it is held the way the
+/// class and weapon rows do, with no rising-edge bookkeeping.
+///
+/// It lights only while the harness still MATCHES a preset. Touch one
+/// plate in the grid and every preset goes dark, because at that point
+/// none of them describes what is equipped, and a row that stayed lit
+/// would be telling you something false about your own soldier.
+fn intro_armor_preset_buttons(
+    mut q: Query<
+        (&Interaction, &ArmorPresetButton, &mut BackgroundColor, &mut BorderColor),
+        With<Button>,
+    >,
+    mut sel: ResMut<Selected>,
+) {
+    for (i, pb, _, _) in &mut q {
+        if *i == Interaction::Pressed {
+            sel.armor = sim::preset_harness(pb.0, sel.class);
+        }
+    }
+    let now = sim::preset_of(sel.armor, sel.class);
+    for (i, pb, mut bg, mut border) in &mut q {
+        paint(&mut bg, &mut border, now == Some(pb.0), *i == Interaction::Hovered);
     }
 }
 
@@ -21100,30 +21195,65 @@ mod forge_tests {
     /// file, invisible in the Forge, and impossible to take off.
     #[test]
     fn every_plate_appears_in_exactly_one_forge_row() {
-        let rows = [
-            sim::HitZone::Head,
-            sim::HitZone::Torso,
-            sim::HitZone::Arms,
-            sim::HitZone::Legs,
-        ];
         for p in sim::ArmorPiece::ALL {
-            let n = rows.iter().filter(|z| p.zone() == **z).count();
-            assert_eq!(n, 1, "{} appears in {n} rows, not 1", p.name());
+            let n: usize = ARMOUR_ROWS
+                .iter()
+                .map(|(_, row)| row.iter().filter(|q| **q == p).count())
+                .sum();
+            assert_eq!(n, 1, "{} appears in {n} grid rows, not 1", p.name());
         }
-        let shown: usize = rows
-            .iter()
-            .map(|z| sim::ArmorPiece::ALL.iter().filter(|p| p.zone() == *z).count())
-            .sum();
-        assert_eq!(shown, sim::ARMOR_PIECES, "the grid must show the whole harness");
-        // and no two plates share a name - they are toggles, and a
+        let shown: usize = ARMOUR_ROWS.iter().map(|(_, r)| r.len()).sum();
+        assert_eq!(
+            shown,
+            sim::ARMOR_PIECES,
+            "the grid must show the WHOLE harness - a plate missing from \
+             every row is one that still counts toward weight, is \
+             equippable from a save file, and cannot be taken off"
+        );
+        // no two plates share a pill label - they are toggles, and a
         // duplicate label is a toggle nobody can identify
         for p in sim::ArmorPiece::ALL {
             let same = sim::ArmorPiece::ALL
                 .iter()
-                .filter(|q| q.name() == p.name())
+                .filter(|q| q.short_name() == p.short_name())
                 .count();
-            assert_eq!(same, 1, "{} is not a unique label", p.name());
+            assert_eq!(same, 1, "{} is not a unique pill label", p.short_name());
         }
+    }
+
+    /// The grid stays LEGIBLE: even rows, and labels short enough not to
+    /// wrap at the pill widths this layout produces.
+    ///
+    /// The first version used the four damage ZONES as its rows, which
+    /// put ten pills in LEGS against two in HEAD - every label in the
+    /// long rows wrapped to two lines and the page read as a wall. The
+    /// grouping is anatomical now, and this is what stops it drifting
+    /// back.
+    #[test]
+    fn the_armour_grid_rows_stay_even_and_short() {
+        const MAX_PILLS: usize = 6;
+        const MAX_LABEL: usize = 11;
+        for (name, row) in ARMOUR_ROWS {
+            assert!(!row.is_empty(), "{name} is an empty row");
+            assert!(
+                row.len() <= MAX_PILLS,
+                "{name} has {} pills - past {MAX_PILLS} the labels wrap",
+                row.len()
+            );
+            for p in row {
+                assert!(
+                    p.short_name().len() <= MAX_LABEL,
+                    "{} is {} chars; the pill fits about {MAX_LABEL}",
+                    p.short_name(),
+                    p.short_name().len()
+                );
+            }
+        }
+        // and the rows must leave the turntable card its space
+        assert!(
+            ARMOURY_ROW_W_PCT < 100.0,
+            "full-width rows run under the soldier preview"
+        );
     }
 
     #[test]
