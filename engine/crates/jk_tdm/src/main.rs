@@ -2046,6 +2046,8 @@ struct FighterRig {
     /// §owner AGILE SUPPORT MECH: the light chassis, hung beside the
     /// heavy one and swapped by Visibility.
     scout_rig: Entity,
+    /// §C tier 2: the 24 plates, in ArmorPiece::ALL order.
+    armor_plates: [Entity; sim::ARMOR_PIECES],
     /// D.1: mech leg armour roots, [left, right] x [thigh, shin, foot] -
     /// parented to the REAL leg bones so the plating walks with the gait.
     mech_leg_armor: [[Entity; 3]; 2],
@@ -2515,6 +2517,9 @@ struct ForgePreview {
     arm_r: [Entity; 3],
     /// one silhouette group per class, indexed by `Class::ALL`
     class_rigs: [Entity; 4],
+    /// §C tier 2: the turntable's own 24 plates, so the armoury page
+    /// shows the harness being built rather than describing it.
+    armor_plates: [Entity; sim::ARMOR_PIECES],
     /// §8.1: all five helmets mounted at once, indexed by
     /// `HELMET_CHOICES`. Same trick as `class_rigs` and `weapons` - one
     /// `Visibility` write swaps the head, where a rebuild would fight the
@@ -9525,6 +9530,8 @@ struct SoldierParts {
     arm_r: [Entity; 3],
     weapon_root: Entity,
     weapons: [Entity; N_WEAPONS],
+    /// §C tier 2: the 24 armour plates, in ArmorPiece::ALL order.
+    armor_plates: [Entity; sim::ARMOR_PIECES],
     /// §8.1: where a helmet mounts. Published so a caller that passed
     /// `None` for the helmet can fill it - see `spawn_soldier_body`.
     helmet_socket: Entity,
@@ -9550,6 +9557,241 @@ struct SoldierLook {
     knee: Handle<StandardMaterial>,
     eye: Handle<StandardMaterial>,
     emblem_center: Handle<StandardMaterial>,
+}
+
+/// §C tier 2: the 24 plates, as GEOMETRY.
+///
+/// The harness has been a stat model with a Forge grid - equippable,
+/// weighed, and worth ±25% damage on a segment, and completely invisible.
+/// Stripping a gauntlet changed a number and nothing else, which is the
+/// worst possible version of a customisation system: a decision the
+/// player makes and then cannot see.
+///
+/// Each plate is built on the BONE it protects, so it moves with the
+/// body for free - no attachment system, no per-frame placement, and a
+/// pauldron that stays on the shoulder through a melee swing because it
+/// IS the shoulder's child.
+///
+/// SHAPE over part count. Every piece is a shaped shell plus a trim edge
+/// plus, where it earns it, a rivet line - three elements that together
+/// read as beaten plate rather than as a box strapped to a limb. The
+/// trim is what does most of the work: a plate with a bright lip catches
+/// light along its edge, which is exactly how real armour reads and what
+/// separates it from the shell underneath.
+///
+/// Returned in `ArmorPiece::ALL` order so the caller can index by the
+/// same position the equipped bitmask uses.
+fn spawn_armor_plates(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    look: &SoldierLook,
+    bones: &ArmorBones,
+) -> [Entity; sim::ARMOR_PIECES] {
+    // one group per plate, so a single Visibility write equips it
+    let group = |commands: &mut Commands, parent: Entity, tr: Vec3| -> Entity {
+        commands
+            .spawn((Transform::from_translation(tr), Visibility::Hidden))
+            .set_parent(parent)
+            .id()
+    };
+    let piece = |commands: &mut Commands,
+                 parent: Entity,
+                 mesh: Handle<Mesh>,
+                 mat: Handle<StandardMaterial>,
+                 tr: Vec3,
+                 rot: Quat,
+                 sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(parent);
+    };
+    // the three materials every plate is made of: the shell, the bright
+    // trim that edges it, and the dark rivets
+    let shell = kit.armor_dark.clone();
+    let trim = kit.gold.clone();
+    let rivet = kit.grey_black.clone();
+    let steel = kit.steel.clone();
+    let _ = look;
+
+    let mut out = [Entity::PLACEHOLDER; sim::ARMOR_PIECES];
+    let mut set = |i: usize, e: Entity| out[i] = e;
+
+    // ---- HELMET: a skull over the head shell, with a raised comb -------
+    {
+        let g = group(commands, bones.head, Vec3::new(0.0, 0.16, 0.01));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.41, 0.35, 0.38));
+        // the comb - one raised ridge front to back, the neatest way to
+        // make a dome read as a made object
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.155, 0.0), Quat::IDENTITY, Vec3::new(0.030, 0.055, 0.34));
+        // brow band, and a nasal down the centre
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.028, 0.155), Quat::from_rotation_x(-0.18), Vec3::new(0.36, 0.030, 0.05));
+        piece(commands, g, kit.cube.clone(), steel.clone(), Vec3::new(0.0, -0.030, 0.185), Quat::IDENTITY, Vec3::new(0.032, 0.10, 0.030));
+        for sx in [-1.0_f32, 1.0] {
+            piece(commands, g, kit.ball.clone(), rivet.clone(), Vec3::new(sx * 0.155, 0.02, 0.06), Quat::IDENTITY, Vec3::splat(0.026));
+        }
+        set(0, g);
+    }
+    // ---- GORGET: a throat collar, two overlapping lames ---------------
+    {
+        let g = group(commands, bones.torso, Vec3::new(0.0, 0.70, 0.0));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.070, 0.28));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::new(0.0, 0.055, 0.0), Quat::IDENTITY, Vec3::new(0.26, 0.055, 0.24));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, 0.090, 0.0), Quat::IDENTITY, Vec3::new(0.245, 0.016, 0.225));
+        set(1, g);
+    }
+    // ---- CUIRASS FRONT: a breastplate with a medial ridge -------------
+    {
+        let g = group(commands, bones.torso, Vec3::new(0.0, 0.46, 0.13));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.42, 0.34, 0.20));
+        // the keel - a real breastplate is not flat, and this one line
+        // is what says so
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.0, 0.085), Quat::IDENTITY, Vec3::new(0.028, 0.30, 0.045));
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.155, 0.03), Quat::IDENTITY, Vec3::new(0.36, 0.022, 0.16));
+        for sx in [-1.0_f32, 1.0] {
+            for k in 0..3 {
+                piece(commands, g, kit.ball.clone(), rivet.clone(), Vec3::new(sx * 0.175, 0.10 - k as f32 * 0.10, 0.04), Quat::IDENTITY, Vec3::splat(0.020));
+            }
+        }
+        set(2, g);
+    }
+    // ---- CUIRASS BACK -------------------------------------------------
+    {
+        let g = group(commands, bones.torso, Vec3::new(0.0, 0.46, -0.12));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.40, 0.33, 0.18));
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.150, -0.02), Quat::IDENTITY, Vec3::new(0.34, 0.022, 0.14));
+        piece(commands, g, kit.cube.clone(), steel.clone(), Vec3::new(0.0, 0.0, -0.080), Quat::IDENTITY, Vec3::new(0.045, 0.28, 0.030));
+        set(3, g);
+    }
+    // ---- FAULD: SEGMENTED lames round the waist ----------------------
+    //
+    // The one piece that has to be built as a run rather than a shell -
+    // a fauld is a stack of hoops and drawing it as one skirt would lose
+    // the only thing that identifies it.
+    {
+        let g = group(commands, bones.torso, Vec3::new(0.0, 0.20, 0.0));
+        for k in 0..3 {
+            let y = -k as f32 * 0.055;
+            let r = 0.30 + k as f32 * 0.020;
+            piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::new(0.0, y, 0.0), Quat::IDENTITY, Vec3::new(r, 0.045, r * 0.82));
+            piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, y - 0.026, 0.0), Quat::IDENTITY, Vec3::new(r * 1.02, 0.010, r * 0.84));
+        }
+        set(4, g);
+    }
+    // ---- PELVIS PLATE: a shaped front guard --------------------------
+    {
+        let g = group(commands, bones.torso, Vec3::new(0.0, 0.06, 0.10));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.30, 0.16, 0.14));
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, -0.055, 0.045), Quat::IDENTITY, Vec3::new(0.24, 0.018, 0.06));
+        set(5, g);
+    }
+    // ---- PAULDRONS: a cap plus two lames, on the CLAVICLE -------------
+    for (i, (idx, bone, sx)) in [(6usize, bones.clav_l, -1.0_f32), (7, bones.clav_r, 1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let _ = i;
+        let g = group(commands, bone, Vec3::new(sx * 0.045, 0.03, 0.0));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.24, 0.20, 0.26));
+        // two lames stepping down the arm - the layered read
+        for k in 0..2 {
+            let d = 0.055 + k as f32 * 0.050;
+            piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(sx * d * 0.5, -d, 0.0), Quat::IDENTITY, Vec3::new(0.21 - k as f32 * 0.030, 0.055, 0.23 - k as f32 * 0.030));
+            piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(sx * d * 0.5, -d - 0.026, 0.0), Quat::IDENTITY, Vec3::new(0.21 - k as f32 * 0.030, 0.010, 0.23 - k as f32 * 0.030));
+        }
+        piece(commands, g, kit.ball.clone(), rivet.clone(), Vec3::new(sx * 0.10, 0.055, 0.0), Quat::IDENTITY, Vec3::splat(0.028));
+        set(idx, g);
+    }
+    // ---- REREBRACE (upper arm) / VAMBRACE (forearm): tapered tubes ----
+    for (idx, bone) in [(8usize, bones.arm_l[0]), (9, bones.arm_r[0])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.10, 0.0));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.135, 0.16, 0.135));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, 0.085, 0.0), Quat::IDENTITY, Vec3::new(0.145, 0.014, 0.145));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, -0.085, 0.0), Quat::IDENTITY, Vec3::new(0.130, 0.014, 0.130));
+        set(idx, g);
+    }
+    for (idx, bone) in [(10usize, bones.arm_l[1]), (11, bones.arm_r[1])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.10, 0.0));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.125, 0.15, 0.125));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, -0.080, 0.0), Quat::IDENTITY, Vec3::new(0.135, 0.014, 0.135));
+        // the cop over the elbow end
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(0.0, 0.095, 0.0), Quat::IDENTITY, Vec3::new(0.145, 0.085, 0.145));
+        set(idx, g);
+    }
+    // ---- GAUNTLETS: a cuff, a back plate, and knuckle lames -----------
+    for (idx, bone) in [(12usize, bones.arm_l[2]), (13, bones.arm_r[2])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.03, 0.0));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::new(0.0, 0.035, 0.0), Quat::IDENTITY, Vec3::new(0.125, 0.055, 0.125));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, 0.065, 0.0), Quat::IDENTITY, Vec3::new(0.135, 0.012, 0.135));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(0.0, -0.035, 0.020), Quat::IDENTITY, Vec3::new(0.115, 0.075, 0.13));
+        for k in 0..2 {
+            piece(commands, g, kit.cube.clone(), steel.clone(), Vec3::new(0.0, -0.055 - k as f32 * 0.030, 0.045), Quat::IDENTITY, Vec3::new(0.105, 0.016, 0.055));
+        }
+        set(idx, g);
+    }
+    // ---- TASSETS: hanging thigh guards, on the THIGH bone -------------
+    for (idx, bone, sx) in [(14usize, bones.leg_l[0], -1.0_f32), (15, bones.leg_r[0], 1.0)] {
+        let g = group(commands, bone, Vec3::new(sx * 0.02, -0.045, 0.02));
+        for k in 0..2 {
+            let y = -k as f32 * 0.055;
+            piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(0.0, y, 0.0), Quat::IDENTITY, Vec3::new(0.175, 0.045, 0.155));
+            piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, y - 0.026, 0.0), Quat::IDENTITY, Vec3::new(0.175, 0.009, 0.155));
+        }
+        set(idx, g);
+    }
+    // ---- CUISSES: thigh tubes ----------------------------------------
+    for (idx, bone) in [(16usize, bones.leg_l[0]), (17, bones.leg_r[0])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.16, 0.01));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.165, 0.15, 0.165));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, -0.085, 0.0), Quat::IDENTITY, Vec3::new(0.170, 0.014, 0.170));
+        set(idx, g);
+    }
+    // ---- POLEYNS: knee cops with a side fan --------------------------
+    for (idx, bone, sx) in [(18usize, bones.leg_l[1], -1.0_f32), (19, bones.leg_r[1], 1.0)] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.005, 0.045));
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.155, 0.145, 0.145));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, 0.0, 0.055), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.120, 0.014, 0.120));
+        // the fan, outboard - the detail that makes a knee cop read as
+        // armour rather than as a kneepad
+        piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(sx * 0.075, -0.010, -0.010), Quat::IDENTITY, Vec3::new(0.075, 0.11, 0.10));
+        set(idx, g);
+    }
+    // ---- GREAVES: shin tubes ------------------------------------------
+    for (idx, bone) in [(20usize, bones.leg_l[1]), (21, bones.leg_r[1])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.16, 0.01));
+        piece(commands, g, kit.cyl.clone(), shell.clone(), Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.145, 0.14, 0.145));
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, -0.080, 0.0), Quat::IDENTITY, Vec3::new(0.150, 0.014, 0.150));
+        piece(commands, g, kit.cube.clone(), trim.clone(), Vec3::new(0.0, 0.0, 0.075), Quat::IDENTITY, Vec3::new(0.026, 0.24, 0.030));
+        set(idx, g);
+    }
+    // ---- SABATONS: layered foot lames ---------------------------------
+    for (idx, bone) in [(22usize, bones.leg_l[2]), (23, bones.leg_r[2])] {
+        let g = group(commands, bone, Vec3::new(0.0, -0.025, 0.045));
+        for k in 0..3 {
+            let z = k as f32 * 0.055;
+            piece(commands, g, kit.ball.clone(), shell.clone(), Vec3::new(0.0, -k as f32 * 0.008, z), Quat::IDENTITY, Vec3::new(0.145 - k as f32 * 0.018, 0.075, 0.075));
+        }
+        piece(commands, g, kit.cyl.clone(), trim.clone(), Vec3::new(0.0, 0.015, -0.030), Quat::IDENTITY, Vec3::new(0.150, 0.012, 0.100));
+        set(idx, g);
+    }
+    out
+}
+
+/// The bones `spawn_armor_plates` mounts to. A struct rather than eight
+/// arguments, because getting two of them the wrong way round would put
+/// a greave on a forearm and the compiler would not care.
+struct ArmorBones {
+    head: Entity,
+    torso: Entity,
+    clav_l: Entity,
+    clav_r: Entity,
+    arm_l: [Entity; 3],
+    arm_r: [Entity; 3],
+    leg_l: [Entity; 3],
+    leg_r: [Entity; 3],
 }
 
 /// Build ONE soldier body - root through the spine-mounted weapon set.
@@ -9922,6 +10164,22 @@ fn spawn_soldier_body(
         weapons[wi] = model;
     }
     spawn_class_silhouette(commands, kit, look, torso, class);
+    // §C tier 2: the 24 plates, each on the bone it protects.
+    let armor_plates = spawn_armor_plates(
+        commands,
+        kit,
+        look,
+        &ArmorBones {
+            head,
+            torso,
+            clav_l: clavs[0],
+            clav_r: clavs[1],
+            arm_l,
+            arm_r,
+            leg_l,
+            leg_r,
+        },
+    );
     SoldierParts {
         root,
         leg_l,
@@ -9935,6 +10193,7 @@ fn spawn_soldier_body(
         arm_r,
         weapon_root,
         weapons,
+        armor_plates,
         helmet_socket: hat_socket,
     }
 }
@@ -10100,6 +10359,7 @@ fn spawn_fighter_rigs(
             arm_r,
             weapon_root,
             weapons,
+            armor_plates,
             // §8.1: a live fighter's helmet is mounted and never touched
             // again - only the Forge turntable needs the socket back.
             helmet_socket: _,
@@ -10185,6 +10445,7 @@ fn spawn_fighter_rigs(
             shield,
             armor_rig,
             scout_rig,
+            armor_plates,
             mech_leg_armor: [la_l.roots, la_r.roots],
             mech_detach_70: [hull_det.skirt_l, hull_det.skirt_r, la_l.thigh_plate],
             mech_detach_40: [la_l.shin_plate, hull_det.drum_r, hull_det.antenna],
@@ -10795,6 +11056,7 @@ fn setup(
             arm_r: parts.arm_r,
             class_rigs,
             helmets,
+            armor_plates: parts.armor_plates,
         });
     }
 
@@ -14002,6 +14264,23 @@ fn sync_fighters(
                 Visibility::Hidden
             };
         }
+        // §C tier 2: the harness. Each plate shows exactly when it is
+        // equipped AND the soldier's own body is showing - a pilot
+        // inside a chassis is not wearing a pauldron in any sense the
+        // viewer can see, and leaving them on would poke plate through
+        // the hull.
+        {
+            let wearing = !f.armor_set.is_mech();
+            for (k, p) in sim::ArmorPiece::ALL.into_iter().enumerate() {
+                if let Ok((_, mut v)) = parts.get_mut(rig.armor_plates[k]) {
+                    *v = if wearing && f.armor_pieces.has(p) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                }
+            }
+        }
         // §owner AGILE SUPPORT MECH: and the light chassis while THAT is.
         // Exactly one of the two can be visible, which is why both are
         // written from the same rmor_set rather than one of them
@@ -15219,6 +15498,18 @@ fn forge_preview_sync(
         // emissive parity with the live rig's stripe (x0.4), so the
         // card's tunic glows exactly like the field one
         mat.emissive = LinearRgba::new(tr * 0.4, tg * 0.4, tb * 0.4, 1.0);
+    }
+    // §C tier 2: the harness, live. Without this the armoury page is a
+    // spreadsheet with a mannequin beside it - the whole point of a
+    // turntable is that you SEE the decision.
+    for (k, p) in sim::ArmorPiece::ALL.into_iter().enumerate() {
+        if let Ok(mut v) = vis.get_mut(fp.armor_plates[k]) {
+            *v = if sel.armor.has(p) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
     }
     // §8.1: the picked helmet, and only that one
     for (i, e) in fp.helmets.iter().enumerate() {
@@ -23053,6 +23344,37 @@ mod forge_tests {
                 .filter(|q| q.short_name() == p.short_name())
                 .count();
             assert_eq!(same, 1, "{} is not a unique pill label", p.short_name());
+        }
+    }
+
+    /// §C tier 2: every plate in the harness has GEOMETRY, and the
+    /// arrays that carry it are indexed by the same position the
+    /// equipped bitmask uses.
+    ///
+    /// The failure this guards is quiet and total: `armor_plates` is a
+    /// bare array indexed by `ArmorPiece::ALL`'s position, and if the
+    /// two ever disagree by one the player equips a greave and a
+    /// pauldron appears. Nothing would crash and nothing would look
+    /// obviously wrong until someone counted.
+    #[test]
+    fn every_plate_has_a_model_slot_at_its_own_index() {
+        // the array the rig carries is exactly the size of the harness
+        assert_eq!(
+            sim::ARMOR_PIECES,
+            sim::ArmorPiece::ALL.len(),
+            "the plate array and the piece list must be the same length"
+        );
+        // and the index a piece occupies in ALL is the index the bitmask
+        // uses - the one relationship the whole mapping rests on
+        for (k, p) in sim::ArmorPiece::ALL.into_iter().enumerate() {
+            let mut only = sim::ArmorLoadout::EMPTY;
+            only.set(p, true);
+            assert_eq!(
+                only.0,
+                1u32 << k,
+                "{} sits at index {k} in ALL but its bit is elsewhere",
+                p.name()
+            );
         }
     }
 
