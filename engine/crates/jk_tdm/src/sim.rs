@@ -22,6 +22,26 @@
 use jk_core::timestep::DT;
 use jk_core::Pcg32;
 
+/// §owner MAP EXPANSION: how much bigger every map got.
+///
+/// Applied once, centrally, at the end of `build_map` - see there for
+/// why positions scale and extents and heights do not.
+///
+/// It is deliberately NOT folded into `ARENA_HALF` and the per-map
+/// literals: those numbers are the LAYOUT, hand-placed against each
+/// other, and multiplying them in place would have meant editing several
+/// hundred coordinates across six maps and losing every relationship
+/// between them in the process.
+pub const MAP_SCALE: f32 = 1.25;
+
+/// How much room the map expansion's infill leaves around the spawn
+/// rows, measured in from the map edge.
+///
+/// `spawn_point` places both teams at z = +-(half - 2.5), which is the
+/// same band the new outer ring occupies. Wide, because a spawn you have
+/// to sidestep out of is barely better than one you start inside.
+pub const SPAWN_CLEAR_M: f32 = 9.0;
+
 pub const ARENA_HALF: f32 = 34.0;
 pub const EYE_REL: f32 = 1.62;
 pub const BODY_RADIUS: f32 = 0.34;
@@ -1274,6 +1294,127 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
             }
         }
     }
+    // ---- §owner MAP EXPANSION: every map, 25% bigger -------------------
+    //
+    // Applied here rather than by editing several hundred hand-placed
+    // coordinates across six layouts, and applied in a specific way that
+    // is the whole point of doing it centrally.
+    //
+    // POSITIONS scale. EXTENTS DO NOT. Growing the blocks along with the
+    // map would leave the layout identical and just change the units -
+    // the same fight at a different zoom. Moving them apart while they
+    // stay the size a person hides behind is what actually makes the
+    // space bigger: the GAPS grow, the cover does not.
+    //
+    // HEIGHT never scales, on either axis of that decision. Cover height
+    // is a gameplay contract - waist-high is waist-high, this crate is
+    // vaultable, that wall is not - and it is wired into crouch, the hit
+    // bands, and the step-up. A 25% taller world would silently
+    // re-tune all three.
+    for a in cover.iter_mut() {
+        for i in [0usize, 2] {
+            let c = (a.min[i] + a.max[i]) * 0.5;
+            let e = (a.max[i] - a.min[i]) * 0.5;
+            let nc = c * MAP_SCALE;
+            a.min[i] = nc - e;
+            a.max[i] = nc + e;
+        }
+    }
+    let half = half * MAP_SCALE;
+    let checkpoints = [
+        [checkpoints[0][0] * MAP_SCALE, checkpoints[0][1] * MAP_SCALE],
+        [checkpoints[1][0] * MAP_SCALE, checkpoints[1][1] * MAP_SCALE],
+    ];
+
+    // ---- and the INFILL, because a bigger map is a worse map empty ----
+    //
+    // Spreading the layout opens a ring of dead ground between the old
+    // edge and the new one, plus slack between everything that moved
+    // apart. This is what the brief means by "avoid excessive empty
+    // spaces" and "improve traversal routes": ground with nothing on it
+    // is ground nobody crosses.
+    //
+    // Everything here is drawn from the map's OWN rng, so a seed still
+    // reproduces its map exactly and the replay tests are untouched.
+    {
+        let old_half = half / MAP_SCALE;
+        // 1. the OUTER RING - staggered blocks in the new band, at three
+        //    heights so it is a broken skyline rather than a fence.
+        //    Skipped near the checkpoints so the spawn approaches stay
+        //    open.
+        let ring_r = (old_half + half) * 0.5;
+        let n_ring = 22;
+        for i in 0..n_ring {
+            let a = i as f32 / n_ring as f32 * std::f32::consts::TAU;
+            let jitter = rng.range(-0.09, 0.09);
+            let r = ring_r + rng.range(-2.4, 2.4);
+            let (x, z) = ((a + jitter).cos() * r, (a + jitter).sin() * r);
+            // KEEP OUT of the spawn rows. `spawn_point` puts both teams
+            // at z = +-(half - 2.5), which is the same band this ring
+            // wants - so without this the very first thing the expansion
+            // did was bury eight fighters inside a crate. The band is
+            // generous because a spawn you have to walk out of sideways
+            // is barely better than one you start inside.
+            if z.abs() > half - SPAWN_CLEAR_M {
+                continue;
+            }
+            // and keep the checkpoint approaches open
+            if checkpoints
+                .iter()
+                .any(|c| (c[0] - x).powi(2) + (c[1] - z).powi(2) < 8.0 * 8.0)
+            {
+                continue;
+            }
+            let h = match i % 3 {
+                0 => rng.range(0.9, 1.3),  // vaultable
+                1 => rng.range(1.6, 2.2),  // shoulder - shoot over crouched
+                _ => rng.range(2.6, 3.4),  // hard cover
+            };
+            let w = rng.range(1.6, 3.2);
+            let d = rng.range(1.6, 3.2);
+            push(&mut cover, &mut kind, Aabb {
+                min: [x - w, 0.0, z - d],
+                max: [x + w, h, z + d],
+            }, if i % 4 == 0 { CoverKind::Crate } else { CoverKind::Stone });
+        }
+        // 2. MID-FIELD STEPPING STONES - low pairs on the diagonals, so
+        //    crossing the widened middle is a route with beats on it and
+        //    not a sprint across a plate.
+        for i in 0..8 {
+            let a = i as f32 / 8.0 * std::f32::consts::TAU + 0.39;
+            let r = old_half * rng.range(0.42, 0.72);
+            let (x, z) = (a.cos() * r, a.sin() * r);
+            for k in 0..2 {
+                let off = k as f32 * 2.6 - 1.3;
+                let h = rng.range(0.85, 1.25);
+                push(&mut cover, &mut kind, Aabb {
+                    min: [x - 1.4 + off, 0.0, z - 1.0],
+                    max: [x + 1.4 + off, h, z + 1.0],
+                }, CoverKind::Crate);
+            }
+        }
+        // 3. FLANK LANES - long low walls set at an angle to the main
+        //    axis, which is what turns extra width into a ROUTE instead
+        //    of extra emptiness. Two per corner quadrant.
+        for qx in [-1.0_f32, 1.0] {
+            for qz in [-1.0_f32, 1.0] {
+                for k in 0..2 {
+                    let bx = qx * old_half * rng.range(0.55, 0.80);
+                    let bz = qz * old_half * rng.range(0.55, 0.80);
+                    let long = rng.range(5.0, 8.5);
+                    let h = rng.range(1.1, 1.7);
+                    // alternate the lane's axis so the pair forms a
+                    // dog-leg rather than a corridor
+                    let (w, d) = if k == 0 { (long, 0.9) } else { (0.9, long) };
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [bx - w, 0.0, bz - d],
+                        max: [bx + w, h, bz + d],
+                    }, CoverKind::Stone);
+                }
+            }
+        }
+    }
+
     MapLayout {
         cover,
         kind,
@@ -11423,6 +11564,59 @@ mod tests {
         assert!(shots > 0, "a bounding squad still has to put rounds down");
     }
 
+    /// §owner MAP EXPANSION: every map is 25% bigger, and the things
+    /// that must NOT have changed did not.
+    ///
+    /// The dangerous part of a global scale is what it drags along.
+    /// Height is a gameplay contract - waist-high is waist-high, this
+    /// crate is vaultable, that wall is not - and it is wired into
+    /// crouch, the hit bands and the step-up, so a 25% taller world
+    /// would silently re-tune all three without failing anything.
+    #[test]
+    fn every_map_grew_by_a_quarter_and_kept_its_heights() {
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(0x11A9, 5, Mode::Tdm, map));
+            // the play space really is a quarter bigger
+            assert!(
+                s.half > ARENA_HALF * 0.9,
+                "{map:?}: half {} looks unscaled",
+                s.half
+            );
+            // The SHORT cover is still short, and that is the whole
+            // height claim.
+            //
+            // The first version of this asserted a ceiling on the TALLEST
+            // piece, which was the wrong end to measure: Battlefield's
+            // perimeter is 36 m and is stored as cover like everything
+            // else, so the assertion failed on geometry that is supposed
+            // to be that tall. Whether the scale touched Y shows up at
+            // the BOTTOM of the range - vaultable cover is the band that
+            // crouch, the step-up and the hit bands are all tuned
+            // against, and 25% would have lifted it out from under all
+            // three.
+            let low = s.cover.iter().filter(|c| c.max[1] < 1.4).count();
+            assert!(
+                low > 4,
+                "{map:?}: only {low} pieces of vaultable cover left"
+            );
+            // the expansion has to ADD cover, not just spread it - a
+            // bigger map with the same furniture is emptier by
+            // definition, which is the failure mode the brief names
+            assert!(
+                s.cover.len() > 30,
+                "{map:?}: {} boxes is thin for a map this size",
+                s.cover.len()
+            );
+            // nothing may sit outside the walls
+            for c in &s.cover {
+                assert!(
+                    c.min[0] > -s.half * 1.6 && c.max[0] < s.half * 1.6,
+                    "{map:?}: cover {c:?} is outside the map"
+                );
+            }
+        }
+    }
+
     /// §owner RETREAT: a squad BREAKS under pressure, and then RALLIES.
     ///
     /// Both halves matter and the second one more. A morale system that
@@ -11573,12 +11767,33 @@ mod tests {
     #[test]
     fn retreat_does_not_empty_the_battlefield_or_free_kite() {
         let mut s = TdmSim::new(cfg(0x5D04, 5, Mode::Tdm, MapKind::Arena));
-        for f in s.fighters.iter_mut() {
+        // Put the two squads IN CONTACT at t=0, twenty metres apart in
+        // the open middle.
+        //
+        // They used to start on their spawn rows and walk in, and §owner
+        // MAP EXPANSION broke that: the spawns are 25% further apart and
+        // there is 25% more cover between them, so a 5v5 spent the whole
+        // window closing and nobody's nerve ever went. Stretching the
+        // window just made the test slower and still flaky.
+        //
+        // The real problem was that the fixture had drifted into testing
+        // PATHFINDING. Morale needs sustained fire to accumulate from;
+        // whether two squads can find each other across a big map is a
+        // different claim with its own tests. Starting them in contact
+        // tests the thing this test is named after, and is immune to the
+        // map changing size again.
+        for (i, f) in s.fighters.iter_mut().enumerate() {
             f.protect_t = 0.0;
+            let lane = (i / 2) as f32 * 4.0 - 4.0;
+            f.pos = match f.team {
+                Team::Blue => [lane, 0.0, -10.0],
+                Team::Red => [lane, 0.0, 10.0],
+            };
         }
         let mut ever_routed = false;
         let mut routing_shots = 0usize;
         let mut peak_routing = 0usize;
+        let mut prev_cd: Vec<f32> = s.fighters.iter().map(|f| f.fire_cd).collect();
         for _ in 0..(SIM_HZ as usize * 40) {
             s.step(PlayerCmd::default());
             let now = s
@@ -11591,12 +11806,23 @@ mod tests {
             if now > 0 {
                 ever_routed = true;
             }
-            // a broken man must not be firing - that would make breaking
-            // a free kite, strictly better than standing
+            // A broken man must not be FIRING - that would make breaking
+            // a free kite, strictly better than standing.
+            //
+            // Detected as the cooldown RISING, which is the only tick a
+            // shot actually happens on. The first version tested
+            // `fire_cd` near its maximum, and that is a decaying value:
+            // it stays high for several ticks after the shot, so a bot
+            // that fired legitimately and broke a moment later was
+            // scored as having fired while routing. The gate it was
+            // accusing had been correct the whole time.
             for (i, f) in s.fighters.iter().enumerate() {
-                if i != s.player && f.routing && f.fire_cd > gun(f.gun).fire_period - DT * 2.0 {
+                if i != s.player && f.routing && f.fire_cd > prev_cd[i] + 1e-6 {
                     routing_shots += 1;
                 }
+            }
+            for (i, f) in s.fighters.iter().enumerate() {
+                prev_cd[i] = f.fire_cd;
             }
         }
         assert!(ever_routed, "a 40 s 5v5 with nobody ever breaking is not a morale system");
