@@ -2408,6 +2408,9 @@ struct VmRig {
     /// (stowed) carried arsenal while piloting
     mech_turret: Entity,
     mech_pod: Entity,
+    /// §owner MECHANICAL MEDIC's two mounts, first person.
+    plasma_bow: Entity,
+    repair_emitter: Entity,
 }
 
 /// Extra weapon greebles that only show while aiming - the ADS detail pass.
@@ -4362,10 +4365,34 @@ fn weapon_strip(
     let strip_fade = if *idle_t > 4.0 { 0.45 } else { 1.0 };
     for (cell, mut t, mut tc) in &mut q {
         let (name, active) = if in_mech {
-            match cell.0 {
-                0 => (format!("TURRET {}", p.mech_rounds), cur == 0),
-                1 => (format!("ROCKETS {}", p.pod_ammo), cur == 1),
-                _ => {
+            // §owner: the strip is built from the CHASSIS's own mount
+            // list, not from a hardcoded heavy pair.
+            //
+            // It read "TURRET 0 / ROCKETS 0" inside a Mechanical Medic -
+            // two mounts it does not have, both showing an ammo count it
+            // does not use, both in the empty-magazine danger colour.
+            // `MechWeapon::for_set` existed for exactly this and was
+            // never wired to it, which is the most ordinary way a
+            // feature ends up half-built: the data was right and nothing
+            // asked it the question.
+            let mounts = sim::MechWeapon::for_set(p.armor_set);
+            match mounts.get(cell.0) {
+                Some(w) => {
+                    // ammo where a mount HAS ammo, heat where it does
+                    // not. A count of zero on a weapon that never counts
+                    // is worse than no number at all.
+                    let label = match w {
+                        sim::MechWeapon::Gatling => format!("TURRET {}", p.mech_rounds),
+                        sim::MechWeapon::Rockets => format!("ROCKETS {}", p.pod_ammo),
+                        sim::MechWeapon::Autocannon => "AUTOCANNON".to_string(),
+                        sim::MechWeapon::Plasma => {
+                            format!("PLASMA BOW  {:.0}%", p.gatling_heat * 100.0)
+                        }
+                        sim::MechWeapon::Repair => "REPAIR BEAM".to_string(),
+                    };
+                    (label, p.mech_weapon == *w)
+                }
+                None => {
                     **t = String::new();
                     continue;
                 }
@@ -4525,7 +4552,11 @@ fn equip_hint(set: ArmorSet) -> &'static str {
         // §owner AGILE SUPPORT MECH: the hint names the two things a
         // pilot has to know that the heavy's does not - the cannon has
         // no ammo, and the beam is pointed at friends.
-        ArmorSet::ScoutMech => "MECHANICAL MEDIC BOARDED - LMB: plasma bow (heat, no ammo) - RMB: charged PRECISION shot - 2: REPAIR BEAM - U: DISMOUNT",
+        // At 120 characters this ran off the right edge of the frame and
+        // over the vitals panel. Every other hint here sits near 55, and
+        // that is not a coincidence - it is the width that fits. Cut to
+        // the two facts named above; the strip carries the key numbers.
+        ArmorSet::ScoutMech => "MEDIC BOARDED - bow needs no ammo, beam heals allies",
     }
 }
 
@@ -4678,6 +4709,30 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
 ///
 /// V first, then equip - toggling person AFTER the draw starts would
 /// re-pose mid-pull and confuse what the frames mean.
+/// §owner MEDIC: the light chassis. Third person first so the whole
+/// silhouette reads, then V into the cockpit for the mounts and the HUD,
+/// then the plasma bow held long enough to overheat.
+const MEDIC_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.06)), ..beat(0.4) },
+    CapBeat { snap: Some("01-medic-third-person"), ..beat(1.4) },
+    CapBeat { look: Some((2.4, 0.05)), ..beat(1.8) },
+    CapBeat { snap: Some("02-medic-side-on"), ..beat(2.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(3.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(3.1) },
+    CapBeat { look: Some((0.0, 0.04)), ..beat(3.3) },
+    CapBeat { snap: Some("03-medic-cockpit"), ..beat(4.0) },
+    // hold the trigger through the three-second overheat
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(4.2) },
+    CapBeat { snap: Some("04-plasma-firing"), ..beat(5.4) },
+    CapBeat { snap: Some("05-plasma-venting"), ..beat(7.6) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(7.8) },
+    // and the charged precision shot on RMB
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(10.0) },
+    CapBeat { snap: Some("06-precision-charging"), ..beat(10.5) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(11.0) },
+    CapBeat { end: true, ..beat(11.6) },
+];
+
 const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
@@ -4945,7 +5000,9 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
-        "bow_draw" => BOW_DRAW_BEATS,
+        // §owner MEDIC: the light chassis, in first and third person.
+    "medic" => MEDIC_BEATS,
+    "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
@@ -4987,7 +5044,8 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 22] = [
+const CAPTURE_SCRIPTS: [&str; 23] = [
+    "medic",
     "baseline",
     "idle_life",
     "bow_draw",
@@ -5234,6 +5292,32 @@ fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
         // the subject stays planted where the script put it.
         f.health = MAX_HEALTH;
         f.respawn_t = 0.0;
+    }
+}
+
+/// §owner MEDIC: put the subject in the light chassis for its captures.
+///
+/// Boarding it "properly" would mean walking to a pad, and a pad's
+/// position moves with every map change - so a capture that depended on
+/// finding one would break the next time the layout was touched. This
+/// grants the chassis directly, which is what the capture is FOR: the
+/// thing under test is the model and the HUD, not the pickup path (which
+/// has its own tests).
+///
+/// Capture-harness only, and inert without `JK_CAPTURE`.
+fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
+    let Some(name) = cap.script.as_deref() else { return };
+    if !name.starts_with("medic") {
+        return;
+    }
+    let p = game.sim.player;
+    if let Some(f) = game.sim.fighters.get_mut(p) {
+        f.armor_set = sim::ArmorSet::ScoutMech;
+        f.hull = sim::SCOUT_HULL;
+        f.mech_transition_t = 0.0;
+        f.health = MAX_HEALTH;
+        f.respawn_t = 0.0;
+        f.crouch = false;
     }
 }
 
@@ -6013,6 +6097,7 @@ fn main() {
             PreUpdate,
             (
                 capture_keep_subject_alive,
+                capture_board_medic,
                 capture_input_driver,
                 capture_screenshot_driver,
             )
@@ -7355,6 +7440,120 @@ fn spawn_shield_model(commands: &mut Commands, kit: &ModelKit, see_through: bool
     root
 }
 
+/// §owner PLASMA BOW: the medic's first-person primary.
+///
+/// A BOW, not a cannon, and the silhouette has to say so from the one
+/// angle a pilot ever sees it: two swept limbs, a string of light
+/// between them, and the arrow riding a rail up the middle. Everything
+/// else on this machine is struts and gaps, and the weapon follows the
+/// same rule - open frame, visible mechanism, light where the energy is.
+///
+/// The heavy's mounts are housings with barrels. This is a FRAME with a
+/// field in it, which is the whole contrast.
+fn spawn_plasma_bow_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let mut part = |mesh: Handle<Mesh>,
+                    mat: Handle<StandardMaterial>,
+                    tr: Vec3,
+                    rot: Quat,
+                    sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(root);
+    };
+    // the RISER - held vertical, so it reads as a bow and not a rifle
+    part(kit.cube.clone(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.10), Quat::IDENTITY, Vec3::new(0.075, 0.30, 0.10));
+    part(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, 0.15), Quat::IDENTITY, Vec3::new(0.055, 0.22, 0.045));
+    // the GRIP and its wrap
+    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, -0.055, 0.055), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.13, 0.055));
+    // two SWEPT LIMBS, each three shortening segments - the recurve, and
+    // the same construction the war bow uses so the two read as cousins
+    for sd in [-1.0_f32, 1.0] {
+        for (dy, dz, w, h, d) in [
+            (0.155_f32, 0.0_f32, 0.05_f32, 0.16_f32, 0.075_f32),
+            (0.29, -0.045, 0.042, 0.13, 0.06),
+            (0.395, -0.115, 0.034, 0.10, 0.048),
+        ] {
+            part(kit.cube.clone(), kit.mech_khaki.clone(),
+                Vec3::new(0.0, sd * dy, 0.10 + dz), Quat::from_rotation_x(sd * -0.22),
+                Vec3::new(w, h, d));
+        }
+        // the emitter node at each tip, where the string's light starts
+        part(kit.cyl.clone(), kit.core_glow.clone(),
+            Vec3::new(0.0, sd * 0.455, 0.02), Quat::from_rotation_z(FRAC_PI_2),
+            Vec3::new(0.048, 0.055, 0.048));
+        part(kit.cube.clone(), kit.mech_metal.clone(),
+            Vec3::new(0.0, sd * 0.455, 0.02), Quat::IDENTITY, Vec3::new(0.055, 0.05, 0.055));
+    }
+    // the STRING - a bar of light tip to tip. On a plasma bow the string
+    // IS the energy, so it is emissive rather than cord-coloured.
+    part(kit.cube.clone(), kit.core_glow.clone(), Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY, Vec3::new(0.012, 0.91, 0.012));
+    // the ARROW RAIL and the bolt sitting on it
+    part(kit.cube.clone(), kit.mech_metal.clone(), Vec3::new(0.045, 0.0, 0.20), Quat::IDENTITY, Vec3::new(0.020, 0.030, 0.34));
+    part(kit.cyl.clone(), kit.core_glow.clone(), Vec3::new(0.045, 0.0, 0.26), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.022, 0.30, 0.022));
+    // COOLING fins down the back of the riser, and the capacitor bank
+    for k in 0..4 {
+        part(kit.cube.clone(), kit.mech_metal.clone(),
+            Vec3::new(0.0, -0.10 + k as f32 * 0.055, -0.02), Quat::IDENTITY,
+            Vec3::new(0.085, 0.012, 0.075));
+    }
+    part(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, -0.055), Quat::IDENTITY, Vec3::new(0.065, 0.20, 0.055));
+    part(kit.cube.clone(), kit.med_glow.clone(), Vec3::new(0.036, 0.0, -0.055), Quat::IDENTITY, Vec3::new(0.010, 0.16, 0.030));
+    root
+}
+
+/// §owner REPAIR BEAM: the medic's secondary, first person.
+///
+/// A projector, not a gun: a wide dish with an emitter node in it and
+/// the coil stack behind. The silhouette should say PROJECTS where the
+/// bow says FIRES, so a pilot can tell which mount is up without
+/// reading the strip.
+fn spawn_repair_emitter_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let mut part = |mesh: Handle<Mesh>,
+                    mat: Handle<StandardMaterial>,
+                    tr: Vec3,
+                    rot: Quat,
+                    sc: Vec3| {
+        commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mat),
+                Transform { translation: tr, rotation: rot, scale: sc },
+            ))
+            .set_parent(root);
+    };
+    part(kit.cube.clone(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.08), Quat::IDENTITY, Vec3::new(0.14, 0.14, 0.32));
+    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, -0.075, 0.02), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.14, 0.055));
+    // the DISH, its recess, and the node
+    part(kit.cyl.clone(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.0, 0.29), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.30, 0.055, 0.30));
+    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.0, 0.305), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.045, 0.22));
+    part(kit.ball.clone(), kit.barrier_edge.clone(), Vec3::new(0.0, 0.0, 0.32), Quat::IDENTITY, Vec3::splat(0.10));
+    // four struts holding the dish off the body
+    for k in 0..4 {
+        let a = k as f32 * std::f32::consts::TAU / 4.0 + 0.78;
+        part(kit.cube.clone(), kit.mech_metal.clone(),
+            Vec3::new(a.cos() * 0.145, a.sin() * 0.145, 0.235), Quat::from_rotation_z(a),
+            Vec3::new(0.075, 0.022, 0.11));
+    }
+    // coil stack behind, and its lit seam
+    for k in 0..3 {
+        part(kit.cyl.clone(), kit.mech_metal.clone(),
+            Vec3::new(0.0, 0.0, -0.02 + k as f32 * 0.055), Quat::from_rotation_x(FRAC_PI_2),
+            Vec3::new(0.165, 0.028, 0.165));
+    }
+    part(kit.cube.clone(), kit.barrier_edge.clone(), Vec3::new(0.0, 0.085, 0.08), Quat::IDENTITY, Vec3::new(0.014, 0.012, 0.26));
+    root
+}
+
 /// §owner AGILE SUPPORT MECH: the light chassis.
 ///
 /// Built against the heavy as its opposite in every line. Where that one
@@ -7472,6 +7671,155 @@ fn spawn_scout_chassis(commands: &mut Commands, kit: &ModelKit, ally: bool) -> E
         // and a thruster in the calf - this one really does need to jink
         part(cyl(), kit.mech_khaki_dk.clone(), Vec3::new(sd * 0.185, -0.16, -0.15), Quat::from_rotation_x(0.42), Vec3::new(0.075, 0.11, 0.075));
         part(cyl(), line.clone(), Vec3::new(sd * 0.185, -0.235, -0.20), Quat::from_rotation_x(0.42), Vec3::new(0.048, 0.020, 0.048));
+    }
+
+    // ---- §owner MEDIC DETAIL PASS --------------------------------------
+    //
+    // Built ON the existing frame rather than replacing it: the spine,
+    // the exposed core, the digitigrade legs and the plate placement all
+    // stay, and everything below is added between and around them.
+    //
+    // The identity rule for every piece here is the OPPOSITE of the
+    // heavy's. Where that machine answers "make it look heavy" with mass
+    // - thicker plates, bigger housings - this one answers "make it look
+    // fast" with EXPOSURE: small plates over visible mechanism, and gaps
+    // you can see the workings through. A part that would be a solid
+    // block on the heavy is a strut with something behind it here.
+    {
+        // SERVO MOTORS at every major joint. The single clearest way to
+        // say "this limb is driven" - a drum with a cable leaving it.
+        // Small, because the whole point of this chassis is that its
+        // hardware is compact.
+        for (sx, sy, sz, ax) in [
+            (0.30_f32, 0.78_f32, 0.0_f32, 1.0_f32),
+            (-0.30, 0.78, 0.0, 1.0),
+            (0.40, 0.46, 0.03, 1.0),
+            (-0.40, 0.46, 0.03, 1.0),
+            (0.17, 0.20, 0.0, 0.0),
+            (-0.17, 0.20, 0.0, 0.0),
+            (0.185, -0.10, 0.13, 0.0),
+            (-0.185, -0.10, 0.13, 0.0),
+        ] {
+            let rot = if ax > 0.5 {
+                Quat::from_rotation_z(FRAC_PI_2)
+            } else {
+                Quat::from_rotation_x(FRAC_PI_2)
+            };
+            part(cyl(), plate.clone(), Vec3::new(sx, sy, sz), rot, Vec3::new(0.105, 0.075, 0.105));
+            part(cyl(), kit.mech_shadow.clone(), Vec3::new(sx * 1.06, sy, sz), rot, Vec3::new(0.075, 0.085, 0.075));
+            // the drive cable leaving it
+            part(cyl(), kit.mech_shadow.clone(),
+                Vec3::new(sx * 0.82, sy - 0.055, sz - 0.045), Quat::from_rotation_x(0.6),
+                Vec3::new(0.022, 0.13, 0.022));
+        }
+
+        // SECONDARY ARMOUR - small plates standing off the primary ones,
+        // with a shadow gap behind. Smaller and more numerous than the
+        // heavy's, which is the layering read at this weight class.
+        for (px, py, pz, sx2, sy2, sz2, rot) in [
+            (0.0_f32, 0.78_f32, 0.235_f32, 0.26_f32, 0.14_f32, 0.020_f32, -0.22_f32),
+            (0.0, 0.50, 0.225, 0.34, 0.16, 0.020, -0.22),
+            (0.0, 0.545, -0.245, 0.30, 0.20, 0.020, 0.18),
+            (0.235, 0.62, 0.10, 0.020, 0.26, 0.20, 0.0),
+            (-0.235, 0.62, 0.10, 0.020, 0.26, 0.20, 0.0),
+        ] {
+            part(cube(), plate.clone(), Vec3::new(px, py, pz), Quat::from_rotation_x(rot), Vec3::new(sx2, sy2, sz2));
+            part(cube(), kit.mech_shadow.clone(),
+                Vec3::new(px * 0.94, py, pz - sz2.signum() * 0.014),
+                Quat::from_rotation_x(rot),
+                Vec3::new(sx2 * 1.06, sy2 * 1.06, sz2 * 0.6));
+        }
+
+        // HYDRAULIC PISTONS - thin, and there are more of them than the
+        // heavy has. A light machine gets its strength from linkage
+        // count, not from ram diameter.
+        for sd in [-1.0_f32, 1.0] {
+            for (bx, by, bz, ang, len) in [
+                (0.21_f32, 0.44_f32, -0.10_f32, 0.30_f32, 0.24_f32),
+                (0.135, 0.10, -0.10, -0.25, 0.20),
+                (0.245, -0.20, -0.10, 0.42, 0.22),
+            ] {
+                part(cyl(), kit.mech_khaki_dk.clone(), Vec3::new(sd * bx, by, bz), Quat::from_rotation_x(ang), Vec3::new(0.034, len, 0.034));
+                part(cyl(), kit.mech_metal.clone(),
+                    Vec3::new(sd * bx, by + len * 0.5, bz - ang.sin() * len * 0.5),
+                    Quat::from_rotation_x(ang), Vec3::new(0.020, len * 0.55, 0.020));
+            }
+        }
+
+        // COOLING - fine louvres, in more places and smaller than the
+        // heavy's. This machine sheds heat everywhere because it has no
+        // mass to soak it.
+        for (vx, vy, vz, n, sd) in [
+            (0.20_f32, 0.66_f32, -0.20_f32, 4usize, 1.0_f32),
+            (-0.20, 0.66, -0.20, 4, -1.0),
+            (0.0, 0.30, -0.26, 3, 1.0),
+        ] {
+            for k in 0..n {
+                part(cube(), kit.mech_metal.clone(),
+                    Vec3::new(vx, vy + k as f32 * 0.036, vz),
+                    Quat::from_rotation_x(0.35),
+                    Vec3::new(0.055 * sd.abs(), 0.010, 0.14));
+            }
+        }
+
+        // ENERGY CONDUITS from the core out to both mounts and up the
+        // spine - lit, thin, and following the frame rather than cutting
+        // across it
+        for sd in [-1.0_f32, 1.0] {
+            for (cx, cy, cz, w, h, d) in [
+                (sd * 0.12, 0.60, 0.13, 0.16, 0.012, 0.010),
+                (sd * 0.195, 0.52, 0.13, 0.012, 0.18, 0.010),
+                (sd * 0.30, 0.42, 0.10, 0.20, 0.012, 0.010),
+            ] {
+                part(cube(), line.clone(), Vec3::new(cx, cy, cz), Quat::IDENTITY, Vec3::new(w, h, d));
+            }
+        }
+        for k in 0..3 {
+            part(cube(), line.clone(), Vec3::new(0.0, 0.72 + k as f32 * 0.075, 0.09), Quat::IDENTITY, Vec3::new(0.075, 0.010, 0.010));
+        }
+
+        // BOLTS and FASTENERS - a light frame is BOLTED, and showing the
+        // fasteners is what makes small plates read as removable panels
+        // rather than as a skin
+        for (bx, by, bz) in [
+            (0.0_f32, 0.845_f32, 0.20_f32),
+            (0.0, 0.715, 0.20),
+            (0.20, 0.50, 0.20),
+            (-0.20, 0.50, 0.20),
+            (0.0, 0.375, -0.25),
+        ] {
+            for s in [-1.0_f32, 1.0] {
+                part(ball(), kit.mech_shadow.clone(), Vec3::new(bx + s * 0.075, by, bz), Quat::IDENTITY, Vec3::splat(0.018));
+            }
+        }
+
+        // MAINTENANCE HATCH with a visible latch, and the panel seams
+        // round it. One hatch, in the one place a technician would open.
+        part(cube(), plate.clone(), Vec3::new(0.0, 0.40, -0.245), Quat::IDENTITY, Vec3::new(0.22, 0.17, 0.016));
+        part(cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.40, -0.238), Quat::IDENTITY, Vec3::new(0.235, 0.185, 0.008));
+        part(cube(), kit.mech_metal.clone(), Vec3::new(0.075, 0.40, -0.255), Quat::IDENTITY, Vec3::new(0.030, 0.045, 0.014));
+
+        // INTERNALS seen through the frame - the thing that makes a gap
+        // read as a WINDOW into a machine rather than as a missing part.
+        // Dark blocks and a lit strip, set BEHIND the outer plates.
+        for (ix, iy, iz) in [(0.0_f32, 0.44_f32, 0.02_f32), (0.0, 0.70, 0.02)] {
+            part(cube(), kit.mech_shadow.clone(), Vec3::new(ix, iy, iz), Quat::IDENTITY, Vec3::new(0.20, 0.11, 0.13));
+            part(cube(), kit.mech_metal.clone(), Vec3::new(ix, iy, iz + 0.055), Quat::IDENTITY, Vec3::new(0.16, 0.075, 0.020));
+            part(cube(), line.clone(), Vec3::new(ix, iy - 0.045, iz + 0.062), Quat::IDENTITY, Vec3::new(0.12, 0.008, 0.008));
+        }
+
+        // small ILLUMINATED components scattered where a technician would
+        // put status lamps - never on a silhouette edge, so they read as
+        // detail and never as a team signal
+        for (lx, ly, lz) in [
+            (0.145_f32, 0.83_f32, 0.13_f32),
+            (-0.145, 0.83, 0.13),
+            (0.10, 0.335, 0.15),
+            (-0.10, 0.335, 0.15),
+            (0.0, 0.20, -0.14),
+        ] {
+            part(ball(), line.clone(), Vec3::new(lx, ly, lz), Quat::IDENTITY, Vec3::splat(0.016));
+        }
     }
 
     // ---- MOUNTS: plasma right, repair left ----------------------------
@@ -11908,12 +12256,49 @@ fn setup(
             Visibility::Hidden,
         ))
         .set_parent(vm_root);
+    // §owner MECHANICAL MEDIC's two mounts. Both sit closer and lower
+    // than the heavy's - a light chassis holds its weapons in front of
+    // it rather than bracketed off a hull, and the frame should feel
+    // less occupied because the machine is.
+    let plasma_bow = spawn_plasma_bow_vm(&mut commands, &kit);
+    commands
+        .entity(plasma_bow)
+        .insert((
+            // Small and pushed out. The bow is nearly a metre tall in
+            // its own space and stands VERTICAL, so it eats screen
+            // height where every other weapon eats width - at the
+            // heavy's 0.66 it filled a third of the frame top to bottom.
+            // The mech intrusion sweep does not cover hull mounts (it
+            // bounds the soldier arsenal), so this one is set by eye
+            // against a capture and noted as such.
+            Transform {
+                translation: Vec3::new(0.30, -0.30, -0.62),
+                rotation: Quat::from_rotation_y(PI + 0.10),
+                scale: Vec3::splat(0.40),
+            },
+            Visibility::Hidden,
+        ))
+        .set_parent(vm_root);
+    let repair_emitter = spawn_repair_emitter_vm(&mut commands, &kit);
+    commands
+        .entity(repair_emitter)
+        .insert((
+            Transform {
+                translation: Vec3::new(0.24, -0.24, -0.55),
+                rotation: Quat::from_rotation_y(PI + 0.06),
+                scale: Vec3::splat(0.48),
+            },
+            Visibility::Hidden,
+        ))
+        .set_parent(vm_root);
     commands.insert_resource(VmRig {
         root: vm_root,
         weapons: vm_weapons,
         shield: vm_shield,
         mech_turret,
         mech_pod,
+        plasma_bow,
+        repair_emitter,
     });
 
     // ---- §4.2 projectile arc preview: pixel squares spaced by ARC
@@ -16417,20 +16802,26 @@ fn fp_viewmodel(
     // §C.7: the two hull-mount viewmodels - TURRET (gatling cluster,
     // also stands in for the bot-only autocannon) and the ROCKETS pod,
     // swapped by the selected mount exactly as the weapon strip maps it
-    let pod_sel = p.in_mech() && p.mech_weapon == sim::MechWeapon::Rockets;
-    if let Ok((_, mut v)) = q.get_mut(vm.mech_turret) {
-        *v = if p.in_mech() && !pod_sel {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
-    if let Ok((_, mut v)) = q.get_mut(vm.mech_pod) {
-        *v = if pod_sel {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+    // §owner: FOUR hull-mount viewmodels now, and each shows only for
+    // its own mount. The medic was showing the heavy's gatling because
+    // this branched on "in a mech" and then on rockets - so every mount
+    // that was not the pod fell through to the turret, including two
+    // that belong to a different machine entirely.
+    let sel = if p.in_mech() { Some(p.mech_weapon) } else { None };
+    for (e, want) in [
+        (vm.mech_turret, sim::MechWeapon::Gatling),
+        (vm.mech_pod, sim::MechWeapon::Rockets),
+        (vm.plasma_bow, sim::MechWeapon::Plasma),
+        (vm.repair_emitter, sim::MechWeapon::Repair),
+    ] {
+        if let Ok((_, mut v)) = q.get_mut(e) {
+            // the autocannon has no viewmodel of its own and rides the
+            // turret's, which is the one deliberate fall-through
+            let on = sel == Some(want)
+                || (want == sim::MechWeapon::Gatling
+                    && sel == Some(sim::MechWeapon::Autocannon));
+            *v = if on { Visibility::Inherited } else { Visibility::Hidden };
+        }
     }
     // How drawn the bow is, from the same function the body rig uses so
     // the two views cannot disagree.
@@ -17926,6 +18317,35 @@ MECH  HULL {:.0}  PWR {:.0}{brace}{barrier}{stride}", p.hull, p.armor)
                     format!("POD {} / {}
 [{tubes}]", p.pod_ammo, POD_TUBES)
                 }
+                // §owner MECHANICAL MEDIC: its mounts have no magazine,
+                // so the corner shows what they DO have. Printing a
+                // round count of zero on a weapon that never counts
+                // rounds is worse than printing nothing - it reads as an
+                // empty gun, in the empty-gun colour.
+                sim::MechWeapon::Plasma => {
+                    if p.gatling_vent_t > 0.0 {
+                        format!("PLASMA BOW
+VENTING {:.1}s", p.gatling_vent_t)
+                    } else if p.plasma_charge_t > 0.0 {
+                        format!(
+                            "PRECISION
+CHARGE {:.0}%",
+                            p.plasma_charge_t / sim::PLASMA_CHARGE_S * 100.0
+                        )
+                    } else {
+                        format!("PLASMA BOW
+HEAT {:.0}%", p.gatling_heat * 100.0)
+                    }
+                }
+                sim::MechWeapon::Repair => {
+                    if p.repair_target >= 0 {
+                        format!("REPAIR BEAM
+LINKED  {:.0}%", p.gatling_heat * 100.0)
+                    } else {
+                        format!("REPAIR BEAM
+HEAT {:.0}%", p.gatling_heat * 100.0)
+                    }
+                }
                 _ => {
                     if p.gatling_vent_t > 0.0 {
                         format!("TURRET {}
@@ -18268,15 +18688,27 @@ fn hud_colors(
     if let Ok(mut c) = q.p1().get_single_mut() {
         // §C.7: while piloting, "low" means the MOUNT's own pool, not
         // the stowed rifle's magazine
-        let (a, m) = if p.in_mech() {
+        // §owner MECHANICAL MEDIC: a HEAT weapon has no low-ammo state,
+        // so it must not be painted in the low-ammo colour. The medic's
+        // corner sat permanently red - it reported zero rounds on a
+        // mount that never counts rounds, and red on a HUD is a promise
+        // that something is wrong.
+        //
+        // What IS wrong for a heat mount is venting, so that is what
+        // turns it red. Everything else - including 99% heat - is white,
+        // because a hot weapon that still fires is not a failure state.
+        let danger = if p.in_mech() {
             match p.mech_weapon {
-                sim::MechWeapon::Rockets => (p.pod_ammo as u32, POD_TUBES as u32),
-                _ => (p.mech_rounds, MECH_ROUNDS),
+                sim::MechWeapon::Plasma | sim::MechWeapon::Repair => p.gatling_vent_t > 0.0,
+                sim::MechWeapon::Rockets => {
+                    ammo_is_low(p.pod_ammo as u32, POD_TUBES as u32)
+                }
+                _ => ammo_is_low(p.mech_rounds, MECH_ROUNDS),
             }
         } else {
-            (p.ammo, gun(p.gun).mag)
+            ammo_is_low(p.ammo, gun(p.gun).mag)
         };
-        *c = TextColor(if ammo_is_low(a, m) {
+        *c = TextColor(if danger {
             Color::srgb(1.0, 0.18, 0.15)
         } else {
             Color::WHITE
@@ -22535,6 +22967,37 @@ mod segment_tests {
             "{} hull/s outheals a squad and makes the heavy immortal",
             sim::REPAIR_PER_S
         );
+    }
+
+    /// §owner: the weapon strip shows the mounts a chassis ACTUALLY has.
+    ///
+    /// It showed "TURRET / ROCKETS" inside a Mechanical Medic - two
+    /// mounts it does not carry, both displaying a round count it never
+    /// uses, both in the empty-magazine danger colour.
+    /// `MechWeapon::for_set` had existed since the chassis landed and
+    /// nothing asked it the question, which is the most ordinary way a
+    /// feature ends up half-built: the data was right and no caller
+    /// looked at it.
+    #[test]
+    fn the_weapon_strip_lists_the_chassis_you_are_actually_in() {
+        let heavy = sim::MechWeapon::for_set(sim::ArmorSet::RobotSuit);
+        let medic = sim::MechWeapon::for_set(sim::ArmorSet::ScoutMech);
+        // both chassis fill the same two strip slots, so the UI needs no
+        // per-chassis layout - only per-chassis CONTENT
+        assert_eq!(heavy.len(), 2);
+        assert_eq!(medic.len(), 2);
+        // and they share nothing, so a strip built from the wrong list
+        // is wrong in every cell rather than subtly off in one
+        assert!(medic.iter().all(|w| !heavy.contains(w)));
+        // the mounts that count rounds and the ones that count heat are
+        // disjoint - which is why the corner readout branches on the
+        // mount and not on the chassis
+        for w in medic {
+            assert!(
+                matches!(w, sim::MechWeapon::Plasma | sim::MechWeapon::Repair),
+                "{w:?} has a magazine and the medic has none"
+            );
+        }
     }
 
     /// §owner MECH BARRIER: the two halves of "transparent to me, a wall

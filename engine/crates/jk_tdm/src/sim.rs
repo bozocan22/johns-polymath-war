@@ -3650,14 +3650,34 @@ pub enum MechWeapon {
 }
 
 impl MechWeapon {
-    /// The mounts a chassis actually carries. The two mechs share the
-    /// enum and share NOTHING else: a heavy cannot heal and a scout
-    /// cannot put a rocket downrange, and the weapon strip is built from
-    /// this rather than from a hand-written list per HUD.
+    /// The mounts a chassis puts ON THE STRIP - what the pilot can
+    /// select with 1 and 2, in that order.
+    ///
+    /// This is a UI list, and it is deliberately not the same question
+    /// as `valid_for`: the heavy's autocannon is a real mount that a bot
+    /// picks by range, and it has never had a number key. Treating this
+    /// list as "every mount the chassis can hold" is what broke the bot
+    /// autocannon the first time the two were confused.
     pub fn for_set(s: ArmorSet) -> &'static [MechWeapon] {
         match s {
             ArmorSet::ScoutMech => &[MechWeapon::Plasma, MechWeapon::Repair],
             _ => &[MechWeapon::Gatling, MechWeapon::Rockets],
+        }
+    }
+
+    /// Every mount a chassis can legitimately be HOLDING, strip or not.
+    ///
+    /// Includes the heavy's autocannon, which the bot brain selects by
+    /// range and no player can. The two mechs still share nothing: a
+    /// heavy cannot heal and a medic cannot put a rocket downrange.
+    pub fn valid_for(s: ArmorSet) -> &'static [MechWeapon] {
+        match s {
+            ArmorSet::ScoutMech => &[MechWeapon::Plasma, MechWeapon::Repair],
+            _ => &[
+                MechWeapon::Gatling,
+                MechWeapon::Rockets,
+                MechWeapon::Autocannon,
+            ],
         }
     }
 
@@ -5087,6 +5107,25 @@ impl TdmSim {
             // rather than hanging on a stale index.
             f.repair_target = -1;
             f.plasma_cd = (f.plasma_cd - DT).max(0.0);
+            // §owner: a chassis can only hold a mount it HAS.
+            //
+            // `MechWeapon` defaults to `Gatling`, so anything that put a
+            // fighter into a chassis without also choosing a mount left
+            // them holding a heavy turret - which for a Mechanical Medic
+            // meant the weapon strip, the corner readout and the
+            // viewmodel all showed a weapon that does not exist on the
+            // machine, and the trigger fired it.
+            //
+            // The pickup path does set it. This is the guard for every
+            // other path that ever will: a test fixture, a future spawn
+            // rule, a debug grant. Snapping to the chassis's first mount
+            // is the right repair because `for_set` lists them in the
+            // order the strip does, so the fix lands on slot 1.
+            if f.armor_set.is_mech()
+                && !MechWeapon::valid_for(f.armor_set).contains(&f.mech_weapon)
+            {
+                f.mech_weapon = MechWeapon::for_set(f.armor_set)[0];
+            }
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
                 if f.gatling_vent_t <= 0.0 {
@@ -12204,6 +12243,66 @@ mod tests {
         assert!(s.iter().all(|w| !h.contains(w)), "the mounts must not overlap");
         assert!(s.contains(&MechWeapon::Plasma) && s.contains(&MechWeapon::Repair));
         assert!(h.contains(&MechWeapon::Gatling) && h.contains(&MechWeapon::Rockets));
+    }
+
+    /// §owner: a chassis can only be holding a mount it HAS - and the
+    /// STRIP list and the VALID list are different questions.
+    ///
+    /// Both halves of this were bugs. `MechWeapon` defaults to `Gatling`,
+    /// so anything putting a fighter into a chassis without choosing a
+    /// mount left a Mechanical Medic holding a heavy turret - shown on
+    /// the strip, in the corner readout and as the viewmodel, and it
+    /// fired. Then the first guard used `for_set`, which is the STRIP
+    /// list, and so snapped the bot's autocannon back to the gatling
+    /// every tick: the heavy's autocannon is a real mount that a bot
+    /// picks by range and no player can select.
+    #[test]
+    fn a_chassis_cannot_hold_a_mount_it_does_not_have() {
+        // the strip lists what a PLAYER can pick
+        assert_eq!(MechWeapon::for_set(ArmorSet::RobotSuit).len(), 2);
+        assert!(!MechWeapon::for_set(ArmorSet::RobotSuit).contains(&MechWeapon::Autocannon));
+        // the valid list includes what a BOT can end up holding
+        assert!(MechWeapon::valid_for(ArmorSet::RobotSuit).contains(&MechWeapon::Autocannon));
+        // and the two chassis still share nothing
+        for w in MechWeapon::valid_for(ArmorSet::ScoutMech) {
+            assert!(!MechWeapon::valid_for(ArmorSet::RobotSuit).contains(w));
+        }
+        // the strip is always a subset of what is valid, or a player
+        // could select a mount the guard then takes away
+        for s in [ArmorSet::RobotSuit, ArmorSet::ScoutMech] {
+            for w in MechWeapon::for_set(s) {
+                assert!(MechWeapon::valid_for(s).contains(w), "{w:?} is on the strip but not valid");
+            }
+        }
+
+        // through the real step loop: a medic granted a chassis without
+        // a mount must not be left holding a gatling
+        let mut s = range(0x9301);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_weapon = MechWeapon::Gatling; // the enum default
+        }
+        s.step(PlayerCmd::default());
+        assert_eq!(
+            s.fighters[0].mech_weapon,
+            MechWeapon::Plasma,
+            "the guard must snap an impossible mount to the chassis's first"
+        );
+        // and a heavy holding its autocannon keeps it
+        {
+            let f = &mut s.fighters[1];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_weapon = MechWeapon::Autocannon;
+        }
+        s.step(PlayerCmd::default());
+        assert_eq!(
+            s.fighters[1].mech_weapon,
+            MechWeapon::Autocannon,
+            "the guard must not disarm the bot's own range pick"
+        );
     }
 
     /// §owner: the PLASMA cannon's heat budget replaces ammunition, and
