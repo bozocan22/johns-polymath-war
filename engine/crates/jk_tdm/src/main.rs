@@ -804,6 +804,33 @@ fn segment_data(s: Segment) -> SegmentData {
 }
 
 /// §B.4's non-length proportions, as fractions of total height H.
+/// The waist - where the trunk meets the legs, in root space.
+///
+/// Named because §B.2's trunk split made it load-bearing in two places
+/// at once: the lumbar SPAWNS here, and `sync_fighters` has to subtract
+/// it when writing the thorax's own translation, which is still
+/// expressed in root space. Two bare 0.63s that have to agree is one
+/// too many.
+const WAIST_Y: f32 = 0.63;
+
+/// The thorax's LOCAL height under the lumbar, given the root-space
+/// height it needs to end up at.
+///
+/// A two-line function for a subtraction, and it earns its place: the
+/// first version of the trunk split left the thorax carrying `WAIST_Y`
+/// while its new parent carried it too, which lifted the entire upper
+/// body a full waist off the legs. The rig visibly came apart in a
+/// capture and NOT ONE test failed, because every rig test in this file
+/// measures either an ANGLE (separation, the kinetic chain) or the head
+/// BAND (derived from `gait_pose`, not from the transform hierarchy) -
+/// and neither notices a torso floating in the air.
+///
+/// `thorax_height_is_conserved_across_the_trunk_split` is the guard that
+/// was missing.
+fn thorax_local_y(hip_y: f32, crouch_dip: f32, breath: f32) -> f32 {
+    hip_y - WAIST_Y - crouch_dip + breath
+}
+
 /// §B.2: how much of the trunk's twist the LUMBAR carries, the thorax
 /// taking the remainder.
 ///
@@ -8003,8 +8030,20 @@ fn spawn_soldier_body(
     // is what makes this a pure insertion: every shell, socket, arm and
     // head below hangs off the thorax at the local offsets it always had,
     // so an unposed rig is untouched geometry.
+    // The LUMBAR carries the waist height and the THORAX sits at identity
+    // on top of it - so both twist about the waist, exactly where the
+    // single trunk segment used to.
+    //
+    // Note which one holds `WAIST_Y`. `sync_fighters` writes the thorax's
+    // translation every frame (hip bob, sway, breathing), and that write
+    // is expressed in ROOT space because it always was. Leaving the 0.63
+    // on the thorax as well would add the waist height twice and lift the
+    // whole upper body a full waist off the legs - which is exactly what
+    // the first version of this did, and it is invisible to every test in
+    // this file because they all measure the head band and the separation
+    // ANGLE, neither of which cares where the torso is.
     let lumbar = commands
-        .spawn((Transform::from_xyz(0.0, 0.63, 0.0), Visibility::default()))
+        .spawn((Transform::from_xyz(0.0, WAIST_Y, 0.0), Visibility::default()))
         .set_parent(root)
         .id();
     let torso = commands
@@ -11599,8 +11638,15 @@ fn sync_fighters(
             // (net ±1.5° - which is also all the arm swing an armed
             // carry gets: the upper body moves through the spine, not
             // the shoulders)
-            t.translation.y =
-                hip_y - if f.crouch && !rolling { 0.12 } else { 0.0 } + breath;
+            // §B.2: MINUS the waist, because the thorax now hangs off the
+            // lumbar and the lumbar already carries it. `hip_y` is a
+            // root-space height and has to stay one - it is the same
+            // number the legs are posed with.
+            t.translation.y = thorax_local_y(
+                hip_y,
+                if f.crouch && !rolling { 0.12 } else { 0.0 },
+                breath,
+            );
             // amplitudes tuned UP so the gait reads from the 2.6 m boom
             t.translation.x = 0.048 * rig.phase.sin() * amp + wshift;
             // §5.2: `torso_aim` puts the shoulders back on the aim that
@@ -19766,6 +19812,50 @@ mod segment_tests {
         assert!(
             walk < peak * 0.5,
             "a walk must not toe off like a sprint: {walk} vs {peak}"
+        );
+    }
+
+    /// §B.2: inserting the lumbar must not MOVE anything.
+    ///
+    /// This test exists because its absence cost a broken build. The
+    /// first trunk split left `WAIST_Y` on the thorax while its new
+    /// parent, the lumbar, also carried it - so the upper body sat a full
+    /// waist above the legs and the soldier came apart in mid-air. Every
+    /// rig test in this file passed: they measure ANGLES (separation, the
+    /// kinetic chain, the trunk twist above) or the head BAND, which is
+    /// derived from `gait_pose` rather than read back off the transform
+    /// hierarchy. Nothing was watching where the torso actually WAS.
+    ///
+    /// The claim is composition: lumbar + thorax must land exactly where
+    /// the single trunk segment used to.
+    #[test]
+    fn thorax_height_is_conserved_across_the_trunk_split() {
+        for hip_y in [0.50_f32, 0.63, 0.71] {
+            for crouch in [0.0_f32, 0.12] {
+                for breath in [-0.004_f32, 0.0, 0.004] {
+                    // what the SINGLE trunk segment used to be set to, in
+                    // root space - the expression this replaced, verbatim
+                    let before = hip_y - crouch + breath;
+                    // and what the two segments now compose to
+                    let after = WAIST_Y + thorax_local_y(hip_y, crouch, breath);
+                    assert!(
+                        (after - before).abs() < 1e-6,
+                        "the trunk moved: {before} -> {after} \
+                         (hip {hip_y} crouch {crouch} breath {breath})"
+                    );
+                }
+            }
+        }
+        // and the waist really is where the legs are hung from, or the
+        // subtraction is against the wrong number
+        assert!(
+            (WAIST_Y - 0.63).abs() < 1e-6,
+            "WAIST_Y must match the height the thighs spawn at"
+        );
+        // a standing fighter's thorax sits AT the waist - local zero
+        assert!(
+            thorax_local_y(WAIST_Y, 0.0, 0.0).abs() < 1e-6,
+            "an unposed thorax must sit exactly on its own parent"
         );
     }
 
