@@ -2154,6 +2154,12 @@ pub struct Fighter {
     /// §owner SQUAD AI: which half of a bounding pair this bot is in.
     /// Derived, like the role, from the clock and index order.
     pub bound_phase: BoundPhase,
+    /// §owner AGILE SUPPORT MECH: who the repair beam is currently
+    /// mending, or -1. Published so the client can DRAW the beam without
+    /// re-deriving the choice - two independent answers to "who is being
+    /// healed" is exactly the split-brain the bow draw already had to be
+    /// rescued from.
+    pub repair_target: i32,
     /// §owner SUPPRESSION: seconds of "rounds are cracking past me" left,
     /// capped at `SUPPRESS_MAX_S`.
     ///
@@ -4654,6 +4660,7 @@ impl TdmSim {
                     bound_phase: BoundPhase::Free,
                     suppress_t: 0.0,
                     suppress_from: [0.0, 0.0, 0.0],
+                    repair_target: -1,
                     fear: 0.0,
                     routing: false,
                     armor_pieces: ArmorLoadout::default(),
@@ -5025,6 +5032,11 @@ impl TdmSim {
             // second; pinning a man costs a belt.
             f.suppress_t = (f.suppress_t - DT).max(0.0);
             f.gatling_trigger_t = (f.gatling_trigger_t - DT).max(0.0);
+            // §owner: the beam's target lasts ONE tick. It is re-asserted
+            // every tick the trigger is held, so clearing it here means
+            // the client's beam vanishes the frame the pilot lets go
+            // rather than hanging on a stale index.
+            f.repair_target = -1;
             if f.gatling_vent_t > 0.0 {
                 f.gatling_vent_t -= DT;
                 if f.gatling_vent_t <= 0.0 {
@@ -7837,6 +7849,7 @@ impl TdmSim {
             }
         }
         let (j, _) = best?;
+        self.fighters[p].repair_target = j as i32;
         let cap = self.fighters[j].mech_hull_max();
         let g = &mut self.fighters[j];
         g.hull = (g.hull + REPAIR_PER_S * DT).min(cap);

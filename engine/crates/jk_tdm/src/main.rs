@@ -6024,6 +6024,7 @@ fn main() {
                 spin_minigun_barrels,
                 spin_mech_turret_barrels,
                 mech_barrier_sync,
+                repair_beam_sync,
                 bow_string_sync,
                 grenade_arc,
                 rocket_aim_preview,
@@ -7431,6 +7432,157 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
         }
     }
     (root, MechBarrier { petals, field })
+}
+
+/// §owner AGILE SUPPORT MECH: the repair beam, drawn.
+///
+/// One pooled set of segments per fighter would be wasteful for a verb
+/// only two machines on the field can use, so the whole game shares one
+/// pool and the system re-points it each frame at whichever beams are
+/// live. Beams that are not running are parked hidden.
+#[derive(Resource)]
+struct RepairBeamVis {
+    /// The shaft segments - a chain of short bars laid end to end along
+    /// the beam, which is what lets it BEND toward a moving target
+    /// without a mesh that has to be rebuilt.
+    shaft: Vec<Entity>,
+    /// The energy packets that travel the beam. This is the "energy
+    /// transfer" read: a static glowing line says a connection exists,
+    /// travelling packets say something is being MOVED along it, and
+    /// only the second one reads as repair rather than as a laser.
+    packets: Vec<Entity>,
+    /// The bloom at the receiving end.
+    landing: Entity,
+}
+
+const REPAIR_SEGMENTS: usize = 14;
+const REPAIR_PACKETS: usize = 5;
+
+fn spawn_repair_beam_vis(
+    commands: &mut Commands,
+    kit: &ModelKit,
+) -> RepairBeamVis {
+    let shaft = (0..REPAIR_SEGMENTS)
+        .map(|_| {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.barrier_edge.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id()
+        })
+        .collect();
+    let packets = (0..REPAIR_PACKETS)
+        .map(|_| {
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(kit.core_glow.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                ))
+                .id()
+        })
+        .collect();
+    let landing = commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.barrier_fill.clone()),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+        ))
+        .id();
+    RepairBeamVis { shaft, packets, landing }
+}
+
+/// Point the beam at whatever the sim says is being mended.
+///
+/// The sim publishes `repair_target` rather than the client working out
+/// who is being healed for itself. Two independent answers to that
+/// question is precisely the split brain the bow draw had to be rescued
+/// from, and a beam that connected to a different ally than the one
+/// actually gaining hull would be worse than no beam at all.
+fn repair_beam_sync(
+    time: Res<Time>,
+    game: Res<Game>,
+    vis: Option<Res<RepairBeamVis>>,
+    mut q: Query<(&mut Transform, &mut Visibility)>,
+) {
+    let Some(vis) = vis else { return };
+    let tnow = time.elapsed_secs();
+    // the first live beam on the field owns the pool. With two support
+    // mechs the second is not drawn - a limitation worth stating plainly
+    // rather than hiding, and cheap to lift by growing the pool per
+    // fighter if a match ever fields more than one medic a side.
+    let live = game.sim.fighters.iter().enumerate().find_map(|(i, f)| {
+        let t = f.repair_target;
+        if t >= 0 && f.in_mech() {
+            game.sim.fighters.get(t as usize).map(|g| (i, g))
+        } else {
+            None
+        }
+    });
+    let Some((i, target)) = live else {
+        for e in vis.shaft.iter().chain(vis.packets.iter()).chain([&vis.landing]) {
+            if let Ok((_, mut v)) = q.get_mut(*e) {
+                *v = Visibility::Hidden;
+            }
+        }
+        return;
+    };
+    let src = &game.sim.fighters[i];
+    // from the repair dish on the chassis's left arm, to the target's
+    // centre of mass
+    let (sy, cy) = src.yaw.sin_cos();
+    let from = Vec3::new(
+        src.pos[0] - cy * 0.63 + sy * 0.45,
+        src.pos[1] + src.height() * 0.55,
+        src.pos[2] + sy * 0.63 + cy * 0.45,
+    );
+    let to = Vec3::new(
+        target.pos[0],
+        target.pos[1] + target.height() * 0.55,
+        target.pos[2],
+    );
+    let span = to - from;
+    let len = span.length().max(1e-3);
+    let dir = span / len;
+    let seg = len / REPAIR_SEGMENTS as f32;
+    // a cylinder's long axis is +Y, so rotate +Y onto the beam
+    let rot = Quat::from_rotation_arc(Vec3::Y, dir);
+    for (k, e) in vis.shaft.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            let a = (k as f32 + 0.5) / REPAIR_SEGMENTS as f32;
+            // the shaft BREATHES along its length - thicker where a
+            // packet is passing, which is what ties the two layers
+            // together instead of leaving them two unrelated effects
+            let pulse = 1.0 + ((a * 9.0 - tnow * 6.0).sin() * 0.35).max(0.0);
+            t.translation = from + dir * (len * a);
+            t.rotation = rot;
+            t.scale = Vec3::new(0.055 * pulse, seg * 0.92, 0.055 * pulse);
+            *v = Visibility::Visible;
+        }
+    }
+    for (k, e) in vis.packets.iter().enumerate() {
+        if let Ok((mut t, mut v)) = q.get_mut(*e) {
+            // evenly spaced, all travelling source -> target, wrapping.
+            // The DIRECTION is the whole message: energy leaving the
+            // medic and arriving at the patient.
+            let a = ((tnow * 0.85 + k as f32 / REPAIR_PACKETS as f32) % 1.0).clamp(0.0, 1.0);
+            t.translation = from + dir * (len * a);
+            t.rotation = Quat::IDENTITY;
+            // they swell as they arrive, so the far end is the busy end
+            t.scale = Vec3::splat(0.055 + 0.075 * a);
+            *v = Visibility::Visible;
+        }
+    }
+    if let Ok((mut t, mut v)) = q.get_mut(vis.landing) {
+        t.translation = to;
+        t.scale = Vec3::splat(0.55 + (tnow * 7.0).sin() * 0.06);
+        *v = Visibility::Visible;
+    }
 }
 
 /// §owner MECH BARRIER: fold, deploy, and ripple.
@@ -10387,6 +10539,11 @@ fn setup(
             .entity(parts.root)
             .insert(Transform::from_xyz(0.0, 0.06, 0.0)) // feet on the pedestal
             .set_parent(stand);
+        // §owner AGILE SUPPORT MECH: the shared repair-beam pool. Built
+        // here with the rest of the one-time visual scaffolding, so it
+        // exists before any chassis can be boarded.
+        let beam = spawn_repair_beam_vis(&mut commands, &kit);
+        commands.insert_resource(beam);
         commands.insert_resource(ForgePreview {
             image,
             stand,
@@ -21213,6 +21370,45 @@ mod segment_tests {
         assert!(
             SHOULDER_HEIGHT_FRAC < 1.0,
             "the shoulders are below the top of the head"
+        );
+    }
+
+    /// §owner AGILE SUPPORT MECH: the repair beam has to read as
+    /// TRANSFER, not as a laser.
+    ///
+    /// A static glowing line says a connection exists. Packets moving
+    /// along it say something is being carried, and only the second
+    /// reads as repair - which matters, because a beam pointed at a
+    /// teammate that looks like a weapon is a beam that will make people
+    /// dodge their own medic.
+    #[test]
+    fn the_repair_beam_reads_as_energy_going_somewhere() {
+        assert!(
+            REPAIR_PACKETS >= 3,
+            "one or two packets read as a flicker, not a flow"
+        );
+        assert!(
+            REPAIR_SEGMENTS > REPAIR_PACKETS,
+            "the shaft must be finer than the packets travelling it, or \
+             the beam looks like a string of beads"
+        );
+        // enough segments to bend toward a moving target without the
+        // seams showing
+        assert!(REPAIR_SEGMENTS >= 8, "{REPAIR_SEGMENTS} segments will crease");
+        // and the beam must actually out-range a fight - a support verb
+        // that requires standing next to the man being shot at is one
+        // nobody survives using
+        assert!(
+            sim::REPAIR_RANGE_M > 15.0,
+            "a {:.0} m beam is a melee ability",
+            sim::REPAIR_RANGE_M
+        );
+        // it must mend slower than a rifle removes: support extends a
+        // fight, it does not decide one
+        assert!(
+            sim::REPAIR_PER_S < 100.0,
+            "{} hull/s outheals a squad and makes the heavy immortal",
+            sim::REPAIR_PER_S
         );
     }
 
