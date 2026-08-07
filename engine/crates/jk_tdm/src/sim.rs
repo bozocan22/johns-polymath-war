@@ -2666,7 +2666,35 @@ pub struct Tracer {
     pub shooter: usize,
 }
 
-/// Arrow / thrown spear in flight (or stuck).
+/// §owner What a missile IS, as opposed to how it flies.
+///
+/// This started as a lone `is_spear: bool`, which was honest while there
+/// were exactly two kinds. Then the plasma cannon landed and reused the
+/// arrow's flight model - deliberately, and the comment in
+/// `try_fire_plasma` says so: same gravity, same hit rule, no pierce.
+///
+/// But `is_spear: false` does not mean "flies like an arrow". Every
+/// caller read it as "IS an arrow", and two of them were right to,
+/// because that is what the name says. So a bolt of superheated plasma
+/// rendered as a fletched wooden shaft with SPINNING VANES, and when it
+/// came to rest it converted into a recoverable arrow 65% of the time -
+/// which made a weapon that has no ammunition, only heat, into a
+/// fountain of free arrows for whoever walked past the impact.
+///
+/// A third state cannot be added to a bool. It can be added here, and
+/// every match on it has to say what it means about plasma before it
+/// compiles - which is the entire reason to spend the refactor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MissileKind {
+    #[default]
+    Arrow,
+    Spear,
+    /// §owner the medic's plasma bolt. Flies as an arrow, is made of
+    /// nothing you can pick up, and glows.
+    Plasma,
+}
+
+/// Arrow / thrown spear / plasma bolt in flight (or stuck).
 #[derive(Clone, Debug)]
 pub struct Missile {
     /// stable identity — part of the sim API even when the client pools by index
@@ -2677,7 +2705,10 @@ pub struct Missile {
     pub team: Team,
     pub shooter: usize,
     pub damage: f32,
-    pub is_spear: bool,
+    /// What this shot is. Read `is_spear()` for the flight question and
+    /// `recoverable_as()` for the pickup question - the two used to be
+    /// the same field, and that is exactly how plasma became wood.
+    pub kind: MissileKind,
     pub stuck_t: Option<f32>,
     /// §3.2 (Brief VII v2): set at the moment of a world/ground hit -
     /// true = embedded (steep enough to stick), false = a shallow
@@ -2695,6 +2726,33 @@ pub struct Missile {
     /// §4.1: this shot's draw-power fraction (0.35-1.0) - scales every
     /// pierce's damage, not just the first.
     pub power: f32,
+}
+
+impl Missile {
+    /// The FLIGHT question: does this fly and land like a thrown spear?
+    ///
+    /// Plasma answers no, which is what the old field already meant for
+    /// it and the one reading of `is_spear: false` that was correct.
+    /// Gravity, the stick angle and the head multiplier all key off
+    /// this, and plasma is meant to share the arrow's numbers there.
+    pub fn is_spear(&self) -> bool {
+        matches!(self.kind, MissileKind::Spear)
+    }
+
+    /// The PICKUP question: what, if anything, does this leave on the
+    /// ground for someone to walk over?
+    ///
+    /// Plasma answers `None`. It is a discharge, not an object; there is
+    /// nothing to recover and no quiver it would go into. This is the
+    /// half `is_spear` got WRONG - it made every non-spear an arrow, so
+    /// a weapon with no ammunition minted ammunition for both teams.
+    pub fn recoverable_as(&self) -> Option<AmmoKind> {
+        match self.kind {
+            MissileKind::Arrow => Some(AmmoKind::Arrow),
+            MissileKind::Spear => Some(AmmoKind::Spear),
+            MissileKind::Plasma => None,
+        }
+    }
 }
 
 /// §3.2 (Brief VII v2): impact angle from surface (0 deg = grazing,
@@ -5286,6 +5344,14 @@ impl TdmSim {
                     f.gatling_cd = 0.0;
                     f.gatling_trigger_t = 0.0;
                     f.autocannon_cd = 0.0;
+                    // §owner the LOYAL GHOST: a precision shot half wound
+                    // up when the chassis died survived into the next
+                    // life, so the crosshair charge marks sprang open on
+                    // a fresh machine with no trigger held. The clock
+                    // only self-clears inside `step_plasma_precision`,
+                    // and that is never called once `in_mech()` is false
+                    // - so it can only be cleared here.
+                    f.plasma_charge_t = 0.0;
                     f.knife_phase = 0.0;
                     f.knife_committed = false;
                     f.knife_dir = MeleeDir::Overhead;
@@ -5478,6 +5544,7 @@ impl TdmSim {
                             f.gatling_cd = 0.0;
                             f.gatling_trigger_t = 0.0;
                             f.autocannon_cd = 0.0;
+                            f.plasma_charge_t = 0.0;
                             // §owner: 10 tubes and a 300-round belt per
                             // chassis - and ammo pads RESUPPLY them now,
                             // so a walking mech can sustain instead of
@@ -7041,7 +7108,7 @@ impl TdmSim {
             team: self.fighters[i].team,
             shooter: i,
             damage: dmg,
-            is_spear,
+            kind: if is_spear { MissileKind::Spear } else { MissileKind::Arrow },
             stuck_t: None,
             embedded: true,
             pierces_left: 0,
@@ -7065,7 +7132,7 @@ impl TdmSim {
             team: self.fighters[i].team,
             shooter: i,
             damage: BOW_PIERCE_DMG[0] * power,
-            is_spear: false,
+            kind: MissileKind::Arrow,
             stuck_t: None,
             embedded: true,
             pierces_left: BOW_MAX_PIERCES,
@@ -7897,7 +7964,7 @@ impl TdmSim {
             team,
             shooter: p,
             damage: PLASMA_DAMAGE,
-            is_spear: false,
+            kind: MissileKind::Plasma,
             stuck_t: None,
             embedded: false,
             pierces_left: 0,
@@ -7965,7 +8032,7 @@ impl TdmSim {
             team,
             shooter: p,
             damage: PLASMA_PRECISION_DAMAGE,
-            is_spear: false,
+            kind: MissileKind::Plasma,
             stuck_t: None,
             embedded: false,
             // it PIERCES, unlike the rapid bolt. A shot that costs five
@@ -8000,18 +8067,31 @@ impl TdmSim {
     ///
     /// Returns the target it is currently working on, so the client can
     /// draw a beam to it without re-deriving the choice.
-    pub fn tick_repair_beam(&mut self, p: usize, aim: [f32; 3]) -> Option<usize> {
-        let (from, team, ok) = {
-            let f = &self.fighters[p];
-            (
-                self.muzzle_origin(p),
-                f.team,
-                f.in_mech() && f.stagger_t <= 0.0 && f.gatling_vent_t <= 0.0,
-            )
-        };
-        if !ok {
+    /// §owner Who the beam WOULD take, right now, for this aim.
+    ///
+    /// Extracted from `tick_repair_beam` so the HUD can frame the answer
+    /// without guessing at it. That guess was a real bug and it was mine:
+    /// the bracket called `repair_candidate` under a comment claiming it
+    /// was "the very function the beam itself uses", and it is not. That
+    /// function answers the BOT's question - who on this team is worth
+    /// crossing a battlefield for - and it differs from the beam's in
+    /// every clause: most-hurt vs nearest-to-crosshair, no aim term vs a
+    /// hard arc gate, a 0.85 damage floor vs any damage at all, 2D
+    /// distance vs 3D, and a line-of-sight test the beam does not run.
+    ///
+    /// So the bracket could sit on one ally while the beam healed
+    /// another, or stay blank at 93% hull while the corner read LINKED
+    /// and the target's bar climbed. Writing "one source" in a comment is
+    /// not the same as having one, and I shipped the comment.
+    ///
+    /// `&self` and no side effects: the HUD calls this at render rate,
+    /// and anything it touched would be a divergence.
+    pub fn repair_beam_target(&self, p: usize, aim: [f32; 3]) -> Option<usize> {
+        let f = &self.fighters[p];
+        if !(f.in_mech() && f.stagger_t <= 0.0 && f.gatling_vent_t <= 0.0) {
             return None;
         }
+        let (from, team) = (self.muzzle_origin(p), f.team);
         let d = normalize(aim);
         // the ally most directly under the reticle, inside the arc and
         // the range. Nearest-to-centre rather than nearest-in-space: the
@@ -8043,7 +8123,11 @@ impl TdmSim {
                 best = Some((j, cos));
             }
         }
-        let (j, _) = best?;
+        best.map(|(j, _)| j)
+    }
+
+    pub fn tick_repair_beam(&mut self, p: usize, aim: [f32; 3]) -> Option<usize> {
+        let j = self.repair_beam_target(p, aim)?;
         self.fighters[p].repair_target = j as i32;
         let cap = self.fighters[j].mech_hull_max();
         let g = &mut self.fighters[j];
@@ -8452,7 +8536,7 @@ impl TdmSim {
             if m.stuck_t.is_some() {
                 continue;
             }
-            m.vel[1] -= missile_g(m.is_spear) * DT; // ONE shared constant (§4)
+            m.vel[1] -= missile_g(m.is_spear()) * DT; // ONE shared constant (§4)
             let old = m.pos;
             m.pos[0] += m.vel[0] * DT;
             m.pos[1] += m.vel[1] * DT;
@@ -8471,14 +8555,14 @@ impl TdmSim {
                     // uses the cascade table (already scaled by power at
                     // spawn for pass 0; later passes re-scale here).
                     let pass = BOW_MAX_PIERCES - m.pierces_left;
-                    let dmg = if !m.is_spear && m.pierces_left > 0 {
+                    let dmg = if !m.is_spear() && m.pierces_left > 0 {
                         BOW_PIERCE_DMG[pass.min(2) as usize] * m.power
                     } else {
                         m.damage
                     };
-                    hits.push((m.shooter, j, dmg, m.pos, m.vel, m.is_spear));
+                    hits.push((m.shooter, j, dmg, m.pos, m.vel, m.is_spear()));
                     m.pierced.push(j);
-                    if !m.is_spear && m.pierces_left > 0 {
+                    if !m.is_spear() && m.pierces_left > 0 {
                         m.pierces_left -= 1;
                         if m.pierces_left == 0 {
                             m.stuck_t = Some(t_now); // last pierce spent - embeds
@@ -8560,27 +8644,41 @@ impl TdmSim {
             if m.stuck_t != Some(t_now) {
                 continue; // only missiles that stuck THIS tick
             }
-            let recovered = if m.is_spear {
+            // §owner ask what it LEAVES, not what it flies like. A
+            // plasma bolt answers `None`: it is a discharge, and the
+            // question of whether it broke on landing does not arise.
+            //
+            // Before this it fell down the `else` - the arrow branch -
+            // and rolled a 65% chance to become a recoverable ARROW. So
+            // the medic's cannon, which has no ammunition and can fire
+            // forever, was minting quiverable arrows on the ground for
+            // both teams. Sustained fire into a wall was an ammo
+            // printer, and nothing in the sim thought that was odd,
+            // because the only question anyone asked was "spear?".
+            let Some(kind) = m.recoverable_as() else {
+                continue;
+            };
+            let recovered = match m.kind {
                 // §3.2 (Brief VII v2): a spear that embedded (steep
                 // enough) always survives as a pickup; one that bounced
                 // off shallow is lost, exactly like a broken arrow.
-                m.embedded
-            } else {
-                let mut r = Pcg32::new(
-                    self.cfg.seed ^ (m.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                    0xD20,
-                );
-                r.next_f32() < ARROW_RECOVER_P
+                MissileKind::Spear => m.embedded,
+                MissileKind::Arrow => {
+                    let mut r = Pcg32::new(
+                        self.cfg.seed ^ (m.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                        0xD20,
+                    );
+                    r.next_f32() < ARROW_RECOVER_P
+                }
+                // unreachable via `recoverable_as`, and spelled out
+                // rather than wildcarded so a fourth kind has to come
+                // back here and decide
+                MissileKind::Plasma => false,
             };
             if !recovered {
                 continue; // the broken arrow stays as a 15 s prop
             }
             converted.push(m.id);
-            let kind = if m.is_spear {
-                AmmoKind::Spear
-            } else {
-                AmmoKind::Arrow
-            };
             // stack merging: an arrow-heavy round must not spawn hundreds
             // of entities — nearby same-kind piles absorb the new one
             let merged = self.dropped.iter_mut().any(|d| {
@@ -9682,6 +9780,10 @@ impl TdmSim {
                     f.hull = 0.0;
                     f.armor_set = ArmorSet::None;
                     f.health = f.health.min(MECH_EJECT_HP);
+                    // the wind-up dies with the machine that was doing
+                    // it - `step_plasma_precision` cannot clear this once
+                    // `in_mech()` is false, so the eject path must
+                    f.plasma_charge_t = 0.0;
                 }
                 return through;
             }
@@ -9760,6 +9862,7 @@ impl TdmSim {
                     f.armor_set = ArmorSet::None;
                     f.armor = 0.0;
                     f.health = f.health.min(MECH_EJECT_HP);
+                    f.plasma_charge_t = 0.0;
                     f.mech_plates_dropped = 0;
                     // being blown out mid-boarding must not leave the
                     // ejected pilot disarmed on top of everything else
@@ -10163,13 +10266,23 @@ impl TdmSim {
     ///
     /// Pure and rng-free, like every other squad rule here, so a replay
     /// heals the same men in the same order.
-    /// `pub` because the HUD frames whoever this returns. That is not a
-    /// convenience: the pilot has to be shown the SAME target the beam
-    /// will actually take, and the only way to guarantee that is for the
-    /// bracket and the beam to ask one function. A HUD that runs its own
-    /// "probably this ally" search is a second opinion, and a second
-    /// opinion is a bug waiting for the two to disagree.
-    pub fn repair_candidate(&self, i: usize) -> Option<usize> {
+    /// §owner The BOT's question: whose damage is worth crossing a
+    /// battlefield for? NOT "who would the beam hit" - see
+    /// `repair_beam_target` for that, and do not substitute one for the
+    /// other, which is a mistake this file has already paid for once.
+    ///
+    /// The two differ deliberately, because they are asked at different
+    /// moments. This one has no aim term (a bot has not turned yet), a
+    /// 0.85 floor (do not abandon a firing position over a scratch), a
+    /// line-of-sight test (do not walk at a wall) and 2D distance (a
+    /// navigation question is a floorplan question). The beam's is a
+    /// weapon question and has none of that.
+    ///
+    /// Private again, deliberately. It was briefly `pub` so the HUD
+    /// could frame its answer, and framing its answer was the bug: the
+    /// bracket named one ally while the beam healed another. The narrow
+    /// visibility is now part of the guard.
+    fn repair_candidate(&self, i: usize) -> Option<usize> {
         let f = &self.fighters[i];
         let from = [f.pos[0], f.pos[1] + f.height() * 0.55, f.pos[2]];
         let mut best: Option<(usize, f32)> = None;
@@ -11221,7 +11334,7 @@ mod tests {
                 team: Team::Blue,
                 shooter: 0,
                 damage: 55.0,
-                is_spear: true,
+                kind: MissileKind::Spear,
                 stuck_t: None,
                 embedded: true,
                 pierces_left: 0,
@@ -12329,6 +12442,154 @@ mod tests {
             s.fighters[1].mech_weapon,
             MechWeapon::Autocannon,
             "the guard must not disarm the bot's own range pick"
+        );
+    }
+
+    /// §owner The bracket and the beam must name the same ally.
+    ///
+    /// They did not. The HUD called `repair_candidate` under a comment
+    /// of mine asserting it was "the very function the beam itself
+    /// uses"; it is the BOT's picker and disagrees with the beam in
+    /// every clause. So the green bracket could sit on the ally who was
+    /// most hurt while the beam healed whoever was under the crosshair.
+    ///
+    /// The geometry below is the divergence, minimal: A is badly hurt
+    /// and far off-axis, B is barely scratched and dead ahead. The two
+    /// rules return different fighters here BY CONSTRUCTION - which is
+    /// what makes it a fixture rather than a coincidence - and the
+    /// bracket now asks the beam's question, so it must return B.
+    ///
+    /// Asserted against `tick_repair_beam`'s OWN return value rather
+    /// than against a named index: what has to hold is that the two
+    /// agree, not that either picks any particular ally.
+    #[test]
+    fn the_repair_bracket_names_whoever_the_beam_would_actually_heal() {
+        // built like `a_bot_in_the_scout_chassis_mends_the_worst_hurt_ally`
+        // rather than on `range()`, which seats only one ally - and one
+        // ally cannot express a disagreement about WHICH ally
+        let mut s = TdmSim::new(cfg(0xC501, 3, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        let p = 1usize;
+        {
+            let f = &mut s.fighters[p];
+            f.team = Team::Blue;
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_transition_t = 0.0;
+            f.mech_weapon = MechWeapon::Repair;
+            f.pos = [0.0, 0.0, 0.0];
+        }
+        let (a, b) = (2usize, 3usize);
+        for k in [a, b] {
+            s.fighters[k].team = Team::Blue;
+        }
+        {
+            // A: nearly dead, and well off to the side
+            let f = &mut s.fighters[a];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL * 0.10;
+            f.mech_transition_t = 0.0;
+            f.pos = [-7.0, 0.0, 2.0];
+        }
+        {
+            // B: barely scratched, straight down the aim line
+            let f = &mut s.fighters[b];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL * 0.97;
+            f.mech_transition_t = 0.0;
+            f.pos = [0.0, 0.0, -9.0];
+        }
+        let aim = [0.0, 0.0, -1.0];
+
+        // the two rules really do disagree here, or this proves nothing
+        assert_eq!(
+            s.repair_candidate(p),
+            Some(a),
+            "fixture: the BOT's picker should want the badly hurt ally"
+        );
+
+        let framed = s.repair_beam_target(p, aim);
+        let healed = s.tick_repair_beam(p, aim);
+        assert_eq!(
+            framed, healed,
+            "the bracket framed {framed:?} and the beam healed {healed:?}",
+        );
+        assert_eq!(framed, Some(b), "and both must be the ally under the crosshair");
+        assert!(
+            s.fighters[b].hull > MECH_HULL * 0.97,
+            "B is the one whose hull actually moved"
+        );
+        assert_eq!(
+            s.fighters[a].hull,
+            MECH_HULL * 0.10,
+            "A was framed by the old code and healed by nobody"
+        );
+    }
+
+    /// §owner A weapon with no ammunition must not create ammunition.
+    ///
+    /// The plasma cannon fires forever and pays in heat. Its bolts were
+    /// constructed as ordinary missiles with `is_spear: false`, which
+    /// every consumer read as "this is an arrow" - because that is what
+    /// the name says. So a bolt coming to rest rolled `ARROW_RECOVER_P`
+    /// and became a recoverable ARROW 65% of the time: sustained fire
+    /// into a wall was an ammo printer, for both teams, out of a mount
+    /// that has no magazine at all.
+    ///
+    /// Pinned on the DROPPED PILES rather than on the enum, because the
+    /// enum is only the mechanism. What must stay true is that firing
+    /// plasma leaves nothing on the ground to pick up.
+    #[test]
+    fn plasma_leaves_nothing_to_pick_up() {
+        let mut s = range(0xB701);
+        let p = s.player;
+        {
+            let f = &mut s.fighters[p];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_transition_t = 0.0;
+            f.mech_weapon = MechWeapon::Plasma;
+        }
+        let before = s.dropped.len();
+        // straight into the ground a few metres ahead, over and over -
+        // the venting lockout means this has to feather the trigger
+        for _ in 0..900 {
+            let f = &s.fighters[p];
+            if f.gatling_cd <= 0.0 && f.gatling_vent_t <= 0.0 {
+                s.try_fire_plasma(p, [0.0, -0.55, -1.0]);
+            }
+            s.step(PlayerCmd::default());
+        }
+        assert!(
+            s.missiles.len() < 900,
+            "the bolts must actually be landing for this test to mean anything"
+        );
+        assert_eq!(
+            s.dropped.len(),
+            before,
+            "plasma left {} pickup pile(s) on the ground - a mount with no \
+             magazine must not mint ammunition",
+            s.dropped.len() - before,
+        );
+        // and the same question asked directly, so a future refactor that
+        // routes recovery elsewhere still trips something
+        for m in &s.missiles {
+            if m.kind == MissileKind::Plasma {
+                assert!(m.recoverable_as().is_none(), "a plasma bolt is not an object");
+            }
+        }
+        // the control: an ARROW in the same sim does still leave piles,
+        // or the assertion above would pass on a broken recovery path
+        let mut s2 = range(0xB702);
+        for _ in 0..400 {
+            s2.spawn_arrow([0.0, 1.4, 0.0], normalize([0.0, -0.5, -1.0]), 1.0, 0);
+            s2.step(PlayerCmd::default());
+        }
+        assert!(
+            !s2.dropped.is_empty(),
+            "arrows must still be recoverable - otherwise this test proves nothing"
         );
     }
 
@@ -15000,7 +15261,7 @@ mod tests {
             team: Team::Blue,
             shooter: 0,
             damage: 0.0,
-            is_spear: true,
+            kind: MissileKind::Spear,
             stuck_t: None,
             embedded: true,
             pierces_left: 0,
@@ -18483,7 +18744,7 @@ mod tests {
                 team: Team::Blue,
                 shooter: 0,
                 damage: 0.0,
-                is_spear,
+                kind: if is_spear { MissileKind::Spear } else { MissileKind::Arrow },
                 stuck_t: None,
                 embedded: true,
                 pierces_left: 0,
@@ -18552,7 +18813,7 @@ mod tests {
                     team: Team::Blue,
                     shooter: 0,
                     damage: 0.0,
-                    is_spear: !arrows,
+                    kind: if arrows { MissileKind::Arrow } else { MissileKind::Spear },
                     stuck_t: None,
                     embedded: true,
                     pierces_left: 0,
@@ -19107,7 +19368,7 @@ mod tests {
             team: Team::Blue,
             shooter: 0,
             damage: 85.0,
-            is_spear: true,
+            kind: MissileKind::Spear,
             stuck_t: None,
             embedded: true,
             pierces_left: 0,
@@ -19131,7 +19392,7 @@ mod tests {
             team: Team::Blue,
             shooter: 0,
             damage: 85.0,
-            is_spear: true,
+            kind: MissileKind::Spear,
             stuck_t: None,
             embedded: true,
             pierces_left: 0,
@@ -19167,7 +19428,7 @@ mod tests {
                 // test that builds its own copy of the thing it is
                 // testing cannot detect a change in it.
                 damage: gun(GunKind::Spear).damage,
-                is_spear: true,
+                kind: MissileKind::Spear,
                 stuck_t: None,
                 embedded: true,
                 pierces_left: 0,

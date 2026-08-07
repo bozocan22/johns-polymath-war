@@ -3089,6 +3089,11 @@ struct MissileSlot {
     root: Entity,
     arrow: Entity,
     spear: Entity,
+    /// §owner the plasma bolt. A third shape in the same slot, for the
+    /// same reason the spear is: a missile is exactly one of these at a
+    /// time, so one pooled entity per kind costs nothing per shot and
+    /// the switch is two visibility writes.
+    plasma: Entity,
     spin: Entity,
 }
 
@@ -3409,6 +3414,13 @@ struct ModelKit {
     med_glow: Handle<StandardMaterial>,
     armor_dark: Handle<StandardMaterial>,
     core_glow: Handle<StandardMaterial>,
+    /// §owner the plasma bolt's two layers. The CORE is nearly white -
+    /// a hot thing is white at the middle, not saturated - and the
+    /// HALO around it carries the colour. One material would have to
+    /// choose, and choosing gives you either a pale streak with no hue
+    /// or a coloured stick with no heat.
+    plasma_core: Handle<StandardMaterial>,
+    plasma_halo: Handle<StandardMaterial>,
     /// the gripping mitt - §1 restyles this to the robot's shell
     hand: Handle<StandardMaterial>,
     // §2.1 weapon palette: four flat greys, tone changes - not geometry -
@@ -3759,6 +3771,67 @@ const ARROW_NOCK_Z: f32 = -0.36;
 /// caller's `scale.z` sets the real length and the proportions hold.
 /// The `spin` child carries the fletching alone - vanes rotate about
 /// the shaft, a shaft that rolled as a whole would look like a drill.
+/// §owner the plasma bolt, as geometry.
+///
+/// Built in the arrow's local frame - +Z is the direction of travel, and
+/// the pool scales Z by the shaft length - so it drops into the same
+/// slot without the caller learning a second convention.
+///
+/// Three ideas, in order of how far away they still read:
+///   the HALO, a long translucent sheath that survives to the distance
+///     where the core is one pixel;
+///   the CORE, short and near-white, which is where the eye lands;
+///   the WAKE, three shrinking rings behind it, which is the only part
+///     that says which way the thing is going.
+///
+/// The wake is the load-bearing one. A symmetrical glowing capsule has
+/// no heading, and a projectile whose heading you cannot read is a
+/// projectile you cannot dodge - the bolt is slow enough (PLASMA_SPEED,
+/// well under a rifle round) that dodging is a real thing a player does.
+fn spawn_plasma_bolt_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    let mut part =
+        |mesh: Handle<Mesh>, mat: Handle<StandardMaterial>, z: f32, rot: Quat, sc: Vec3| {
+            commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(mat),
+                    Transform {
+                        translation: Vec3::new(0.0, 0.0, z),
+                        rotation: rot,
+                        scale: sc,
+                    },
+                ))
+                .set_parent(root);
+        };
+    // the sheath - longest, dimmest, and the whole silhouette at range
+    part(kit.ball.clone(), kit.plasma_halo.clone(), 0.0, Quat::IDENTITY, Vec3::new(0.20, 0.20, 0.95));
+    // the core - short and hot, sitting FORWARD of centre so the mass
+    // reads at the leading end rather than in the middle of a capsule
+    part(kit.ball.clone(), kit.plasma_core.clone(), 0.16, Quat::IDENTITY, Vec3::new(0.105, 0.105, 0.42));
+    // the leading point: a small hard tip, because a bolt with a rounded
+    // nose reads as floating and one with a point reads as travelling
+    part(kit.cube.clone(), kit.plasma_core.clone(), 0.42, Quat::IDENTITY, Vec3::new(0.045, 0.045, 0.14));
+    // the wake - three rings, each smaller and dimmer than the last.
+    // A Bevy cylinder stands on Y, so every one of these is rotated a
+    // quarter turn about X to FACE the direction of travel; left
+    // unrotated they would be three discs lying flat through the bolt,
+    // which is a different object entirely.
+    for k in 0..3 {
+        let t = k as f32;
+        part(
+            kit.cyl.clone(),
+            kit.plasma_halo.clone(),
+            -0.20 - t * 0.20,
+            Quat::from_rotation_x(FRAC_PI_2),
+            Vec3::new(0.17 - t * 0.045, 0.020, 0.17 - t * 0.045),
+        );
+    }
+    root
+}
+
 fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity) {
     debug_assert!(
         (ARROW_NOCK_Z - (-0.345 - 0.03 * 0.5)).abs() < 1e-6,
@@ -6650,8 +6723,22 @@ fn spawn_casings(
         if matches!(f.gun, GunKind::Bow | GunKind::Spear | GunKind::Fists) {
             continue;
         }
-        // §C.7: a rocket tube ejects no brass
-        if f.in_mech() && f.mech_weapon == sim::MechWeapon::Rockets {
+        // §C.7 / §owner: a hull mount ejects brass only if it is a GUN.
+        //
+        // This was `== Rockets`, an allow-by-default list written when
+        // the only two mounts were a gatling and a tube. The medic's
+        // plasma cannon and its repair beam both drive `gatling_cd`, so
+        // both cleared the "shot clock jumped" test and both threw
+        // brass: a weapon with no cartridge was littering spent cases,
+        // and the healing beam was doing it too, once every 0.16 s.
+        //
+        // Spelled as a match so a fifth mount has to state its answer.
+        if f.in_mech()
+            && matches!(
+                f.mech_weapon,
+                sim::MechWeapon::Rockets | sim::MechWeapon::Plasma | sim::MechWeapon::Repair
+            )
+        {
             continue;
         }
         budget -= 1;
@@ -8305,11 +8392,18 @@ fn mech_hud_sync(
     // ALLY the beam would take, in green, instead of an enemy in the
     // hull tint. Same four bars, same sizing, one different question.
     //
-    // The target comes from `sim.repair_candidate` - the very function
-    // the beam itself uses - rather than from a lookalike search here.
-    // A support weapon whose HUD points at a different friend than the
-    // beam picks is worse than no HUD: it teaches the pilot a rule the
-    // game does not follow.
+    // The target comes from `sim.repair_beam_target` - which IS the
+    // beam's own selection, because `tick_repair_beam` was refactored to
+    // call it and can no longer answer differently.
+    //
+    // The first version of this called `repair_candidate` under a
+    // comment asserting it was the same function, and it was not: that
+    // one answers the BOT's question (who is worth walking to) and
+    // differs from the beam in every clause - most-hurt vs
+    // nearest-to-crosshair, no aim term vs a hard arc gate, a damage
+    // floor the beam does not have, and a line-of-sight test the beam
+    // does not run. So the bracket could frame one ally while the beam
+    // healed another. A comment claiming one source is not one source.
     let repairing = p.in_scout_mech() && p.mech_weapon == sim::MechWeapon::Repair;
     let mut placed = false;
     if inside {
@@ -8323,11 +8417,18 @@ fn mech_hud_sync(
             // body in space is frequently not it
             let mut best: Option<(usize, f32)> = None;
             if repairing {
-                // no aim cone: the beam has none either. It takes the
-                // most hurt ally in range and line of sight WHEREVER the
-                // pilot happens to be looking, and the bracket has to
-                // report that or it is reporting a different weapon.
-                best = game.sim.repair_candidate(game.sim.player).map(|j| (j, 1.0));
+                // and the AIM this is asked with has to be the aim the
+                // sim will be handed, not a lookalike rebuilt from
+                // yaw/pitch: `crosshair_aim_dir` applies the third-person
+                // parallax correction, and a bracket that skipped it
+                // would disagree with the beam by exactly that angle -
+                // reintroducing the same bug in miniature.
+                let cam_t = cam_tf.compute_transform();
+                let (dir, _) = crosshair_aim_dir(&game.sim, &cam_t);
+                best = game
+                    .sim
+                    .repair_beam_target(game.sim.player, dir.to_array())
+                    .map(|j| (j, 1.0));
             } else {
                 for (j, g) in game.sim.fighters.iter().enumerate() {
                     if g.team == p.team || !g.alive() || g.protect_t > 0.0 {
@@ -11715,6 +11816,26 @@ fn setup(
         core_glow: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.25, 0.15),
             emissive: LinearRgba::new(2.2, 0.35, 0.15, 1.0),
+            unlit: true,
+            ..default()
+        }),
+        // §owner CYAN, and deliberately not the red of `core_glow` or the
+        // green of `med_glow`. Both are already spoken for on this
+        // battlefield - red is an enemy sensor slit and a damaged core,
+        // green is a friendly repair line - and a projectile in flight is
+        // the one thing that must never be mistaken for either. Cyan is
+        // unclaimed here and stays legible against sand and sky, which
+        // are the only two backgrounds a bolt ever crosses.
+        plasma_core: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.90, 0.99, 1.0),
+            emissive: LinearRgba::new(3.4, 4.0, 4.2, 1.0),
+            unlit: true,
+            ..default()
+        }),
+        plasma_halo: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.20, 0.80, 1.0, 0.42),
+            emissive: LinearRgba::new(0.35, 1.9, 2.6, 1.0),
+            alpha_mode: AlphaMode::Blend,
             unlit: true,
             ..default()
         }),
@@ -15640,7 +15761,9 @@ fn sync_missiles(
         commands.entity(arrow).set_parent(root);
         let spear = spawn_spear_model(&mut commands, &kit);
         commands.entity(spear).set_parent(root);
-        pool.0.push(MissileSlot { root, arrow, spear, spin });
+        let plasma = spawn_plasma_bolt_model(&mut commands, &kit);
+        commands.entity(plasma).set_parent(root);
+        pool.0.push(MissileSlot { root, arrow, spear, plasma, spin });
     }
     let dt = time.delta_secs().min(0.05);
     for (idx, slot) in pool.0.iter().enumerate() {
@@ -15653,13 +15776,28 @@ fn sync_missiles(
                 // §owner: a shaft in flight points where it is GOING, and
                 // a stuck one keeps the angle it bit at (the sim leaves
                 // `vel` intact on impact precisely so this still reads).
-                let (len, thick) = if m.is_spear { (1.9, 1.0) } else { (0.85, 1.0) };
+                // §owner asking the KIND, not "spear?". Every non-spear
+                // used to take the arrow's length and the arrow's model,
+                // so a plasma bolt flew as a fletched wooden shaft with
+                // spinning vanes.
+                let (len, thick) = match m.kind {
+                    sim::MissileKind::Spear => (1.9, 1.0),
+                    sim::MissileKind::Arrow => (0.85, 1.0),
+                    // shorter and fatter: a bolt is a blob of energy, and
+                    // stretching it to an arrow's length made a lance
+                    sim::MissileKind::Plasma => (0.60, 1.15),
+                };
                 *tf = Transform::from_translation(Vec3::from_array(m.pos))
                     .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir))
                     .with_scale(Vec3::new(thick, thick, len));
                 *vis = Visibility::Visible;
-                // one slot, two shapes
-                for (e, on) in [(slot.arrow, !m.is_spear), (slot.spear, m.is_spear)] {
+                // one slot, three shapes - exhaustive, so a fourth kind
+                // cannot quietly inherit the arrow again
+                for (e, on) in [
+                    (slot.arrow, m.kind == sim::MissileKind::Arrow),
+                    (slot.spear, m.kind == sim::MissileKind::Spear),
+                    (slot.plasma, m.kind == sim::MissileKind::Plasma),
+                ] {
                     if let Ok((_, mut v)) = q2.get_mut(e) {
                         *v = if on {
                             Visibility::Inherited
@@ -15670,8 +15808,9 @@ fn sync_missiles(
                 }
                 // fletching spin - vanes bite the air and roll the shaft,
                 // which is what makes an arrow FLY instead of drift. It
-                // stops the moment the shaft does.
-                if !m.is_spear && m.stuck_t.is_none() {
+                // stops the moment the shaft does. Arrows only: plasma
+                // has no vanes and a spear has no spin.
+                if m.kind == sim::MissileKind::Arrow && m.stuck_t.is_none() {
                     if let Ok((mut st, _)) = q2.get_mut(slot.spin) {
                         st.rotation *= Quat::from_rotation_z(ARROW_SPIN_RAD_S * dt);
                     }
@@ -18173,13 +18312,24 @@ fn sfx_system(
             bot_shots += 1;
         }
     }
-    // new arrows / spears in the air
+    // new arrows / spears / plasma bolts in the air
     for m in &simr.missiles {
         if m.id >= st.max_missile {
             if m.shooter != simr.player {
+                // §owner PLACEHOLDER for plasma: `shot_mp5` is what the
+                // mount already borrows for its own muzzle, so at least
+                // someone else's bolt and your own agree. It is not a
+                // plasma sound and is listed as an open placeholder in
+                // WHATS_MISSING - what it is NOT any more is a bowstring,
+                // which is what every non-spear got before the kind
+                // existed to ask about.
                 play(
                     &mut commands,
-                    if m.is_spear { &sfx.spear } else { &sfx.bow },
+                    match m.kind {
+                        sim::MissileKind::Spear => &sfx.spear,
+                        sim::MissileKind::Arrow => &sfx.bow,
+                        sim::MissileKind::Plasma => &sfx.shot_mp5,
+                    },
                     0.25,
                 );
             }
