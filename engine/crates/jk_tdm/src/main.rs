@@ -7171,6 +7171,169 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             ))
             .set_parent(root);
     }
+    // ---- §owner FLAGSHIP PASS: the turret ------------------------------
+    //
+    // This is the weapon the player looks at for the whole time they are
+    // in a chassis, and it was a spine, two discs and six tubes. A
+    // rotary cannon is a SYSTEM: barrels, the clamps that hold them true,
+    // the drive that turns them, the belt that feeds them, and the heat
+    // it all makes. Each of those is a group below, and each of them is
+    // the reason the next one exists.
+    {
+        // BARREL CLAMPS - two rings around the cluster, and the reason
+        // the barrels look like an assembly instead of six loose rods.
+        // On the SPINNER, so they turn with what they are clamping.
+        for (rz, r) in [(0.16_f32, 0.095_f32), (0.50, 0.088)] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: Vec3::new(0.0, 0.0, rz),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(r * 2.0, 0.045, r * 2.0),
+                    },
+                ))
+                .set_parent(spinner);
+        }
+        // muzzle collars, one per barrel - a bored gun has a THICKER
+        // mouth, and six of them catch the light as the cluster turns
+        for i in 0..6 {
+            let a = i as f32 * std::f32::consts::TAU / 6.0;
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(a.cos() * 0.064, a.sin() * 0.064, 0.645),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.034, 0.035, 0.034),
+                    },
+                ))
+                .set_parent(spinner);
+        }
+        // DRIVE HOUSING - the motor that turns the cluster, static, with
+        // a cooling jacket and a lit power feed. Static on purpose: the
+        // drive does not spin, the thing it drives does, and that
+        // difference is most of what makes a gatling read correctly.
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, 0.0, 0.03),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.25, 0.20, 0.25),
+                },
+            ))
+            .set_parent(root);
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::TAU / 8.0;
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(a.cos() * 0.132, a.sin() * 0.132, 0.03),
+                        rotation: Quat::from_rotation_z(a),
+                        scale: Vec3::new(0.030, 0.055, 0.19),
+                    },
+                ))
+                .set_parent(root);
+        }
+        // HEAT SINK stack over the drive - fins, and a glowing seam
+        // between them. The mount already HAS a heat model the HUD
+        // shows; this is where that number lives on the gun.
+        for k in 0..5 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform::from_xyz(0.0, 0.115, -0.02 + k as f32 * 0.042)
+                        .with_scale(Vec3::new(0.19, 0.075, 0.016)),
+                ))
+                .set_parent(root);
+        }
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.med_glow.clone()),
+                Transform::from_xyz(0.0, 0.075, 0.065)
+                    .with_scale(Vec3::new(0.17, 0.012, 0.20)),
+            ))
+            .set_parent(root);
+        // AMMUNITION - a belt box under the breech and the links running
+        // up into it. Gold, matching the ammo-pickup vocabulary, so a
+        // player reads "rounds" without being told.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.0, -0.20, -0.16)
+                    .with_scale(Vec3::new(0.26, 0.20, 0.30)),
+            ))
+            .set_parent(root);
+        for (lx, ly, lz) in [
+            (0.0_f32, -0.115_f32, -0.11_f32),
+            (0.0, -0.075, -0.055),
+            (0.0, -0.055, 0.00),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.gold.clone()),
+                    Transform::from_xyz(lx, ly, lz)
+                        .with_scale(Vec3::new(0.10, 0.045, 0.075)),
+                ))
+                .set_parent(root);
+        }
+        // CABLING from the drive back into the hull, and the two small
+        // status lamps a crewed weapon always has
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.13, -0.09, -0.20),
+                        rotation: Quat::from_rotation_x(0.55),
+                        scale: Vec3::new(0.032, 0.28, 0.032),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(kit.core_glow.clone()),
+                    Transform::from_xyz(sd * 0.115, 0.055, -0.14)
+                        .with_scale(Vec3::splat(0.024)),
+                ))
+                .set_parent(root);
+        }
+        // reinforced barrel shroud - a partial cowl over the top of the
+        // cluster, open below so the barrels stay readable
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki.clone()),
+                Transform::from_xyz(0.0, 0.105, 0.34)
+                    .with_scale(Vec3::new(0.20, 0.030, 0.42)),
+            ))
+            .set_parent(root);
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.105, 0.055, 0.34),
+                        rotation: Quat::from_rotation_z(sd * 0.55),
+                        scale: Vec3::new(0.028, 0.11, 0.42),
+                    },
+                ))
+                .set_parent(root);
+        }
+    }
     root
 }
 
@@ -7237,6 +7400,159 @@ fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     translation: Vec3::new(x, -0.13, 0.30),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
                     scale: Vec3::new(0.05, 0.10, 0.05),
+                },
+            ))
+            .set_parent(root);
+    }
+    // ---- §owner FLAGSHIP PASS: the launcher -----------------------------
+    //
+    // A launcher is a tube plus everything that makes firing one safe:
+    // the casing that contains a misfire, the lock that holds the round
+    // until it is told not to, the vent that puts the backblast
+    // somewhere, and the sensor that decided to fire in the first place.
+    // The tube had none of them.
+    {
+        // ARMOUR CASING - a half-shell over the tube, ribbed, open below
+        // so the tube stays the thing you read
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki.clone()),
+                Transform::from_xyz(0.0, 0.115, 0.42)
+                    .with_scale(Vec3::new(0.20, 0.045, 0.78)),
+            ))
+            .set_parent(root);
+        for k in 0..5 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform::from_xyz(0.0, 0.115, 0.13 + k as f32 * 0.145)
+                        .with_scale(Vec3::new(0.215, 0.055, 0.030)),
+                ))
+                .set_parent(root);
+        }
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.115, 0.055, 0.42),
+                        rotation: Quat::from_rotation_z(sd * 0.60),
+                        scale: Vec3::new(0.030, 0.10, 0.78),
+                    },
+                ))
+                .set_parent(root);
+        }
+        // LOCKING MECHANISM at the mouth - two jaws and their actuator.
+        // This is the part that says the round is HELD rather than
+        // resting in a pipe.
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.155, 0.0, 0.815),
+                        rotation: Quat::from_rotation_z(sd * -0.25),
+                        scale: Vec3::new(0.045, 0.13, 0.075),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.145, 0.0, 0.735),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.040, 0.055, 0.040),
+                    },
+                ))
+                .set_parent(root);
+        }
+        // EXHAUST / BACKBLAST vents at the rear, angled out and down so
+        // the blast is visibly going somewhere that is not the pilot
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.115, -0.035, -0.06),
+                        rotation: Quat::from_rotation_z(sd * -0.55),
+                        scale: Vec3::new(0.085, 0.16, 0.085),
+                    },
+                ))
+                .set_parent(root);
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.grey_black.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.155, -0.105, -0.06),
+                        rotation: Quat::from_rotation_z(sd * -0.55),
+                        scale: Vec3::new(0.065, 0.03, 0.065),
+                    },
+                ))
+                .set_parent(root);
+        }
+        // RELOAD components - the feed arm that lifts a round from the
+        // magazine into the breech, caught mid-travel
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, -0.075, 0.22),
+                    rotation: Quat::from_rotation_x(-0.45),
+                    scale: Vec3::new(0.075, 0.14, 0.045),
+                },
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, -0.135, 0.10),
+                    rotation: Quat::from_rotation_z(FRAC_PI_2),
+                    scale: Vec3::new(0.055, 0.18, 0.055),
+                },
+            ))
+            .set_parent(root);
+        // TARGETING SENSOR over the muzzle - a boxed seeker head with a
+        // lit aperture. The pod already LOCKS (`pod_lock_t`); this is
+        // where that lives on the model.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.0, 0.175, 0.70)
+                    .with_scale(Vec3::new(0.13, 0.085, 0.17)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.core_glow.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, 0.175, 0.79),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.055, 0.014, 0.055),
+                },
+            ))
+            .set_parent(root);
+        // and the cable run from the seeker back into the mount
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform {
+                    translation: Vec3::new(0.075, 0.15, 0.40),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.026, 0.60, 0.026),
                 },
             ))
             .set_parent(root);
