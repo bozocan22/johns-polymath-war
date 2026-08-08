@@ -45,16 +45,21 @@ pub const SPAWN_CLEAR_M: f32 = 9.0;
 pub const ARENA_HALF: f32 = 34.0;
 pub const EYE_REL: f32 = 1.62;
 pub const BODY_RADIUS: f32 = 0.34;
-/// §owner: 5% shorter than the original 1.78. Every consumer in this file
-/// and in `main.rs` reads it as `BODY_HEIGHT * <multiplier>` or
-/// `x / BODY_HEIGHT`, never as a re-typed literal, so this single edit is
-/// the whole change - crouch ratio, mech-visor fraction, camera boom
-/// scaling, hit-band fractions all move with it automatically.
-/// Deliberately NOT touched: `EYE_REL` (camera eye height) is its own
-/// absolute constant, not derived from this one - shrinking the body
-/// without also being asked to move the eye keeps that a separate,
-/// separately-requestable change rather than an assumed one.
-pub const BODY_HEIGHT: f32 = 1.691;
+/// §owner: REVERTED to the original 1.78 - see the commit that reverted
+/// it. A 5% shrink was tried and confirmed to break
+/// `a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does` (bisected
+/// by an independent verifier; the fixture never touches the scout, so
+/// this constant was the only possible cause). The claimed reasoning -
+/// "every consumer reads this as a multiplier, so one edit is the whole
+/// change" - was wrong: `CROUCH_HEIGHT`, `ROLL_HEIGHT` and `EYE_REL` are
+/// each their OWN absolute constant, not derived from this one, so
+/// shrinking only this one shifted the ratios between them (crouch ratio
+/// alone moved 0.646 -> 0.680) in a way nothing here accounted for or
+/// tested for. Making the player 5% shorter is still a real, valid
+/// request - it needs its own pass that decides what ALL of those
+/// related constants should do together, not a single-line edit assumed
+/// to be complete.
+pub const BODY_HEIGHT: f32 = 1.78;
 /// Full crouch. 1.15 keeps the hitbox honest against the chibi rig's
 /// visible crouched head — what you can see, you can shoot.
 pub const CROUCH_HEIGHT: f32 = 1.15;
@@ -14787,6 +14792,20 @@ mod tests {
 
         // a second press this same airborne period must do nothing -
         // vy should NOT jump again.
+        //
+        // §owner CAUGHT BY THOR, RECORDED HONESTLY: the first version of
+        // this assertion checked `(vy - JUMP_SPEED).abs() > 0.01`, which
+        // cannot fail. One tick of gravity is GRAVITY*DT = 0.15 - larger
+        // than the 0.01 tolerance - so even a WRONGLY-fired second jump
+        // reads as `|7.25 - 7.4| = 0.15`, which is also `> 0.01` and would
+        // have passed the same assertion meant to catch it. I had just
+        // fixed the mirror-image mistake (an assertion too TIGHT to pass
+        // on correct code) in the first sub-test above, and reintroduced
+        // the same class of error inverted, in the same test, minutes
+        // later. Fixed to an upper bound that actually separates the two
+        // outcomes: denied leaves vy well under 1.0 (it only ever fell
+        // further from 0.1), a real second jump would put it near
+        // JUMP_SPEED (7.4).
         let vy_after_first = s.fighters[0].vy;
         s.fighters[0].vy = 0.1; // simulate having fallen a little since
         s.step(PlayerCmd {
@@ -14795,7 +14814,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            (s.fighters[0].vy - JUMP_SPEED).abs() > 0.01,
+            s.fighters[0].vy < 1.0,
             "a second air-jump this period must be denied: vy_before_first={vy_after_first}, \
              vy_now={}",
             s.fighters[0].vy
