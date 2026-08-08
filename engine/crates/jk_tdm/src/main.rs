@@ -38,6 +38,9 @@ mod branding;
 /// its vibration. Its own module for the reason `branding` is: it wires
 /// in with two lines here, so it costs this file nothing to own.
 mod cockpit;
+/// §gallery: the training range's mech exhibit. Self-contained; wired in
+/// with this line and one `add_plugins` below.
+mod mech_lineup;
 mod menu_ui;
 mod sim;
 
@@ -3544,9 +3547,38 @@ struct ModelKit {
     mech_royal: Handle<StandardMaterial>,
     mech_royal_dk: Handle<StandardMaterial>,
     mech_royal_lt: Handle<StandardMaterial>,
+    /// §gallery THE ENEMY HEAVY's three body tones.
+    ///
+    /// The heavy shipped in ONE livery for both factions: two heavy
+    /// mechs at range were the same machine in the same paint, and the
+    /// only thing that said whose it was was the name plate over its
+    /// head. That is the exact complaint the plate armour and the light
+    /// chassis were both re-liveried to answer (see `plate_shell_foe`
+    /// and `scout_hull_foe`), and the heaviest, largest silhouette in
+    /// the game was the one that never got the fix.
+    ///
+    /// Same three roles as the khaki set, so it is a handle swap at the
+    /// top of `spawn_armor_rig`. Near-black oxide iron, the family the
+    /// foe scout already wears, so the two enemy machines read as one
+    /// army rather than two.
+    mech_iron: Handle<StandardMaterial>,
+    mech_iron_dk: Handle<StandardMaterial>,
+    mech_iron_lt: Handle<StandardMaterial>,
     mech_shadow: Handle<StandardMaterial>,
     mech_metal: Handle<StandardMaterial>,
     mech_red: Handle<StandardMaterial>,
+    /// §gallery the ALLY heavy's lit accent - the mirror of `mech_red`.
+    ///
+    /// Gold where the foe machine is red: the sensor slit, the pod
+    /// status line and the two tracking lenses. `mech_red` keeps its
+    /// job on the enemy machine, so the "one red slit is the x2 weak
+    /// point" read is unchanged for the thing you are shooting at.
+    ///
+    /// `unlit` exactly like `mech_red`, which means the `emissive` on
+    /// either is dead weight - Bevy's unlit path returns `base_color`
+    /// and never reaches the emissive add. The brightness therefore
+    /// lives in the base colour here, on purpose.
+    mech_lamp: Handle<StandardMaterial>,
     /// §4.2 (Brief VI): yellow-black hazard accents.
     mech_hazard: Handle<StandardMaterial>,
     /// FP-only translucent shield set - the raised plate must not blind
@@ -5511,8 +5543,98 @@ const MAP_LAP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(6.7) },
 ];
 
+/// §gallery THE MECH EXHIBIT, photographed.
+///
+/// The whole point of the gallery is a comparison, so the frames it needs
+/// are a WIDE one holding all five stands at once and a CLOSE walk along
+/// the row. The camera cannot simply be turned to see the row - the
+/// third-person boom is rigidly behind the player, so `look` swings the
+/// subject and the exhibit together. The row is laid along the player's
+/// spawn facing instead, and `boom` does the framing.
+///
+/// The player is planted and pointed by `capture_quick_deploy`, which is
+/// also where the mode is set to Training - without that there is no
+/// gallery to photograph and this script would quietly produce five
+/// pictures of an empty field.
+const MECH_GALLERY_BEATS: &[CapBeat] = &[
+    // Third person first, for SCALE. The soldier is in this frame, two
+    // metres from the camera and a head shorter than the machines, and
+    // "how big is it" is half of what the owner asked to see.
+    //
+    // Pitched UP rather than level. The boom is welded behind the
+    // player's head, so a level third-person shot puts his body exactly
+    // over the middle stand - the first run of this script eclipsed the
+    // royal machine with the pilot's own hat. Lifting the camera looks
+    // over him instead.
+    CapBeat { look: Some((0.0, 0.18)), ..beat(0.3) },
+    CapBeat { snap: Some("01-gallery-wide-third"), ..beat(1.2) },
+    // then into first person, which is the only camera that gets close
+    // enough to judge PAINT: the boom sits 2.2 m further back and at 90
+    // degrees of vertical FOV that costs a fifth of the subject.
+    CapBeat { look: Some((0.0, 0.02)), ..beat(1.3) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(1.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(1.5) },
+    CapBeat { snap: Some("02-gallery-wide-fp"), ..beat(2.2) },
+    // Back to THIRD person and WALK IN.
+    //
+    // Both pair shots want the machines twice the size the stand-off
+    // gives, and the only control that moves a camera toward something
+    // in this harness is the player's own legs - `boom` scales the boom
+    // and pulls the camera AWAY from the subject, and `orbit` swings it
+    // sideways. So: hold W for a second (MOVE_SPEED 4.8 m/s, so about 5
+    // m of the 9 m stand-off), which puts the row at four metres.
+    //
+    // Third rather than first for the pairs, because the first-person
+    // rifle occupies the bottom-right quadrant and the row is symmetric:
+    // whichever pair sits on the right of the frame would be behind the
+    // receiver. The over-the-shoulder camera has no viewmodel at all.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(2.3) },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyV)],
+        press: &[CapKey::K(KeyCode::KeyW)],
+        ..beat(2.4)
+    },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(3.2) },
+    // The heavy pair. Stand 0 sits at row-offset -7.2 m along `right`,
+    // and `right` at yaw 0 is -X - so the heavies are at POSITIVE x,
+    // which in this right-handed frame is the LEFT of the screen, which
+    // a POSITIVE yaw turns toward.
+    //
+    // Both signs were wrong on the first pass and the "scout pair" frame
+    // came back full of heavies. Two axis conventions compose here (the
+    // row's own `right`, and the screen's) and neither is guessable from
+    // the source; this is what the capture is for.
+    //
+    // Aimed PAST the pair, not at it.
+    //
+    // The obvious yaw is the pair's own midpoint, atan(5.4 / 5.2) = 0.80
+    // rad, and it is wrong: the third-person boom parks the pilot dead
+    // centre of frame, so anything you centre is behind his hat. Two
+    // runs put HEAVY/ALLY squarely behind the pilot's head that way.
+    // Over-turning to 1.25 rad throws the pair into the right-hand half
+    // of the frame, where nothing is standing.
+    CapBeat { look: Some((1.25, 0.10)), ..beat(3.4) },
+    CapBeat { snap: Some("03-heavy-pair"), ..beat(4.3) },
+    // and the light pair - mirrored, but NOT by the same angle.
+    //
+    // The heavy side has the royal machine at the row's centre, five
+    // metres away and huge, so the pair reads even when the outer one
+    // sits close to the pilot's silhouette. The light side has nothing
+    // nearer than 6 m, and at -1.25 the enemy scout came out directly
+    // behind the pilot's shoulder. The extra fifth of a radian is worth
+    // more here than symmetry in the source is.
+    CapBeat { look: Some((-1.45, 0.10)), ..beat(4.5) },
+    CapBeat { snap: Some("04-scout-pair"), ..beat(5.2) },
+    // finally round to a three-quarter, so the machines are read as
+    // SOLIDS rather than as five flat elevations
+    CapBeat { look: Some((0.0, 0.06)), orbit: Some(0.85), boom: Some(1.6), ..beat(5.4) },
+    CapBeat { snap: Some("05-gallery-quarter"), ..beat(6.2) },
+    CapBeat { end: true, ..beat(6.7) },
+];
+
 fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
+        "mech_gallery" => MECH_GALLERY_BEATS,
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
         // §owner MEDIC: the light chassis, in first and third person.
@@ -5564,8 +5686,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 28] = [
+const CAPTURE_SCRIPTS: [&str; 29] = [
     "medic",
+    // §gallery: the training range's exhibit - both chassis, both
+    // liveries, and the royal paint, in one frame.
+    "mech_gallery",
     // §20 THE COCKPIT, both chassis. `medic_cockpit` MUST keep the
     // `medic` prefix - that is what `capture_board_medic` matches on to
     // hand it the light chassis.
@@ -5718,7 +5843,33 @@ fn capture_quick_deploy(
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
     }
-    start_match(&sel, Mode::Tdm, &mut game, &mut next);
+    // §gallery: the exhibit only exists on the RANGE, so the script that
+    // photographs it has to start the range. Every other script keeps the
+    // TDM it has always had.
+    let mode = match cap.script.as_deref() {
+        Some("mech_gallery") => Mode::Training,
+        _ => Mode::Tdm,
+    };
+    start_match(&sel, mode, &mut game, &mut next);
+    if cap.script.as_deref() == Some("mech_gallery") {
+        // The row is laid out along the player's SPAWN FACING, and the
+        // beats then aim with absolute `look` yaws - so the spawn facing
+        // has to be a known number or the script aims at empty ground.
+        //
+        // The stage point is the gallery's OWN, not the generic one. The
+        // generic `capture_stage_pos` only proves the SUBJECT stands in
+        // the open; the first run of this script proved that is not the
+        // same question - it planted the player in a clear spot facing a
+        // timber barricade, the row placed itself legitimately behind
+        // it, and three of the five machines were invisible in every
+        // frame. `mech_lineup::capture_stage_pos` asks the question this
+        // script actually needs: is the whole ROW visible from here.
+        let stage = mech_lineup::capture_stage_pos(&game.sim)
+            .unwrap_or_else(|| capture_stage_pos(&game.sim));
+        let f = &mut game.sim.fighters[0];
+        f.pos = stage;
+        f.yaw = 0.0;
+    }
     if matches!(
         cap.script.as_deref(),
         Some("mech_scale") | Some("mech_fp") | Some("cockpit")
@@ -6728,6 +6879,7 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
+        .add_plugins(mech_lineup::MechGalleryPlugin)
         .init_resource::<IntroPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
         // the warm gold-and-sepia art on every menu screen.
@@ -10514,6 +10666,36 @@ struct MechLegArmor {
     cleat_front: Entity,
 }
 
+/// §gallery: the heavy's three body tones, as `[base, light, dark]`.
+///
+/// ONE table, because the hull and the LEG ARMOUR are the same machine
+/// and used to disagree about it: the legs hard-coded `mech_khaki*`, so
+/// the royal variant has always walked on khaki shins under red plate,
+/// and the moment the hull learned an enemy livery the foe machine would
+/// have had khaki legs under an iron hull. A shared accessor is the only
+/// thing that keeps a second livery from being a second bug.
+///
+/// `elite` wins over `ally`: three paints, not four. See `spawn_armor_rig`.
+fn mech_body_tones(kit: &ModelKit, ally: bool, elite: bool) -> [Handle<StandardMaterial>; 3] {
+    match (elite, ally) {
+        (true, _) => [
+            kit.mech_royal.clone(),
+            kit.mech_royal_lt.clone(),
+            kit.mech_royal_dk.clone(),
+        ],
+        (false, true) => [
+            kit.mech_khaki.clone(),
+            kit.mech_khaki_lt.clone(),
+            kit.mech_khaki_dk.clone(),
+        ],
+        (false, false) => [
+            kit.mech_iron.clone(),
+            kit.mech_iron_lt.clone(),
+            kit.mech_iron_dk.clone(),
+        ],
+    }
+}
+
 /// Spawn the mech hull rig - a WALKING WEAPONS PLATFORM: a slab hull
 /// cantilevered over an exposed hip/waist mechanism, a sensor-visor deck
 /// instead of a head, a 10-tube rocket pod on the left hardpoint and a
@@ -10525,12 +10707,20 @@ struct MechLegArmor {
 fn spawn_armor_rig(
     commands: &mut Commands,
     kit: &ModelKit,
+    // §gallery WHOSE SIDE IT IS ON, from the viewer's seat - the same
+    // question `spawn_scout_chassis` has always asked. Khaki for us,
+    // oxide iron for them, gold lamps against red ones.
+    ally: bool,
     // §22 THE ROYAL VARIANT. Same machine, same 53 plates, same
     // silhouette - red lacquer over the khaki, gold where the hazard
     // stripes sit, and a crown on the sensor deck. The spec asked for
     // "the same mech family plus a unique elite variant", and the way
     // to get that is to change the PAINT and one silhouette element,
     // not to fork the model.
+    //
+    // Elite OVERRIDES the side tones rather than combining with them:
+    // there are three paints, not four. The side still reads off the
+    // lamps, which `elite` never touches.
     elite: bool,
 ) -> (Entity, MechHullDetach) {
     let root = commands
@@ -10540,11 +10730,13 @@ fn spawn_armor_rig(
     let cyl = || kit.cyl.clone();
     let ball = || kit.ball.clone();
     // the three body tones, picked once. Every plate below names the
-    // ROLE (body / body_lt / body_dk) rather than the colour, so the two
-    // liveries cannot drift into different machines.
-    let body = if elite { kit.mech_royal.clone() } else { kit.mech_khaki.clone() };
-    let body_lt = if elite { kit.mech_royal_lt.clone() } else { kit.mech_khaki_lt.clone() };
-    let body_dk = if elite { kit.mech_royal_dk.clone() } else { kit.mech_khaki_dk.clone() };
+    // ROLE (body / body_lt / body_dk) rather than the colour, so the
+    // three liveries cannot drift into different machines.
+    let [body, body_lt, body_dk] = mech_body_tones(kit, ally, elite);
+    // The LIT ACCENT - sensor slit, pod status line, tracking lenses.
+    // Gold for us, red for them, and it survives the elite override
+    // because paint and lamps are two different reads.
+    let lamp = if ally { kit.mech_lamp.clone() } else { kit.mech_red.clone() };
     // (mesh, material, translation, rotation, scale) - torso-local
     let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 53] = [
         // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
@@ -10562,7 +10754,7 @@ fn spawn_armor_rig(
         (cube(), body.clone(), Vec3::new(0.0, 0.88, 0.02), Quat::IDENTITY, Vec3::new(0.62, 0.32, 0.54)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.89, 0.297), Quat::IDENTITY, Vec3::new(0.48, 0.17, 0.012)),
         // the SENSOR VISOR strip - a thin lens line, not a lightbar
-        (cube(), kit.mech_red.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
+        (cube(), lamp.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
         // brow hood over the slit + cheek blocks framing the recess -
         // NO extra mech_red anywhere: one slit is the x2 weak-point read
         (cube(), body_dk.clone(), Vec3::new(0.0, 0.99, 0.30), Quat::from_rotation_x(-0.20), Vec3::new(0.50, 0.025, 0.12)),
@@ -10604,7 +10796,7 @@ fn spawn_armor_rig(
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.440, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.372, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.305, 0.815, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
-        (cube(), kit.mech_red.clone(), Vec3::new(-0.44, 0.755, 0.235), Quat::IDENTITY, Vec3::new(0.30, 0.012, 0.01)),
+        (cube(), lamp.clone(), Vec3::new(-0.44, 0.755, 0.235), Quat::IDENTITY, Vec3::new(0.30, 0.012, 0.01)),
         (cube(), kit.mech_hazard.clone(), Vec3::new(-0.44, 0.965, 0.225), Quat::IDENTITY, Vec3::new(0.30, 0.016, 0.014)),
         // ---- GATLING ARM, right flank: hangs LOW and FORWARD -----------
         (cube(), body_dk.clone(), Vec3::new(0.60, 0.24, 0.14), Quat::IDENTITY, Vec3::new(0.20, 0.20, 0.30)),
@@ -11047,7 +11239,7 @@ fn spawn_armor_rig(
                 commands
                     .spawn((
                         Mesh3d(cyl()),
-                        MeshMaterial3d(kit.core_glow.clone()),
+                        MeshMaterial3d(lamp.clone()),
                         Transform {
                             translation: Vec3::new(sd * 0.235, 0.985, 0.322),
                             rotation: Quat::from_rotation_x(FRAC_PI_2),
@@ -11062,7 +11254,7 @@ fn spawn_armor_rig(
                         .spawn((
                             Mesh3d(ball()),
                             MeshMaterial3d(if k == 1 {
-                                kit.core_glow.clone()
+                                lamp.clone()
                             } else {
                                 kit.mech_shadow.clone()
                             }),
@@ -11347,16 +11539,22 @@ fn spawn_armor_rig(
         //
         // Five concentric elements so it reads as DEPTH: a sunk housing,
         // a dark well, a metal iris, the lens itself, and a containment
-        // ring standing proud of the glacis. The glow is `core_glow`,
-        // the same emissive the antenna tip uses, so the machine has one
-        // energy colour and not two.
+        // ring standing proud of the glacis.
+        //
+        // §gallery: the glow is the SIDE LAMP, gold for us and red for
+        // them - the same handle the sensor slit and the pod line take,
+        // so the machine still has exactly one energy colour. It used to
+        // be `core_glow`, which is the shared danger-red: a friendly
+        // heavy wore a hand-sized red lamp on its chest, the brightest
+        // thing on its front plate, in a game whose colour language
+        // spends red on "enemy" and "damaged".
         {
             let cz = 0.556;
             for (mat, r, z, h) in [
                 (body_dk.clone(), 0.20_f32, cz - 0.014, 0.030_f32),
                 (kit.mech_shadow.clone(), 0.155, cz + 0.002, 0.022),
                 (kit.mech_metal.clone(), 0.125, cz + 0.012, 0.018),
-                (kit.core_glow.clone(), 0.088, cz + 0.020, 0.016),
+                (lamp.clone(), 0.088, cz + 0.020, 0.016),
             ] {
                 commands
                     .spawn((
@@ -11459,7 +11657,7 @@ fn spawn_armor_rig(
             commands
                 .spawn((
                     Mesh3d(kit.cyl.clone()),
-                    MeshMaterial3d(kit.mech_red.clone()),
+                    MeshMaterial3d(lamp.clone()),
                     Transform {
                         translation: Vec3::new(cx, cy, 0.665),
                         rotation: Quat::from_rotation_x(FRAC_PI_2),
@@ -11601,7 +11799,12 @@ fn spawn_mech_leg_armor(
     shin: Entity,
     foot: Entity,
     side: f32,
+    // §gallery: the same two questions the hull asks, so the legs cannot
+    // be a different machine from the thing standing on them.
+    ally: bool,
+    elite: bool,
 ) -> MechLegArmor {
+    let [leg_body, leg_lt, leg_dk] = mech_body_tones(kit, ally, elite);
     let mut root_of = |commands: &mut Commands, bone: Entity| {
         commands
             .spawn((Transform::IDENTITY, Visibility::Hidden))
@@ -11628,18 +11831,18 @@ fn spawn_mech_leg_armor(
             .id()
     };
     // THIGH: the single largest flat surface, outer face, reverse-raked
-    let thigh_plate = part(commands, t_root, kit.cube.clone(), kit.mech_khaki.clone(),
+    let thigh_plate = part(commands, t_root, kit.cube.clone(), leg_body.clone(),
         Vec3::new(side * 0.10, -0.13, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.045, 0.34, 0.24));
-    part(commands, t_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+    part(commands, t_root, kit.cube.clone(), leg_dk.clone(),
         Vec3::new(side * 0.126, -0.13, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.012, 0.30, 0.03));
-    part(commands, t_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+    part(commands, t_root, kit.cube.clone(), leg_dk.clone(),
         Vec3::new(0.0, -0.12, 0.095), Quat::from_rotation_x(-0.22), Vec3::new(0.15, 0.20, 0.03));
     // SHIN: exposed knee pistons + counter-raked plate + ankle actuator
     part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
         Vec3::new(0.045, -0.03, 0.075), Quat::from_rotation_x(0.35), Vec3::new(0.03, 0.16, 0.03));
     part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
         Vec3::new(-0.045, -0.03, 0.075), Quat::from_rotation_x(0.35), Vec3::new(0.03, 0.16, 0.03));
-    let shin_plate = part(commands, s_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+    let shin_plate = part(commands, s_root, kit.cube.clone(), leg_dk.clone(),
         Vec3::new(0.0, -0.16, 0.06), Quat::from_rotation_x(0.30), Vec3::new(0.13, 0.20, 0.035));
     // knee hazard strip - within the §4.2 knee-plate allowance
     part(commands, s_root, kit.cube.clone(), kit.mech_hazard.clone(),
@@ -11654,12 +11857,12 @@ fn spawn_mech_leg_armor(
     {
         // THIGH: a second armour layer standing off the main plate, and
         // the hip actuator that drives it
-        part(commands, t_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+        part(commands, t_root, kit.cube.clone(), leg_lt.clone(),
             Vec3::new(side * 0.118, -0.06, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.020, 0.13, 0.20));
         part(commands, t_root, kit.cube.clone(), kit.mech_shadow.clone(),
             Vec3::new(side * 0.104, -0.06, 0.03), Quat::from_rotation_x(-0.22), Vec3::new(0.010, 0.145, 0.215));
         // hip ram, barrel + rod
-        part(commands, t_root, kit.cyl.clone(), kit.mech_khaki_dk.clone(),
+        part(commands, t_root, kit.cyl.clone(), leg_dk.clone(),
             Vec3::new(side * -0.05, -0.10, -0.075), Quat::from_rotation_x(-0.30), Vec3::new(0.048, 0.22, 0.048));
         part(commands, t_root, kit.cyl.clone(), kit.mech_metal.clone(),
             Vec3::new(side * -0.05, -0.20, -0.045), Quat::from_rotation_x(-0.30), Vec3::new(0.026, 0.14, 0.026));
@@ -11670,9 +11873,9 @@ fn spawn_mech_leg_armor(
         // KNEE: a real cap over the joint, with a pivot boss either side.
         // The knee is the one silhouette landmark on a leg and it was a
         // hazard stripe on a flat plate.
-        part(commands, s_root, kit.ball.clone(), kit.mech_khaki.clone(),
+        part(commands, s_root, kit.ball.clone(), leg_body.clone(),
             Vec3::new(0.0, -0.005, 0.075), Quat::IDENTITY, Vec3::new(0.175, 0.16, 0.165));
-        part(commands, s_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+        part(commands, s_root, kit.cube.clone(), leg_lt.clone(),
             Vec3::new(0.0, 0.045, 0.10), Quat::from_rotation_x(-0.35), Vec3::new(0.15, 0.055, 0.09));
         for bs in [-1.0_f32, 1.0] {
             part(commands, s_root, kit.cyl.clone(), kit.mech_metal.clone(),
@@ -11681,9 +11884,9 @@ fn spawn_mech_leg_armor(
 
         // SHIN: layered armour, a calf mass at the back so the leg is not
         // a slat, and a heat vent stack
-        part(commands, s_root, kit.cube.clone(), kit.mech_khaki.clone(),
+        part(commands, s_root, kit.cube.clone(), leg_body.clone(),
             Vec3::new(0.0, -0.155, -0.055), Quat::from_rotation_x(-0.12), Vec3::new(0.135, 0.22, 0.09));
-        part(commands, s_root, kit.cube.clone(), kit.mech_khaki_lt.clone(),
+        part(commands, s_root, kit.cube.clone(), leg_lt.clone(),
             Vec3::new(0.0, -0.20, 0.082), Quat::from_rotation_x(0.30), Vec3::new(0.10, 0.10, 0.020));
         for k in 0..3 {
             part(commands, s_root, kit.cube.clone(), kit.mech_metal.clone(),
@@ -11697,7 +11900,7 @@ fn spawn_mech_leg_armor(
         // and this is not a jet: it is the attitude jet a top-heavy
         // walker needs to not fall over when it plants a foot hard. A
         // dark bell with a lit throat, angled down and out.
-        part(commands, s_root, kit.cyl.clone(), kit.mech_khaki_dk.clone(),
+        part(commands, s_root, kit.cyl.clone(), leg_dk.clone(),
             Vec3::new(side * 0.105, -0.115, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.075, 0.11, 0.075));
         part(commands, s_root, kit.cyl.clone(), kit.mech_shadow.clone(),
             Vec3::new(side * 0.128, -0.165, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.058, 0.03, 0.058));
@@ -11705,9 +11908,9 @@ fn spawn_mech_leg_armor(
             Vec3::new(side * 0.133, -0.178, -0.045), Quat::from_rotation_z(side * -0.45), Vec3::new(0.038, 0.012, 0.038));
     }
     // FOOT: wide pad, rear spur, and the cleat rows. Do NOT smooth them.
-    part(commands, f_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+    part(commands, f_root, kit.cube.clone(), leg_dk.clone(),
         Vec3::new(0.0, -0.03, 0.05), Quat::IDENTITY, Vec3::new(0.17, 0.045, 0.30));
-    part(commands, f_root, kit.cube.clone(), kit.mech_khaki_dk.clone(),
+    part(commands, f_root, kit.cube.clone(), leg_dk.clone(),
         Vec3::new(0.0, -0.015, -0.115), Quat::from_rotation_x(0.45), Vec3::new(0.06, 0.035, 0.10));
     let cleat_front = part(commands, f_root, kit.cube.clone(), kit.mech_metal.clone(),
         Vec3::new(0.0, -0.055, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.018, 0.05));
@@ -11795,7 +11998,9 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
         PickupKind::RobotArmor => {
             // the pad floats the hull kit alone - no leg armour on a
             // totem, and its stage parts never hide (ids dropped)
-            let (e, _) = spawn_armor_rig(commands, kit, false);
+            // the pad totem is unclaimed equipment - nobody's side yet,
+            // so it wears the standard khaki the ally machine does
+            let (e, _) = spawn_armor_rig(commands, kit, true, false);
             commands.entity(e).insert(
                 Transform::from_xyz(0.0, 0.75, 0.0).with_scale(Vec3::splat(0.9)),
             );
@@ -12928,7 +13133,8 @@ fn spawn_fighter_rigs(
         // same trick the helmets and the medic trims use, and for the
         // same reason: a livery chosen at spawn from an index cannot
         // reach replay state.
-        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit, i % 4 == 1);
+        let elite = i % 4 == 1;
+        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit, ally, elite);
         // §owner MECH BARRIER: on the LEFT forearm cradle, which is the
         // arm that is not holding the gatling - a shield on the gun arm
         // would be a shield you cannot use while shooting.
@@ -12941,8 +13147,10 @@ fn spawn_fighter_rigs(
                 scale: Vec3::splat(MECH_HULL_SCALE),
             })
             .set_parent(armor_rig);
-        let la_l = spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0);
-        let la_r = spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0);
+        let la_l =
+            spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0, ally, elite);
+        let la_r =
+            spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0, ally, elite);
         commands
             .entity(armor_rig)
             .insert((
@@ -13367,6 +13575,30 @@ fn setup(
             ..default()
         }),
         mech_khaki_lt: materials.add(tex_metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65, 2.2)),
+        // §gallery THE ENEMY HEAVY. Oxide iron, the `signal::ENEMY`
+        // family the foe scout already wears, carrying the SAME brushed
+        // texture and the same uv scale as the khaki set - the two
+        // liveries have to be the same machine under different paint,
+        // and a different surface treatment would read as a different
+        // model. Metallic is up and roughness down against the khaki
+        // because a dark tone with no specular is a hole in the frame.
+        mech_iron: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.205, 0.150, 0.140),
+            base_color_texture: Some(tex_kit.metal.clone()),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
+            metallic: 0.28,
+            perceptual_roughness: 0.60,
+            ..default()
+        }),
+        mech_iron_dk: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.115, 0.080, 0.075),
+            base_color_texture: Some(tex_kit.metal.clone()),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
+            metallic: 0.32,
+            perceptual_roughness: 0.62,
+            ..default()
+        }),
+        mech_iron_lt: materials.add(tex_metal(Color::srgb(0.315, 0.235, 0.215), 0.26, 0.55, 2.2)),
         mech_shadow: materials.add(flat(0x33352F)),
         mech_metal: materials.add(tex_metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45, 2.6)),
         // §4.2: hazard chevrons - shoulder-pod cover and knee plates
@@ -13375,6 +13607,16 @@ fn setup(
         mech_red: materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0xC2, 0x3B, 0x2E),
             emissive: LinearRgba::new(1.6, 0.25, 0.12, 1.0),
+            unlit: true,
+            ..default()
+        }),
+        // §gallery the ally heavy's lit accent. Built the same way as
+        // `mech_red` - unlit, so the BASE COLOUR is the whole of what
+        // reaches a pixel - and pushed bright, because a gold slit at
+        // the khaki machine's own luminance would vanish into it.
+        mech_lamp: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.99, 0.82, 0.30),
+            emissive: LinearRgba::new(1.9, 1.35, 0.40, 1.0),
             unlit: true,
             ..default()
         }),
@@ -15249,6 +15491,23 @@ fn rebuild_world(
             Color::srgb(0.60, 0.62, 0.68),
             Color::srgb(0.36, 0.40, 0.28),
             Color::srgb(0.50, 0.50, 0.48),
+        ),
+        // §cliffhold: a 600 m mountain map with 32 m of relief - cliff,
+        // plateau castle, a half-city and a quarry. Cool grey-blue air
+        // and dry stone ground, the high-altitude family, distinct from
+        // Battlefield's warmer dust.
+        //
+        // A PLACEHOLDER, and named as one. This arm exists so the client
+        // compiles against the new map; the real art pass this map needs
+        // - per-CoverKind stone/rock/timber tints, a sky that sells the
+        // height, and the four landmark silhouettes (keep, gatehouse
+        // pair, bell tower, cliff line) that keep a deliberately messy
+        // map readable - is a job in its own right and has NOT been done
+        // or looked at here.
+        MapKind::Cliffhold => (
+            Color::srgb(0.62, 0.68, 0.78),
+            Color::srgb(0.42, 0.40, 0.34),
+            Color::srgb(0.48, 0.47, 0.45),
         ),
     };
     clear.0 = sky;
@@ -21804,7 +22063,11 @@ fn open_intro(
                 ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
                 (
                     "TRAINING RANGE",
-                    "still targets, nothing shoots back - learn the spray",
+                    // §gallery: the exhibit is the second reason to come
+                    // here now, and a feature nobody is told about is a
+                    // feature nobody finds - it stands in front of the
+                    // spawn, but only if you know to look.
+                    "still targets, nothing shoots back - and the mech gallery",
                     ModeButton::Training,
                 ),
             ] {

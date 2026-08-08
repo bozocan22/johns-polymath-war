@@ -480,3 +480,206 @@ safe: tip geometry matters, by a factor ~2.5 where measured cleanly.**
    a third-party summary only and are **NOT CARRIED**. Given this repo's
    history that is precisely the shape of number that gets fabricated; leave
    it out until someone reads the page.
+
+---
+
+## 2026-08-08 — Dispatch: vertical maps, flight, and what bots can cope with — TOTO33
+
+First entry by **TOTO33**, the practitioner-tier researcher (talks,
+postmortems, dev blogs). **Ledger written:** `vertical-maps/SOURCES.md`
+(new, IDs VM-01…VM-18).
+
+**Asked:** what changes about level design when players can fly; how
+shipped games structure altitude bands; how a multi-level map stays
+readable; how to join a castle-on-a-cliff to half a city to open ground;
+and — urgently — what breaks for bots on vertical geometry, because a
+builder is being asked that question right now.
+
+### THE HEADLINE: tier-V is no longer 0
+
+Every ledger in this repo has reported **tier-V = 0** since the project
+began. This log said so three times, most recently "Not touched this pass
+either." The recorded blocker was GDC Vault gating.
+
+**The blocker was misidentified.** Two routes work, both trivial:
+
+1. **`pip install youtube-transcript-api`.** GDC talks published on the
+   official YouTube channel return full timestamped auto-captions.
+   Three talks read this pass. Worked first try.
+2. **Internet Archive carries OCR'd GDC slide decks** at
+   `archive.org/download/<item>/<item>_djvu.txt` for Vault-gated talks.
+   That is how VM-06 (Brewer, GDC 2015 AI Summit) was read.
+
+**Both routes were already reachable from existing ledgers and nobody
+tried them.** `maps/SOURCES.md` S-02 (Yoder, "Holy Grail of Multiplayer
+Level Design") sat SNIPPET-ONLY and uncounted since 2026-08-01 — I read
+the whole 27 minutes. `aiming/SOURCES.md` S-01 (Weihs, aim assist) already
+records the URL `archive.org/details/GDC2013Weihs` **in its own source
+row** and is still marked "NOT COUNTED until watched". That is a slide
+deck one `curl` away.
+
+**Standing correction for the next researcher: "watched" was the wrong
+verb and it froze this tier for the whole project.** We cannot watch
+anything. We can read transcripts and slides, and for these two talks the
+text was always there. **5 of the 14 sources this pass are tier V.**
+
+### Sources read end to end this pass
+
+| ID | Source | Status |
+|---|---|---|
+| VM-01 | Jim Brown / Epic, "The Importance of Nothing", GDC 2014 | **READ-TRANSCRIPT** (auto-caption, full 51 min) |
+| VM-02 | Andrew Yoder / Hi-Rez, "Holy Grail of Multiplayer Level Design" | **READ-TRANSCRIPT** (full 27 min) — upgrades `maps/` S-02 |
+| VM-03 | Beinke-Schwartz, "Singleplayer vs Multiplayer LD", GDC 2017 | **READ-TRANSCRIPT (PARTIAL)** — scanned all, read 5 passages |
+| VM-04 | Crystin Cox / ArenaNet, "Gliding in Central Tyria", 2016 | **READ-WRITEUP** (raw HTML fetched and read, not summarised) |
+| VM-05 | Brewer / Digital Extremes, *Game AI Pro 3* ch.21 | **READ** (full 10 pp) |
+| VM-06 | Brewer, GDC 2015 AI Summit slides via Internet Archive | **READ-SLIDES** (OCR, no narration) |
+| VM-07 | Guerrilla, Killzone 3 MP bots, *Game AI Pro* ch.29 | **READ** (full 14 pp) |
+| VM-08 | Kirst, voxel navmesh coverage, *Game AI Pro 2* ch.32 | **READ** (full 16 pp) |
+| VM-09 | Butcher & Griesemer / Bungie, "Illusion of Intelligence", GDC 2002 | **READ-SLIDES** (27 slides) |
+| VM-10…13 | The Level Design Book: Verticality, Composition, Wayfinding, Circulation | **READ** (`.md` sources pulled to disk) |
+| VM-14 | Bennett Foddy, "zk map for stranger", 2021 | **READ-WRITEUP** |
+| VM-15 | Gamasutra on Titanfall 2 action blocks | **SECOND-HAND**, and does not answer the question — logged so it is not re-chased |
+| VM-16 | Mononen, "Automatic Annotations in Killzone 3" | **NO-TRANSCRIPT** — identified, not retrieved. Top unread target |
+| VM-17/18 | ArenaNet on designing HoT *for* gliding; any Respawn/DICE primary | **NOT FOUND / PAYWALLED** — stated plainly, not substituted |
+
+**14 counted. Tier V: 5.**
+
+### The finding that outranked the literature — and it came from the source tree
+
+The urgent question was "what can bots cope with". I read `sim.rs`
+read-only before reading anyone's opinion, and the answer is not a
+literature question:
+
+- `Fighter` carries `pub waypoint: [f32; 2]` — **x and z. No height.**
+- Waypoints are uniform-random samples inside a **square** of half-extent
+  `self.half`, team-biased, then clamped — **never checked for
+  reachability, collision, or line of sight** (`sim.rs` approx L11976-12016).
+- Grep across `src/` for `navmesh|nav_mesh|pathfind|path_find|a_star|astar`:
+  **exactly two hits, neither of them code** — one false positive from the
+  test name `head_glance_is_a_glance_not_a_stare`, and one comment saying a
+  morale fixture "had drifted into testing PATHFINDING". **There is no
+  navmesh, no path graph and no pathfinder.**
+  *(I first wrote "20 hits, all comments". That regex included `waypoint`,
+  which matches the real bot field and several research `.md` files, so the
+  count and the characterisation were both wrong. Re-run narrowed, hits
+  re-read individually, corrected here and in the ledger. The corrected
+  finding is stronger than the botched one.)*
+
+**Bots walk in a straight line at a random 2D point.** On the flat arenas
+that ship, that reads as roaming and is the right design. On a
+castle-on-a-cliff map, sampled waypoints land inside the mountain and the
+bot presses into the rock until the 15% re-roll fires — an *intermittent*
+failure, which is the worst kind to diagnose. Bots have no notion of "up"
+and can never choose to go to the castle.
+
+**This is the only item in the whole pass that is a defect rather than a
+risk**, and it is what I sent the map builder first.
+
+### What the practitioner tier gave that papers could not
+
+- **VM-01, Gears of War *Gridlock*: they changed the art and nothing
+  else, and lost the map.** "We hadn't changed the physical play space the
+  weapon load out or even the collision — but just that shift in tone and
+  color meant a change in perception" [21:37]. Most-popular map to bottom
+  of the time-played chart, rebuilt, then "back in the top three most
+  played maps of Gears of War 3's lifetime" [22:17]. **Independently
+  corroborated by VM-02 [24:20]**, different studio and decade: Hi-Rez's
+  *Corey* tested well as grey-box and went lukewarm after the art pass.
+- **VM-02, the flight rule, from a studio with flying characters:** "what
+  you see is what you get… we have characters that can fly" [19:57].
+  Flight abolishes the difference between scenery and playable space.
+  Cheap at blockout, expensive later.
+- **VM-04, what actually breaks when you add flight to grounded maps:**
+  progression/skippable content first (got a bespoke No-Fly Zone
+  mechanism), scripted interiors next ("just not designed to handle
+  gliding" so flight was disabled wholesale), out-of-bounds geometry last
+  (tolerated).
+- **VM-07 + VM-09, twenty-four years apart, same answer:** give the AI a
+  discrete set of *authored* positions. Guerrilla: "**We chose to manually
+  place these, because they would require complex terrain reasoning to
+  generate automatically.**" Bungie: firing points, "need a discrete
+  answer to a continuous problem."
+- **Tried and rejected** — the thing only this tier supplies: stacked
+  navmesh layers and 3D waypoint graphs for flight (VM-05, with the
+  boundary condition that *favours* us — layers "work well in confined
+  spaces", the rejection is scoped to 2 km volumes); 3D Jump Point Search
+  ("an order of magnitude slower than the tweaked heuristic A-star");
+  Hi-Rez's *Sewer*, a map deliberately enclosed "so you can't really fly
+  anywhere" — "on average players didn't like it so much" (VM-02 [23:42]).
+
+### Two contradictions recorded, neither averaged away
+
+1. **CONTRADICTION-1:** `maps/SOURCES.md` S-01 says stairs should run
+   30-35 deg; VM-08's illustrative walkable-slope limit is `maxSlopeRad` =
+   0.5 rad = **28.65 deg**. A ramp at the recommended human-comfort slope
+   is steeper than that navmesh will walk. They do not truly conflict
+   (voxel generators take stairs through `maxStepHeight` per riser, not
+   the aggregate angle) but they are 1.05-1.22x apart and someone will
+   eventually build a smooth 33 deg ramp and find bots refuse it.
+2. **CONTRADICTION-2:** VM-01 states a "280 times increase in detail" from
+   130 polygons to 60,000 triangles. **60,000 / 130 = 461.5, not 280.**
+   His *other* comparison reproduces (30,000 / 130 = 230.8 vs "more than
+   200 times"), so the 280 is the anomaly — either a polygons/triangles
+   unit mismatch or a caption error. **NOT CARRIED.** Ceiling: "two to
+   three orders of magnitude", no specific multiplier.
+
+### Numbers I refused to carry
+
+**VM-12's 20-row wayfinding table with "% certainty" values** (allegory
+1% … hard barriers 98%). **The authors' own text calls them "a
+non-scientific estimate".** It is the most quotable-looking table in this
+ledger and it is vibes with a decimal point. Ordering kept, percentages
+dropped. Same family as `aiming`'s fabrication and `armor-damage`'s AD-09.
+
+Also **not answered by anybody: how far apart altitude bands should be, in
+metres.** No practitioner source found gives a figure. The only defensible
+ceiling is VM-01's, and it is about silhouettes rather than distance —
+vertical extent is bounded above by the range at which a 1.78 m fighter
+still reads as a figure against his background. **This project can measure
+that**, using the `max_unobstructed_sightline` instrument `maps/SOURCES.md`
+already records, pointed upward.
+
+### Method notes for the next researcher
+
+- **The two transcript routes above. Use them before declaring a talk
+  unreachable.** "PAYWALLED" was true of the Vault and false of the talk.
+- **Auto-captions drop negations.** VM-02 [20:13] reads "we want to make
+  sure that as you're going over rooftops you're hitting invisible walls",
+  which is the exact opposite of the speaker's meaning; context fixes it
+  beyond doubt. **Carry the principle, never that sentence.** Flag the
+  repair at the point of use, not in a footnote.
+- **Divide the numbers before repeating the adjective.** That standing
+  rule from the body-rig pass caught CONTRADICTION-2 on its first
+  outing against a new source type. It keeps earning its place.
+- **Read the source tree before the literature when the question is
+  "what can our thing cope with".** The single most important finding this
+  pass took one grep and was not in any paper.
+- **`.md` versions of GitBook sites** are available by appending `.md` to
+  any page URL, and `llms.txt` at the site root is a full index. That is
+  how VM-10…13 were read as files rather than summaries.
+- **A tool summary is still not a source.** WebFetch's pass at VM-04
+  produced a decent summary with quotes; I fetched the raw HTML, stripped
+  it and read it anyway. It happened to be accurate. That is not a reason
+  to stop.
+
+### What I would read next to close what I left open
+
+1. **VM-16, Mononen, "Automatic Annotations in Killzone 3 and Beyond"** —
+   the primary on deriving cover from geometry. It is a *blog* (slides on
+   `digestingduck.blogspot.com`), so it should be reachable. Highest value.
+2. **A Respawn or DICE primary on flight / vertical map design.** Sweep
+   the GDC YouTube channel by title now that transcripts work, before
+   concluding it does not exist. Titanfall, Battlefield, Anthem and Just
+   Cause currently contribute **nothing** to this ledger.
+3. **Recast/Detour off-mesh connections and jump links** — the documented
+   hole in VM-08, which covers crouch/prone/swim and never mentions
+   cliffs. **This is a code-reading job — hand it to TOTO22**, which is
+   the entire reason we are separate roles.
+4. **Bellard, "Environment Design as Spatial Cinematography", Rockstar,
+   GDC 2019** — the credible opposing view to VM-11's "leading lines are
+   brain poison", named by VM-11 itself. On YouTube, so transcriptable.
+5. **Kevin Lynch, *The Image of the City* (1960)** — the districts/edges/
+   nodes model is the whole theoretical basis of my Q4 answer and it is
+   currently second-hand through VM-12. **Nobody here has read Lynch.**
+
+— TOTO33
