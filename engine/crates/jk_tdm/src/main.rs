@@ -3442,6 +3442,12 @@ struct ModelKit {
     /// or a coloured stick with no heat.
     plasma_core: Handle<StandardMaterial>,
     plasma_halo: Handle<StandardMaterial>,
+    /// §25 the GREEN armour-impact flash. A separate pair from the
+    /// medic's plasma bolt on purpose: that one is a projectile the
+    /// player tracks in flight, this one is a hit confirmation, and two
+    /// things that mean different things must not share a colour.
+    hit_plasma_core: Handle<StandardMaterial>,
+    hit_plasma_halo: Handle<StandardMaterial>,
     /// the gripping mitt - §1 restyles this to the robot's shell
     hand: Handle<StandardMaterial>,
     // §2.1 weapon palette: four flat greys, tone changes - not geometry -
@@ -6542,6 +6548,7 @@ fn main() {
         .init_resource::<CaptureMode>()
         .init_resource::<CaptureOrbit>()
         .init_resource::<CaptureBoom>()
+        .init_resource::<PlasmaHitPool>()
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
         // menu capture runs in the MENU states, not Playing
@@ -6723,6 +6730,7 @@ fn main() {
                 mech_barrier_sync,
                 mech_hud_sync,
                 repair_beam_sync,
+                plasma_hit_sync,
                 bow_string_sync,
                 grenade_arc,
                 rocket_aim_preview,
@@ -8625,6 +8633,92 @@ fn spawn_scout_chassis(
     root
 }
 
+/// §25 THE ARMOUR HIT FLASH: green plasma where a round meets a hull.
+///
+/// The spec asked to replace an "x-ray" hit visualisation with green
+/// plasma. The x-ray half has no target - every translucency, depth-bias
+/// and render-layer path on fighters was searched and the only
+/// see-through material in the game is the deliberate first-person guard
+/// plate. So this builds the POSITIVE half only, and deletes nothing on
+/// the strength of a guess.
+///
+/// WHAT DRIVES IT is the interesting part. `Impact` carries only a
+/// position and a normal - it cannot say whether it struck armour or a
+/// wall - so a client-side "is this impact near a body" search would be
+/// a second, drifting answer to a question the sim already answers. It
+/// reads `Fighter::last_hit_by` instead: the sim writes `(attacker,
+/// time)` on every credited hit, and credits ENEMIES only, which is
+/// exactly the population this effect is for. Freshness of that
+/// timestamp IS the effect's clock.
+#[derive(Resource, Default)]
+struct PlasmaHitPool(Vec<(Entity, Entity)>);
+
+/// How long a flash lives. Short: this is a confirmation, and a
+/// confirmation that outlives the shot that caused it stops being one.
+const PLASMA_HIT_S: f32 = 0.20;
+
+fn plasma_hit_sync(
+    mut commands: Commands,
+    game: Res<Game>,
+    kit: Res<ModelKit>,
+    mut pool: ResMut<PlasmaHitPool>,
+    mut q: Query<(&mut Transform, &mut Visibility)>,
+) {
+    while pool.0.len() < game.sim.fighters.len() {
+        let core = commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.hit_plasma_core.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+            ))
+            .id();
+        let halo = commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.hit_plasma_halo.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+            ))
+            .id();
+        pool.0.push((core, halo));
+    }
+    let now = game.sim.t;
+    for (i, f) in game.sim.fighters.iter().enumerate() {
+        let Some(&(core, halo)) = pool.0.get(i) else { continue };
+        // the flash belongs to ARMOUR. A round meeting a man is already
+        // told by the blood and the hit marker; this is the read that
+        // says "that one hit a HULL and the hull ate it".
+        let age = match f.last_hit_by {
+            Some((_, t)) if f.alive() && f.in_mech() => now - t,
+            _ => f32::INFINITY,
+        };
+        if !(0.0..PLASMA_HIT_S).contains(&age) {
+            for e in [core, halo] {
+                if let Ok((_, mut v)) = q.get_mut(e) {
+                    *v = Visibility::Hidden;
+                }
+            }
+            continue;
+        }
+        // grows and thins over its life - a flash that only fades reads
+        // as a lamp being switched off, where an impact SPREADS
+        let k = (age / PLASMA_HIT_S).clamp(0.0, 1.0);
+        let at = Vec3::new(
+            f.pos[0],
+            f.pos[1] + f.height() * 0.62,
+            f.pos[2],
+        );
+        for (e, base, grow) in [(core, 0.34_f32, 0.55_f32), (halo, 0.72, 1.35)] {
+            if let Ok((mut tf, mut vis)) = q.get_mut(e) {
+                let sc = base * (1.0 + grow * k) * (1.0 - k * 0.55);
+                *tf = Transform::from_translation(at).with_scale(Vec3::splat(sc.max(0.01)));
+                *vis = Visibility::Visible;
+            }
+        }
+    }
+}
+
 /// §owner MECH BARRIER: the arm module that projects the field, and the
 /// field itself.
 #[derive(Component)]
@@ -9708,6 +9802,145 @@ fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 },
             ))
             .set_parent(root);
+    }
+
+    // ---- §14 THE ELECTRONICS ------------------------------------------
+    //
+    // The casing, the mouth jaws, the vents and a seeker already existed.
+    // What the launcher still had nothing of is the half of a guided
+    // weapon that is not mechanical: the boxes that decide WHERE it goes.
+    //
+    // Four things, and each says something different about the weapon,
+    // because four identical greebles say only "there are greebles here":
+    //
+    //   FIRE-CONTROL BOX with a data panel - the computer, and a face
+    //     that is visibly displaying something
+    //   RANGEFINDER on its own short mast, offset from the seeker so the
+    //     two are visibly separate instruments rather than one repeated
+    //   POWER CELL with a charge ladder - a launcher that guides needs a
+    //     supply, and a ladder reads as a quantity at a glance
+    //   HEAT LADDER along the tube - the tube gets hot, and it is the
+    //     only part of this weapon the eye already follows
+    //
+    // All of it sits on the casing's upper-left quarter, clear of the
+    // tube's own line: the tube is what a player reads to know where the
+    // rocket goes, and hardware stacked in front of it would be hardware
+    // that costs aim.
+    {
+        // FIRE-CONTROL BOX: housing, a recessed dark face, and three lit
+        // data rows on it. The rows are unequal lengths - a display
+        // showing the same bar three times is a texture, not a readout.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(-0.135, 0.135, 0.30)
+                    .with_scale(Vec3::new(0.075, 0.11, 0.22)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform::from_xyz(-0.176, 0.140, 0.30)
+                    .with_scale(Vec3::new(0.010, 0.080, 0.175)),
+            ))
+            .set_parent(root);
+        for (k, w) in [(0usize, 0.130_f32), (1, 0.085), (2, 0.150)] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.core_glow.clone()),
+                    Transform::from_xyz(-0.182, 0.170 - k as f32 * 0.028, 0.30)
+                        .with_scale(Vec3::new(0.006, 0.010, w)),
+                ))
+                .set_parent(root);
+        }
+
+        // RANGEFINDER on a short mast, deliberately NOT beside the
+        // seeker: two instruments a hand-span apart read as one boxy
+        // lump, and the whole point of a second sensor is that you can
+        // see there are two.
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(-0.115, 0.205, 0.55)
+                    .with_scale(Vec3::new(0.020, 0.075, 0.020)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki.clone()),
+                Transform::from_xyz(-0.115, 0.255, 0.56)
+                    .with_scale(Vec3::new(0.085, 0.060, 0.115)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_red.clone()),
+                Transform {
+                    translation: Vec3::new(-0.115, 0.255, 0.622),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.032, 0.014, 0.032),
+                },
+            ))
+            .set_parent(root);
+
+        // POWER CELL and its charge ladder - five rungs, so it reads as
+        // a QUANTITY rather than as a light
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.135, 0.130, 0.22)
+                    .with_scale(Vec3::new(0.070, 0.095, 0.20)),
+            ))
+            .set_parent(root);
+        for k in 0..5 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.core_glow.clone()),
+                    Transform::from_xyz(0.172, 0.130, 0.145 + k as f32 * 0.038)
+                        .with_scale(Vec3::new(0.006, 0.050, 0.016)),
+                ))
+                .set_parent(root);
+        }
+
+        // HEAT LADDER along the tube: fins that shorten toward the
+        // muzzle, which is how a real heat path is built - most metal
+        // where the gas has been longest.
+        for k in 0..4 {
+            let z = 0.20 + k as f32 * 0.13;
+            let w = 0.155 - k as f32 * 0.020;
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform::from_xyz(0.0, -0.085, z)
+                        .with_scale(Vec3::new(w, 0.014, 0.045)),
+                ))
+                .set_parent(root);
+        }
+
+        // MOUNTING HARDWARE: the two bolts the whole assembly hangs on.
+        // A weapon with no visible attachment reads as floating.
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.105, 0.020, 0.075),
+                        rotation: Quat::from_rotation_z(FRAC_PI_2),
+                        scale: Vec3::new(0.036, 0.045, 0.036),
+                    },
+                ))
+                .set_parent(root);
+        }
     }
     root
 }
@@ -12527,6 +12760,23 @@ fn setup(
         // the one thing that must never be mistaken for either. Cyan is
         // unclaimed here and stays legible against sand and sky, which
         // are the only two backgrounds a bolt ever crosses.
+        // §25 green, and EMISSIVE far above 1.0 so it survives being
+        // seen against a sunlit wall - a hit flash that only reads in
+        // shadow is a hit flash you cannot trust.
+        hit_plasma_core: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.80, 1.00, 0.82),
+            emissive: LinearRgba::new(1.2, 6.0, 1.6, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        hit_plasma_halo: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.20, 0.95, 0.35, 0.34),
+            emissive: LinearRgba::new(0.20, 2.2, 0.40, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
         plasma_core: materials.add(StandardMaterial {
             base_color: Color::srgb(0.90, 0.99, 1.0),
             emissive: LinearRgba::new(3.4, 4.0, 4.2, 1.0),
