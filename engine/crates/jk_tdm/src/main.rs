@@ -9417,6 +9417,278 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             ))
             .set_parent(root);
     }
+
+    // ---- §10 THE TURRET THE PILOT ACTUALLY LOOKS AT --------------------
+    //
+    // The module ring went on the HULL turret - the one other players
+    // see. This is the other one: the mount in the pilot's own hands,
+    // which was a spine, two collars and six barrels, and is the thing
+    // the owner is looking at for most of a match.
+    //
+    // The owner's list, item by item, and where each one went:
+    //
+    //   rotating barrels ................ already there, kept
+    //   ROTATING CENTRAL ASSEMBLY ....... rotor disc + breech, ON the
+    //                                     spinner, so the machine turns
+    //                                     rather than only its barrels
+    //   MECHANICAL BARREL HOUSING ....... a shroud open at the bottom
+    //   VISIBLE FIRING MECHANISM ........ belt, feed pawl, bolt track
+    //   MECHANICAL SUPPORTS ............. two braces to the cradle
+    //   COOLING ......................... fin stack + vented jacket
+    //   SENSORS / RANGE / TRACKING ...... three distinct pods
+    //   ENERGY / DATA MODULES ........... lit-seam box + data rows
+    //   SMALL ARTICULATED COMPONENTS .... feed arm caught mid-travel,
+    //                                     ejector door part-open
+    //
+    // The split that makes it read: only the CLUSTER turns. The housing,
+    // the sensors and the feed stay put. That contrast is what a gatling
+    // looks like - a still machine with a spinning heart - and it is why
+    // the drive housing is deliberately static even though it drives.
+    {
+        // ---- ON THE SPINNER: the rotating central assembly ------------
+        // rotor disc between the barrels and the breech - a wide flat
+        // plate is what makes rotation legible, because a cylinder
+        // turning about its own axis shows you nothing
+        for (mat, z, r, h) in [
+            (kit.mech_metal.clone(), 0.115_f32, 0.098_f32, 0.030_f32),
+            (kit.mech_khaki_dk.clone(), 0.055, 0.086, 0.045),
+        ] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(mat),
+                    Transform {
+                        translation: Vec3::new(0.0, 0.0, z),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(r, h, r),
+                    },
+                ))
+                .set_parent(spinner);
+        }
+        // six lugs around the rotor - the teeth that make the turn
+        // countable. Without something asymmetric on the disc, a
+        // spinning disc and a still one look identical.
+        for i in 0..6 {
+            let a = i as f32 * std::f32::consts::TAU / 6.0 + 0.52;
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.grey_black.clone()),
+                    Transform {
+                        translation: Vec3::new(a.cos() * 0.082, a.sin() * 0.082, 0.115),
+                        rotation: Quat::from_rotation_z(a),
+                        scale: Vec3::new(0.030, 0.018, 0.040),
+                    },
+                ))
+                .set_parent(spinner);
+        }
+        // muzzle collar, also on the spinner, so the front of the
+        // machine turns with it
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, 0.0, 0.635),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.088, 0.028, 0.088),
+                },
+            ))
+            .set_parent(spinner);
+
+        // ---- STATIC: housing, supports, mechanism --------------------
+        // BARREL SHROUD. Two flat BARS over the top of the cluster, not
+        // rings around it.
+        //
+        // The first attempt was a pair of cylinders rotated to face down
+        // the barrel axis, described in its own comment as a half-cowl
+        // open below. A cylinder facing that way is a DISC: it capped
+        // the cluster and hid the six barrels behind a plate, which is
+        // the exact opposite of the brief - the central rotating minigun
+        // has to stay recognisable. Caught by looking at it.
+        //
+        // Bars sitting ON TOP leave the barrels in full view from the
+        // pilot's eye, which is the only angle this model is seen from.
+        for (z, w) in [(0.28_f32, 0.20_f32), (0.44, 0.185)] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    Transform::from_xyz(0.0, 0.098, z)
+                        .with_scale(Vec3::new(w, 0.022, 0.055)),
+                ))
+                .set_parent(root);
+        }
+        // MECHANICAL SUPPORTS: two braces from the shroud down to the
+        // cradle, angled - a strut that is vertical carries nothing a
+        // player believes in
+        for sd in [-1.0_f32, 1.0] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform {
+                        translation: Vec3::new(sd * 0.105, -0.035, 0.20),
+                        rotation: Quat::from_rotation_z(sd * -0.42),
+                        scale: Vec3::new(0.022, 0.14, 0.055),
+                    },
+                ))
+                .set_parent(root);
+        }
+        // VISIBLE FIRING MECHANISM: the belt, its links, the feed pawl,
+        // and the bolt track the carrier runs in
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(-0.135, -0.055, -0.02)
+                    .with_scale(Vec3::new(0.075, 0.10, 0.20)),
+            ))
+            .set_parent(root);
+        for k in 0..5 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.gold.clone()),
+                    Transform::from_xyz(-0.108 + k as f32 * 0.017, -0.030 + k as f32 * 0.012, 0.02)
+                        .with_scale(Vec3::new(0.014, 0.026, 0.020)),
+                ))
+                .set_parent(root);
+        }
+        // the bolt track: a slot with a carrier sitting part way along
+        // it - a mechanism frozen mid-stroke reads as a mechanism, where
+        // one at rest reads as a casting
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform::from_xyz(0.098, 0.010, 0.06)
+                    .with_scale(Vec3::new(0.014, 0.030, 0.26)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(0.098, 0.010, 0.13)
+                    .with_scale(Vec3::new(0.024, 0.040, 0.055)),
+            ))
+            .set_parent(root);
+        // SMALL ARTICULATED COMPONENTS: the feed arm caught mid-travel
+        // and the ejector door part open, both on angles no rest pose
+        // would produce
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform::from_xyz(-0.085, 0.010, 0.10)
+                    .with_rotation(Quat::from_rotation_z(0.55))
+                    .with_scale(Vec3::new(0.075, 0.018, 0.030)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.115, -0.030, -0.01)
+                    .with_rotation(Quat::from_rotation_x(0.42))
+                    .with_scale(Vec3::new(0.020, 0.070, 0.085)),
+            ))
+            .set_parent(root);
+
+        // ---- COOLING -------------------------------------------------
+        for k in 0..5 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.mech_metal.clone()),
+                    Transform::from_xyz(0.0, 0.062, 0.10 + k as f32 * 0.052)
+                        .with_scale(Vec3::new(0.15, 0.030, 0.014)),
+                ))
+                .set_parent(root);
+        }
+
+        // ---- SENSORS: three DIFFERENT instruments --------------------
+        // range finder (round lens), tracker (square window), and a data
+        // module with lit rows. Three shapes, because three copies of one
+        // pod is one instrument repeated, not three instruments.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(0.128, 0.055, 0.30)
+                    .with_scale(Vec3::new(0.055, 0.055, 0.10)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_red.clone()),
+                Transform {
+                    translation: Vec3::new(0.128, 0.055, 0.355),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2),
+                    scale: Vec3::new(0.024, 0.012, 0.024),
+                },
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform::from_xyz(-0.128, 0.055, 0.30)
+                    .with_scale(Vec3::new(0.055, 0.055, 0.10)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.core_glow.clone()),
+                Transform::from_xyz(-0.128, 0.055, 0.352)
+                    .with_scale(Vec3::new(0.034, 0.024, 0.008)),
+            ))
+            .set_parent(root);
+
+        // ---- ENERGY / DATA MODULE ------------------------------------
+        // a boxed unit with a lit seam and three data rows of unequal
+        // length, plus the conduit feeding it
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki.clone()),
+                Transform::from_xyz(0.0, 0.075, -0.14)
+                    .with_scale(Vec3::new(0.17, 0.075, 0.14)),
+            ))
+            .set_parent(root);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.core_glow.clone()),
+                Transform::from_xyz(0.0, 0.075, -0.212)
+                    .with_scale(Vec3::new(0.12, 0.010, 0.008)),
+            ))
+            .set_parent(root);
+        for (k, w) in [(0usize, 0.090_f32), (1, 0.055), (2, 0.075)] {
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(kit.core_glow.clone()),
+                    Transform::from_xyz(0.0, 0.100 - k as f32 * 0.016, -0.212)
+                        .with_scale(Vec3::new(w, 0.006, 0.006)),
+                ))
+                .set_parent(root);
+        }
+        commands
+            .spawn((
+                Mesh3d(kit.cyl.clone()),
+                MeshMaterial3d(kit.mech_shadow.clone()),
+                Transform {
+                    translation: Vec3::new(0.070, 0.030, -0.10),
+                    rotation: Quat::from_rotation_x(FRAC_PI_2 - 0.5),
+                    scale: Vec3::new(0.016, 0.16, 0.016),
+                },
+            ))
+            .set_parent(root);
+    }
     // ---- §owner FLAGSHIP PASS: the turret ------------------------------
     //
     // This is the weapon the player looks at for the whole time they are
