@@ -4434,6 +4434,97 @@ struct CompassText;
 struct WeaponStripCell(usize);
 
 /// §9.1: the strip - updates names/opacity, fades after 4 s idle.
+/// §18 THE SHIELD READOUT, under the weapon strip on the right edge.
+///
+/// The spec asked for "current / maximum shield value and recharge
+/// state". Exactly one of the two shields in this game HAS those: the
+/// mech barrier is a real 280-point pool that stops absorbing when it is
+/// spent and refills after a quiet spell. The soldier's tower shield is
+/// not a pool at all - it is a damage REDUCTION plate (65% standing,
+/// 95% crouched, inside a 60-degree arc), with no durability anywhere in
+/// the sim.
+///
+/// So this does not print "0 / 0" for the soldier and call it a shield
+/// value. Each shield reports the number that actually governs it: the
+/// barrier its charge, the plate its block fraction and the arc that
+/// fraction is worth anything inside. A readout that invents a field to
+/// fill a layout is worse than one that admits the field does not exist.
+#[derive(Component)]
+struct ShieldReadout;
+
+fn shield_readout(
+    game: Res<Game>,
+    mut q: Query<(&mut Text, &mut TextColor), With<ShieldReadout>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let Ok((mut t, mut tc)) = q.get_single_mut() else { return };
+    if !p.alive() {
+        **t = String::new();
+        return;
+    }
+    // team-neutral chrome; the STATE is what carries colour here, and
+    // only two states are worth a colour: spent, and holding.
+    let (line, col) = if p.in_mech() {
+        let hp = p.mech_shield_hp;
+        let frac = (hp / sim::MECH_SHIELD_HP).clamp(0.0, 1.0);
+        let bars = (frac * 10.0).round() as usize;
+        let state = if hp <= 0.0 {
+            "DOWN"
+        } else if p.shield_up {
+            "UP"
+        } else {
+            "STOWED"
+        };
+        // recharging is a real, visible state: the pool only refills
+        // after MECH_SHIELD_RECHARGE_DELAY_S without a hit, so a pilot
+        // who just took one needs to know the wait has not started.
+        let charging = hp < sim::MECH_SHIELD_HP
+            && p.mech_shield_quiet_t >= sim::MECH_SHIELD_RECHARGE_DELAY_S;
+        (
+            format!(
+                "BARRIER  {}  [{}{}]  {:.0}/{:.0}{}",
+                state,
+                "#".repeat(bars),
+                "-".repeat(10 - bars),
+                hp,
+                sim::MECH_SHIELD_HP,
+                if charging { "  ^" } else { "" }
+            ),
+            if hp <= 0.0 {
+                Color::srgb(0.95, 0.35, 0.30)
+            } else if p.shield_up {
+                Color::srgb(0.55, 0.85, 0.98)
+            } else {
+                Color::srgba(0.85, 0.88, 0.92, 0.55)
+            },
+        )
+    } else {
+        // the plate. Its number is the fraction of a frontal hit it
+        // eats, and that fraction genuinely changes with stance, so the
+        // readout changes with stance too.
+        let block = if p.crouch {
+            sim::SHIELD_BLOCK_CROUCH
+        } else {
+            sim::SHIELD_BLOCK_STAND
+        };
+        let arc = sim::SHIELD_ARC_COS.acos().to_degrees() * 2.0;
+        (
+            if p.shield_up {
+                format!("GUARD  UP  BLOCKS {:.0}%  FRONT {:.0}", block * 100.0, arc)
+            } else {
+                "GUARD  STOWED  [4]".to_string()
+            },
+            if p.shield_up {
+                Color::srgb(0.55, 0.85, 0.98)
+            } else {
+                Color::srgba(0.85, 0.88, 0.92, 0.55)
+            },
+        )
+    };
+    **t = line;
+    *tc = TextColor(col);
+}
+
 fn weapon_strip(
     time: Res<Time>,
     game: Res<Game>,
@@ -6413,6 +6504,7 @@ fn main() {
                 stability_bracket,
                 health_vignette,
                 weapon_strip,
+                shield_readout,
             )
                 .run_if(in_state(GameState::Playing)),
         )
@@ -12889,6 +12981,24 @@ fn setup(
             HudRoot,
         ));
     }
+    // §18: the shield's own line, directly under the four strip cells so
+    // it reads as part of the same block rather than as a stray label.
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 15.0,
+            ..default()
+        },
+        TextColor(Color::srgba(0.85, 0.88, 0.92, 0.55)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(14.0),
+            top: Val::Percent(40.0 + 4.0 * 4.6),
+            ..default()
+        },
+        ShieldReadout,
+        HudRoot,
+    ));
     // §7 compass strip
     commands.spawn((
         Text::new(""),
@@ -18668,27 +18778,20 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         // simulated, neither was ever on screen, so the
                         // pilot was flying half blind.
                         let brace = if p.mech_brace { "  [BRACED]" } else { "" };
-                        // §owner MECH SHIELD: the barrier's pool. Shown
-                        // whenever it is raised OR still regrowing, so
-                        // the pilot can see both what is left and when it
-                        // is safe to push again.
-                        let barrier = if p.shield_up || p.mech_shield_hp < sim::MECH_SHIELD_HP {
-                            let n = ((p.mech_shield_hp / sim::MECH_SHIELD_HP) * 10.0)
-                                .round()
-                                .clamp(0.0, 10.0) as i32;
-                            let bar: String =
-                                (0..10).map(|i| if i < n { '#' } else { '.' }).collect();
-                            let tag = if !p.shield_up {
-                                "REGROW"
-                            } else if p.mech_shield_hp > 0.0 {
-                                "BARRIER"
-                            } else {
-                                "COLLAPSED"
-                            };
-                            format!("  {tag} [{bar}]")
-                        } else {
-                            String::new()
-                        };
+                        // §18: the barrier's pool used to be drawn HERE
+                        // too, as a second bar in the vitals line. It now
+                        // lives with the weapon strip on the right, where
+                        // the spec asked for it and where it can carry
+                        // state, charge and the recharge marker together
+                        // - see `shield_readout`.
+                        //
+                        // The duplicate is removed rather than left as a
+                        // convenience. Two widgets rendering one fact is
+                        // how they end up disagreeing: this one showed a
+                        // REGROW tag the right-hand readout knows nothing
+                        // about, and the next change to either would have
+                        // had to remember the other existed.
+                        let barrier = "";
                         // ten segments of stride heat: full bar = ready,
                         // empty = still cooling. Shown only once it is
                         // actually spent, so a fresh chassis stays clean.
