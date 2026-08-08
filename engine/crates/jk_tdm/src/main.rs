@@ -7263,6 +7263,161 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
     root
 }
 
+/// §2 THE SOLDIER'S HAND, with fingers.
+///
+/// The owner asked for hands, finger joints and arm joints on the NORMAL
+/// SOLDIER - not on the mech. This is that hand, and it is a different
+/// object from `spawn_hand_fingered`: that one is a VIEWMODEL hand,
+/// built to read at 30 cm from the camera with 19 entities, and putting
+/// it on every body in the match would multiply per-fighter cost by the
+/// squad size for detail nobody could resolve at combat range.
+///
+/// This one is built for the WORLD model: a palm, four fingers of two
+/// segments each, and a two-segment thumb, at world-body scale. Fifteen
+/// entities against the mitten's three.
+///
+/// It is spawned only when `detail` is set, which is the same flag the
+/// weapons already use to mean "this body is the PLAYER". Bots keep the
+/// mitten. That is not a compromise - a bot's hand is never closer than
+/// several metres and the mitten silhouette is identical at that range.
+///
+/// `curl` closes the fingers (1.0 = a fist round a rifle grip, 0.55 =
+/// the open cradle of a forend), and every joint below derives its angle
+/// from it, so one number poses the whole hand.
+fn spawn_world_hand_fingered(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    look: &SoldierLook,
+    curl: f32,
+    mirror: bool,
+) -> Entity {
+    let m = if mirror { -1.0_f32 } else { 1.0 };
+    let root = commands
+        .spawn((Transform::IDENTITY, Visibility::default()))
+        .id();
+    // the PALM - flatter and squarer than the mitten's egg, because a
+    // palm is what fingers have to look like they grow out of
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, -0.012, 0.012)
+                .with_rotation(Quat::from_rotation_x(-0.30 * curl))
+                .with_scale(Vec3::new(0.072, 0.052, 0.078)),
+        ))
+        .set_parent(root);
+    // the KNUCKLE BAR: one dark bridge across the finger roots, so the
+    // four fingers read as belonging to one hand rather than as four
+    // separate stalks
+    commands
+        .spawn((
+            Mesh3d(kit.cyl.clone()),
+            MeshMaterial3d(look.joint.clone()),
+            Transform::from_xyz(0.0, -0.020, 0.052)
+                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::new(0.019, 0.070, 0.019)),
+        ))
+        .set_parent(root);
+    // FOUR FINGERS, index to little. Each is two segments with a dark
+    // knuckle between them, and each is shorter than the one inboard of
+    // it - a row of equal fingers reads as a rake.
+    for (i, (fx, len)) in [
+        (0.026_f32, 0.052_f32),
+        (0.009, 0.056),
+        (-0.009, 0.052),
+        (-0.026, 0.044),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // proximal: swings down from the knuckle bar with the curl
+        let a1 = 0.55 + 1.05 * curl;
+        let prox = commands
+            .spawn((
+                Transform::from_xyz(fx * m, -0.020, 0.052)
+                    .with_rotation(Quat::from_rotation_x(-a1)),
+                Visibility::default(),
+            ))
+            .set_parent(root)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, 0.0, len * 0.5)
+                    .with_scale(Vec3::new(0.016, 0.017, len)),
+            ))
+            .set_parent(prox);
+        // the middle knuckle, then the distal segment folding further
+        let dist = commands
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, len)
+                    .with_rotation(Quat::from_rotation_x(-0.45 - 0.85 * curl)),
+                Visibility::default(),
+            ))
+            .set_parent(prox)
+            .id();
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::splat(0.019)),
+            ))
+            .set_parent(dist);
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(look.shell2.clone()),
+                Transform::from_xyz(0.0, 0.0, len * 0.42)
+                    .with_scale(Vec3::new(0.014, 0.015, len * 0.82)),
+            ))
+            .set_parent(dist);
+        let _ = i;
+    }
+    // THE THUMB, on its own axis. It opposes across the grip rather than
+    // curling with the fingers, which is the single thing that makes a
+    // hand look like it is holding something instead of pointing at it.
+    let thumb = commands
+        .spawn((
+            Transform::from_xyz(-0.038 * m, -0.006, 0.020).with_rotation(
+                Quat::from_rotation_y(0.85 * m) * Quat::from_rotation_x(-0.35 - 0.55 * curl),
+            ),
+            Visibility::default(),
+        ))
+        .set_parent(root)
+        .id();
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.024).with_scale(Vec3::new(0.020, 0.020, 0.048)),
+        ))
+        .set_parent(thumb);
+    let thumb_tip = commands
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 0.048)
+                .with_rotation(Quat::from_rotation_x(-0.55 * curl)),
+            Visibility::default(),
+        ))
+        .set_parent(thumb)
+        .id();
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.joint.clone()),
+            Transform::from_scale(Vec3::splat(0.021)),
+        ))
+        .set_parent(thumb_tip);
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.shell2.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.018).with_scale(Vec3::new(0.018, 0.018, 0.038)),
+        ))
+        .set_parent(thumb_tip);
+    root
+}
+
 /// §1.1: hands are MITTENS - a rounded mitt curled to the grip plus a
 /// separate thumb. `curl` is the grip strength (1.0 = fist around a rifle
 /// grip, 0.55 = the open cradle of a forend); `mirror` flips chirality so
@@ -8258,6 +8413,163 @@ fn spawn_scout_chassis(
     part(cyl(), shell.clone(), Vec3::new(-0.445, 0.30, 0.42), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.24, 0.050, 0.24));
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(-0.445, 0.30, 0.44), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.035, 0.17));
     part(ball(), line.clone(), Vec3::new(-0.445, 0.30, 0.455), Quat::IDENTITY, Vec3::splat(0.070));
+
+    // ---- §1 THE HARDWARE PASS ---------------------------------------
+    //
+    // The owner asked for roughly three times the mechanical detail and
+    // was explicit that this is a GRAPHICS pass: no new articulation on
+    // this chassis. So everything below is bolted to masses that already
+    // exist, and nothing here moves or is read by any system.
+    //
+    // The rule that stops it becoming noise: every piece must be
+    // something a machinist would have had to FIT. A bolt sits on a
+    // seam. An actuator spans two masses that move relative to each
+    // other. A cable leaves a housing and ARRIVES somewhere. A vent is
+    // on the hot side. Detail that cannot answer "what is it attached
+    // to, and why" makes a model busier without making it read as a
+    // machine.
+    //
+    // Positions are derived from the frame's own joint centres rather
+    // than typed fresh, so moving a limb drags its hardware with it
+    // instead of leaving it floating in the old place.
+    {
+        // JOINT COLLARS on every ball: a split ring with a shadow gap.
+        // The cheapest thing that says "this rotates" without animating.
+        for (jx, jy, jz, r, axis_x) in [
+            (0.30_f32, 0.76_f32, 0.0_f32, 0.150_f32, true),
+            (-0.30, 0.76, 0.0, 0.150, true),
+            (0.395, 0.45, 0.03, 0.115, true),
+            (-0.395, 0.45, 0.03, 0.115, true),
+            (0.17, 0.18, 0.0, 0.140, false),
+            (-0.17, 0.18, 0.0, 0.140, false),
+            (0.185, -0.15, 0.035, 0.130, false),
+            (-0.185, -0.15, 0.035, 0.130, false),
+            (0.185, -0.445, -0.02, 0.105, false),
+            (-0.185, -0.445, -0.02, 0.105, false),
+        ] {
+            let rot = if axis_x {
+                Quat::from_rotation_z(FRAC_PI_2)
+            } else {
+                Quat::from_rotation_x(FRAC_PI_2)
+            };
+            part(cyl(), kit.mech_metal.clone(), Vec3::new(jx, jy, jz), rot, Vec3::new(r, 0.028, r));
+            part(cyl(), kit.mech_shadow.clone(), Vec3::new(jx, jy, jz), rot, Vec3::new(r * 0.92, 0.040, r * 0.92));
+        }
+
+        // ACTUATORS across the joints that carry load: a barrel with a
+        // rod sliding out of it, spanning the gap between two masses,
+        // and a clevis at the rod end - a rod that simply stops is a rod
+        // attached to nothing.
+        for sd in [-1.0_f32, 1.0] {
+            for (ax, ay, az, ang, len) in [
+                (0.315_f32, 0.62_f32, -0.075_f32, 0.22_f32, 0.20_f32),
+                (0.375, 0.375, -0.055, -0.18, 0.17),
+                (0.150, 0.055, -0.10, 0.16, 0.22),
+                (0.230, -0.225, -0.095, 0.30, 0.24),
+            ] {
+                part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * ax, ay, az), Quat::from_rotation_x(ang), Vec3::new(0.040, len, 0.040));
+                part(cyl(), kit.mech_metal.clone(),
+                    Vec3::new(sd * ax, ay + len * 0.44, az - ang.sin() * len * 0.44),
+                    Quat::from_rotation_x(ang), Vec3::new(0.024, len * 0.62, 0.024));
+                part(cube(), kit.mech_metal.clone(),
+                    Vec3::new(sd * ax, ay + len * 0.72, az - ang.sin() * len * 0.72),
+                    Quat::from_rotation_x(ang), Vec3::new(0.055, 0.045, 0.030));
+            }
+        }
+
+        // CABLE RUNS. Each leaves the backpack, follows the frame and
+        // ends at a collar - never crossing open air.
+        for sd in [-1.0_f32, 1.0] {
+            for (cx, cy, cz, ang, len) in [
+                (0.145_f32, 0.655_f32, -0.185_f32, 0.55_f32, 0.24_f32),
+                (0.255, 0.545, -0.13, 0.95, 0.22),
+                (0.115, 0.30, -0.175, -0.35, 0.26),
+            ] {
+                part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * cx, cy, cz),
+                    Quat::from_rotation_z(sd * -0.35) * Quat::from_rotation_x(ang),
+                    Vec3::new(0.020, len, 0.020));
+            }
+        }
+
+        // ARMOUR SEAMS: a thin dark line inset along each big shell,
+        // which is what turns a moulded lump into plate that was cut and
+        // fitted. Cheaper and more legible than splitting the mesh.
+        for (sx, sy, sz, w, h) in [
+            (0.0_f32, 0.60_f32, 0.255_f32, 0.34_f32, 0.010_f32),
+            (0.0, 0.72, 0.235, 0.26, 0.010),
+            (0.0, 0.475, 0.245, 0.30, 0.010),
+            (0.0, 1.045, 0.245, 0.24, 0.010),
+        ] {
+            part(cube(), kit.mech_shadow.clone(), Vec3::new(sx, sy, sz), Quat::IDENTITY, Vec3::new(w, h, 0.014));
+        }
+        for sd in [-1.0_f32, 1.0] {
+            for (sy, len) in [(0.045_f32, 0.16_f32), (-0.30, 0.15)] {
+                part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.265, sy, 0.02), Quat::IDENTITY, Vec3::new(0.012, len, 0.10));
+            }
+        }
+
+        // FASTENERS on those seams - showing the bolts is what makes a
+        // panel read as removable rather than as a skin.
+        for (bx, by, bz) in [
+            (0.0_f32, 0.665_f32, 0.262_f32),
+            (0.0, 0.535, 0.262),
+            (0.0, 0.30, 0.235),
+            (0.0, 1.10, 0.235),
+        ] {
+            for sgn in [-1.0_f32, 1.0] {
+                part(ball(), kit.mech_metal.clone(), Vec3::new(bx + sgn * 0.135, by, bz), Quat::IDENTITY, Vec3::splat(0.020));
+            }
+        }
+
+        // COOLING on the hot side only: backpack and hips, never the
+        // face.
+        for (vx, vy, vz, n) in [(0.0_f32, 0.66_f32, -0.315_f32, 4usize), (0.0, 0.235, -0.20, 3)] {
+            for k in 0..n {
+                part(cube(), kit.mech_metal.clone(),
+                    Vec3::new(vx, vy + k as f32 * 0.038, vz),
+                    Quat::from_rotation_x(0.38),
+                    Vec3::new(0.22, 0.012, 0.10));
+            }
+        }
+
+        // SENSOR PODS on the head flanks and crown, each a housing with
+        // a lit face, all pointing where the lens points.
+        for (sx, sy, sz, r) in [
+            (0.205_f32, 1.075_f32, 0.115_f32, 0.030_f32),
+            (-0.205, 1.075, 0.115, 0.030),
+            (0.0, 1.185, 0.115, 0.026),
+        ] {
+            part(cube(), kit.mech_shadow.clone(), Vec3::new(sx, sy, sz), Quat::IDENTITY, Vec3::new(0.065, 0.055, 0.070));
+            part(cyl(), line.clone(), Vec3::new(sx, sy, sz + 0.045), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(r, 0.016, r));
+        }
+
+        // SERVO DRUMS at the wrists and ankles - the joints that get no
+        // collar, because they are the ones that are not balls.
+        for sd in [-1.0_f32, 1.0] {
+            part(cyl(), plate.clone(), Vec3::new(sd * 0.445, 0.175, 0.045), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.075, 0.055, 0.075));
+            part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.475, 0.175, 0.045), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.055, 0.030, 0.055));
+            part(cyl(), plate.clone(), Vec3::new(sd * 0.185, -0.445, -0.075), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.070, 0.050, 0.070));
+        }
+
+        // FOOT HARDWARE: a toe hinge line and two cleats, so the biggest
+        // flat surface on the machine is not a blank slab.
+        for sd in [-1.0_f32, 1.0] {
+            part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.475, 0.145), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.040, 0.175, 0.040));
+            for cz in [-0.04_f32, 0.115] {
+                part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.522, cz), Quat::IDENTITY, Vec3::new(0.185, 0.022, 0.055));
+            }
+        }
+
+        // STATUS LAMPS, kept off every silhouette edge so they read as
+        // detail and never as a team signal.
+        for (lx, ly, lz) in [
+            (0.115_f32, 0.79_f32, 0.185_f32),
+            (-0.115, 0.79, 0.185),
+            (0.0, 0.415, -0.30),
+        ] {
+            part(ball(), line.clone(), Vec3::new(lx, ly, lz), Quat::IDENTITY, Vec3::splat(0.017));
+        }
+    }
     root
 }
 
@@ -11485,14 +11797,82 @@ fn spawn_soldier_body(
                 Transform::from_scale(Vec3::splat(WRIST_R * 2.0)),
             ))
             .set_parent(hand);
-        commands
-            .spawn((
-                Mesh3d(kit.ball.clone()),
-                MeshMaterial3d(look.shell.clone()),
-                Transform::from_xyz(0.0, -0.02, 0.0)
-                    .with_scale(Vec3::new(0.13, 0.10, 0.15)),
-            ))
-            .set_parent(hand);
+        // §2 THE HAND. The player's body gets real fingers; a bot keeps
+        // the single rounded mitt, which is what it has always worn and
+        // which is indistinguishable from fingers at the range a bot is
+        // ever seen from. `weapon_detail` is already the "this body is
+        // the player" flag - reusing it keeps one answer to that
+        // question instead of two that can disagree.
+        if weapon_detail {
+            // curl 0.72: closed enough to read as a grip, open enough
+            // that the fingers are still separable in silhouette. The
+            // real grip pose comes from the IK'd weapon sockets; this is
+            // the hand's own rest shape.
+            let fh = spawn_world_hand_fingered(commands, kit, look, 0.72, ai == 0);
+            commands
+                .entity(fh)
+                .insert(Transform::from_xyz(0.0, -0.03, 0.0))
+                .set_parent(hand);
+        } else {
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(look.shell.clone()),
+                    Transform::from_xyz(0.0, -0.02, 0.0)
+                        .with_scale(Vec3::new(0.13, 0.10, 0.15)),
+                ))
+                .set_parent(hand);
+        }
+        // §2 ARM JOINT HARDWARE, player only, for the same reason.
+        //
+        // The arm was three shells and three plain balls. A joint reads
+        // as a JOINT when you can see what constrains it, so: a shoulder
+        // cap over the deltoid, a hinge PIN through the elbow with a
+        // guard plate outboard of it, and a collar closing the wrist.
+        // None of it moves independently - it rides the bone it is
+        // fitted to, which is what hardware does.
+        if weapon_detail {
+            // shoulder cap - a shell riding the ball, cut away inboard
+            commands
+                .spawn((
+                    Mesh3d(kit.ball.clone()),
+                    MeshMaterial3d(look.shell2.clone()),
+                    Transform::from_xyz(ax.signum() * 0.030, 0.022, 0.0)
+                        .with_rotation(Quat::from_rotation_z(ax.signum() * 0.35))
+                        .with_scale(Vec3::new(0.115, 0.075, 0.120)),
+                ))
+                .set_parent(upper);
+            // elbow hinge: the pin crosses the joint, the guard sits
+            // outboard of it
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(look.joint.clone()),
+                    Transform::from_rotation(Quat::from_rotation_z(
+                        std::f32::consts::FRAC_PI_2,
+                    ))
+                    .with_scale(Vec3::new(0.026, 0.115, 0.026)),
+                ))
+                .set_parent(fore);
+            commands
+                .spawn((
+                    Mesh3d(kit.cube.clone()),
+                    MeshMaterial3d(look.shell2.clone()),
+                    Transform::from_xyz(ax.signum() * 0.050, 0.0, 0.004)
+                        .with_scale(Vec3::new(0.018, 0.070, 0.062)),
+                ))
+                .set_parent(fore);
+            // wrist collar - closes the forearm-to-hand seam that the
+            // mitten used to hide by being fat
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(look.joint.clone()),
+                    Transform::from_xyz(0.0, 0.012, 0.0)
+                        .with_scale(Vec3::new(0.052, 0.026, 0.055)),
+                ))
+                .set_parent(hand);
+        }
         arms[ai] = [upper, fore, hand];
     }
     let [arm_l, arm_r] = arms;
