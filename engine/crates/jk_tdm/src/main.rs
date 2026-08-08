@@ -17724,7 +17724,14 @@ fn camera_system(
     // Lean shift is deliberately NOT applied in a mech: the pilot is
     // strapped into a hull that does not peek.
     let eye = if p.in_mech() {
-        Vec3::new(p.pos[0], sim::mech_visor_eye_y(p.pos[1]), p.pos[2])
+        // §21: the FIGHTER's own visor height, not the free function.
+        // `mech_visor_eye_y(pos_y)` only ever sees a Y coordinate and
+        // cannot know the chassis has KNELT - so with the crouch landing
+        // in the sim, a kneeling pilot kept a standing eye while the
+        // weak point being shot at had dropped most of a metre. Same
+        // class as the visor band the crouch ban was hiding, one layer
+        // out.
+        Vec3::new(p.pos[0], p.visor_eye_y(), p.pos[2])
     } else {
         let eye_h = (p.height() - 0.16).max(0.55);
         Vec3::new(p.pos[0], p.pos[1] + eye_h, p.pos[2])
@@ -17877,7 +17884,17 @@ fn camera_system(
     // when braced - the camera cue that sells the ZMP widening the sim
     // already models as a speed and recoil trade. Cosmetic only; the
     // sim's own `mech_brace` is the authority.
-    let mech_brace_drop = if p.armor_set == ArmorSet::RobotSuit && p.hull > 0.0 && p.mech_brace {
+    //
+    // §21: and it is suppressed while KNEELING. The sim sinks the hull
+    // itself now (`height()` follows `chassis_kneeling`), and the crouch
+    // key sets brace as well - so a kneeling braced mech was paying the
+    // drop twice, once really and once cosmetically, and the camera went
+    // through its own knees.
+    let mech_brace_drop = if p.armor_set == ArmorSet::RobotSuit
+        && p.hull > 0.0
+        && p.mech_brace
+        && !p.chassis_kneeling()
+    {
         p.height() * MECH_BRACE_STANCE_DROP
     } else {
         0.0
