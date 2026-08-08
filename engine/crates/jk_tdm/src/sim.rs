@@ -45,7 +45,16 @@ pub const SPAWN_CLEAR_M: f32 = 9.0;
 pub const ARENA_HALF: f32 = 34.0;
 pub const EYE_REL: f32 = 1.62;
 pub const BODY_RADIUS: f32 = 0.34;
-pub const BODY_HEIGHT: f32 = 1.78;
+/// §owner: 5% shorter than the original 1.78. Every consumer in this file
+/// and in `main.rs` reads it as `BODY_HEIGHT * <multiplier>` or
+/// `x / BODY_HEIGHT`, never as a re-typed literal, so this single edit is
+/// the whole change - crouch ratio, mech-visor fraction, camera boom
+/// scaling, hit-band fractions all move with it automatically.
+/// Deliberately NOT touched: `EYE_REL` (camera eye height) is its own
+/// absolute constant, not derived from this one - shrinking the body
+/// without also being asked to move the eye keeps that a separate,
+/// separately-requestable change rather than an assumed one.
+pub const BODY_HEIGHT: f32 = 1.691;
 /// Full crouch. 1.15 keeps the hitbox honest against the chibi rig's
 /// visible crouched head — what you can see, you can shoot.
 pub const CROUCH_HEIGHT: f32 = 1.15;
@@ -3501,6 +3510,15 @@ impl Fighter {
             } else {
                 standing
             }
+        } else if self.in_scout_mech() {
+            // §owner AGILE SUPPORT MECH: SCOUT_SCALE was declared and never
+            // consumed anywhere - a piloted scout fell through to the plain
+            // player branches below and stood, crouched and rolled at
+            // exactly player size. No kneel state for this chassis (it has
+            // none - see `chassis_kneeling`'s heavy-only gate), so this is
+            // unconditional: the whole point of the light chassis is that
+            // it does not fold.
+            BODY_HEIGHT * SCOUT_SCALE
         } else if self.roll_t > 0.0 {
             ROLL_HEIGHT
         } else if self.crouch {
@@ -4667,7 +4685,12 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
 pub const SCOUT_HULL: f32 = 210.0;
 /// Scale, against the heavy's chassis. Slimmer and shorter, so it reads
 /// as a different silhouette from across a map rather than a repaint.
-pub const SCOUT_SCALE: f32 = 1.42;
+///
+/// §owner: 1.05 - only 5% over `BODY_HEIGHT`, a near-human scout rather
+/// than a small mech. Declared and unused until now: nothing in `height()`
+/// ever multiplied by this, so a piloted scout collided and hit-tested at
+/// plain player size regardless of what this said. See `height()`.
+pub const SCOUT_SCALE: f32 = 1.05;
 /// §owner WEAKNESS: what a spear or an arrow does to it.
 ///
 /// The brief asks for "very vulnerable to spears, very vulnerable to
@@ -13353,7 +13376,7 @@ mod tests {
             "rear shots ignore the shield entirely: took {rear_dmg}"
         );
         // standing (not crouched) front block is real but not near-total
-        // (standing height 1.78 → torso is around y ≈ 1.0)
+        // (standing height BODY_HEIGHT → torso is around y ≈ half of it)
         s.fighters[1].yaw = std::f32::consts::PI;
         s.fighters[1].crouch = false;
         let h2 = s.fighters[1].health;
@@ -14450,6 +14473,50 @@ mod tests {
         assert!(s.iter().all(|w| !h.contains(w)), "the mounts must not overlap");
         assert!(s.contains(&MechWeapon::Plasma) && s.contains(&MechWeapon::Repair));
         assert!(h.contains(&MechWeapon::Gatling) && h.contains(&MechWeapon::Rockets));
+    }
+
+    /// §owner: a near-human scale for the light chassis - 5% over
+    /// `BODY_HEIGHT`, not the heavy's 1.7x.
+    ///
+    /// `SCOUT_SCALE` existed before this test did and `height()` never
+    /// multiplied by it: a piloted scout stood, crouched and rolled at
+    /// exactly PLAYER size, indistinguishable from an unarmoured man to
+    /// every hit-band and camera-boom calculation that reads `height()`.
+    /// This is a RATIO assertion against `BODY_HEIGHT`, not a pinned
+    /// metre figure, so it survives the next retune of either constant
+    /// and only fails if the two stop being close to 5% apart.
+    #[test]
+    fn the_scout_chassis_stands_five_percent_over_the_player() {
+        let mut s = range(701);
+        s.fighters[0].armor_set = ArmorSet::ScoutMech;
+        s.fighters[0].hull = SCOUT_HULL;
+        let scout_h = s.fighters[0].height();
+
+        let player_h = {
+            s.fighters[0].armor_set = ArmorSet::None;
+            s.fighters[0].hull = 0.0;
+            s.fighters[0].height()
+        };
+
+        assert!(
+            (player_h - BODY_HEIGHT).abs() < 1e-6,
+            "sanity: an unarmoured fighter stands at BODY_HEIGHT, got {player_h}"
+        );
+        assert!(
+            (scout_h - player_h * SCOUT_SCALE).abs() < 1e-6,
+            "height() must read SCOUT_SCALE, not fall through to the plain \
+             player branches: scout {scout_h} vs player*scale {}",
+            player_h * SCOUT_SCALE
+        );
+        let ratio = scout_h / player_h;
+        assert!(
+            (ratio - 1.05).abs() < 0.001,
+            "scout must stand ~5% over the player, got a ratio of {ratio}"
+        );
+        assert!(
+            (scout_h - player_h).abs() > 0.01,
+            "the whole bug: without the fix this is exactly zero"
+        );
     }
 
     /// §owner: a chassis can only be holding a mount it HAS - and the
@@ -18731,9 +18798,9 @@ mod tests {
     ///
     /// `REACH_M` is a chosen yardstick, not a measured one - a long
     /// javelin duel, past which a bow is the right tool. Current margin
-    /// on (2) is about 0.2 m of the 1.78, i.e. this WILL start arguing
-    /// with the next person who slows the spear down or steepens its
-    /// gravity. That is the point of it.
+    /// on (2) is a small fraction of `BODY_HEIGHT`, i.e. this WILL start
+    /// arguing with the next person who slows the spear down or steepens
+    /// its gravity. That is the point of it.
     #[test]
     fn a_thrown_spear_reaches_where_it_is_aimed() {
         const REACH_M: f32 = 28.0;
