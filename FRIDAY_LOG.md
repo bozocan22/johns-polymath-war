@@ -92,3 +92,69 @@ That `.min()` only ever bites for a SHORT fighter, so a 3.03 m chassis
 fires from 1.62 m — knee height on the machine, 1.10 m under its own visor.
 Changing it would move every mech engagement, so it is reported rather
 than done.
+
+---
+
+## FRIDAY22 — CLIFFHOLD: a castle on a cliff over half a city
+
+`MapKind::Cliffhold`, "CLIFFHOLD". 600 x 600 m — half again the Arena,
+a fifth bigger than the Battlefield. Builder at `sim.rs:1522`
+(`build_cliffhold`), reached from the `build_map` arm at `sim.rs:1379`.
+
+THE POINT was verticality, because flight is coming, so the bands are
+OCCUPIED rather than decorative: 0 streets/commons/ravine, 5 city roofs
+and the aqueduct deck, 6 the east apron, 7 the muster plaza (the KOTH
+hill, at the origin), 8 and 11 the upper roof courses, 12 the west bench
+and east shelf, 18 THE PLATEAU (cliff top and castle courtyard), 24 the
+curtain wall-walk, 25 the keep half-landing, 32 the keep parapet. Every
+one of them is reachable ON FOOT today, with no flight and no mech, and
+`every_cliffhold_band_is_reachable_on_foot` walks eight routes to prove
+it using the sim's own two movement rules.
+
+LAID OUT IN FINAL METRES and divided back out by `MAP_SCALE`. The
+central +25% pass moves centres and leaves extents alone, so two slabs
+that abut before it are a quarter of their centre distance APART after
+it. On furniture that is a wider gap; on a mountain it is a crack you
+fall eighteen metres down.
+
+THE KEEP IS NOT A SOLID BLOCK. Four walls, a 14 m doorway, the plateau
+for a floor, and a two-flight stair inside to a 32 m parapet — the
+named contrast being the Gardens' gazebo and the Bailey's keep, both
+solid centrepieces you can only walk around. Neither is fixed here.
+
+THE ONE NUMBER THAT MATTERS is `STAIR_RISE_M = 0.5`, under BOTH
+`STEP_UP` (0.55, the legs) and the newly-named `BOT_PROBE_Y` (0.75, the
+bot whisker, extracted from a literal in `bot_act`, value unchanged). Over
+the first it is a mech-only route; over the second a bot reads the flight
+as a wall and veers off it. Mutating it to 0.6 killed three tests.
+
+BOTS HAVE NO PATHFINDER. `waypoint` is `[f32; 2]` — no height — sampled
+uniformly from a square and never checked for reachability. A bot cannot
+CHOOSE to go up, and its waypoints will land inside this mountain. The
+map is built anyway and NOT shaped down to that; what it does do is aim
+the Breach and the North Road down the x = 0 line, which is where the
+castle capture ring and both spawn rows already are, so a bot steering
+at the objective walks onto a flight instead of into rock. Real
+navigation is work to be scheduled.
+
+Found by my own test, not by inspection: a flight whose top tread only
+TOUCHES the slab it climbs onto leaves a one-tread band of open ground,
+and the support rule drops you to zero in it. Fixed on all seven flights
+and both plaza stairs; the North Road had it twice.
+
+Also new: `NoInfill`, a keep-out list the shared infill honours. Empty
+for every older map, so their RNG draw sequences are byte-identical and
+no replay moved.
+
+HANDED TO FRIDAY33, AND IT BLOCKS THE BUILD: `main.rs:15401` matches
+`MapKind` exhaustively and now needs a `Cliffhold` arm (sky, ground,
+border). Nothing else in the client is required for the map to run. The
+map self-selects into the menu via `MapKind::ALL`. Tints, props, skybox
+and the four landmark silhouettes (keep, gatehouse pair, bell tower, the
+cliff itself) are all client-side and none of them are mine.
+
+Least sure about: the 7.6 m and 14.0 m city roof courses are air-only by
+DECISION, not accident — they are the tallest things in the city so they
+read as unreachable — but that is a judgement I would want looked at.
+
+-- FRIDAY22
