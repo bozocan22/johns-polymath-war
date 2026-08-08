@@ -1562,3 +1562,339 @@ record as plainly as the failures: the `weapon_root` hide, the
 deletion, the royal-variant indexing, the player-only fingers, the S21
 crouch/jump tests, and the de-vacuum-ing of the FP-aim test are all real
 and all mutation- or evidence-backed.
+
+---
+
+# 2026-08-08 — THOR verdict: `feat/scoutmech-scale-and-height` (4 commits), and a coordination note on the ScoutMech visual pass
+
+Dispatched to verify a branch built by a *separate live session* that had
+**never been build-verified by its author**. I got a real build and a real
+test run. Headline: **three of the four commits are sound; commit 1 ships a
+regression that its own doc comment claims is impossible.**
+
+I did **not** check the branch out into the shared worktree — that tree was
+dirty with another session's in-flight work (see §5). Everything below was
+done through `git show` and a throwaway `git worktree` in scratchpad.
+
+## 0. Branch state, which was not what the handoff said
+
+- Handoff said the 4th commit "will be pushed before you read this". It was
+  **not pushed**; it landed as a *local* commit `9b467f3 "Scout mech: a
+  single mid-air jump"` partway through my run. `origin/feat/scoutmech-scale-and-height`
+  is **stale** — it still points at `7a5bfbd`, a pre-rebase tip based on
+  `ffca042`, missing 5 commits of main and all of commit 4.
+- Local branch tip `9b467f3` is based on `421a7e0`. `origin/main` has since
+  moved to `77b9805` (2 commits ahead: CLIFFHOLD, and the mech gallery).
+- **The branch still merges cleanly into current `origin/main`** —
+  `git merge-tree --write-tree origin/main feat/scoutmech-scale-and-height`
+  produced tree `692f4d5` with no conflict.
+- I also checked the *semantic* merge hazard that a textual conflict check
+  misses: the branch adds 2 fields to `Fighter`, so a `Fighter { .. }`
+  literal added on main would break the merge with no conflict marker.
+  **Checked and clear** — `origin/main` has exactly one construction site
+  (`sim.rs:6248`, `fighters.push(Fighter {`), the same one the branch edits,
+  and there is no `impl Default for Fighter`.
+
+## 1. THE BUILD ACTUALLY RAN — and the rustc crash diagnosis is WRONG
+
+**I got a green compile and a full test run.** `rustc 1.97.1`, release.
+
+    361 passed; 1 FAILED; 2 ignored
+
+The author's root cause — "a genuine rustc/toolchain bug on this machine
+under LTO+codegen-units=1 on a cold build, not fixable by choosing a
+different folder" — is **overstated, and the actionable half of it is
+wrong**. `STATUS_STACK_BUFFER_OVERRUN` (0xc0000409) on this workspace is a
+**known, already-fixed-in-repo** condition:
+
+    engine/.cargo/config.toml
+      [env]
+      RUST_MIN_STACK = "134217728"
+
+...with an 18-line comment above it describing *this exact crash code*,
+attributing it to rustc blowing the default 8 MB thread stack on the
+~19k-line `main.rs`, and warning that "the failure looks exactly like a
+miscompile and the natural response is to start deleting the code you just
+wrote."
+
+Cargo discovers `.cargo/config.toml` by walking up from the **invocation
+directory**, *not* from `CARGO_TARGET_DIR`. So a build launched from a
+scratchpad copy, from `C:\`, or from a user-profile dir never gets
+`RUST_MIN_STACK` set and crashes exactly as described — in whichever big
+crate happens to recurse deepest (bevy_reflect, naga, image, windows,
+bevy_math: consistent with a stack limit, not with an LTO bug).
+
+**What worked for me, reproducible recipe:**
+
+    git worktree add --detach <scratch>/wt <ref>
+    cd <scratch>/wt/engine          # <-- MUST cd into engine/, for the config
+    CARGO_TARGET_DIR="<repo>/engine/target" cargo test --release -p jk_tdm
+
+Pointing at the repo's warm 13 GB target dir also means the five crates that
+were crashing are never recompiled at all. Cold `jk_tdm` rebuild is ~6m30s.
+
+*Courtesy note:* those runs overwrote the shared target dir's `jk_tdm`
+artifacts. Whoever builds next from the main worktree eats one ~6m30s
+rebuild of `jk_tdm` only. Dependencies are untouched.
+
+## 2. Verdict per commit
+
+### Commit 1 — `9a0c666` "wire SCOUT_SCALE into height(), 5% over the player"
+**PARTLY AGREE / SHIPS A REGRESSION.**
+
+*Verified true:* `SCOUT_SCALE` really was a dead constant. At base `421a7e0`
+the only occurrence in the whole crate is its own declaration
+(`sim.rs:4144`); zero reads in `sim.rs`, zero in `main.rs`. A piloted scout
+genuinely hit-tested at plain player size. Real pre-existing bug, real fix
+(`sim.rs:3016`, `BODY_HEIGHT * SCOUT_SCALE`). Its test passes.
+
+*The regression.* This commit also retunes `BODY_HEIGHT` 1.78 → **1.691**
+(`sim.rs:57`), which is **global to every fighter**, and its doc comment
+asserts:
+
+> "Every consumer ... reads it as `BODY_HEIGHT * <multiplier>` or
+> `x / BODY_HEIGHT`, never as a re-typed literal, **so this single edit is
+> the whole change**"
+
+**That claim is falsified by a test failure.** Bisected by running the same
+single test at three commits:
+
+| ref | `a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does` |
+|---|---|
+| `421a7e0` (base) | **ok** |
+| `9a0c666` (commit 1) | **FAILED** |
+| `9b467f3` (tip) | **FAILED** |
+
+Failure at `sim.rs:21116` — *"after 20 s of engagement the mount had fallen
+silent with belt remaining."* The fixture (`bot_mech`) is a plain player plus
+a `RobotSuit` bot; **no ScoutMech is involved**, so `in_scout_mech()` is
+never true and `SCOUT_SCALE` is never read. By elimination the only live
+delta is `BODY_HEIGHT`. Mechanism, not yet isolated (I do not edit source, so
+I did not instrument it): both shooter and target geometry moved — the
+heavy's own height is `BODY_HEIGHT * MECH_SCALE`, so the bot's mount dropped
+3.026 m → 2.875 m while the target cylinder dropped 1.78 → 1.691. The
+assertion is `dealt > 0.0` over the last 3 s, which "fired and missed"
+satisfies just as well as "fell silent" — the panic message is misleading.
+
+*Two further consequences of the retune that nobody costed:*
+- `CROUCH_HEIGHT` (1.15) and `ROLL_HEIGHT` (0.95) are **absolute** constants,
+  not derived. The doc comment's "crouch ratio ... move[s] with it
+  automatically" is **false**: stand→crouch went 0.646 → 0.680, i.e.
+  crouching now hides ~5% less of you. Same for `EYE_REL` (1.62, absolute →
+  now 95.8% of body height, was 91.0%) and `main.rs:18071`
+  `anchor_h = 1.6 * (height / BODY_HEIGHT)` (camera anchor unchanged in
+  metres on a shorter body).
+- Doc rot: five comments still say the heavy is "3.03 m" (`sim.rs:2930, 2983,
+  4629, 4665, 19205`); it is now 2.87 m. `main.rs:18070` still says "1.78m
+  soldier".
+
+*Test critique.* `the_scout_chassis_stands_five_percent_over_the_player`
+passes and does catch the named bug, but its doc claim that it "survives the
+next retune of either constant" is wrong — `(ratio - 1.05).abs() < 0.001`
+hard-pins 1.05 and will fail on any `SCOUT_SCALE` retune.
+
+*Also worth an owner decision:* the scout branch sits **above** the `roll_t`
+and `crouch` arms (`sim.rs:2993-3016`), so the scout is now the only fighter
+in the game whose hitbox height **never changes** — rolling or crouching no
+longer shrinks it at all (1.776 m, vs the 0.95 it used to get while rolling).
+Justified in-comment as "it does not fold", but it is a survivability nerf
+bundled with three mobility buffs and was not called out. `radius()` and
+`step_up()` still ignore the scout entirely.
+
+### Commit 2 — `a4da1f5` "a genuine second flip charge — double Q"
+**AGREE. Clean.**
+- The premise checks out: the flip gate's local `mech` is
+  `armor_set == RobotSuit && hull > 0.0` (`sim.rs:7007`), so the scout was
+  never excluded. Confirmed by its own passing test.
+- **Every reset site accounted for.** I enumerated all writes independently
+  rather than trusting the summary: production `flip_used = false` occurs at
+  exactly two places (`sim.rs:6193` end-of-landing-recovery, `sim.rs:6410`
+  respawn) and both got `scout_second_flip_used = false`. No orphan-state
+  path: the second charge can only be spent when `flip_used` is already true,
+  so the `grounded && flip_used` guard that starts recovery always fires and
+  always clears both.
+- **The exotic syntax compiles.** `} else if a && b && { /*block*/ expr } {`
+  (`sim.rs:7038-7049`) is the thing most likely to be a silent parse trap. I
+  proved it standalone before the full build: it compiles **and** the block
+  binds as the condition operand, not as the if-body (tested with a
+  prefix-true / block-false case — the body correctly did not run).
+
+### Commit 3 — `3e8dcc3` "real scale, and dodge routed to what the sim times it against"
+**AGREE — and the author *understated* the second half.** Both claims
+re-derived arithmetically:
+- Sim seeds a scout's `roll_t` = `ROLL_LOAD_S + ROLL_S + ROLL_EASE_S` =
+  0.10 + 0.55 + 0.14 = **0.79 s**. The old `main.rs` branch eased against
+  `MECH_STEP_S + ROLL_EASE_S` = 0.30 + 0.14 = **0.44 s**. A 79% mismatch —
+  the lean finished and then sat wrong for 0.35 s. Fixed at `main.rs:16135`.
+- The `settle` calc was **not merely mistimed, it was dead**. A scout's
+  `roll_cd` = 0.79 + `ROLL_CD_S`(0.9) = 1.69, decaying to 0.9 at roll end.
+  With the old `cd_base = MECH_STEP_CD_S`(1.4): `(0.9 - 1.2)/0.2 = -1.5`,
+  clamped to **0.0 always**. The scout's post-dodge weight-absorb never once
+  played. Now `(0.9 - 0.7)/0.2 = 1.0`, correct. Fix at `main.rs:16298`.
+- `tf.scale` scout arm at `main.rs:16222-16226`: correct; the trailing comma
+  inside `Vec3::splat(...,)` is legal and compiles. The `in_mech` local at
+  `main.rs:16121` is still consumed (16127 / 16431 / 16709 / 17063), so the
+  narrowing produces no unused-variable warning.
+- *Caveat on impact, not correctness:* commit 1 set `SCOUT_SCALE` to 1.05, so
+  the "renders at plain player size" bug this commit fixes now resolves to
+  **1.05× — still plain player size to the eye**. Commits 1 and 3 largely
+  cancel. If the owner's intent was "reads as a machine, not a man", 1.05
+  does not deliver it. Owner call, not a defect.
+
+### Commit 4 — `9b467f3` "a single mid-air jump"
+**AGREE on the code. ONE OF ITS FOUR ASSERTIONS CANNOT FAIL.**
+- Field plumbing is complete. All three production `grounded = true` sites
+  (`sim.rs:6354` respawn, `8035` hard landing, `8079` support-rose-to-meet)
+  are covered by a `scout_air_jump_used = false` (`6425`, `8039`, `8087`).
+  I flagged `6354` as a suspected miss and then **disproved my own flag** —
+  it is inside the respawn block that resets at `6425` (same indent, same
+  `if`). Logging that as a false alarm so nobody re-raises it.
+- Gate (`sim.rs:7096-7106`) correctly leaves non-scouts requiring `grounded`;
+  `grounded_jump` correctly withholds the crouch counter-movement bonus and
+  correctly marks the charge only on the air path.
+- **DEFECT — vacuous assertion, `sim.rs:14216-14221`:**
+
+      assert!((s.fighters[0].vy - JUMP_SPEED).abs() > 0.01,
+              "a second air-jump this period must be denied ...");
+
+  `DT` = 1/120 (`jk_core::timestep`), `GRAVITY` = 18.0, so one tick of
+  gravity = **0.15**. If the second jump *did* fire, post-step `vy` =
+  `JUMP_SPEED - 0.15` = 7.25, and `|7.25 - 7.4| = 0.15 > 0.01` → **passes**.
+  If it correctly did not fire, `vy` = 0.1 - 0.15 = -0.05 → also passes.
+  **The assertion is true in both the correct and the broken case.** It is
+  the only guard on the "only one charge" rule.
+  The irony is sharp: the commit message specifically boasts about catching
+  this exact class of error in assertion #1 ("asserting the raw JUMP_SPEED
+  constant against the post-step vy would have failed against CORRECT code")
+  — then reintroduced it, inverted, in assertion #2.
+  **Fix (for FRIDAY, not me):** assert the computed value, e.g.
+  `(vy - (0.1 - GRAVITY * DT)).abs() < 1e-3`, or simply `vy < 0.1`.
+  The other three sub-assertions (first-jump `vy`, landing refill, unarmoured
+  player denied) are real and would fail if broken.
+
+## 3. Ranked, by what would actually hurt
+
+1. **`BODY_HEIGHT` 1.78→1.691 breaks `a_bot_mech_never_runs_dry_...`**
+   (`sim.rs:57`, fails at `sim.rs:21116`). Bisected to `9a0c666`. **The
+   branch cannot land as-is.**
+2. **The vacuous second-air-jump assertion** (`sim.rs:14216`) — the
+   double-jump's only "just once" guard does not guard anything.
+3. **Undocumented global side effects of the retune** — crouch / roll / eye /
+   camera ratios all silently shifted because those constants are absolute,
+   directly contradicting the new doc comment.
+4. Doc rot: "3.03 m" x5, "1.78m soldier" x1.
+5. Scout hitbox is now height-invariant in every stance (design, needs owner).
+6. `origin/feat/scoutmech-scale-and-height` is 4 commits stale — push it.
+
+## 4. What I could NOT verify — stated as such
+
+- **The mechanism** behind the bot-mech failure. I have the bisect and the
+  elimination argument, not an instrumented trace, because I do not edit
+  source files. Whoever fixes it should confirm whether the mount ran the
+  belt dry or simply missed a shorter target — the panic message assumes the
+  former and the code allows the latter.
+- **Anything visual.** No screenshot was taken. Commit 3's pose/scale changes
+  are render-path and remain, in the author's own honest words, hand-verified
+  only. That admission checks out and is not counted against them.
+
+## 5. COORDINATION — ScoutMech visual pass: DO NOT START. Answer is YES, someone is in it right now.
+
+The other session asked, before starting a metallic-purple + exposed
+Terminator-style skeletal recolor of the ScoutMech, whether anyone is
+touching the scout's visual rig, the general rig-spawning function,
+`BODY_HEIGHT`/`SCOUT_SCALE`, or the jump/flip/dodge trigger block in `sim.rs`.
+
+**Answer: yes, and it is a direct hit.** As of 2026-08-08 the shared main
+worktree has **uncommitted, in-flight** changes doing a *scout recolor of
+their own*:
+
+    engine/crates/jk_tdm/src/main.rs        212 +/-
+    engine/crates/jk_tdm/src/mech_lineup.rs 243 +/-
+
+Enclosing functions of every uncommitted hunk in `main.rs`:
+**`struct ModelKit`**, **`fn mech_body_tones`**, **`fn spawn_armor_rig`**,
+`fn setup`, `const MECH_GALLERY_BEATS`.
+In `mech_lineup.rs`: `fn spawn_row`, `fn place_gallery_labels`,
+`enum Chassis`, `const STANDS`, `fn row_axes`, `fn row_fits`.
+
+Their diff text includes: *"SHELL -> dark blue. The scout's shell is only 8
+parts but they..."*, *"The scout's plate role is the belly band, the
+gorget..."*, *"§owner BLUE ENEMY MECHS: the foe scout's lit lines, off red
+and..."*.
+
+So the *specific* collision surface:
+- `fn spawn_scout_chassis` (`main.rs:8694` on origin/main) takes
+  `kit: &ModelKit` and its colours come from `ModelKit` + `mech_body_tones` —
+  **both being rewritten right now**.
+- `fn spawn_armor_rig` is the general rig spawner — **being rewritten right now**.
+- Landed `77b9805` added `mech_lineup.rs`, which calls
+  `crate::spawn_scout_chassis(commands, kit, ally, GALLERY_TRIM)`
+  (`mech_lineup.rs:576`) and ships committed reference captures
+  (`04-scout-pair.png`) that a recolor would invalidate.
+
+A purple/skeletal scout pass started now would land on top of an unfinished
+blue-livery scout pass, in the same four symbols, with no textual conflict to
+warn either side (one is uncommitted). **The scout-visual author is right to
+have held off; they should keep holding.** The sim-side work on this branch
+(`sim.rs` constants, `Fighter` fields, the jump/flip/dodge block) does **not**
+collide — nobody else is in `sim.rs`; that is theirs to finish.
+Only the visual pass is blocked.
+
+Note also that the branch changes what the scout renders at
+(`main.rs:16222-16226`, `tf.scale` → `SCOUT_SCALE` = 1.05): whoever is
+re-liveriing the scout should know its on-screen size is about to change by
+5%, and that the number moved 1.42 → 1.05 on this branch.
+
+## 6. Instrument note
+
+Two things nearly became false findings and are recorded because the
+near-miss is the lesson: (a) `sim.rs:6354 grounded = true` looked like an
+unpatched landing site and is not — it is the respawn block, patched 71 lines
+down; (b) the `&& { block }` condition looked like a parse trap and is not —
+I proved the binding before trusting it. Both were resolved by a second,
+independent check, which is the only reason they are marked clear rather than
+"suspected".
+
+Everything asserted above is `file:line` or a command I ran. The one thing I
+was asked to do and could not is instrument the bot-mech failure; that is
+labelled unverified, not guessed.
+
+— THOR, 2026-08-08
+
+### §5 addendum — the actual worktree map (checked after writing the above)
+
+`git worktree list` shows **three** live checkouts of this repo, which is
+what makes the collision in §5 concrete rather than theoretical:
+
+| worktree | ref | state |
+|---|---|---|
+| `<repo>` (main worktree) | `77b9805 [main]` | **DIRTY — the scout/mech *visual* session** |
+| `<scratch>/wt-scoutmech` | `9b467f3 [feat/scoutmech-scale-and-height]` | clean — the *sim-side* scout session |
+| `<scratch>/wt-tdm` | `a4d2070 [feat/tdm-customization-bow-recoil]` | clean; branch already contained in `origin/main`, i.e. idle |
+
+So the two live sessions are cleanly separated *by worktree* but not by
+*file*: the sim-side scout work is isolated on its own branch in
+`wt-scoutmech`, while the visual work is uncommitted **on `main` itself** in
+the shared worktree. That is why the visual pass is the blocked one — it is
+the side with no branch to hide behind.
+
+Further confirmation that the visual session is mid-capture right now
+(`git status` in the main worktree at the time of writing):
+
+    M  handback/brief-vii/mech_gallery/01-gallery-wide-third.png
+    M  handback/brief-vii/mech_gallery/02-gallery-wide-fp.png
+    M  handback/brief-vii/mech_gallery/05-gallery-quarter.png
+    M  src/main.rs
+    M  src/mech_lineup.rs
+    ?? handback/brief-vii/mech_gallery/03-ally-section.png
+    ?? handback/brief-vii/mech_gallery/04-enemy-section.png
+
+The gallery captures are being *re-shot* (and `03-heavy-pair` / `04-scout-pair`
+renamed to `03-ally-section` / `04-enemy-section`). Recolouring the scout
+underneath an in-progress re-capture would invalidate the very frames being
+taken.
+
+*My own footprint, for the record:* I created and then removed a fourth,
+detached worktree (`<scratch>/wt`) for the build; it is gone, and
+`git worktree list` above is the state I left. The only file I wrote in this
+repo is this log.

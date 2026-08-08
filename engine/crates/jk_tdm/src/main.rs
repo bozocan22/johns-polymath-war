@@ -3558,27 +3558,53 @@ struct ModelKit {
     /// the game was the one that never got the fix.
     ///
     /// Same three roles as the khaki set, so it is a handle swap at the
-    /// top of `spawn_armor_rig`. Near-black oxide iron, the family the
-    /// foe scout already wears, so the two enemy machines read as one
-    /// army rather than two.
-    mech_iron: Handle<StandardMaterial>,
-    mech_iron_dk: Handle<StandardMaterial>,
-    mech_iron_lt: Handle<StandardMaterial>,
+    /// top of `spawn_armor_rig`.
+    ///
+    /// §owner BLUE ENEMY MECHS: "make enemy mechs colour dark blue and
+    /// light blue tones, so the details should implemented". The three
+    /// slots ARE the tone ladder, so the two blues map onto them with
+    /// nothing invented:
+    ///   `mech_navy`     BODY      dark blue     the big plate
+    ///   `mech_navy_dk`  STRUCTURE deeper navy   housings, recesses
+    ///   `mech_navy_lt`  DETAIL    light blue    edge strips, panel picks
+    /// The lit accent is the fourth role and lives in `mech_lamp_foe`.
+    ///
+    /// This REPLACED a near-black oxide iron, and the swap costs the
+    /// faction system nothing: the ally/enemy read is a LUMINANCE rule
+    /// (`branding::signal`), the ally is the bright thing on the field,
+    /// and a dark blue body is still dark. Only the hue moved.
+    mech_navy: Handle<StandardMaterial>,
+    mech_navy_dk: Handle<StandardMaterial>,
+    mech_navy_lt: Handle<StandardMaterial>,
     mech_shadow: Handle<StandardMaterial>,
     mech_metal: Handle<StandardMaterial>,
     mech_red: Handle<StandardMaterial>,
-    /// §gallery the ALLY heavy's lit accent - the mirror of `mech_red`.
+    /// §gallery the ALLY heavy's lit accent - the mirror of `mech_lamp_foe`.
     ///
     /// Gold where the foe machine is red: the sensor slit, the pod
-    /// status line and the two tracking lenses. `mech_red` keeps its
-    /// job on the enemy machine, so the "one red slit is the x2 weak
-    /// point" read is unchanged for the thing you are shooting at.
+    /// status line and the two tracking lenses. The enemy machine wears
+    /// `mech_lamp_foe` in the same three places, so the "one lit slit is
+    /// the x2 weak point" read is identical on both sides.
     ///
-    /// `unlit` exactly like `mech_red`, which means the `emissive` on
+    /// `unlit` exactly like `mech_lamp_foe`, which means the `emissive` on
     /// either is dead weight - Bevy's unlit path returns `base_color`
     /// and never reaches the emissive add. The brightness therefore
     /// lives in the base colour here, on purpose.
     mech_lamp: Handle<StandardMaterial>,
+    /// §owner BLUE ENEMY MECHS: the ENEMY heavy's lit accent.
+    ///
+    /// The enemy machine used to borrow `mech_red` for its visor slit,
+    /// pod status line and tracking lenses. `mech_red` still exists and
+    /// still does its OTHER jobs (pod missiles in flight, the khaki
+    /// weapon-attachment lenses), so this is a new handle rather than a
+    /// recolour of that one - the two had been sharing a name for two
+    /// different ideas.
+    ///
+    /// `unlit`, exactly like `mech_lamp`: Bevy's unlit path returns
+    /// `base_color` and never reaches `emissive`, so ALL of the apparent
+    /// brightness has to live in the base colour. A light blue chosen at
+    /// panel luminance would read as a pale sticker rather than a lamp.
+    mech_lamp_foe: Handle<StandardMaterial>,
     /// §4.2 (Brief VI): yellow-black hazard accents.
     mech_hazard: Handle<StandardMaterial>,
     /// FP-only translucent shield set - the raised plate must not blind
@@ -3620,12 +3646,12 @@ struct ModelKit {
     /// same argument the team-signal palette already makes about
     /// soldiers, applied one level up to the class of machine.
     ///
-    /// FRIENDLY reads light purple over white with baby-blue light
-    /// lines; ENEMY reads red over deep purple. Both keep the SAME
-    /// silhouette and the same emissive placement, so what changes at a
-    /// distance is the hue and never the shape - a player should be able
-    /// to tell friend from foe without having to identify the model
-    /// first.
+    /// FRIENDLY reads service amber over a black frame with gold light
+    /// lines; ENEMY reads §owner-blue - dark blue shell, light blue
+    /// detail plates, hot blue lines. Both keep the SAME silhouette and
+    /// the same emissive placement, so what changes at a distance is the
+    /// hue and never the shape - a player should be able to tell friend
+    /// from foe without having to identify the model first.
     scout_hull: Handle<StandardMaterial>,
     scout_hull_foe: Handle<StandardMaterial>,
     scout_plate: Handle<StandardMaterial>,
@@ -5595,8 +5621,8 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
         ..beat(2.4)
     },
     CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(3.2) },
-    // The heavy pair. Stand 0 sits at row-offset -7.2 m along `right`,
-    // and `right` at yaw 0 is -X - so the heavies are at POSITIVE x,
+    // The ALLY SECTION. Stand 0 sits at row-offset -8.5 m along `right`,
+    // and `right` at yaw 0 is -X - so the ally group is at POSITIVE x,
     // which in this right-handed frame is the LEFT of the screen, which
     // a POSITIVE yaw turns toward.
     //
@@ -5605,31 +5631,78 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     // row's own `right`, and the screen's) and neither is guessable from
     // the source; this is what the capture is for.
     //
-    // Aimed PAST the pair, not at it.
+    // Aimed PAST the group, not at it.
     //
-    // The obvious yaw is the pair's own midpoint, atan(5.4 / 5.2) = 0.80
+    // The obvious yaw is the group's own midpoint, atan(4.9 / 5.2) = 0.76
     // rad, and it is wrong: the third-person boom parks the pilot dead
     // centre of frame, so anything you centre is behind his hat. Two
     // runs put HEAVY/ALLY squarely behind the pilot's head that way.
-    // Over-turning to 1.25 rad throws the pair into the right-hand half
-    // of the frame, where nothing is standing.
-    CapBeat { look: Some((1.25, 0.10)), ..beat(3.4) },
-    CapBeat { snap: Some("03-heavy-pair"), ..beat(4.3) },
-    // and the light pair - mirrored, but NOT by the same angle.
+    // Over-turning throws the group into the right-hand half of the
+    // frame, where nothing is standing.
     //
-    // The heavy side has the royal machine at the row's centre, five
-    // metres away and huge, so the pair reads even when the outer one
-    // sits close to the pilot's silhouette. The light side has nothing
-    // nearer than 6 m, and at -1.25 the enemy scout came out directly
-    // behind the pilot's shoulder. The extra fifth of a radian is worth
-    // more here than symmetry in the source is.
-    CapBeat { look: Some((-1.45, 0.10)), ..beat(4.5) },
-    CapBeat { snap: Some("04-scout-pair"), ..beat(5.2) },
-    // finally round to a three-quarter, so the machines are read as
-    // SOLIDS rather than as five flat elevations
+    // §owner: these two frames were "03-heavy-pair" and "04-scout-pair"
+    // while the row was chassis-major. The row is now SIDE-major, so the
+    // same two camera positions photograph the two SECTIONS, which is
+    // what the owner asked to be able to compare.
+    CapBeat { look: Some((1.32, 0.10)), ..beat(3.4) },
+    CapBeat { snap: Some("03-ally-section"), ..beat(4.3) },
+    // and the ENEMY SECTION - mirrored, but NOT by the same angle. It is
+    // two stands rather than three and its centre sits 6.7 m off the
+    // axis against the ally group's 4.9 m, so it needs the wider turn to
+    // clear the pilot's own silhouette.
+    //
+    // -1.45 was the first try and it was not enough: SCOUT/ENEMY came
+    // back sitting directly behind the pilot's hat brim. -1.80 walks the
+    // group a further ~0.35 rad (about 250 px at this FOV) into the
+    // empty left half.
+    CapBeat { look: Some((-1.80, 0.10)), ..beat(4.5) },
+    CapBeat { snap: Some("04-enemy-section"), ..beat(5.2) },
+    // round to a three-quarter, so the machines are read as SOLIDS
+    // rather than as five flat elevations
     CapBeat { look: Some((0.0, 0.06)), orbit: Some(0.85), boom: Some(1.6), ..beat(5.4) },
     CapBeat { snap: Some("05-gallery-quarter"), ..beat(6.2) },
-    CapBeat { end: true, ..beat(6.7) },
+    // §owner BLUE ENEMY MECHS: two CLOSE frames of the enemy machines.
+    //
+    // Colour cannot be judged from a hex value and it cannot be judged
+    // from a 70-pixel machine either - the first run of this palette had
+    // to be cropped and 10x nearest-neighboured before the light blue on
+    // the panel edges was visible at all. A capture that needs an image
+    // editor to read is an instrument gap, so the script closes it.
+    //
+    // FIRST PERSON, and walked in on the player's own legs. The
+    // third-person boom parks the pilot dead centre and sits 2.2 m
+    // further back, which is exactly the two things a paint close-up
+    // cannot afford; `boom` only pulls the camera further AWAY.
+    //
+    // The aim yaws are geometry, not taste. After the 0.8 s W press at
+    // beat 2.4 the player stands about 3.8 m up the row's axis, and the
+    // two enemy stands are 4.9 m and 8.5 m across it at 9 m depth:
+    //   heavy  atan2(-4.9, 5.2) = -0.76
+    //   scout  from there, atan2(-5.1, 1.6) = -1.27
+    // `orbit` and `boom` are reset explicitly - they are persistent
+    // camera state, and beat 5.4 left them at 0.85 / 1.6.
+    CapBeat {
+        look: Some((-0.76, 0.02)),
+        orbit: Some(0.0),
+        boom: Some(1.0),
+        press: &[CapKey::K(KeyCode::KeyV)],
+        ..beat(6.4)
+    },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyV)],
+        press: &[CapKey::K(KeyCode::KeyW)],
+        ..beat(6.6)
+    },
+    // 0.8 s at MOVE_SPEED 4.8 m/s is ~3.8 m of the 7.1 m stand-off.
+    CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(7.4) },
+    CapBeat { look: Some((-0.76, 0.05)), ..beat(7.6) },
+    CapBeat { snap: Some("06-enemy-heavy-close"), ..beat(8.3) },
+    CapBeat { look: Some((-1.27, 0.02)), ..beat(8.5) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(8.7) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(9.3) },
+    CapBeat { look: Some((-1.27, 0.05)), ..beat(9.5) },
+    CapBeat { snap: Some("07-enemy-scout-close"), ..beat(10.2) },
+    CapBeat { end: true, ..beat(10.7) },
 ];
 
 fn capture_script(name: &str) -> &'static [CapBeat] {
@@ -10689,9 +10762,9 @@ fn mech_body_tones(kit: &ModelKit, ally: bool, elite: bool) -> [Handle<StandardM
             kit.mech_khaki_dk.clone(),
         ],
         (false, false) => [
-            kit.mech_iron.clone(),
-            kit.mech_iron_lt.clone(),
-            kit.mech_iron_dk.clone(),
+            kit.mech_navy.clone(),
+            kit.mech_navy_lt.clone(),
+            kit.mech_navy_dk.clone(),
         ],
     }
 }
@@ -10734,9 +10807,11 @@ fn spawn_armor_rig(
     // three liveries cannot drift into different machines.
     let [body, body_lt, body_dk] = mech_body_tones(kit, ally, elite);
     // The LIT ACCENT - sensor slit, pod status line, tracking lenses.
-    // Gold for us, red for them, and it survives the elite override
-    // because paint and lamps are two different reads.
-    let lamp = if ally { kit.mech_lamp.clone() } else { kit.mech_red.clone() };
+    // Gold for us, §owner light blue for them, and it survives the elite
+    // override because paint and lamps are two different reads. (The
+    // ROYAL machine therefore still shows whose side it is on: red
+    // lacquer either way, gold lamps ours, blue lamps theirs.)
+    let lamp = if ally { kit.mech_lamp.clone() } else { kit.mech_lamp_foe.clone() };
     // (mesh, material, translation, rotation, scale) - torso-local
     let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 53] = [
         // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
@@ -10756,7 +10831,7 @@ fn spawn_armor_rig(
         // the SENSOR VISOR strip - a thin lens line, not a lightbar
         (cube(), lamp.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
         // brow hood over the slit + cheek blocks framing the recess -
-        // NO extra mech_red anywhere: one slit is the x2 weak-point read
+        // NO extra `lamp` anywhere: one slit is the x2 weak-point read
         (cube(), body_dk.clone(), Vec3::new(0.0, 0.99, 0.30), Quat::from_rotation_x(-0.20), Vec3::new(0.50, 0.025, 0.12)),
         (cube(), body_lt.clone(), Vec3::new(-0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
         (cube(), body_lt.clone(), Vec3::new(0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
@@ -10995,7 +11070,7 @@ fn spawn_armor_rig(
     //
     // Everything is torso-local and cosmetic. None of it touches the
     // angle-armour model, the visor weak point, or the plate-detach
-    // stages: `mech_red` still appears exactly once on the whole machine,
+    // stages: the `lamp` still appears exactly once on the whole machine,
     // and that is the visor slit.
     {
         // ARMOUR LAYERING - a second skin standing proud of the slab,
@@ -11195,7 +11270,7 @@ fn spawn_armor_rig(
         // It was a khaki box with a red slit. The slit STAYS exactly as
         // it was, because it is the x2 weak point and a gameplay promise;
         // everything here is built around it rather than competing with
-        // it. Nothing added is `mech_red`.
+        // it. Nothing added is the `lamp`.
         {
             // armour segmentation: a browplate, a jaw, and a split down
             // the crown, so the head reads as assembled from pieces
@@ -13575,30 +13650,45 @@ fn setup(
             ..default()
         }),
         mech_khaki_lt: materials.add(tex_metal(Color::srgb_u8(0x9A, 0x93, 0x84), 0.05, 0.65, 2.2)),
-        // §gallery THE ENEMY HEAVY. Oxide iron, the `signal::ENEMY`
-        // family the foe scout already wears, carrying the SAME brushed
-        // texture and the same uv scale as the khaki set - the two
-        // liveries have to be the same machine under different paint,
-        // and a different surface treatment would read as a different
-        // model. Metallic is up and roughness down against the khaki
-        // because a dark tone with no specular is a hole in the frame.
-        mech_iron: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.205, 0.150, 0.140),
+        // §owner BLUE ENEMY MECHS. The enemy heavy's three tones, all one
+        // blue family, carrying the SAME brushed texture and the same uv
+        // scale as the khaki set - the two liveries have to be the same
+        // machine under different paint, and a different surface
+        // treatment would read as a different model. Metallic is up and
+        // roughness down against the khaki because a dark tone with no
+        // specular is a hole in the frame.
+        //
+        // BODY: dark blue. Relative luminance ~0.13, which is BELOW the
+        // oxide iron it replaces (~0.16) and far below the khaki ally
+        // (~0.52) - the bright-ally/dark-enemy rule is strengthened, not
+        // spent, by this change.
+        mech_navy: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.085, 0.135, 0.275),
             base_color_texture: Some(tex_kit.metal.clone()),
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
-            metallic: 0.28,
-            perceptual_roughness: 0.60,
+            metallic: 0.30,
+            perceptual_roughness: 0.56,
             ..default()
         }),
-        mech_iron_dk: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.115, 0.080, 0.075),
+        // STRUCTURE: the deeper navy the housings, recesses and shoulder
+        // pods are cut from. This is the most-used of the three tones on
+        // the rig, which is exactly why it is the darkest - it is what
+        // holds the machine's overall value down.
+        mech_navy_dk: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.038, 0.062, 0.135),
             base_color_texture: Some(tex_kit.metal.clone()),
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(2.2)),
-            metallic: 0.32,
-            perceptual_roughness: 0.62,
+            metallic: 0.34,
+            perceptual_roughness: 0.58,
             ..default()
         }),
-        mech_iron_lt: materials.add(tex_metal(Color::srgb(0.315, 0.235, 0.215), 0.26, 0.55, 2.2)),
+        // DETAIL: light blue. It lands on the thin things - the deck
+        // plate, the chest strip, the cheek blocks, the pod nose caps,
+        // the leg edge - so it works as panel-picking and edge-lighting
+        // rather than as a second big colour. That is what "the details
+        // should implemented" is asking for: the blue has to be legible
+        // on the greebles, not only on the slab.
+        mech_navy_lt: materials.add(tex_metal(Color::srgb(0.44, 0.63, 0.86), 0.24, 0.44, 2.2)),
         mech_shadow: materials.add(flat(0x33352F)),
         mech_metal: materials.add(tex_metal(Color::srgb_u8(0x2B, 0x2C, 0x2B), 0.15, 0.45, 2.6)),
         // §4.2: hazard chevrons - shoulder-pod cover and knee plates
@@ -13617,6 +13707,21 @@ fn setup(
         mech_lamp: materials.add(StandardMaterial {
             base_color: Color::srgb(0.99, 0.82, 0.30),
             emissive: LinearRgba::new(1.9, 1.35, 0.40, 1.0),
+            unlit: true,
+            ..default()
+        }),
+        // §owner BLUE ENEMY MECHS: the enemy heavy's lit accent, taken
+        // off red and onto the light blue.
+        //
+        // Pushed to near-white-blue rather than to the panel's light
+        // blue. `unlit` means base colour IS the pixel, so a lamp painted
+        // the same light blue as the deck plate would read as a sticker;
+        // the lamp has to sit clearly ABOVE its own machine's brightest
+        // paint to read as lit. Blue-dominant with the green held back,
+        // so it stays distinct from the cyan barrier field.
+        mech_lamp_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.62, 0.86, 1.00),
+            emissive: LinearRgba::new(0.55, 1.60, 2.60, 1.0),
             unlit: true,
             ..default()
         }),
@@ -13711,8 +13816,15 @@ fn setup(
             perceptual_roughness: 0.55, // painted, not polished
             ..default()
         }),
+        // §owner BLUE ENEMY MECHS. The light chassis takes the SAME two
+        // blues as the heavy, so the enemy fields one army and not two
+        // machines that happen to be dark.
+        //
+        // SHELL -> dark blue. The scout's shell is only 8 parts but they
+        // are the big rounded masses (torso egg, head dome, limb shells),
+        // so this is what the machine reads as at range.
         scout_hull_foe: materials.add(StandardMaterial {
-            base_color: branding::signal::ENEMY, // near-black iron
+            base_color: Color::srgb(0.075, 0.125, 0.265),
             metallic: 0.35,
             perceptual_roughness: 0.50,
             ..default()
@@ -13723,8 +13835,19 @@ fn setup(
             perceptual_roughness: 0.52,
             ..default()
         }),
+        // PLATES -> light blue, and this is the "details" half of the
+        // brief. The scout's plate role is the belly band, the gorget,
+        // the backpack, the knee cops, the two mount housings and the
+        // hip/ankle collars - small, discrete, spread over the whole
+        // machine. Light blue there picks the detail out of the dark
+        // shell instead of adding a second large colour, which is the
+        // only way a two-tone reads as engineering rather than as camo.
+        //
+        // Deliberately MATTE (no emissive): the lit accent below has to
+        // stay the brightest blue on the machine or it stops reading as
+        // lit at all.
         scout_plate_foe: materials.add(StandardMaterial {
-            base_color: branding::signal::ENEMY_STEEL, // dark metal
+            base_color: Color::srgb(0.42, 0.58, 0.78),
             metallic: 0.45,
             perceptual_roughness: 0.44,
             ..default()
@@ -13743,9 +13866,20 @@ fn setup(
             perceptual_roughness: 0.30,
             ..default()
         }),
+        // §owner BLUE ENEMY MECHS: the foe scout's lit lines, off red and
+        // onto the blue family. NOT unlit, so the emissive really is what
+        // carries here - a hot blue at 3.4 against a matte plate at 0.58
+        // albedo is still an order of magnitude apart, which is what
+        // keeps "lit" distinguishable from "pale".
+        //
+        // `branding::signal::ENEMY_ACCENT` is deliberately NOT touched.
+        // That constant is the HUD's enemy red - minimap dots, killfeed,
+        // name plates, the infantry's plate trim - and repainting it here
+        // would have recoloured half the interface to answer a question
+        // about two mechs.
         scout_line_foe: materials.add(StandardMaterial {
-            base_color: branding::signal::ENEMY_ACCENT,
-            emissive: LinearRgba::new(3.4, 0.35, 0.25, 1.0),
+            base_color: Color::srgb(0.62, 0.86, 1.00),
+            emissive: LinearRgba::new(0.60, 1.90, 3.40, 1.0),
             perceptual_roughness: 0.30,
             ..default()
         }),

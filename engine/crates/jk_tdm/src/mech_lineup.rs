@@ -72,6 +72,13 @@ pub struct GalleryVis;
 #[derive(Component)]
 struct GalleryLabel {
     anchor: Vec3,
+    /// Width of this plate's centring box, in percent of the screen.
+    ///
+    /// Per-label rather than one constant, because the section banners
+    /// are wider text over a wider group and a stand plate's 9% box would
+    /// have anchored "ENEMY SECTION" a word and a half to the right of
+    /// its own machines.
+    box_pct: f32,
 }
 
 /// One exhibit.
@@ -92,18 +99,44 @@ enum Chassis {
 
 /// The exhibit list, left to right as the player sees it.
 ///
-/// Chassis-major, so the two questions the owner asked are two ADJACENT
-/// pairs: heavy-ally beside heavy-enemy, scout-ally beside scout-enemy.
-/// Grouping by side instead would have put the two liveries of the same
-/// machine at opposite ends of the row, which is the one arrangement that
-/// makes the comparison hard.
+/// SIDE-MAJOR. This REVERSES the original chassis-major ordering, on the
+/// owner's instruction: *"display all the mech models in the training
+/// ground as well both in enemy and allie section, as how does mechs look
+/// in different teams"*. The unit of comparison they asked for is the
+/// SECTION - here is our army, here is theirs - not the pair.
+///
+/// The old note against chassis-major was that grouping by side puts the
+/// two liveries of one machine at opposite ends of the row. That is still
+/// true and is the price; it is paid back by `SECTION_GAP` and the two
+/// lit floor bars, which make "these three are ours" readable in one
+/// glance, and by the fact that the row is only 17 m wide and both
+/// sections are in the same frame anyway.
+///
+/// EVERY MECH MODEL THIS GAME HAS is on this row. There are exactly two
+/// chassis (`ArmorSet::RobotSuit` and `ArmorSet::ScoutMech`) and one
+/// alternate paint (§22 royal), and all five renderings are here. The
+/// royal stands on the ALLY side only: `mech_body_tones` lets `elite`
+/// override the side tones, so an "enemy royal" would wear the identical
+/// red lacquer and differ from this one by its lamps alone. That is not a
+/// livery, so it does not get a stand.
 const STANDS: [(Chassis, bool, &str); 5] = [
+    // ---- ALLY SECTION -------------------------------------------------
     (Chassis::Heavy { elite: false }, true, "HEAVY/ALLY"),
-    (Chassis::Heavy { elite: false }, false, "HEAVY/ENEMY"),
     (Chassis::Heavy { elite: true }, true, "HEAVY/ROYAL"),
     (Chassis::Scout, true, "SCOUT/ALLY"),
+    // ---- ENEMY SECTION ------------------------------------------------
+    (Chassis::Heavy { elite: false }, false, "HEAVY/ENEMY"),
     (Chassis::Scout, false, "SCOUT/ENEMY"),
 ];
+
+/// Extra metres inserted wherever the side changes along the row.
+///
+/// This is the whole mechanism that turns a row into two SECTIONS. It is
+/// deliberately smaller than `STAND_SPACING` rather than larger: a gap
+/// wide enough to be unambiguous but not so wide that the two groups stop
+/// fitting in one frame, which would defeat the comparison the owner
+/// asked for.
+const SECTION_GAP: f32 = 2.6;
 
 /// Width of a name plate's centring box, in percent of the screen.
 ///
@@ -112,6 +145,17 @@ const STANDS: [(Chassis, bool, &str); 5] = [
 /// overlapped into an unreadable band — "HEAVYALLYHEAVYENEMY". Narrower
 /// than the gap, so two neighbours can touch but never merge.
 const LABEL_BOX_PCT: f32 = 9.0;
+
+/// The same, for a SECTION banner. Wider text, wider box.
+const BANNER_BOX_PCT: f32 = 20.0;
+
+/// How high above the ground a section banner floats, in metres.
+///
+/// Above the tallest machine on the row (the heavy's plate reads at
+/// 2.35 m) by enough that the banner never collides with a stand plate,
+/// which is the failure the narrow `LABEL_BOX_PCT` was introduced to fix
+/// one axis of.
+const BANNER_Y: f32 = 3.35;
 
 /// Metres between stand centres. The heavy's hull is ~1.5 m across the
 /// shoulder housings and its gatling hangs further out again, so this is
@@ -229,9 +273,51 @@ fn row_axes(yaw: f32) -> (Vec3, Vec3) {
     (fwd, right)
 }
 
-/// The x/z centre of stand `k` of `n`, relative to the row centre.
-fn stand_offset(k: usize, n: usize) -> f32 {
-    (k as f32 - (n as f32 - 1.0) * 0.5) * STAND_SPACING
+/// The along-row offset of stand `k`, relative to the row's centre.
+///
+/// No longer a plain `k * spacing`: a `SECTION_GAP` opens wherever the
+/// side changes, so the answer has to be walked rather than multiplied.
+/// The row is then centred on its own SPAN (first-to-last midpoint), not
+/// on the mean of the offsets - with an uneven 3/2 split those are
+/// different points, and centring on the mean would push the whole
+/// exhibit sideways by half a machine.
+fn stand_offset(k: usize) -> f32 {
+    let raw = |i: usize| -> f32 {
+        let mut acc = 0.0;
+        for j in 1..=i {
+            acc += STAND_SPACING;
+            if STANDS[j].1 != STANDS[j - 1].1 {
+                acc += SECTION_GAP;
+            }
+        }
+        acc
+    };
+    raw(k) - raw(STANDS.len() - 1) * 0.5
+}
+
+/// The half-open index range of the section containing stand `k`.
+///
+/// Used for the floor bars and the section banners, and written as a scan
+/// rather than as two hand-typed literals so that adding a sixth stand
+/// cannot leave a bar pointing at the wrong three machines.
+fn section_bounds(k: usize) -> (usize, usize) {
+    let side = STANDS[k].1;
+    let mut a = k;
+    while a > 0 && STANDS[a - 1].1 == side {
+        a -= 1;
+    }
+    let mut b = k + 1;
+    while b < STANDS.len() && STANDS[b].1 == side {
+        b += 1;
+    }
+    (a, b)
+}
+
+/// The index of the first stand of each section, in row order.
+fn section_starts() -> Vec<usize> {
+    (0..STANDS.len())
+        .filter(|&k| k == 0 || STANDS[k].1 != STANDS[k - 1].1)
+        .collect()
 }
 
 /// Does a stand at `p` clear every cover block, and stay inside the map?
@@ -335,7 +421,7 @@ const SIGHT_Y: f32 = 1.1;
 fn row_fits(sim: &crate::TdmSim, centre: Vec3, right: Vec3, from: Option<Vec3>) -> bool {
     let n = STANDS.len();
     (0..n).all(|k| {
-        let p = centre + right * stand_offset(k, n);
+        let p = centre + right * stand_offset(k);
         stand_is_clear(sim, p)
             && from.map_or(true, |a| {
                 sight_is_clear(sim, a + Vec3::Y * SIGHT_Y, p + Vec3::Y * SIGHT_Y)
@@ -478,10 +564,62 @@ fn spawn_row(
         materials.add(unlit(branding::signal::ENEMY_ACCENT)),
     ];
 
-    let n = STANDS.len();
+    // ---- THE TWO SECTIONS: a lit floor bar and a banner over each.
+    //
+    // The bar is what makes the grouping read at a glance and from
+    // behind; the plinth rims alone are five separate statements and the
+    // eye has to collect them. Laid along the row's own `right` axis, so
+    // it stays square to the machines at any facing.
+    let bar_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    for start in section_starts() {
+        let (a, b) = section_bounds(start);
+        let ally = STANDS[a].1;
+        let side = usize::from(!ally);
+        let lo = stand_offset(a);
+        let hi = stand_offset(b - 1);
+        let mid = (lo + hi) * 0.5;
+        let len = (hi - lo) + 2.0 * (PLINTH_R + 0.13);
+        commands.spawn((
+            Mesh3d(bar_mesh.clone()),
+            MeshMaterial3d(ring_mat[side].clone()),
+            Transform {
+                translation: centre + right * mid + Vec3::Y * 0.012,
+                rotation: Quat::from_rotation_y(facing),
+                // local X runs along `right` (up to sign, and the bar is
+                // symmetric), local Z is the row's forward.
+                scale: Vec3::new(len, 0.024, 0.34),
+            },
+            GalleryVis,
+        ));
+        commands.spawn((
+            Text::new(if ally { "ALLY SECTION" } else { "ENEMY SECTION" }),
+            TextFont {
+                font_size: 19.0,
+                ..default()
+            },
+            TextColor(if ally {
+                branding::signal::ALLY_ACCENT
+            } else {
+                branding::signal::ENEMY_ACCENT
+            }),
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(BANNER_BOX_PCT),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+            GalleryLabel {
+                anchor: centre + right * mid + Vec3::Y * BANNER_Y,
+                box_pct: BANNER_BOX_PCT,
+            },
+            GalleryVis,
+        ));
+    }
+
     for (k, (chassis, ally, label)) in STANDS.into_iter().enumerate() {
         let side = usize::from(!ally);
-        let pos = centre + right * stand_offset(k, n);
+        let pos = centre + right * stand_offset(k);
 
         // ---- the plinth: a dark dais with a lit rim in the side colour.
         // The rim is the cheapest possible second statement of ally vs
@@ -612,6 +750,7 @@ fn spawn_row(
             Visibility::Hidden,
             GalleryLabel {
                 anchor: pos + Vec3::Y * head_y,
+                box_pct: LABEL_BOX_PCT,
             },
             GalleryVis,
         ));
@@ -753,7 +892,7 @@ fn place_gallery_labels(
         let want = (playing && in_front)
             .then(|| camera.world_to_ndc(cam_tf, label.anchor))
             .flatten()
-            .and_then(|ndc| label_screen_pct(ndc.truncate(), LABEL_BOX_PCT));
+            .and_then(|ndc| label_screen_pct(ndc.truncate(), label.box_pct));
         match want {
             Some((l, t)) => {
                 node.left = Val::Percent(l);
@@ -769,26 +908,82 @@ fn place_gallery_labels(
 mod tests {
     use super::*;
 
-    /// The row must be a ROW: five distinct stands, evenly spaced, and
-    /// centred on the point handed in. An off-by-one in the centring term
-    /// pushes the whole exhibit half a machine sideways, which is exactly
-    /// the kind of thing a screenshot taken from the front cannot show.
+    /// The row must be a ROW: five distinct stands, spaced by
+    /// `STAND_SPACING` inside a section and by `STAND_SPACING +
+    /// SECTION_GAP` across the join, with the SPAN centred on the point
+    /// handed in. An off-by-one in the centring term pushes the whole
+    /// exhibit half a machine sideways, which is exactly the kind of
+    /// thing a screenshot taken from the front cannot show.
     #[test]
-    fn the_row_is_centred_and_evenly_spaced() {
+    fn the_row_is_span_centred_with_one_gap_between_the_sections() {
         let n = STANDS.len();
-        let offs: Vec<f32> = (0..n).map(|k| stand_offset(k, n)).collect();
-        let sum: f32 = offs.iter().sum();
-        assert!(sum.abs() < 1e-4, "the row is not centred: offsets sum to {sum}");
-        for w in offs.windows(2) {
+        let offs: Vec<f32> = (0..n).map(stand_offset).collect();
+        let span_mid = (offs[0] + offs[n - 1]) * 0.5;
+        assert!(
+            span_mid.abs() < 1e-4,
+            "the row is not centred on its span: midpoint {span_mid}"
+        );
+        let mut gaps = 0;
+        for k in 1..n {
+            let d = offs[k] - offs[k - 1];
+            let want = if STANDS[k].1 == STANDS[k - 1].1 {
+                STAND_SPACING
+            } else {
+                gaps += 1;
+                STAND_SPACING + SECTION_GAP
+            };
             assert!(
-                (w[1] - w[0] - STAND_SPACING).abs() < 1e-4,
-                "uneven spacing: {w:?}"
+                (d - want).abs() < 1e-4,
+                "stand {k} sits {d} m from its neighbour, wanted {want}"
             );
         }
+        assert_eq!(gaps, 1, "there must be exactly one ally/enemy join");
         assert!(
             offs[n - 1] - offs[0] > 2.0 * STAND_CLEAR_R * (n as f32 - 1.0) * 0.5,
             "the stands overlap - there is no room to walk between them"
         );
+        // and the section join must be VISIBLY wider than a plain gap,
+        // or the two groups are a row again
+        assert!(
+            SECTION_GAP > 2.0 * (STAND_CLEAR_R - PLINTH_R),
+            "the section gap is narrower than the clearance it has to beat"
+        );
+    }
+
+    /// §owner: the exhibit is an ALLY SECTION and an ENEMY SECTION, not
+    /// five machines in a line. Every ally stand must precede every enemy
+    /// stand, so a section is a contiguous run and the floor bar under it
+    /// spans exactly its own machines.
+    #[test]
+    fn the_stands_are_grouped_by_side_into_two_sections() {
+        let starts = section_starts();
+        assert_eq!(
+            starts.len(),
+            2,
+            "expected exactly two sections, got {starts:?}"
+        );
+        assert!(STANDS[starts[0]].1, "the ALLY section must come first");
+        assert!(!STANDS[starts[1]].1, "the ENEMY section must come second");
+        // contiguity, stated as the thing that would actually break:
+        // a section's bounds must contain every stand of that side.
+        for (k, (_, ally, name)) in STANDS.iter().enumerate() {
+            let (a, b) = section_bounds(k);
+            assert!(a <= k && k < b);
+            for j in a..b {
+                assert_eq!(
+                    STANDS[j].1, *ally,
+                    "{name}'s section contains a stand from the other side"
+                );
+            }
+            let outside = (0..STANDS.len()).filter(|j| !(a..b).contains(j));
+            for j in outside {
+                assert_ne!(
+                    STANDS[j].1, *ally,
+                    "{name} has a same-side stand outside its own section - \
+                     the row is not side-major"
+                );
+            }
+        }
     }
 
     /// Forward and right must be perpendicular, horizontal, and correctly
