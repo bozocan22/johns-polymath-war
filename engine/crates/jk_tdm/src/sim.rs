@@ -1484,6 +1484,28 @@ impl HitZone {
             HitZone::Legs => LEG_MULT,
         }
     }
+
+    /// The band of the capsule this zone occupies, as a fraction of the
+    /// fighter's height: (low edge, high edge).
+    ///
+    /// A SECOND statement of the bands `apply_hit_dmg` selects on, and
+    /// deliberately so. That code needs them as comparisons and answers
+    /// "which zone"; the per-piece mapping needs them as NUMBERS, to ask
+    /// "how far up this zone did the round land" - and deriving one from
+    /// the other would mean either rewriting a hit path that 300-odd
+    /// tests stand on, or reconstructing the edges from the comparisons
+    /// at the call site. Two statements that must agree are only safe if
+    /// something checks they do: `the_zone_bands_and_the_piece_bands_agree`
+    /// fires real rounds up the whole capsule and matches the zone the
+    /// hit path REPORTS against this table.
+    pub fn band(self) -> (f32, f32) {
+        match self {
+            HitZone::Legs => (0.00, 0.35),
+            HitZone::Torso => (0.35, 0.66),
+            HitZone::Arms => (0.66, 0.82),
+            HitZone::Head => (0.82, 1.00),
+        }
+    }
 }
 
 // ------------------------------------------------------------- difficulty
@@ -1759,6 +1781,95 @@ impl ArmorPiece {
             SabatonR => "SABATON R",
         }
     }
+
+    /// **Which PLATE a hit landed on**, given the zone the hit path
+    /// already resolved, how far up the capsule it landed, and which side
+    /// and face of the body the impact point sits on.
+    ///
+    /// This is the whole reason armour damage states waited: the hit path
+    /// names a ZONE, and per-piece HP needs it to name a PIECE. A zone
+    /// holds between two and ten plates, so something has to choose.
+    ///
+    /// Three answers were considered:
+    ///
+    /// 1. **Roll for it.** One seeded draw per hit picks a plate in the
+    ///    zone. REJECTED outright - it inserts an RNG call into the
+    ///    hottest path in the sim, which moves every subsequent draw and
+    ///    breaks the bit-identical replay guarantee for every OTHER
+    ///    system. Determinism is not a thing to spend here.
+    /// 2. **Spread the wear over every plate in the zone.** No choice to
+    ///    make, and no new information needed. REJECTED because it makes
+    ///    the whole feature invisible: ten leg plates would degrade in
+    ///    lockstep and fall off on the same round, which is a whole-zone
+    ///    armour bar wearing a per-piece costume. The brief's own worked
+    ///    example - one pauldron gone, an asymmetry you can read at range
+    ///    - cannot happen under it.
+    /// 3. **Ask the geometry the hit already carries.** TAKEN. `frac` is
+    ///    already computed to pick the zone; the impact point is already
+    ///    passed in to place the damage number. Between them they say how
+    ///    high, which side, and which face - which is exactly a plate.
+    ///
+    /// So: the zone's band is cut into as many sub-bands as it has plate
+    /// LAYERS, head-down (a leg is tasset, cuisse, poleyn, greave,
+    /// sabaton from hip to boot), and left/right - or front/back for the
+    /// cuirass - picks between the mirrored halves. It costs no state, no
+    /// RNG and no second geometry pass, and it means the plate you lose is
+    /// the one that was being shot at.
+    ///
+    /// `right` is the fighter's OWN right (see `muzzle_origin` for this
+    /// game's yaw convention), `front` is true when the impact point is on
+    /// the facing half of the body.
+    ///
+    /// `frac` is CLAMPED into the zone's own band rather than trusted.
+    /// The two disagree on purpose in one place: a fighter mid-somersault
+    /// is UNIFORM (§4.3), so a boot-height round is called a torso hit,
+    /// and the plate it names must then be a torso plate. The zone is
+    /// authoritative about which part of the man was hit; this only
+    /// decides which of that part's plates caught it.
+    pub fn struck(zone: HitZone, frac: f32, right: bool, front: bool) -> ArmorPiece {
+        use ArmorPiece::*;
+        // Which layer of the zone, counting DOWN from the top of the band.
+        // Anything at or above the band's top edge is layer 0.
+        let layers = |n: usize| -> usize {
+            let (lo, hi) = zone.band();
+            let u = ((frac - lo) / (hi - lo)).clamp(0.0, 1.0);
+            // 1-u so index 0 is the TOP layer, which is the order the
+            // tables below are written in - shoulder to hand, hip to boot
+            (((1.0 - u) * n as f32) as usize).min(n - 1)
+        };
+        match zone {
+            // throat plate below, skull above
+            HitZone::Head => [Helmet, Gorget][layers(2)],
+            // the cuirass is the only plate that is chosen by FACE rather
+            // than by side: a man has one chest and one back, and the
+            // round that came from behind hit the back one
+            HitZone::Torso => match layers(3) {
+                0 => {
+                    if front {
+                        CuirassFront
+                    } else {
+                        CuirassBack
+                    }
+                }
+                1 => Fauld,
+                _ => PelvisPlate,
+            },
+            HitZone::Arms => {
+                let l = [
+                    [PauldronL, RerebraceL, VambraceL, GauntletL],
+                    [PauldronR, RerebraceR, VambraceR, GauntletR],
+                ];
+                l[right as usize][layers(4)]
+            }
+            HitZone::Legs => {
+                let l = [
+                    [TassetL, CuisseL, PoleynL, GreaveL, SabatonL],
+                    [TassetR, CuisseR, PoleynR, GreaveR, SabatonR],
+                ];
+                l[right as usize][layers(5)]
+            }
+        }
+    }
 }
 
 /// How many plates a full harness has. See the note above about 24 vs 26.
@@ -1767,6 +1878,173 @@ pub const ARMOR_PIECES: usize = 24;
 /// Brief IX §C: an unarmoured SEGMENT takes this much more. Max HP is
 /// unchanged - bare places are simply fragile.
 pub const EXPOSED_SEGMENT_MULT: f32 = 1.25;
+
+// ---- ARMOUR DAMAGE STATES (Brief IX §C, "Armour damage states") ---------
+//
+// Until now a plate was equipped or it was not. The brief's table gives it
+// a CONDITION, and every number below is read straight off that table:
+//
+//   Threshold |    HP | State   | Mechanical
+//       100%  | 80/80 | Fresh   | No bonus
+//        70%  | 56/80 | Scuffed | +5% damage resistance
+//        40%  | 32/80 | Cracked | +10% resistance, piece tilts
+//        15%  | 12/80 | Severed | Detaches on next hit
+//
+// Nothing here is invented except the wear RATE, which the brief does not
+// state - see `wear_plate` for what was chosen and why.
+
+/// Brief IX §C: every plate starts at 80 and is scored out of 80. The same
+/// pool for a sabaton as for a cuirass front, because the table gives one
+/// column, not one per piece - a heavier plate is not a tougher one here.
+pub const PLATE_HP: f32 = 80.0;
+
+/// The brief's thresholds, as fractions of `PLATE_HP`. A plate is in a
+/// state once it is AT or BELOW the threshold - the table's own HP column
+/// (56/80, 32/80, 12/80) is what pins that reading, and
+/// `the_four_damage_states_are_the_briefs_table` checks against those
+/// numbers rather than against these.
+pub const PLATE_SCUFFED_FRAC: f32 = 0.70;
+pub const PLATE_CRACKED_FRAC: f32 = 0.40;
+pub const PLATE_SEVERED_FRAC: f32 = 0.15;
+
+/// The Mechanical column, verbatim: a battered plate turns a round a
+/// little better than a clean one.
+///
+/// Counter-intuitive on its face, and deliberately kept: it is the thing
+/// stopping plate wear from being a death spiral, where the first plate to
+/// crack makes the second crack faster. The brief chose a shallow reward
+/// for wearing the damage instead, and this is it.
+pub const PLATE_SCUFFED_RESIST: f32 = 0.05;
+pub const PLATE_CRACKED_RESIST: f32 = 0.10;
+
+/// The four visible conditions of one plate.
+///
+/// SEVERED is a state a plate sits IN, not the moment it leaves: "detached
+/// or hanging by strap ... detaches on next hit". So a severed plate is
+/// still equipped, still drawn, and comes off on the round after.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum ArmorStage {
+    Fresh,
+    Scuffed,
+    Cracked,
+    Severed,
+}
+
+impl ArmorStage {
+    /// Worst-first is the order they are REACHED in, which is what makes
+    /// the `PartialOrd` derive above meaningful: a plate's stage only ever
+    /// increases.
+    pub const ALL: [ArmorStage; 4] = [
+        ArmorStage::Fresh,
+        ArmorStage::Scuffed,
+        ArmorStage::Cracked,
+        ArmorStage::Severed,
+    ];
+
+    /// The one place the strings live - same rule as `TurretMode::label`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ArmorStage::Fresh => "FRESH",
+            ArmorStage::Scuffed => "SCUFFED",
+            ArmorStage::Cracked => "CRACKED",
+            ArmorStage::Severed => "SEVERED",
+        }
+    }
+
+    /// Incoming-damage resistance this plate grants on a hit that lands on
+    /// IT.
+    ///
+    /// SEVERED grants nothing, and that is a reading of the table rather
+    /// than an oversight. The Mechanical column states each row's total,
+    /// not an increment - Fresh spells out "No bonus" rather than leaving
+    /// it blank, which is what proves the column is absolute. Severed's
+    /// cell says only "Detaches on next hit". A plate hanging off a strap
+    /// protecting you as well as a cracked one bolted down would also be
+    /// the odd reading physically.
+    pub fn resist(self) -> f32 {
+        match self {
+            ArmorStage::Fresh => 0.0,
+            ArmorStage::Scuffed => PLATE_SCUFFED_RESIST,
+            ArmorStage::Cracked => PLATE_CRACKED_RESIST,
+            ArmorStage::Severed => 0.0,
+        }
+    }
+
+    /// "piece tilts" - the plate has lost a rivet and hangs crooked. Pure
+    /// presentation, published so the client is not re-deriving which
+    /// stages tilt on the far side of the sim boundary.
+    pub fn tilts(self) -> bool {
+        self == ArmorStage::Cracked || self == ArmorStage::Severed
+    }
+}
+
+/// Per-plate HP for one fighter: 24 pools of `PLATE_HP`.
+///
+/// A plain array rather than bits packed beside `ArmorLoadout`, because
+/// this is a CONTINUOUS quantity - the client wants a wear bar, and the
+/// resistance step happens at thresholds the HP crosses. The loadout stays
+/// exactly what it was, one bit per plate, and detaching clears that bit:
+/// there is one answer to "is this plate on me", and the Forge's switch and
+/// a round through the shoulder both write it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ArmorCondition {
+    hp: [f32; ARMOR_PIECES],
+}
+
+impl Default for ArmorCondition {
+    /// Every plate fresh. A fighter who has not been shot yet.
+    fn default() -> Self {
+        ArmorCondition {
+            hp: [PLATE_HP; ARMOR_PIECES],
+        }
+    }
+}
+
+impl ArmorCondition {
+    fn idx(p: ArmorPiece) -> usize {
+        ArmorPiece::ALL.iter().position(|q| *q == p).unwrap()
+    }
+
+    /// This plate's remaining pool, 0..=`PLATE_HP`.
+    pub fn hp(&self, p: ArmorPiece) -> f32 {
+        self.hp[Self::idx(p)]
+    }
+
+    /// 0..1, for a wear bar.
+    pub fn frac(&self, p: ArmorPiece) -> f32 {
+        self.hp(p) / PLATE_HP
+    }
+
+    /// Which of the brief's four states this plate is in.
+    pub fn stage(&self, p: ArmorPiece) -> ArmorStage {
+        let f = self.frac(p);
+        if f > PLATE_SCUFFED_FRAC {
+            ArmorStage::Fresh
+        } else if f > PLATE_CRACKED_FRAC {
+            ArmorStage::Scuffed
+        } else if f > PLATE_SEVERED_FRAC {
+            ArmorStage::Cracked
+        } else {
+            ArmorStage::Severed
+        }
+    }
+
+    /// Take `d` out of this plate's pool. Never below zero.
+    pub fn wear(&mut self, p: ArmorPiece, d: f32) {
+        let i = Self::idx(p);
+        self.hp[i] = (self.hp[i] - d).max(0.0);
+    }
+
+    /// §C Forge, "Piece repair ... reverts to fresh visually and
+    /// mechanically". The sim side of that, so the economy around it can
+    /// be built without a second definition of what "fresh" means.
+    ///
+    /// Deliberately NOT called on respawn or on detach - see
+    /// `plate_condition_survives_a_respawn`.
+    pub fn repair(&mut self, p: ArmorPiece) {
+        self.hp[Self::idx(p)] = PLATE_HP;
+    }
+}
 
 /// Which plates are on, as one bit per `ArmorPiece::ALL` index.
 ///
@@ -2239,6 +2517,20 @@ pub struct Fighter {
     /// no-op, and only a player who takes something OFF sees a
     /// difference.
     pub armor_pieces: ArmorLoadout,
+    /// §C: how battered each of those plates is - the four damage states.
+    ///
+    /// AUTHORITATIVE, not display: the struck plate's stage multiplies
+    /// incoming damage (`ArmorStage::resist`), and the round after it
+    /// reaches SEVERED clears its bit out of `armor_pieces`. A client
+    /// reads it through `armor_stage_of`; nothing outside the sim writes
+    /// it.
+    ///
+    /// Deliberately NOT cleared on respawn, which is the opposite of the
+    /// house rule and needs the reason stated: §C repairs plate in the
+    /// FORGE, at 50 points a piece, between matches. Dying is not a
+    /// repair. `plate_condition_survives_a_respawn` pins that so it reads
+    /// as a decision rather than as the recurring bug it resembles.
+    pub armor_cond: ArmorCondition,
     /// §owner: which of the four classes this fighter is fighting as.
     /// Set at spawn and kept for the match - `class_spec` turns it into
     /// the four multipliers that actually bite.
@@ -5403,6 +5695,7 @@ impl TdmSim {
                     fear: 0.0,
                     routing: false,
                     armor_pieces: ArmorLoadout::default(),
+                    armor_cond: ArmorCondition::default(),
                     class: Class::Line, // overwritten just below per side
                     climbing: None,
                     grip_pool: CLIMB_GRIP_MAX,
@@ -9357,6 +9650,90 @@ impl TdmSim {
         }
     }
 
+    /// §C: turn a landed hit into the PLATE it landed on.
+    ///
+    /// The side and face come from where the impact point sits in the
+    /// victim's own frame - `right` is this game's yaw convention, lifted
+    /// from `muzzle_origin` rather than restated. A hit synthesised AT the
+    /// victim's own centre (the mech's landing crush passes exactly that)
+    /// projects to zero on both axes and resolves right-front; that is
+    /// deterministic and stated rather than special-cased, because there
+    /// is no truer answer available from a point with no offset.
+    fn struck_plate(&self, j: usize, zone: HitZone, frac: f32, at: [f32; 3]) -> ArmorPiece {
+        let v = &self.fighters[j];
+        let (dx, dz) = (at[0] - v.pos[0], at[2] - v.pos[2]);
+        let right = (-v.yaw.cos()) * dx + v.yaw.sin() * dz;
+        let front = v.yaw.sin() * dx + v.yaw.cos() * dz;
+        ArmorPiece::struck(zone, frac, right >= 0.0, front >= 0.0)
+    }
+
+    /// §C: put `d` points of wear into one plate, and take it off the
+    /// fighter if it was already hanging.
+    ///
+    /// The wear RATE is the one number Brief IX §C does not give, so it is
+    /// stated here: **a plate takes the same damage the fighter took from
+    /// that hit.** ASSUMED. It was chosen for pace rather than for
+    /// realism - the baseline rifle deals ~12.5 to a torso, so an 80-point
+    /// plate scuffs on the second round into it, cracks on the fourth,
+    /// severs on the sixth and comes off on the seventh. Seven rifle
+    /// rounds into the same plate is a plausible cost for stripping one,
+    /// and it falls out of the brief's own 80 rather than needing a
+    /// tuning constant nobody can justify.
+    ///
+    /// Detaching is `armor_pieces.set(p, false)` and nothing else: the
+    /// SAME bit the Forge switch clears, so a shot-off plate and one that
+    /// was never equipped are the same state, and `zone_mult` exposes the
+    /// segment for both without a second mechanism to keep in step.
+    fn wear_plate(&mut self, j: usize, p: ArmorPiece, d: f32) {
+        if d <= 0.0 {
+            return;
+        }
+        let f = &mut self.fighters[j];
+        if !f.armor_pieces.has(p) {
+            return; // nothing there to wear - the segment is already bare
+        }
+        if f.armor_cond.stage(p) == ArmorStage::Severed {
+            // "Detaches on next hit". The plate was already hanging when
+            // this round arrived; it is the round that finishes the strap.
+            // Its pool is NOT restored - §C reattaches and repairs in the
+            // Forge, so a plate picked back up off the floor of the menu
+            // is still the wreck it was.
+            f.armor_pieces.set(p, false);
+            return;
+        }
+        f.armor_cond.wear(p, d);
+    }
+
+    /// §C: **THE accessor for one plate's damage state** - what the client
+    /// reads to know whether to draw it clean, scratched, gouged or
+    /// hanging. `armor_stage_of(sim.player, ArmorPiece::PauldronL)` is the
+    /// whole call, on the same pattern as `turret_mode_of` and
+    /// `mech_jump_phase_of`, and `ArmorStage::label` is the only place the
+    /// strings live.
+    ///
+    /// `None` means there is no plate there AT ALL - never equipped, or
+    /// shot off. That distinction is the client's whole reason to ask: a
+    /// missing plate draws a bare segment, a SEVERED one draws a plate
+    /// hanging off a strap, and returning `Fresh` for an empty mount would
+    /// put clean steel on a naked shoulder.
+    pub fn armor_stage_of(&self, i: usize, p: ArmorPiece) -> Option<ArmorStage> {
+        let f = &self.fighters[i];
+        f.armor_pieces
+            .has(p)
+            .then(|| f.armor_cond.stage(p))
+    }
+
+    /// §C: the same plate's remaining pool as 0..1, for a wear bar.
+    ///
+    /// Offered beside the stage for the reason `mech_jump_compression_of`
+    /// is offered beside the phase: "which state" and "how far through it"
+    /// are different questions, and a client dividing by `PLATE_HP` on the
+    /// far side of the sim boundary is re-deriving the sim's own numbers.
+    pub fn armor_wear_of(&self, i: usize, p: ArmorPiece) -> Option<f32> {
+        let f = &self.fighters[i];
+        f.armor_pieces.has(p).then(|| f.armor_cond.frac(p))
+    }
+
     /// A hitscan hit from the shooter's CURRENTLY HELD gun. Thin wrapper
     /// over `apply_hit_dmg` so the 20-odd call sites that mean exactly
     /// that keep reading as they did.
@@ -9413,8 +9790,27 @@ impl TdmSim {
         // are: the angle-armour model replaces proportional zones there,
         // and a man inside a mech is not wearing his own pauldrons in any
         // sense that matters to a round hitting the hull.
+        // §C damage states: which PLATE the round landed on. Resolved
+        // from geometry the hit already carries - see `ArmorPiece::struck`
+        // for the two alternatives this rejected and why.
+        //
+        // Gated on the SAME `in_mech` the protection is, on purpose: plate
+        // that is not turning rounds must not be wearing out either, and
+        // one condition for both is the only way those two cannot drift.
+        let struck = if in_mech {
+            None
+        } else {
+            Some(self.struck_plate(j, zone, frac, at))
+        };
         if !in_mech {
             dmg *= self.fighters[j].armor_pieces.zone_mult(zone);
+            // and the condition of the ONE plate that caught it
+            if let Some(p) = struck {
+                let f = &self.fighters[j];
+                if f.armor_pieces.has(p) {
+                    dmg *= 1.0 - f.armor_cond.stage(p).resist();
+                }
+            }
         }
         let from = {
             let f = &self.fighters[i];
@@ -9425,6 +9821,14 @@ impl TdmSim {
         if let Some(block) = self.shield_block(j, from) {
             dmg *= 1.0 - block;
             shielded = true;
+        }
+        // §C: the plate wears by what actually reached it. AFTER the
+        // shield, because a round the plate stopped never touched the
+        // harness behind it; BEFORE the set flats, because those are a
+        // different garment (a Folk brace, a Pyro suit) worn over the top
+        // and they do not spare the plate underneath.
+        if let Some(p) = struck {
+            self.wear_plate(j, p, dmg);
         }
         // §6.1: set armor applies AFTER the zone multiplier, with a floor
         dmg = self.apply_armor(j, dmg, base_dmg, zone, Some(from));
@@ -14549,6 +14953,552 @@ mod tests {
             (bare / plated - EXPOSED_SEGMENT_MULT).abs() < 0.01,
             "the exposure multiplier must arrive intact through the damage \
              path: {bare}/{plated}"
+        );
+    }
+
+    // ---- §C ARMOUR DAMAGE STATES ---------------------------------------
+
+    /// The four states are the brief's table, read off its HP column.
+    ///
+    /// Written against the raw HP numbers the table prints - 56/80, 32/80,
+    /// 12/80 - rather than against `PLATE_SCUFFED_FRAC` and friends,
+    /// because a test that divides by the same constants the code
+    /// multiplies by would move with any mutation and never fail.
+    #[test]
+    fn the_four_damage_states_are_the_briefs_table() {
+        assert_eq!(PLATE_HP, 80.0, "the brief's pool is 80 points a plate");
+        // build a plate AT a given HP, using the literal 80 rather than
+        // the constant, so re-pooling the plate is caught above and the
+        // thresholds are caught here
+        let at = |hp: f32| {
+            let mut c = ArmorCondition::default();
+            c.wear(ArmorPiece::Helmet, 80.0 - hp);
+            c.stage(ArmorPiece::Helmet)
+        };
+        assert_eq!(at(80.0), ArmorStage::Fresh, "untouched plate is clean");
+        assert_eq!(at(57.0), ArmorStage::Fresh, "one point above 56/80");
+        assert_eq!(at(56.0), ArmorStage::Scuffed, "the brief's 70% row");
+        assert_eq!(at(33.0), ArmorStage::Scuffed);
+        assert_eq!(at(32.0), ArmorStage::Cracked, "the brief's 40% row");
+        assert_eq!(at(13.0), ArmorStage::Cracked);
+        assert_eq!(at(12.0), ArmorStage::Severed, "the brief's 15% row");
+        assert_eq!(at(0.0), ArmorStage::Severed, "a spent plate is severed");
+
+        // the Mechanical column
+        assert_eq!(ArmorStage::Fresh.resist(), 0.0, "\"No bonus\"");
+        assert!(
+            (ArmorStage::Scuffed.resist() - 0.05).abs() < 1e-6,
+            "the brief says +5% at Scuffed"
+        );
+        assert!(
+            (ArmorStage::Cracked.resist() - 0.10).abs() < 1e-6,
+            "the brief says +10% at Cracked"
+        );
+        assert_eq!(
+            ArmorStage::Severed.resist(),
+            0.0,
+            "the Severed row states one mechanic and it is not resistance - \
+             see ArmorStage::resist for why that reading was taken"
+        );
+        // the shape, which survives retuning the numbers: a plate that has
+        // taken more turns a round better, right up until it is hanging
+        assert!(ArmorStage::Cracked.resist() > ArmorStage::Scuffed.resist());
+        assert!(ArmorStage::Scuffed.resist() > ArmorStage::Fresh.resist());
+        // "piece tilts" starts at Cracked and does not un-tilt
+        assert!(!ArmorStage::Fresh.tilts() && !ArmorStage::Scuffed.tilts());
+        assert!(ArmorStage::Cracked.tilts() && ArmorStage::Severed.tilts());
+        // wear never digs past empty - a plate at -30 would read as
+        // Severed forever and take thirty free points to repair
+        let mut c = ArmorCondition::default();
+        c.wear(ArmorPiece::Helmet, 500.0);
+        assert_eq!(c.hp(ArmorPiece::Helmet), 0.0);
+        c.repair(ArmorPiece::Helmet);
+        assert_eq!(c.stage(ArmorPiece::Helmet), ArmorStage::Fresh, "the Forge");
+    }
+
+    /// A round names the PLATE it landed on, not just the zone.
+    ///
+    /// The table below is read off the anatomy - shoulder to hand, hip to
+    /// boot - and hand-placed in each zone's band. It is an independent
+    /// statement of the mapping, not a re-derivation of it.
+    #[test]
+    fn a_round_names_the_plate_it_landed_on() {
+        use ArmorPiece::*;
+        // (zone, height fraction, the LEFT-side answer, the RIGHT-side one)
+        for (zone, frac, want_l, want_r) in [
+            // head band 0.82..1.00: throat below, skull above
+            (HitZone::Head, 0.98, Helmet, Helmet),
+            (HitZone::Head, 0.85, Gorget, Gorget),
+            // arm band 0.66..0.82, four layers of 0.04
+            (HitZone::Arms, 0.80, PauldronL, PauldronR),
+            (HitZone::Arms, 0.76, RerebraceL, RerebraceR),
+            (HitZone::Arms, 0.72, VambraceL, VambraceR),
+            (HitZone::Arms, 0.68, GauntletL, GauntletR),
+            // leg band 0.00..0.35, five layers of 0.07
+            (HitZone::Legs, 0.31, TassetL, TassetR),
+            (HitZone::Legs, 0.24, CuisseL, CuisseR),
+            (HitZone::Legs, 0.17, PoleynL, PoleynR),
+            (HitZone::Legs, 0.10, GreaveL, GreaveR),
+            (HitZone::Legs, 0.03, SabatonL, SabatonR),
+        ] {
+            assert_eq!(
+                ArmorPiece::struck(zone, frac, false, true),
+                want_l,
+                "{zone:?} at {frac} on the left is a {}",
+                want_l.name()
+            );
+            assert_eq!(
+                ArmorPiece::struck(zone, frac, true, true),
+                want_r,
+                "{zone:?} at {frac} on the right is a {}",
+                want_r.name()
+            );
+        }
+        // the torso is the one zone chosen by FACE rather than by side: a
+        // man has one chest and one back, and side does not enter it
+        assert_eq!(ArmorPiece::struck(HitZone::Torso, 0.62, false, true), CuirassFront);
+        assert_eq!(ArmorPiece::struck(HitZone::Torso, 0.62, true, true), CuirassFront);
+        assert_eq!(ArmorPiece::struck(HitZone::Torso, 0.62, true, false), CuirassBack);
+        assert_eq!(ArmorPiece::struck(HitZone::Torso, 0.50, true, true), Fauld);
+        assert_eq!(ArmorPiece::struck(HitZone::Torso, 0.38, true, true), PelvisPlate);
+
+        // Whatever the geometry says, the plate it names belongs to the
+        // zone that was HIT. Without this a low leg shot could wear a
+        // helmet, and the exposure multiplier and the wear would be
+        // talking about different parts of the body.
+        for z in [HitZone::Head, HitZone::Arms, HitZone::Torso, HitZone::Legs] {
+            for k in 0..=40 {
+                let f = k as f32 / 40.0;
+                for right in [false, true] {
+                    for front in [false, true] {
+                        let p = ArmorPiece::struck(z, f, right, front);
+                        assert_eq!(
+                            p.zone(),
+                            z,
+                            "a {z:?} hit at {f} named {}, which is {:?} plate",
+                            p.name(),
+                            p.zone()
+                        );
+                    }
+                }
+            }
+        }
+        // and every one of the 24 is reachable. A plate no round can name
+        // is a plate that can never wear out or fall off.
+        let mut reached: Vec<ArmorPiece> = Vec::new();
+        for p in ArmorPiece::ALL {
+            let z = p.zone();
+            let (lo, hi) = z.band();
+            'find: for k in 0..=200 {
+                let f = lo + (hi - lo) * (k as f32 / 200.0);
+                for right in [false, true] {
+                    for front in [false, true] {
+                        if ArmorPiece::struck(z, f, right, front) == p {
+                            reached.push(p);
+                            break 'find;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            reached.len(),
+            ARMOR_PIECES,
+            "unreachable plate(s): {:?}",
+            ArmorPiece::ALL
+                .into_iter()
+                .filter(|p| !reached.contains(p))
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `HitZone::band` and the bands `apply_hit_dmg` selects on are two
+    /// statements of the same edges. This is the thing that makes that
+    /// safe: fire real rounds all the way up the capsule and match the
+    /// zone the hit path REPORTS against the table.
+    #[test]
+    fn the_zone_bands_and_the_piece_bands_agree() {
+        let mut s = range(0xA413);
+        plate_up(&mut s);
+        s.fighters[1].health = 1.0e6; // 101 rounds is a lot of man
+        let h = s.fighters[1].height();
+        for k in 0..=100 {
+            let frac = k as f32 / 100.0;
+            let y = frac * h;
+            s.hits.clear();
+            s.apply_hit(0, 1, y, [0.0, y, 5.3]);
+            let z = s.hits.last().expect("the round must land").0.zone;
+            let (lo, hi) = z.band();
+            assert!(
+                frac >= lo && frac <= hi,
+                "the hit path called {frac} a {z:?} hit; HitZone::band says \
+                 {z:?} is {lo}..{hi}"
+            );
+        }
+    }
+
+    /// The headline: one plate, hit over and over, walks Fresh → Scuffed
+    /// → Cracked → Severed and then comes off. In that order, no step
+    /// skipped, no step taken back.
+    #[test]
+    fn a_plate_walks_the_four_states_and_then_falls_off() {
+        let mut s = range(0xA414);
+        plate_up(&mut s);
+        s.fighters[1].yaw = 0.0; // faces +z; the shooter is behind him
+        s.fighters[1].health = 1.0e6; // the PLATE is what is being measured
+        let p = ArmorPiece::CuirassFront;
+        let h = s.fighters[1].height();
+        let y = 0.62 * h; // the cuirass layer of the torso band
+        let at = [0.0, y, 5.3]; // +z of him: his front face
+        let mut seen = vec![s.armor_stage_of(1, p)];
+        // the wear bar the client draws, sampled beside the state
+        assert_eq!(s.armor_wear_of(1, p), Some(1.0), "an untouched plate is full");
+        let mut bar = 1.0_f32;
+        for _ in 0..60 {
+            s.apply_hit(0, 1, y, at);
+            let now = s.armor_stage_of(1, p);
+            if let Some(w) = s.armor_wear_of(1, p) {
+                assert!(
+                    w < bar,
+                    "the wear bar went from {bar} to {w} on a round that \
+                     landed on the plate - it must only ever fall"
+                );
+                assert!((0.0..=1.0).contains(&w), "the bar left 0..1 at {w}");
+                bar = w;
+            } else {
+                assert_eq!(now, None, "the bar and the state must agree there \
+                                       is no plate left");
+            }
+            if *seen.last().unwrap() != now {
+                seen.push(now);
+            }
+            if now.is_none() {
+                break;
+            }
+        }
+        assert!(bar < 1.0, "the fixture never touched the plate at all");
+        assert_eq!(
+            seen,
+            vec![
+                Some(ArmorStage::Fresh),
+                Some(ArmorStage::Scuffed),
+                Some(ArmorStage::Cracked),
+                Some(ArmorStage::Severed),
+                None,
+            ],
+            "a plate must walk the brief's four states in order and then \
+             detach - got {:?}",
+            seen.iter()
+                .map(|s| s.map_or("GONE", |x| x.label()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !s.fighters[1].armor_pieces.has(p),
+            "the detached plate must be off the harness bitmask, not merely \
+             flagged somewhere else"
+        );
+        // and nothing else on him was touched by a shot that never went
+        // near it
+        assert_eq!(s.armor_stage_of(1, ArmorPiece::CuirassBack), Some(ArmorStage::Fresh));
+        assert_eq!(s.armor_stage_of(1, ArmorPiece::Fauld), Some(ArmorStage::Fresh));
+        assert_eq!(s.armor_stage_of(1, ArmorPiece::GreaveL), Some(ArmorStage::Fresh));
+    }
+
+    /// A plate shot off and a plate never worn leave the fighter in
+    /// EXACTLY the same state.
+    ///
+    /// This is the requirement that the detach reuses the unequipped path
+    /// rather than building a second one beside it. If detaching ever
+    /// grows its own flag, this test is what notices.
+    #[test]
+    fn a_shot_off_plate_is_indistinguishable_from_one_never_worn() {
+        let p = ArmorPiece::GreaveR;
+        // (a) shoot it off
+        let mut shot = range(0xA415);
+        plate_up(&mut shot);
+        shot.fighters[1].yaw = 0.0;
+        shot.fighters[1].health = 1.0e6;
+        let h = shot.fighters[1].height();
+        let y = 0.10 * h; // the greave layer of the leg band
+        // his RIGHT: right = [-cos y, 0, sin y] = [-1, 0, 0] at yaw 0, so
+        // a point at -x of him is on his right
+        let at = [-0.3, y, 5.0];
+        for _ in 0..60 {
+            shot.apply_hit(0, 1, y, at);
+            if !shot.fighters[1].armor_pieces.has(p) {
+                break;
+            }
+        }
+        assert!(!shot.fighters[1].armor_pieces.has(p), "it never came off");
+        assert_eq!(shot.armor_stage_of(1, p), None, "a bare mount has no state");
+
+        // (b) never equip it
+        let mut never = range(0xA415);
+        plate_up(&mut never);
+        never.fighters[1].yaw = 0.0;
+        never.fighters[1].health = 1.0e6;
+        never.fighters[1].armor_pieces.set(p, false);
+
+        assert_eq!(
+            shot.fighters[1].armor_pieces, never.fighters[1].armor_pieces,
+            "the harness must read the same either way"
+        );
+        assert_eq!(never.armor_stage_of(1, p), None);
+        assert_eq!(
+            shot.fighters[1].armor_pieces.zone_mult(HitZone::Legs),
+            never.fighters[1].armor_pieces.zone_mult(HitZone::Legs),
+            "the exposure multiplier is the ONE path, and both must be on it"
+        );
+        // and the next round that lands elsewhere on that leg costs the
+        // same to both men
+        let take = |s: &mut TdmSim| -> f32 {
+            let hp = s.fighters[1].health;
+            let y = 0.31 * s.fighters[1].height(); // the tasset, untouched in both
+            s.apply_hit(0, 1, y, [-0.3, y, 5.0]);
+            hp - s.fighters[1].health
+        };
+        let a = take(&mut shot);
+        let b = take(&mut never);
+        assert!(
+            (a - b).abs() < 1e-4,
+            "a shot-off greave cost {a} where an unworn one cost {b}"
+        );
+        assert!(a > 0.0, "the fixture must actually land a round");
+    }
+
+    /// The Mechanical column, through the real damage path: a battered
+    /// plate turns the round a little better, and one hanging off a strap
+    /// turns nothing.
+    #[test]
+    fn a_worn_plate_turns_the_round_and_a_hanging_one_does_not() {
+        // Set the plate to a given HP and measure ONE round into it.
+        let shot = |hp: f32| -> f32 {
+            let mut s = range(0xA416);
+            plate_up(&mut s);
+            s.fighters[1].yaw = 0.0;
+            s.fighters[1].health = 1.0e6;
+            s.fighters[1]
+                .armor_cond
+                .wear(ArmorPiece::CuirassFront, 80.0 - hp);
+            let before = s.fighters[1].health;
+            let y = 0.62 * s.fighters[1].height();
+            s.apply_hit(0, 1, y, [0.0, y, 5.3]);
+            before - s.fighters[1].health
+        };
+        let fresh = shot(80.0);
+        let scuffed = shot(56.0);
+        let cracked = shot(32.0);
+        let severed = shot(12.0);
+        assert!(fresh > 0.0, "the fixture must land a round");
+        // relationships first - these survive any retune of the table
+        assert!(scuffed < fresh, "a scuffed plate must turn MORE, not less");
+        assert!(cracked < scuffed, "a cracked plate must turn more than scuffed");
+        assert!(
+            severed > cracked,
+            "a plate hanging off a strap must stop protecting"
+        );
+        // then the brief's own two numbers
+        assert!(
+            (scuffed / fresh - 0.95).abs() < 1e-3,
+            "the brief's +5% must arrive intact: {scuffed}/{fresh}"
+        );
+        assert!(
+            (cracked / fresh - 0.90).abs() < 1e-3,
+            "the brief's +10% must arrive intact: {cracked}/{fresh}"
+        );
+        assert!(
+            (severed / fresh - 1.0).abs() < 1e-3,
+            "severed must be exactly the bare-plate number: {severed}/{fresh}"
+        );
+    }
+
+    /// Plate wear is ONE rule. The player and a bot, same plate, same
+    /// geometry, same rounds - the states march together.
+    ///
+    /// Player/bot drift is this project's most repeated defect, and armour
+    /// is a place it could hide for a long time: nothing on the HUD says
+    /// what condition an enemy's pauldron is in.
+    #[test]
+    fn plate_wear_is_one_rule_for_the_player_and_for_a_bot() {
+        let mut s = range(0xA417);
+        plate_up(&mut s);
+        // both face +z, both immortal for the duration, both holding the
+        // same gun - the ONLY difference left is which index they are
+        for j in 0..2 {
+            s.fighters[j].yaw = 0.0;
+            s.fighters[j].health = 1.0e6;
+            s.fighters[j].gun = GunKind::M4;
+            s.fighters[j].protect_t = 0.0;
+        }
+        let p = ArmorPiece::PauldronR;
+        let h = s.fighters[0].height();
+        let y = 0.80 * h; // the pauldron layer of the arm band
+        let mut player = Vec::new();
+        let mut bot = Vec::new();
+        for _ in 0..20 {
+            // the bot shoots the player (fighter 0 sits at z = -5)
+            s.apply_hit(1, 0, y, [-0.3, y, -5.0]);
+            // the player shoots the bot (fighter 1 sits at z = +5)
+            s.apply_hit(0, 1, y, [-0.3, y, 5.0]);
+            player.push(s.armor_stage_of(0, p));
+            bot.push(s.armor_stage_of(1, p));
+        }
+        assert_eq!(
+            player, bot,
+            "the player's plate and the bot's wore differently under \
+             identical fire"
+        );
+        assert!(
+            player.contains(&None),
+            "the fixture never stripped the plate - it would pass on two \
+             fighters who both simply stayed Fresh"
+        );
+        assert!(
+            player.contains(&Some(ArmorStage::Cracked)),
+            "the fixture never walked the middle of the table"
+        );
+    }
+
+    /// The round that strips a plate is still a normal round: it credits
+    /// the kill, the assist and the damage column like any other.
+    #[test]
+    fn the_round_that_strips_a_plate_still_credits_the_kill() {
+        // 2v2 so there is a teammate to earn the assist
+        let mut s = TdmSim::new(cfg(0xA418, 2, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        s.pickups.clear();
+        for f in s.fighters.iter_mut() {
+            f.class = Class::Line;
+            f.health = MAX_HEALTH;
+            f.armor_pieces = ArmorLoadout::default();
+            f.gun = GunKind::M4;
+            f.protect_t = 0.0;
+            f.yaw = 0.0;
+        }
+        // 0 and 1 are Blue, 2 and 3 are Red
+        assert_eq!(s.fighters[0].team, s.fighters[1].team);
+        assert_ne!(s.fighters[0].team, s.fighters[2].team);
+        let v = 2;
+        s.fighters[v].pos = [0.0, 0.0, 5.0];
+        let p = ArmorPiece::CuirassFront;
+        // hang the plate by a strap: the next round takes it off
+        s.fighters[v].armor_cond.wear(p, 80.0 - 12.0);
+        assert_eq!(s.armor_stage_of(v, p), Some(ArmorStage::Severed));
+        let y = 0.62 * s.fighters[v].height();
+        let at = [0.0, y, 5.3];
+
+        // the teammate softens him first - that is the assist claim
+        s.apply_hit(1, v, y, at);
+        // and he is one round from dead when the plate comes off
+        s.fighters[v].health = 1.0;
+        let dmg_before = s.fighters[0].dmg_dealt;
+        s.apply_hit(0, v, y, at);
+
+        assert!(
+            !s.fighters[v].armor_pieces.has(p),
+            "this test only means anything if THAT round stripped the plate"
+        );
+        assert_eq!(s.fighters[0].kills, 1, "the kill must still credit");
+        assert_eq!(s.fighters[v].deaths, 1);
+        assert_eq!(s.fighters[1].assists, 1, "the assist must still credit");
+        assert!(
+            s.fighters[0].dmg_dealt > dmg_before,
+            "the damage column must still move"
+        );
+        assert!(
+            s.kill_feed.iter().any(|(k, _)| k.killer == 0 && k.victim == v),
+            "the kill feed must still get the entry"
+        );
+    }
+
+    /// Plate condition SURVIVES a respawn, deliberately.
+    ///
+    /// This is the opposite of the house rule, and the reason is §C: a
+    /// piece is repaired in the FORGE, at 50 points a piece, between
+    /// matches. Dying is not a repair, and a dead man's greave is not
+    /// mended by the wait. Pinned so it reads as a decision rather than as
+    /// the "state survived a transition" defect it resembles.
+    #[test]
+    fn plate_condition_survives_a_respawn() {
+        let mut s = range(0xA419);
+        plate_up(&mut s);
+        let worn = ArmorPiece::CuirassFront;
+        let gone = ArmorPiece::GreaveL;
+        s.fighters[1].armor_cond.wear(worn, 80.0 - 32.0); // cracked
+        s.fighters[1].armor_pieces.set(gone, false); // already shot off
+        s.fighters[1].health = 0.0;
+        s.fighters[1].deaths += 1;
+        s.fighters[1].respawn_t = 0.05;
+        run(&mut s, 1, PlayerCmd::default());
+
+        // the control: the things that DO reset, did
+        assert!(s.fighters[1].alive(), "he must actually have respawned");
+        assert!(s.fighters[1].health > 0.0);
+        assert_eq!(
+            s.armor_stage_of(1, worn),
+            Some(ArmorStage::Cracked),
+            "§C repairs plate in the Forge, not by dying"
+        );
+        assert_eq!(
+            s.armor_stage_of(1, gone),
+            None,
+            "a plate shot off stays off until it is reattached"
+        );
+    }
+
+    /// The new per-fighter armour state replays BIT-IDENTICALLY.
+    ///
+    /// Every field added to a fighter is a chance to break the replay
+    /// guarantee, and this one is written from inside the hottest path in
+    /// the sim. Raw bits, because a one-ULP drift in a plate's pool is
+    /// still a divergence - it just takes another few rounds to become a
+    /// plate that fell off in one run and held in the other.
+    ///
+    /// A SEPARATE fingerprint rather than fields bolted onto
+    /// `a_bot_mech_engagement_replays_bit_identically`, because plate wear
+    /// is gated off inside a chassis: in that fixture all 24 pools would
+    /// sit at 80.0 forever and the addition would be a vacuous green. This
+    /// one is a 5v5 infantry battle, and the guard below proves plates
+    /// actually wore in it - and that they wore on the BOT path, since the
+    /// idle player never gets shot at his own spawn.
+    #[test]
+    fn armour_condition_replays_bit_identically() {
+        let fingerprint = || -> Vec<u32> {
+            let mut s = TdmSim::new(cfg(0xA41A, 5, Mode::Tdm, MapKind::Arena));
+            run(&mut s, 30, PlayerCmd::default());
+            let mut out = Vec::new();
+            for f in &s.fighters {
+                out.push(f.armor_pieces.0);
+                for p in ArmorPiece::ALL {
+                    out.push(f.armor_cond.hp(p).to_bits());
+                }
+            }
+            out
+        };
+        let a = fingerprint();
+        let b = fingerprint();
+        assert_eq!(
+            a, b,
+            "armour condition did not replay bit-identically - something \
+             nondeterministic has entered the plate path"
+        );
+        // and prove the fixture EXERCISED it. A determinism assertion over
+        // 24 untouched pools is the most comfortable green there is.
+        let mut s = TdmSim::new(cfg(0xA41A, 5, Mode::Tdm, MapKind::Arena));
+        run(&mut s, 30, PlayerCmd::default());
+        let worn = s
+            .fighters
+            .iter()
+            .flat_map(|f| ArmorPiece::ALL.into_iter().map(move |p| f.armor_cond.hp(p)))
+            .filter(|hp| *hp < PLATE_HP)
+            .count();
+        assert!(
+            worn > 0,
+            "no plate anywhere took a scratch in 30 seconds of battle - the \
+             assertion above is vacuous"
         );
     }
 
