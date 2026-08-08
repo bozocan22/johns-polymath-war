@@ -1252,3 +1252,313 @@ claimed fit was still wrapping. It re-measured, fixed it, and changed
 the comment to say "measured, not assumed". That is the confident-
 narrator anti-pattern being caught by evidence in the same session it
 was written.
+
+---
+
+# 2026-08-08 - THOR verdict on the ~19-commit visual/gameplay session (HEAD 568a42a)
+
+Scope: the five items dispatched - visual claims, claimed bug fixes,
+the S7 FP-aim audit, a test-quality sweep with real mutations, and a
+hunt for unverified claims dressed as verified.
+
+**Method note, read this first.** Two builders were writing `sim.rs` and
+`main.rs` throughout this run (sim.rs mtime moved twice while I worked;
+line numbers drifted ~180 lines in sim.rs and ~18 in main.rs mid-audit).
+I therefore did **all** mutation work in an isolated copy of the
+workspace at `<scratchpad>/eng`, restoring from `<scratchpad>/pristine/*.rs`
+between mutations. **The repo's source files were never written to.**
+Baseline in the copy: 328 passed / 0 failed / 2 ignored, identical to
+the repo.
+
+Second method note: the shared `engine/target` dir was under memory
+pressure from three concurrent cargo processes. Two mutation runs came
+back with bogus "could not compile bevy_reflect_derive (472 errors)" and
+"rustc-LLVM ERROR: out of memory". **Those were the instrument, not the
+code** - both re-ran clean. Any compile error seen in this environment
+must be re-run before it is believed.
+
+## THE ONE THING THAT IS WRONG: the LMB grenade throw is dead
+
+`main.rs:15446-15447` (live repo):
+
+    if game.nade_ready && buttons.just_pressed(fire_btn) {
+        game.nade_ready = false;
+    }
+
+...runs **before** `main.rs:15483`:
+
+    throw_hold: (game.nade_ready && buttons.pressed(fire_btn))
+        || keys.pressed(KeyCode::KeyH)
+        || buttons.pressed(MouseButton::Back),
+
+In Bevy, `just_pressed` is a subset of `pressed`: on the frame LMB goes
+down both are true. So the clear fires first, `nade_ready` is false by
+line 15483, and `throw_hold` is false on that frame and on every held
+frame after (nothing re-sets `nade_ready` except G). `cook_t` never
+accrues, so the sim's release branch (`else if cook_t > 0.0`) never runs
+and `grenades[sel] -= 1` never executes.
+
+**Net: press G, hold LMB, release - nothing is thrown, ever. The grenade
+stays in hand and you fire your rifle instead.**
+
+This is the exact sequence commit `6a46f61` documents as the new
+contract ("G puts it in your hand and does nothing else, LMB winds,
+releasing LMB throws").
+
+Confirmed twice, independently:
+1. Code reading + Bevy `ButtonInput` semantics.
+2. `git show 6a46f61 -- crates/jk_tdm/src/main.rs`: the diff changed
+   **only** `!buttons.just_pressed(fire_btn)` to `buttons.pressed(fire_btn)`.
+   The clear-on-just_pressed block was pre-existing and is what made the
+   OLD expression correct (it produced the falling edge). Left in place,
+   it kills the new one on frame one. Classic: the fix moved the edge and
+   left the edge-consumer behind.
+
+Still working: `H`, `Mouse4`, and the accidental order **hold LMB first,
+then tap G** (G is handled at 15384-15392, before the clear, and
+`just_pressed(LMB)` is false by then). That last one is why this could
+survive a casual test.
+
+No test covers this. Every sim test sets `throw_hold: true` on a
+`PlayerCmd` directly (sim.rs:16708, 16946, 17619, 17727, 21326), so the
+client wiring is entirely unguarded. That is the real gap.
+
+## S7 first-person aim: the audit is OVERSTATED, not wrong
+
+The commit says hypothesis (1) is cleared because "`muzzle_origin`
+returns the EYE" and "when muzzle == camera the second stage is the
+identity". That is true for exactly one case: an on-foot fighter
+standing up.
+
+FP camera eye (`main.rs:17833-17845`) vs `muzzle_origin`
+(`sim.rs:8158`, `pos[1] + EYE_REL.min(height()-0.12)`):
+
+| stance | camera eye offset | muzzle offset | delta |
+|---|---|---|---|
+| standing on foot (h 1.78) | h-0.16 = 1.62 | min(1.62,1.66) = 1.62 | **0.000 m** |
+| crouched (CROUCH_HEIGHT 1.15) | 0.99 | min(1.62,1.03) = 1.03 | **0.04 m** |
+| rolling (ROLL_HEIGHT 0.95) | 0.79 | 0.83 | **0.04 m** |
+| heavy mech standing (h 3.026) | visor_eye_y = 2.723 | 1.62 | **1.103 m** |
+| heavy mech kneeling (S21, h 2.179) | 1.961 | 1.62 | **0.341 m** |
+
+The mech row is the one that matters. `visor_eye_y = pos + height()*0.90`
+(sim.rs:3008 / MECH_VISOR_Y_FRAC sim.rs:4620) but every mech weapon
+fires from `muzzle_origin`: gatling (~sim.rs:8800), autocannon (~8886),
+plasma (~8945, ~9013), rockets (~9162), repair-beam pick (~9088).
+**A pilot in first person is looking from 2.72 m and shooting from
+1.62 m.** With nothing in the aim ray's path, `crosshair_aim_dir` falls
+back to `t_hit = 200.0` (main.rs:1197ff) and the shot converges only at
+200 m - at a target 40 m out that is ~0.88 m low. The barrel is also
+below the top of low cover the camera clearly sees over. That is
+precisely the "crosshair lies about where the bullet goes" failure the
+audit declares cleared.
+
+I am not calling this a regression - the two-stage aim is deliberate and
+this offset predates the audit. I am calling the **claim** wrong: "FP aim
+is geometrically exact" is true for a standing soldier, false for a
+crouched one, and badly false for a pilot.
+
+### The surviving test is NOT self-referential in the way that matters
+
+`a_first_person_shot_goes_exactly_where_the_crosshair_points`
+(main.rs:24001). Mutation-proved, both directions:
+
+- **M8** - add `+ 0.40` to `muzzle_origin`'s Y (the barrel offset the
+  test exists to catch): **KILLED**. The fix to the first, vacuous
+  version is real.
+- **M7** - `EYE_REL` 1.62 -> 1.20: **SURVIVED**. The test rebuilds
+  `EYE_REL.min(f.height()-0.12)` verbatim, so both sides move together.
+
+So it pins the **formula**, not the **constant**. Weaker than advertised,
+but it does bite on the stated threat model. Note also it sets
+`lean = 0.0` and never crouches or boards a mech - it cannot see any row
+of the table above except the first.
+
+## The visual claims
+
+**(a) Four medic trims render distinguishably - PARTLY SUPPORTED.**
+Code is real and consumed: `MechTrim::ALL[i % 4]` drives
+`spawn_scout_chassis`, which reads `trim.limb_scale()` (as `lt`) and
+`trim.wears(...)` for the four optional plates. Plate counts 0/1/3/4 are
+all distinct, so no two trims can be identical.
+But the CAPTURE does not establish it.
+`handback/brief-vii/trims/01-trims-front.png` cuts the fourth machine off
+at the right frame edge and buries the lower halves under the
+"+100 MEDIC HULL 210" panel; `02-trims-quarter.png` strings the four
+along a depth gradient so apparent size is dominated by perspective, and
+the two furthest read as identical. The script's own comment claims the
+lineup is the instrument ("if this lineup ever shows two identical
+machines, the indexing is what is wrong"). At this framing the
+instrument cannot resolve that.
+
+**(b) Hull gatling barrels spin in third person - OVERSTATED, and the
+S32 defect it claims to fix has been MOVED, not removed.**
+`spawn_armor_rig` (called per fighter, main.rs:12773) gives **every**
+mech hull a `MechTurretSpinner` node. `spin_mech_turret_barrels`
+(main.rs:10321) queries `With<MechTurretSpinner>` with **no per-fighter
+filter** and reads only `game.sim.fighters[game.sim.player]`. Therefore:
+- player on foot -> `rate = 0.0` -> early return -> **every bot mech's
+  barrels are frozen even while it is firing**;
+- player holds the trigger -> **every bot mech's barrels spin up**,
+  firing or not;
+- the `RobotArmor` pickup totem (main.rs ~11541, "stage parts never
+  hide") spins with the player's trigger too.
+
+The commit says this fixes "a weapon correct in one view and broken in
+the other". It fixed it for the player's own body and recreated it for
+everyone else's.
+
+**(c) Fingers on the PLAYER, mitten on bots - HOLDS.**
+`is_player = i == sim.player` (main.rs:12576) -> `weapon_detail` ->
+`spawn_world_hand_fingered` under `if weapon_detail` (main.rs:12462),
+`else` a single ball. Arm hardware gated the same way at main.rs:12490.
+The Forge turntable passes `true` deliberately.
+**But the commit's stated verification is false - see item 5.**
+
+**(d) Royal variant 1-in-4 by slot index - HOLDS.**
+`spawn_armor_rig(commands, kit, i % 4 == 1)` at main.rs:12773, inside
+`for (i, f) in sim.fighters.iter().enumerate()`. Index-derived, never
+rng, so replay-safe as claimed.
+
+## The claimed bug fixes - all five in place, one of them non-functional
+
+1. `weapon_root` hidden in a mech - main.rs:17030,
+   `for e in [rig.neck, rig.arm_l[0], rig.arm_r[0], rig.weapon_root]`
+   set from `f.armor_set.is_mech()`. HOLDS.
+2. `let in_mech = f.in_mech();` - main.rs:15952, replacing the
+   `== ArmorSet::RobotSuit` that excluded the medic. HOLDS.
+3. Medic no longer wears the heavy's leg armour - the leg-armour loop
+   just below main.rs:17030 is gated on
+   `f.armor_set == ArmorSet::RobotSuit` specifically while the body hide
+   uses `is_mech()`. The distinction is deliberate and correct. HOLDS.
+4. Grenade wind-up at the trigger - the *expression* is in place at
+   main.rs:15483 but **the feature is broken**, see the top of this
+   entry. Counts as NOT HELD.
+5. Spear halving deleted - no `SPEAR_V0_MIN` branch survives in
+   `try_fire`; the only remaining speed modifiers are the S5.4 running
+   bonus and `spear_power`, both applied to player and bot alike. The
+   commit's claim that `SPEAR_V0_MIN` now equals the full speed checks
+   out numerically: both are
+   `22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA` (sim.rs:350 vs the
+   Spear `GunSpec.projectile`). HOLDS.
+
+## Test-quality sweep (all mutations run in the isolated copy)
+
+| # | mutation | result | reading |
+|---|---|---|---|
+| M1 | barrier FILL alpha 0.085 -> 0.90 | **SURVIVED** | vacuous |
+| M2 | `BARRIER_SCALE` 1.60 -> 1.20 | KILLED | real |
+| M3 | barrier field disc 1.70*SCALE -> 0.80*SCALE (production only) | **SURVIVED** | vacuous |
+| M4 | `MechTrim::Field` limb_scale 1.00 -> 0.84 | KILLED | real |
+| M6 | `MechTrim::wears()` -> always `true` | **SURVIVED** | uncovered |
+| M7 | `EYE_REL` 1.62 -> 1.20 | **SURVIVED** | formula-only |
+| M8 | `muzzle_origin` +0.40 barrel offset | KILLED | real |
+| M9 | `MECH_CROUCH_HEIGHT_FRAC` 0.72 -> 1.00 | KILLED | real |
+| M10 | `chassis_kneeling` drops the jump phases | KILLED | real |
+
+M5 - stubbing `let lt = trim.limb_scale()` - could not be made to compile
+cleanly under the OOM conditions above. **PROVISIONAL / never verified.**
+M6 covers the same claim from the other dial and survived, so the
+conclusion below stands on M6 alone.
+
+**The S21 crouch/jump tests are genuinely good.** Both mutations killed
+them. Nothing to report there.
+
+**`the_barrier_is_a_window_to_the_pilot_and_a_wall_to_the_enemy` is half
+vacuous.** Its first two assertions read `const FILL_A: f32 = 0.085;` and
+`const EDGE_A: f32 = 0.60;` **declared inside the test body**
+(main.rs:25065). The production alphas live in the `barrier_fill` /
+`barrier_edge` materials (main.rs ~13252) and are never referenced. M1
+proves it: the pilot's view can be turned into frosted glass and the test
+stays green. Same shape at main.rs:25077,
+`let span = 1.70 * BARRIER_SCALE;` - the `1.70` is copied from production
+rather than read, so M3 (shrinking the actual field disc to 47%) also
+survives. Only `BARRIER_SCALE` is genuinely pinned (M2).
+
+**`every_armour_trim_is_visibly_a_different_machine` (main.rs:24962)
+tests the TABLE, not the machine.** M4 killed it, so it is not vacuous -
+but M6 shows it never checks that `wears()` gates anything: every trim
+can be made to wear every plate and the suite stays green. The test
+verifies monotonicity of two accessor functions; the claim it is titled
+with ("visibly a different machine") rests on capture and code reading.
+
+**The suite is not 328 distinct tests.** `cargo test -- --list` returns
+**330** entries containing **2 duplicates**:
+`segment_tests::every_armour_trim_is_visibly_a_different_machine` and
+`band_tests::generated_textures_tile_and_only_darken`. Both carry a
+**duplicated `#[test]` attribute** caused by a new test's doc comment
+being inserted between a previous test's `#[test]` and its `fn`:
+- main.rs ~24950: the repair-beam doc + `#[test]`, then the trim doc +
+  `#[test]`, then the trim `fn`.
+- main.rs:23348-23359: `/// S1.4 Rule-2 gate: scoped + zoomed = the
+  viewmodel is not rendered.` + `#[test]`, then the texture doc +
+  `#[test]`, then `fn generated_textures_tile_and_only_darken`.
+
+Two consequences. (i) The reported count is inflated by 2 - the real
+figure is **326 distinct passing + 2 ignored**, and every "N tests green"
+line in this session's commit messages inherits the error. (ii) The
+`S1.4 Rule-2 gate` doc has **no function under it at all**, which means
+either a test was deleted and its header left behind, or a test was never
+written. Either way the doc asserts a guarantee nothing checks. Same
+pattern one item earlier: the FP-aim doc is welded onto the tail of the
+shot-clock test's doc, so `shot_clock_follows_the_weapon_that_actually_fired`
+now has no rationale of its own.
+
+## Claims presented as verified that are not
+
+1. **`afbe9d2` - "VERIFIED: ... the hardware is present on the player and
+   absent on a bot in the same frame - the detail gate works."**
+   FALSE as stated. `HANDS_BEATS` (main.rs ~5003) is orbit + boom on the
+   player only, and `capture_board_medic` returns early for `"hands"`
+   (only `medic*`, `trims`, `barrier` get extra fighters placed). I
+   opened both frames: `hands/01-hands-front.png` and
+   `hands/02-hands-quarter.png` contain **no bot**. The fingers
+   themselves are visible-ish on the grip hand in the quarter shot; the
+   comparison is not.
+2. **`d6b9de1` - "the alignment is exact"** for FP aim. Only for a
+   standing soldier; see the table above.
+3. **`182f354` - the third-person hull spin.** The commit is honest that
+   the muzzle end sits under the HUD panel, but the driver defect (b)
+   above is not something a capture of the player's own mech could ever
+   reveal, and it is not mentioned.
+
+Already admitted in their own commits and therefore **not** counted
+against anyone: the third-person bow (shot only from behind, torso
+occludes it) and the S25 green plasma hit flash (never seen firing -
+"NOT VERIFIED" in `5e09907`). Both admissions check out; the flash's
+driver (`last_hit_by`, enemy-credited only) is a sound choice.
+
+## Cross-checks on a defect-scout report that was routed to me
+
+Two build dispatches for FRIDAY (a `pod_aim_held` dead field + S21 doc
+rot, and an armour-damage research handoff) arrived addressed to me
+mid-run. **I did not act on them - I do not edit source.** They need
+re-routing. I did verify the checkable one as a second pair of eyes:
+
+- **`pod_aim_held` is dead - CONFIRMED.** `sim.rs:2723` (decl), plus
+  writes at ~5751 (init), ~6362 (respawn), ~7153 (per-tick from
+  `cmd.pod_aim`). Grep across `main.rs` + `sim.rs` returns those four
+  sites and **no read**. Agree with the scout.
+
+## Ranked
+
+1. **LMB grenade throw is dead** (main.rs:15446 vs 15483) - a primary
+   verb, broken by the commit that claimed to fix it, untested.
+2. **Mech FP aim is 1.10 m off** and the S7 audit says it is exact
+   (sim.rs:8158 vs main.rs:17833).
+3. **`spin_mech_turret_barrels` is player-global** (main.rs:10321) -
+   every other mech on the field mirrors the player's trigger.
+4. **Barrier test half vacuous** (main.rs:25065, 25077) - proven by M1
+   and M3.
+5. **Duplicated `#[test]` attributes** - the headline count is 2 high,
+   and one orphaned doc has no test at all (main.rs:23348).
+6. **"Verified on a bot in the same frame"** was not (afbe9d2).
+7. Trim capture framing cannot resolve four machines; `wears()` is
+   uncovered (M6).
+
+Everything else I was asked to attack **held**, and I want that on the
+record as plainly as the failures: the `weapon_root` hide, the
+`in_mech()` predicate, the medic leg-armour gate, the spear halving
+deletion, the royal-variant indexing, the player-only fingers, the S21
+crouch/jump tests, and the de-vacuum-ing of the FP-aim test are all real
+and all mutation- or evidence-backed.

@@ -34,6 +34,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod branding;
+/// §20 THE MECH COCKPIT - the first-person shell, its instruments and
+/// its vibration. Its own module for the reason `branding` is: it wires
+/// in with two lines here, so it costs this file nothing to own.
+mod cockpit;
 mod menu_ui;
 mod sim;
 
@@ -68,6 +72,65 @@ struct Game {
     pending_cycle_throw: bool,
     /// §5: the throwable is in hand (G). RMB aims it, LMB throws it.
     nade_ready: bool,
+    /// §26: the LMB wind-up is actually running.
+    ///
+    /// A second flag rather than "LMB is down", because the press that
+    /// STARTS a wind has to be a fresh one: G pressed while the trigger
+    /// is already held (reloading into a firefight, say) must not have
+    /// the grenade half-cooked the instant it reaches your hand.
+    nade_wind: bool,
+}
+
+/// §26 THE THROW INPUT, as a pure function - see `throw_input`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct ThrowState {
+    ready: bool,
+    wind: bool,
+}
+
+/// Resolve one frame of throwable input.
+///
+/// Extracted from `input_and_step` because it had to be: the whole
+/// LMB throw was DEAD in shipped code and every test in the suite was
+/// green, because every one of them sets `PlayerCmd::throw_hold`
+/// directly and nothing anywhere exercised the path that decides it.
+///
+/// The break was one line out of order. §26 changed the contract from
+/// "held from equip, thrown on the press" to "wound by the press,
+/// thrown on the release", and the line that emptied the hand stayed on
+/// the PRESS:
+///
+/// ```ignore
+/// if game.nade_ready && buttons.just_pressed(fire_btn) { game.nade_ready = false; }
+/// ...
+/// throw_hold: game.nade_ready && buttons.pressed(fire_btn)
+/// ```
+///
+/// `just_pressed` is a subset of `pressed`, so `nade_ready` was cleared
+/// on the press frame before `throw_hold` was computed from it, and
+/// nothing ever set it back. G, hold, release threw nothing, ever. Only
+/// H and Mouse4 - which OR in separately - still worked.
+///
+/// Returns `(throw_hold, next_state)`.
+fn throw_input(
+    s: ThrowState,
+    fire_pressed: bool,
+    fire_just_pressed: bool,
+    fire_just_released: bool,
+    alt_hold: bool,
+) -> (bool, ThrowState) {
+    let mut s = s;
+    if s.ready && fire_just_pressed {
+        s.wind = true;
+    }
+    // The hand empties on the RELEASE - the frame the grenade actually
+    // leaves it. Emptying it on the press is what killed the feature.
+    let hold = (s.ready && s.wind && fire_pressed) || alt_hold;
+    if s.wind && fire_just_released {
+        s.ready = false;
+        s.wind = false;
+    }
+    (hold, s)
 }
 
 #[derive(Resource)]
@@ -2514,6 +2577,18 @@ const N_WEAPONS: usize = 11;
 /// §2.3: render layer for the first-person viewmodel - seen only by the
 /// dedicated fixed-FOV viewmodel camera, never by the world camera.
 const VIEWMODEL_LAYER: usize = 1;
+/// §20: the MECH COCKPIT's own layer. The viewmodel camera sees it; the
+/// world camera and - crucially - the sun do not.
+///
+/// The one `DirectionalLight` in the game is declared on layers `[0,
+/// VIEWMODEL_LAYER]` so the first-person weapon is not lit differently
+/// from the same weapon in third person. That is right for a gun held
+/// out in the open and wrong for the inside of a sealed cab: the first
+/// capture came back with daylight across the console lip and the
+/// pillars' side faces, plus shadow-map aliasing on the near geometry.
+/// A cockpit interior is lit by AmbientLight and by its own service
+/// lamp, which is what this layer buys.
+const COCKPIT_LAYER: usize = 2;
 /// §7.2/§8.2: the Forge TURNTABLE renders on its own layer, to a texture
 /// the soldier page shows as a UI image. Layer isolation means the main
 /// camera never sees the stage and the stage camera never sees the world.
@@ -4882,6 +4957,21 @@ struct CapBeat {
     /// Capture-only boom scale - see `CaptureBoom`. Held until changed,
     /// exactly like `orbit`.
     boom: Option<f32>,
+    /// §20 capture-only: set the subject's HULL to this fraction of its
+    /// chassis maximum, at this beat.
+    ///
+    /// Added because the damage states of a cockpit - the caution lamp,
+    /// the red hull ladder, the flicker on the lit edges - could not be
+    /// photographed at all. The only way to lose hull was to let bots
+    /// shoot you, which arrives at a different number on every run and
+    /// mostly does not arrive at a LOW one inside a five-second script.
+    /// A state that cannot be staged is a state nobody checks.
+    ///
+    /// This writes a sim field, which is what every other staging hook
+    /// in this harness already does (`capture_quick_deploy` sets hull,
+    /// power, belt and position outright). It is inert without
+    /// `JK_CAPTURE`.
+    hull: Option<f32>,
     snap: Option<&'static str>,
     end: bool,
 }
@@ -4894,6 +4984,7 @@ const fn beat(t: f32) -> CapBeat {
         look: None,
         orbit: None,
         boom: None,
+        hull: None,
         snap: None,
         end: false,
     }
@@ -5150,6 +5241,72 @@ const MECH_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(5.0) },
 ];
 
+/// §20 THE COCKPIT, photographed. One table, two runs.
+///
+/// `cockpit` boards the HEAVY, `medic_cockpit` the light chassis (the
+/// name is load-bearing: `capture_board_medic` matches on the `medic`
+/// prefix, so the second run gets the light chassis for free). Same
+/// beats both times, which is the point - the two machines have to be
+/// telling apart from IDENTICAL camera work, or the difference is in
+/// the script rather than in the cockpits.
+///
+/// The existing `mech_fp` script cannot do this job. It stands still,
+/// looks at the horizon and never takes a scratch, so the console lip,
+/// the footfall judder, the caution lamp and the damage flicker are all
+/// invisible to it - every one of them a state, and every state needs
+/// a beat that reaches it.
+const COCKPIT_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    // 01 the whole frame at rest, eye level: pillars, canopy, console,
+    // instruments, and the centre of the screen clear.
+    CapBeat { look: Some((0.0, 0.06)), ..beat(0.8) },
+    CapBeat { snap: Some("01-cockpit-level"), ..beat(1.6) },
+    // 02 pitched DOWN onto the console. The lip and everything sunk into
+    // it are below the horizon by construction, so a level shot is the
+    // one angle that cannot photograph them.
+    CapBeat { look: Some((0.0, 0.42)), ..beat(1.8) },
+    CapBeat { snap: Some("02-cockpit-console"), ..beat(2.5) },
+    // 03 pitched UP into the canopy arch.
+    CapBeat { look: Some((0.0, -0.30)), ..beat(2.7) },
+    CapBeat { snap: Some("03-cockpit-canopy"), ..beat(3.3) },
+    // 04 WALKING: the footfall judder, and the frame moving against a
+    // world that is not.
+    CapBeat {
+        look: Some((0.0, 0.10)),
+        press: &[CapKey::K(KeyCode::KeyW)],
+        ..beat(3.5)
+    },
+    CapBeat { snap: Some("04-cockpit-walking"), ..beat(4.3) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(4.5) },
+    // 05 FIRING: the mount rattle, and heat climbing the gauge.
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(4.7) },
+    CapBeat { snap: Some("05-cockpit-firing"), ..beat(6.4) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(6.6) },
+    // 06 HURT: hull down to a sixth, which lights the caution lamp,
+    // takes the hull ladder to alarm and kicks the flicker.
+    CapBeat { hull: Some(0.16), ..beat(6.9) },
+    CapBeat { snap: Some("06-cockpit-damaged"), ..beat(7.05) },
+    // 07 and the same hull a second later, once the jolt has decayed -
+    // a lamp that is only bright in the frame right after a hit is a
+    // lamp nobody will ever see lit.
+    CapBeat { snap: Some("07-cockpit-damaged-settled"), ..beat(8.0) },
+    // 08 THIRD PERSON. V back out: the canopy must be gone and the
+    // instrument panel must not be. Half the owner's brief is this
+    // frame, and no script in this repo had ever pressed V twice.
+    //
+    // The hull goes back up first, and that is not tidying: on the first
+    // run the 16% chassis was finished off by bot fire during the two
+    // seconds before this beat, so the frame photographed a dismounted
+    // soldier and proved nothing about either group. This shot is about
+    // the toggle; 06 and 07 are the ones about damage.
+    CapBeat { hull: Some(0.62), ..beat(8.1) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(8.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(8.3) },
+    CapBeat { snap: Some("08-cockpit-third-person"), ..beat(9.1) },
+    CapBeat { end: true, ..beat(9.6) },
+];
+
 /// Every iron-sighted gun's ADS sight picture, one frame each. Focus
 /// aligns `sight_line_y` to the eye, so a gun whose declared sight line
 /// does not match its actual geometry lays whatever IS at that height
@@ -5367,6 +5524,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
+        // §20: one beat table, two chassis - see COCKPIT_BEATS
+        "cockpit" | "medic_cockpit" => COCKPIT_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
@@ -5405,8 +5564,13 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 26] = [
+const CAPTURE_SCRIPTS: [&str; 28] = [
     "medic",
+    // §20 THE COCKPIT, both chassis. `medic_cockpit` MUST keep the
+    // `medic` prefix - that is what `capture_board_medic` matches on to
+    // hand it the light chassis.
+    "cockpit",
+    "medic_cockpit",
     "barrier",
     "trims",
     "hands",
@@ -5555,7 +5719,10 @@ fn capture_quick_deploy(
         _ => {}
     }
     start_match(&sel, Mode::Tdm, &mut game, &mut next);
-    if matches!(cap.script.as_deref(), Some("mech_scale") | Some("mech_fp")) {
+    if matches!(
+        cap.script.as_deref(),
+        Some("mech_scale") | Some("mech_fp") | Some("cockpit")
+    ) {
         // Task 5.7: board the mech directly - no need to walk to a pad
         // just to prove the scale/palette read. Also plant it at a KNOWN
         // clear spot (Arena center) - the default spawn's proximity to
@@ -5669,7 +5836,20 @@ fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
 /// has its own tests).
 ///
 /// Capture-harness only, and inert without `JK_CAPTURE`.
-fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
+fn capture_board_medic(
+    cap: Res<CaptureMode>,
+    mut game: ResMut<Game>,
+    // §20: whether the hull has been granted yet. This system runs
+    // EVERY frame, and it used to re-fill `hull` on every one of them -
+    // a silent invulnerable chassis that made the light machine's damage
+    // states impossible to photograph at all. `medic_cockpit`'s hull
+    // beat set 16% and the very next frame put it back to 210.
+    //
+    // Health and respawn stay pinned every frame (this doubles as the
+    // keep-alive for a 13-second script that holds the trigger in the
+    // open); only the HULL grant latches, so a beat can stage damage.
+    mut hull_granted: Local<bool>,
+) {
     let Some(name) = cap.script.as_deref() else { return };
     // which chassis this script needs. `barrier` photographs the HEAVY's
     // arm module, so it must not be handed the light one.
@@ -5685,7 +5865,10 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     };
     if let Some(f) = game.sim.fighters.get_mut(p) {
         f.armor_set = set;
-        f.hull = f.mech_hull_max();
+        if !*hull_granted {
+            f.hull = f.mech_hull_max();
+            *hull_granted = true;
+        }
         f.mech_transition_t = 0.0;
         f.health = MAX_HEALTH;
         f.respawn_t = 0.0;
@@ -5785,6 +5968,7 @@ fn capture_input_driver(
     mut cam: ResMut<CamCtl>,
     mut orbit: ResMut<CaptureOrbit>,
     mut boom: ResMut<CaptureBoom>,
+    mut game: ResMut<Game>,
 ) {
     let Some(name) = cap.script.clone() else { return };
     cap.t += time.delta_secs();
@@ -5815,6 +5999,15 @@ fn capture_input_driver(
         }
         if let Some(bm) = b.boom {
             boom.0 = bm;
+        }
+        // §20: stage a damage state. Written as a FRACTION of whatever
+        // chassis the subject is in, so one beat table can serve both
+        // machines without knowing either hull constant.
+        if let Some(frac) = b.hull {
+            let p = game.sim.player;
+            if let Some(f) = game.sim.fighters.get_mut(p) {
+                f.hull = f.mech_hull_max() * frac;
+            }
         }
         // queue this beat's snap/end for the screenshot driver instead of
         // letting it infer them from the cursor - a frame that passes
@@ -6729,6 +6922,12 @@ fn main() {
                 spin_mech_turret_barrels,
                 mech_barrier_sync,
                 mech_hud_sync,
+                // §20: the first-person cockpit shell. Sits alongside
+                // `mech_hud_sync` on purpose - that one owns the flat
+                // sensor overlay and the target bracket, this one owns
+                // the 3D structure on the viewmodel layer, and between
+                // them they are the whole "you are inside a machine".
+                cockpit::cockpit_sync,
                 repair_beam_sync,
                 plasma_hit_sync,
                 bow_string_sync,
@@ -6913,24 +7112,48 @@ fn grenade_arc(
 const MINIGUN_IDLE_CRAWL_RAD_S: f32 = 0.55;
 const MINIGUN_SPIN_FULL_RAD_S: f32 = 46.0;
 
+/// §32: every minigun's cluster turns with ITS OWN carrier's spin state.
+///
+/// Two faults, one shape. `spawn_weapon_model` only tagged the spinner
+/// node when `with_hands` was set - and `with_hands` means VIEWMODEL, so
+/// the world models built with `false` had a spinner node nothing could
+/// ever find. And this driver read the player's fighter and wrote that
+/// one rate to whatever it did find. Together: the pilot saw his barrels
+/// wind up, and every other minigun on the field was welded solid. That
+/// is the same defect §32 was written against and the same one
+/// `spin_mech_turret_barrels` just had.
 fn spin_minigun_barrels(
     game: Res<Game>,
     time: Res<Time>,
-    mut q: Query<&mut Transform, With<MinigunSpinner>>,
+    parents: Query<&Parent>,
+    owners: Query<&FighterVis>,
+    mut q: Query<(Entity, &mut Transform), With<MinigunSpinner>>,
 ) {
-    let p = &game.sim.fighters[game.sim.player];
-    let rate = if p.vent_t > 0.0 {
-        0.0 // vent locks the cluster while it dumps heat
-    } else {
-        MINIGUN_IDLE_CRAWL_RAD_S
-            + (p.spin_t / MINIGUN_SPINUP_S) * MINIGUN_SPIN_FULL_RAD_S
-    };
-    if rate <= 0.0 {
-        return;
-    }
     let dt = time.delta_secs().min(0.05);
-    for mut tf in &mut q {
-        tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+    for (e, mut tf) in &mut q {
+        // nearest FighterVis ancestor, or the player for the viewmodel
+        let mut owner = game.sim.player;
+        let mut node = e;
+        loop {
+            if let Ok(v) = owners.get(node) {
+                owner = v.index;
+                break;
+            }
+            match parents.get(node) {
+                Ok(p) => node = p.get(),
+                Err(_) => break,
+            }
+        }
+        let Some(f) = game.sim.fighters.get(owner) else { continue };
+        let rate = if f.vent_t > 0.0 {
+            0.0 // vent locks the cluster while it dumps heat
+        } else {
+            MINIGUN_IDLE_CRAWL_RAD_S
+                + (f.spin_t / MINIGUN_SPINUP_S) * MINIGUN_SPIN_FULL_RAD_S
+        };
+        if rate > 0.0 {
+            tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+        }
     }
 }
 
@@ -7906,13 +8129,14 @@ fn spawn_weapon_model(
     let parts = weapon_parts(kind);
     // The spinner is created LAZILY, only if some part asked for one, so
     // no weapon ends up carrying an empty child node it never rotates.
+    // §32: tagged on EVERY build, not just `with_hands`. `with_hands` is
+    // the viewmodel flag, so gating the marker on it meant every body's
+    // minigun carried a spinner node that no system could ever query -
+    // the pilot's barrels turned and nobody else's ever did.
     let spinner = parts.iter().any(|p| p.spin).then(|| {
         let e = commands
-            .spawn((Transform::IDENTITY, Visibility::default()))
+            .spawn((Transform::IDENTITY, Visibility::default(), MinigunSpinner))
             .id();
-        if with_hands {
-            commands.entity(e).insert(MinigunSpinner);
-        }
         commands.entity(e).set_parent(root);
         e
     });
@@ -9352,9 +9576,13 @@ fn mech_barrier_sync(
     }
 }
 
-/// §C: the TURRET mount's viewmodel barrel cluster - spun by the mount's
-/// own trigger/vent state (`spin_mech_turret_barrels`), never the
-/// carried minigun's `spin_t`.
+/// §C: a TURRET barrel cluster's rotating node - spun by ITS OWN mount's
+/// trigger/vent state (`spin_mech_turret_barrels`), never the carried
+/// minigun's `spin_t`.
+///
+/// On BOTH the pilot's viewmodel and every fighter's hull rig. The
+/// driver tells them apart by ancestry, not by a flag - see the note
+/// there, and do not reintroduce "read the player once" here.
 #[derive(Component)]
 struct MechTurretSpinner;
 
@@ -10217,27 +10445,56 @@ fn spawn_mech_pod_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     root
 }
 
-/// §C: the turret viewmodel's barrels spin with the MOUNT's own state -
-/// crawl at idle, spin-up while the trigger is held, dead while venting.
+/// §C/§32: every turret barrel cluster spins with ITS OWN mount's state -
+/// crawl at idle, spin-up while that mount's trigger is held, dead while
+/// it vents.
+///
+/// "Its own", and that word is doing real work. This read the PLAYER's
+/// fighter once and wrote the resulting rate to every `MechTurretSpinner`
+/// in the world - which was harmless while the component only existed on
+/// the viewmodel, and became the §32 defect the hull spinner was added to
+/// FIX the moment it also existed on each fighter's chassis. Piloting, the
+/// whole field's gatlings wound up in lockstep with your trigger; on foot
+/// the early return froze every one of them, so an enemy mech firing at
+/// you showed a welded cluster. One view right, the other wrong, again.
+///
+/// The owner is resolved by walking UP to the nearest `FighterVis` rather
+/// than by threading an index through `spawn_armor_rig`: the viewmodel
+/// cluster has no such ancestor, which is exactly the "this one is the
+/// player's" case, so one walk answers both.
 fn spin_mech_turret_barrels(
     game: Res<Game>,
     time: Res<Time>,
-    mut q: Query<&mut Transform, With<MechTurretSpinner>>,
+    parents: Query<&Parent>,
+    owners: Query<&FighterVis>,
+    mut q: Query<(Entity, &mut Transform), With<MechTurretSpinner>>,
 ) {
-    let p = &game.sim.fighters[game.sim.player];
-    let rate = if !p.in_mech() || p.gatling_vent_t > 0.0 {
-        0.0
-    } else if p.gatling_trigger_t > 0.0 {
-        MINIGUN_SPIN_FULL_RAD_S * 0.75
-    } else {
-        MINIGUN_IDLE_CRAWL_RAD_S
-    };
-    if rate <= 0.0 {
-        return;
-    }
     let dt = time.delta_secs().min(0.05);
-    for mut tf in &mut q {
-        tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+    for (e, mut tf) in &mut q {
+        // nearest FighterVis ancestor, or the player for the viewmodel
+        let mut owner = game.sim.player;
+        let mut node = e;
+        loop {
+            if let Ok(v) = owners.get(node) {
+                owner = v.index;
+                break;
+            }
+            match parents.get(node) {
+                Ok(p) => node = p.get(),
+                Err(_) => break,
+            }
+        }
+        let Some(f) = game.sim.fighters.get(owner) else { continue };
+        let rate = if !f.in_mech() || f.gatling_vent_t > 0.0 {
+            0.0
+        } else if f.gatling_trigger_t > 0.0 {
+            MINIGUN_SPIN_FULL_RAD_S * 0.75
+        } else {
+            MINIGUN_IDLE_CRAWL_RAD_S
+        };
+        if rate > 0.0 {
+            tf.rotation = Quat::from_rotation_z(rate * dt) * tf.rotation;
+        }
     }
 }
 
@@ -12873,6 +13130,7 @@ fn setup(
         pending_slot: None,
         pending_cycle_throw: false,
         nade_ready: false,
+        nade_wind: false,
     };
     commands.insert_resource(Selected::default());
     // settings survive restarts now - loaded from config/settings.txt,
@@ -13782,11 +14040,21 @@ fn setup(
                 fov: VM_FOV_DEG.to_radians(),
                 ..default()
             }),
-            RenderLayers::layer(VIEWMODEL_LAYER),
+            // §20: the viewmodel camera also draws the COCKPIT layer,
+            // which the sun is not declared on - see `COCKPIT_LAYER`.
+            RenderLayers::from_layers(&[VIEWMODEL_LAYER, COCKPIT_LAYER]),
             Transform::IDENTITY,
         ))
         .set_parent(cam)
         .id();
+
+    // ---- §20 THE MECH COCKPIT ------------------------------------------
+    // Hung off the viewmodel CAMERA, not off `vm_root`: the weapon root
+    // carries bob, sway and fire kick, and a cockpit that swam with the
+    // gun would be a cockpit the pilot is holding. It gets its own,
+    // machine-flavoured tremor instead (`cockpit::cockpit_shake`).
+    let cockpit_rig = cockpit::spawn_cockpit(&mut commands, &kit, &mut materials, vm_cam);
+    commands.insert_resource(cockpit_rig);
 
     // ---- first-person viewmodel: hands + weapon on the camera ----------
     // (the camera looks down its -Z, so the models yaw 180°: muzzle out)
@@ -15369,9 +15637,12 @@ fn input_and_step(
             game.nade_ready = true;
         }
     }
-    // B stows without throwing, and still cancels a live aim.
+    // B stows without throwing, and still cancels a live aim. It has to
+    // drop the WIND too, or a stow mid-wind leaves the latch set and the
+    // next equip starts already cooking.
     if keys.just_pressed(KeyCode::KeyB) {
         game.nade_ready = false;
+        game.nade_wind = false;
     }
     for (key, s) in [
         (KeyCode::Digit1, 0u8),
@@ -15423,11 +15694,18 @@ fn input_and_step(
     {
         game.pending_dodge = true;
     }
-    // The click that throws also empties the hand - otherwise the flag
-    // stays set and the next grenade starts cooking on its own.
-    if game.nade_ready && buttons.just_pressed(fire_btn) {
-        game.nade_ready = false;
-    }
+    // §26: the throw input, resolved by the one pure function that owns
+    // it. The hand empties on the RELEASE, not the press - see
+    // `throw_input` for the ordering bug that cost this feature entirely.
+    let (throw_hold, next_throw) = throw_input(
+        ThrowState { ready: game.nade_ready, wind: game.nade_wind },
+        buttons.pressed(fire_btn),
+        buttons.just_pressed(fire_btn),
+        buttons.just_released(fire_btn),
+        keys.pressed(KeyCode::KeyH) || buttons.pressed(MouseButton::Back),
+    );
+    game.nade_ready = next_throw.ready;
+    game.nade_wind = next_throw.wind;
     let mut cmd = PlayerCmd {
         move_x: world.x,
         move_z: world.y,
@@ -15462,9 +15740,7 @@ fn input_and_step(
         //
         // H and Mouse4 stay wired as the old hold-to-cook, so muscle
         // memory and the capture scripts both keep working.
-        throw_hold: (game.nade_ready && buttons.pressed(fire_btn))
-            || keys.pressed(KeyCode::KeyH)
-            || buttons.pressed(MouseButton::Back),
+        throw_hold,
         // §1 (Brief V): B cancels the aimed throw, grenade kept
         throw_cancel: keys.just_pressed(KeyCode::KeyB),
         // §4.6 (Brief VI): U dismounts the mech
@@ -17741,8 +18017,16 @@ fn camera_system(
     // third person: over-the-RIGHT-shoulder boom off the head pivot;
     // ADS pulls in tight. The boom pitch is clamped so a near-vertical
     // look never degenerates the frame.
+    // §21: the flat 0.62 is an INFANTRY number, and `anchor_h` below
+    // already scales with `p.height()` - which now follows
+    // `chassis_kneeling()`. So a kneeling chassis paid the drop twice:
+    // 0.85 m of real hull sink, and 0.62 m more of camera on top, for
+    // 1.38 m on a machine that moved 0.85. Same guard `mech_brace_drop`
+    // carries a hundred lines below, for the same reason.
     let crouch_drop = if p.roll_t > 0.0 {
         0.75
+    } else if p.chassis_kneeling() {
+        0.0
     } else if p.crouch {
         0.62
     } else {
@@ -24207,13 +24491,93 @@ mod camera_v2_tests {
     /// firing beats, and the failure is quiet: the script still runs,
     /// still writes every PNG, and only the CONTENT is wrong. Cheap to
     /// pin for every script at once, so pin it for every script at once.
+    /// §26: G, hold, release must throw. It did not - for anybody, ever
+    /// - and the whole suite stayed green through it, because every
+    /// throwable test in `sim.rs` hands `PlayerCmd::throw_hold` in
+    /// directly and no test at all touched the code that decides it.
+    ///
+    /// This drives `throw_input` frame by frame with the real button
+    /// edges a mouse produces, and asserts the thing a player asserts:
+    /// the wind ran, and then a grenade left the hand.
+    #[test]
+    fn equip_hold_release_actually_throws() {
+        let mut s = ThrowState { ready: false, wind: false };
+        // G: the grenade is in hand and NOT yet winding
+        s.ready = true;
+        let (h, ns) = throw_input(s, false, false, false, false);
+        s = ns;
+        assert!(!h, "an equipped, untouched grenade must not be cooking");
+
+        // press
+        let (h, ns) = throw_input(s, true, true, false, false);
+        s = ns;
+        assert!(h, "the press frame must start the wind - this is the bug");
+        // hold
+        let mut held = 0;
+        for _ in 0..6 {
+            let (h, ns) = throw_input(s, true, false, false, false);
+            s = ns;
+            assert!(h, "the wind must keep running while the trigger is down");
+            held += 1;
+        }
+        assert_eq!(held, 6);
+        // release: throw_hold falls, which is the sim's throw edge, and
+        // the hand comes up empty
+        let (h, ns) = throw_input(s, false, false, true, false);
+        s = ns;
+        assert!(!h, "releasing must drop throw_hold - that edge IS the throw");
+        assert!(!s.ready, "the hand empties on the release");
+        assert!(!s.wind, "and the wind latch clears with it");
+
+        // and nothing keeps cooking afterwards
+        for _ in 0..4 {
+            let (h, ns) = throw_input(s, false, false, false, false);
+            s = ns;
+            assert!(!h, "an empty hand must not keep winding");
+        }
+    }
+
+    /// The property the deleted line was protecting: equipping while the
+    /// trigger is ALREADY down must not hand you a half-cooked grenade.
+    #[test]
+    fn equipping_under_a_held_trigger_does_not_start_the_wind() {
+        // trigger already down (firing), then G
+        let s = ThrowState { ready: true, wind: false };
+        let (h, s) = throw_input(s, true, false, false, false);
+        assert!(!h, "no fresh press, so no wind");
+        assert!(!s.wind);
+        // releasing that same held trigger must not throw either
+        let (h, s) = throw_input(s, false, false, true, false);
+        assert!(!h);
+        assert!(s.ready, "the grenade is still in hand - nothing was thrown");
+    }
+
+    /// H and Mouse4 are the legacy hold-to-cook and must keep working
+    /// with no grenade "readied" at all - three capture scripts use them.
+    #[test]
+    fn the_legacy_hold_key_still_cooks() {
+        let s = ThrowState::default();
+        let (h, s) = throw_input(s, false, false, false, true);
+        assert!(h, "H alone must cook");
+        let (h, _) = throw_input(s, false, false, false, false);
+        assert!(!h, "and releasing it must drop the hold");
+    }
+
     #[test]
     fn every_capture_script_runs_forwards_in_time() {
-        for name in [
-            "baseline", "medic", "bow_draw", "bow_draw_fp", "mech_scale",
-            "mech_fp", "shield_fp", "sights_a", "arrow_flight", "melee_dirs",
-            "class_line", "minigun_check", "traversal", "map_lap",
-        ] {
+        // Iterates CAPTURE_SCRIPTS rather than a transcribed list. The
+        // transcription was already three scripts out of date, which
+        // means the newest tables - exactly the ones most likely to have
+        // a beat in the wrong order - were the ones going unchecked.
+        //
+        // `menus` and the splash are the two deliberate exemptions: they
+        // are wall-clock driven UI walks with no beat table at all, and
+        // `init_capture_mode` still accepts them, so an empty script
+        // here is correct rather than a typo.
+        for name in CAPTURE_SCRIPTS {
+            if matches!(name, "menus") || name == branding::CAPTURE_SPLASH_SCRIPT {
+                continue;
+            }
             let script = capture_script(name);
             assert!(!script.is_empty(), "{name}: script resolved to nothing");
             for w in script.windows(2) {

@@ -336,3 +336,147 @@ publish the solids), not a research one. **Do not leave it flagged
 5. **Zatsiorsky (2002) BR-14** — only if someone acquires the physical
    book. Low expected value now (GAP 1 §5), but it is the last unchecked
    place.
+
+---
+
+## 2026-08-08 — Dispatch: four-stage armour damage (Fresh → Scuffed → Cracked → Severed)
+
+**Ledger written:** `armor-damage/SOURCES.md` (new, IDs AD-01…AD-09).
+**Asked:** is a four-stage progressive-damage model defensible for 24
+steel-analogue plates? How much protection survives per stage? Does hit
+LOCATION compound? What differs between penetrating / blunt / edged?
+
+**Answer: staged degradation is real and measurable — but the model is
+keyed off the wrong variable. Damage in steel plate is POSITIONAL, not
+cumulative.**
+
+### Sources read end to end this pass
+
+| ID | Source | Status |
+|---|---|---|
+| AD-01 | NIJ Standard-0101.06, NCJ 223054, 89 pp | **READ** — §2, §3 defs, §7.6, §7.8.5.1, Tables 4–7 verbatim; conditioning sections skimmed |
+| AD-02 | Qiang et al. (2022) *Proc IMechE Part C*, DOI 10.1177/09544062221080139 | **READ**, all 40 pp of the NUAA-hosted author manuscript |
+| AD-03 | Børvik, Langseth, Hopperstad & Malo (2002) *Int J Impact Eng* 27:19–35 Part I | **READ**, all 17 pp end to end |
+| AD-04 | Göde et al. (2023) *Eng Sci Tech Int J* 38:101337, CC BY-NC-ND | **READ**, all 9 pp |
+| AD-05 | Seidl, Lehmann & Grobert, ISB proceedings, DOI 10.52202/080042-0046 | **READ**, all 10 pp |
+| AD-06 | Alan Williams, *The Knight and the Blast Furnace* (Brill 2003) | **UNREACHABLE** — commercial title, no OA copy anywhere |
+| AD-07 | Forsom & Smith (2017) | **OFF-TOPIC** — arrowheads into cattle scapulae, no armour. Logged so it is not re-chased |
+| AD-08/09 | ceramic damage-zone taxonomy; "one-third residual strength after two hits" | **SNIPPET-ONLY — NOT CARRIED.** AD-09 was the most tempting number in the dispatch and I did not read its paper |
+
+**5 counted. No breadth quota pursued.**
+
+### The finding that reframed the dispatch — and it was a NULL
+
+**AD-04: eight 7.62×51 M61 AP rounds at 815–829 m/s into ONE 12.4 mm Armox
+600T plate. All eight defeated. Verbatim: *"The multi hit shootings did not
+influence the main ballistic resistance since the max depth of the craters
+is very similar."*** Against **AD-02**, where two hits at the *identical*
+spot drop capacity to 0.346 and three to 0.212 of pristine.
+
+Those do not contradict — they are the two ends of one spatial curve, and
+AD-02 measured where it turns over. Projectile D = 12.7 mm; offsets 0 D /
+1.00 D / 1.97 D. At 1 D the *"damage caused by the second projectile
+complemented that caused by the first… inferior ballistic resistance"*; at
+1.97 D the *"damage zones… did not overlap"* and resistance was *"almost
+not affected."* **Interaction radius ≈ 1 projectile diameter; independent
+beyond ≈ 2.** AD-01 corroborates from the regulatory side — mandated
+minimum shot-to-shot **51 mm** (≈ 6.7 calibres for 7.62 mm) and shot-to-edge
+**51 mm / 76 mm** — and both AD-01 and AD-02 independently say hits near a
+plate EDGE are weaker.
+
+**So per-piece HP cannot express the thing the physics is about.** One
+stored "last significant impact point + radius ≈ 2 projectile diameters"
+per plate captures nearly all of it.
+
+### The degradation curve is concave, not linear — arithmetic in the ledger
+
+From AD-02's own FE triple (`V_L` 206.3, `V_2L` 121.3, `V_3L` ≈ 95 m/s),
+energy ∝ v²: capacity **1.000 → 0.346 → 0.212**; marginal loss 0.654 then
+0.134; **ratio 4.89**. The first co-located hit costs ~4.9× what the second
+does. A linear four-step ramp is wrong in shape. (Ratio written out per the
+standing rule from the last pass — no order-of-magnitude adjectives.)
+
+### Five contradictions of the proposed design, recorded not averaged
+
+1. **Linear degradation** — contradicted (4.89× front-loading).
+2. **"Spall/pitting" as stage 2** — **unsupported for steel.** Absent from
+   AD-02/03/04; in AD-04 it is the *projectile* that shatters. Spall zones
+   are a ceramic phenomenon.
+3. **Hit-count HP** — contradicted; position governs.
+4. **All damage types alike** — contradicted with a number: **2.51×** energy
+   difference blunt vs round-nose on the same plate (AD-03), and 40 %
+   penetration-depth difference from tip geometry alone (AD-05).
+5. **Hit order irrelevant** — contradicted. AD-02: Cone-Sphere is strictly
+   worse for the plate than Sphere-Cone. Pointed weapons *prime* a plate.
+
+Plus a conditional: **"Scuffed" only exists for medium steel.** AD-03's
+Weldox 460 E dishes 0.62–4.10 mm; AD-04's Armox 600T *"cannot plastically
+deform, but instead crack."* A hard plate goes Fresh → Cracked → Shattered
+with no scuffed stage.
+
+**"Cracked" is the best-evidenced stage in the model** — three independent
+sources show non-perforating hits leaving through-thickness cracks (AD-03
+test H2: a crack *"almost completely around the circumference of the
+bulge"* on a plate that held).
+
+### A contradiction between two READ sources, left unresolved
+
+AD-02 and AD-03 order the nose shapes **oppositely** — AD-03 (h/D = 0.600):
+blunt easiest, `v_bl` 184.5 vs ~291 m/s. AD-02 (h/D = 0.056): conical
+easiest. AD-03's own Introduction already calls the prior literature
+*"to some extent incompatible"* and says *"the problem is not yet fully
+solved"*; AD-02 warns its own ordering *"may be various"* for other
+thicknesses. Woodward's criterion (plugging favoured when `h < √3·D/2`)
+explains AD-03 but **not** AD-02. **Only the direction both agree on is
+safe: tip geometry matters, by a factor ~2.5 where measured cleanly.**
+
+### Method notes for the next Toto
+
+- **The DSpace REST API is now a proven route, twice over.** Unpaywall said
+  AD-04 was `gold` OA but returned **zero `url_for_pdf`**; ScienceDirect
+  403'd; the naive `/bitstreams/{uuid}/content` guess 404'd. What worked:
+  `discover/search/objects?query=` → item uuid → `core/items/{uuid}/bundles`
+  → `ORIGINAL` → `/bitstreams` → `_links.content.href`. Same shape as the
+  4TU route in the body-rig pass. **Treat it as the standard move for any
+  institutional repository.**
+- **"Gold OA" ≠ fetchable.** Openness status and retrievability are
+  different facts. Check the second one.
+- **Verify a formula by reproducing a number the paper already printed.**
+  AD-03's Woodward criterion came through OCR mangled as `√3 p D/2`;
+  computing `√3 × 20/2 = 17.321` against its own text *"about 17 mm"*
+  confirmed the reading before I used it. Two minutes.
+- **Read the conclusions of the boring-looking experiment.** The pass's most
+  valuable result was AD-04's null.
+- **No OCR needed on this topic** — first time in this repo. All five PDFs
+  had genuine text layers (2 000–6 500 chars/page).
+- **Licence, logged per R6:** AD-04 is **CC BY-NC-ND 4.0**, read verbatim
+  off its own front matter — same trap family as LaFAN1. Facts citable,
+  artifact not redistributable. AD-03 was obtained from a third-party
+  mirror (`aux.ciar.org`), is © Elsevier, and **the mirror must not be
+  linked as if it were authorised** — I verified it as the published
+  version by its PII line and pagination. Nothing this pass is proposed for
+  shipping, so R6's shipping test is not triggered.
+- **Tier-V is still 0.** Not touched.
+
+### What I would need to read next to close the gaps I just left
+
+1. **A repeated-rifle-fire study on a body-armour-scale steel plate.** The
+   standing hole: AD-02 is 0.71 mm stainless, AD-03 is a 197 g slug, AD-04's
+   headline is a null. **Nobody I found measures progressive degradation of a
+   2–12 mm steel plate under repeated rifle rounds at controlled spacing.**
+   That single study would replace most of this ledger's extrapolation.
+2. **AD-02's reference 23** — the *experiment* behind `V_L = 205.1` and
+   `V_2L = 127.2`. Those two numbers reach me only through AD-02's Table 2.
+   Reading the originating paper would also likely give intermediate offsets
+   between 1 D and 2 D, which is the ledger's sharpest missing resolution.
+3. **Quasi-static punching of plate** (Johnson, Ghosh & Reid's survey, cited
+   by AD-03). **The only route to the spear-thrust case** — everything I have
+   is 146–300 m/s and a thrust is ~5–10 m/s. Do not extrapolate; read this.
+4. **Anything at all on a CUTTING edge vs plate.** Zero sources found. The
+   dispatch groups spears as "edged" and the entire edged category is
+   currently unsourced — every pointed source here is a penetrator.
+5. **Alan Williams (AD-06)** — only if someone acquires the physical book.
+   The 80 J / 100 J / 120 J mail figures that circulate online came to me via
+   a third-party summary only and are **NOT CARRIED**. Given this repo's
+   history that is precisely the shape of number that gets fabricated; leave
+   it out until someone reads the page.
