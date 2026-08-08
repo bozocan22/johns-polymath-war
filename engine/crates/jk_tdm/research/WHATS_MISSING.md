@@ -9,6 +9,57 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0b. THE 36-SECTION SPEC — status per section
+
+The owner delivered a consolidated 36-section development spec. Several
+of its premises turned out to be wrong about the current build, and
+those corrections matter more than the ticks:
+
+**Done and pushed**
+- §6 bow orientation — it was not random. An earlier pass laid the bow
+  HORIZONTAL on purpose to keep the upper limb out of the sight line.
+  Standing it up exposed two instruments welded to that decision:
+  `bow_string_half` could only aim in one plane, and the screen-
+  intrusion sweep discarded `vm_carry`'s ROLL (the spear had been
+  measured unrolled the whole time).
+- §18 shield HUD — the shield was NOT missing; "SHIELD [4]" was already
+  in the strip. Its STATE was missing. Only the mech barrier has the
+  "current / max / recharging" the spec asks for; the soldier's plate
+  is damage reduction with no pool, so it reports block % and arc
+  instead of a fabricated 0/0.
+- §10 rotating turret — never lost, only ever half-built: the spinner
+  existed in the VIEWMODEL alone, so the pilot saw it turn and nobody
+  else did. Plus the module ring (2 tracking, 2 cooling), all on the
+  static housing.
+- §32 (partial) — the turret was the first-person/third-person
+  inconsistency the spec predicted.
+
+**Could not be found**
+- §25 "x-ray style" enemy hit effect. Searched translucency,
+  depth-bias, render-layer and see-through material paths on fighters:
+  the only translucent set in the codebase is the deliberate
+  first-person guard plate. The pale blue discs near soldiers in
+  captures look like spawn protection, not a hit effect. The GREEN
+  PLASMA impact effect the section asks for is still worth building on
+  its own merits; the removal half has no identified target.
+- §23 uploaded gun assets — no unused image/model assets located in the
+  repo. `engine/assets/` holds audio plus the three branding PNGs.
+
+**Blocked on other work, not on difficulty**
+- §30 firing-mode UI — needs the sim's fire-mode accessor to exist
+  first. Wiring a display before then means inventing the state.
+
+**Not started (honest, ranked by cost)**
+- §12-13 fire modes + per-weapon recoil, §15 rocket curve, §8-9 spear,
+  §26-28 grenade rework — all SIM-side and in progress.
+- §14 rocket launcher detail, §11 turret recoil, §20 cockpit, §21 mech
+  jump/crouch, §22 red/yellow royal variant, §19 HUD redesign.
+- §1-4 the 3x-detail Agile Mech with articulated fingers. This is the
+  largest single item in the spec and is a rig rebuild, not a detail
+  pass — individually articulated fingers need bones the rig does not
+  have.
+- §24 crafting station, §34 LOD/performance work.
+
 ## 1. Small, one-session buildable (ranked, next up)
 
 *(Audited 2026-08-07 against the code. Three items on this list had
