@@ -9,6 +9,81 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0-SCOUT. WHAT TWO READ-ONLY SCOUTS FOUND (2026-08-08)
+
+**This file was stale AGAIN, for the second time.** A gap scout checked
+section 0a against the code rather than against the commit messages and
+found six items listed as open that had already shipped. That is the
+recurring failure of this document: it is written by whoever last built
+something, and they always know less than the code does. **Treat every
+line here as a claim to re-check, never as truth.**
+
+### Corrected — listed as open, actually DONE
+- TIER 2 #6 mech jump and crouch, #5 rocket launcher detail, #7 green
+  plasma flash — all built.
+- TIER 1 #3 grenade pre-aim — the max-range indicator and the metre
+  readout both exist in the status line. Only the ARC-ATTACHED distance
+  is missing.
+- TIER 1 #4 turret recoil — the camera-kick half is live and tested;
+  muzzle climb and the hull answering the shot are what remain.
+- TIER 3 #14 castle map — mis-stated in BOTH directions. Bailey and
+  Gardens are NOT arena blockouts: they have their own extents,
+  ramparts, cross-walls, drum towers, hedge rings, terraces. What IS
+  arena blockout is exactly the centrepiece (see below).
+- Per-piece armour GEOMETRY — the 24 plate groups exist and visibility
+  follows the loadout. The backlog's "stripping a gauntlet changes
+  nothing" is no longer true.
+
+### NEW, ranked by how likely a player is to notice
+
+1. **Mech boarding is 8 named stages and 7 of them render nothing.**
+   The sim runs a tested 8-stage timer; the client answers seven with a
+   `debug!` line the player never sees. This is the single biggest
+   built-but-invisible system in the game. (BACKLOG #16.)
+2. **`SCOUT_SCALE = 1.42` is declared and read by NOTHING** — the
+   Mechanical Medic renders at scale 1.0, i.e. man-sized, despite a
+   constant whose own doc says it should read as a different silhouette
+   from across a map. Sim and client agree, so there is no hitbox bug;
+   the machine is simply the size of a man.
+3. **CASTLE BAILEY's "keep" is byte-identical to DUST ARENA's centre
+   tower** — the same helper called with the same two arguments. And
+   **CASTLE GARDENS' "stone gazebo" is a solid 8x8x2.4 m block** you
+   can neither enter nor shoot through.
+4. **`visor_ready` promises a camera that does not exist.** It is a
+   Bevy `Local`, so nothing outside its own system CAN read it.
+5. **`ROBOT_SPEED_MULT = 1.12` is dead and contradicts the live 0.85**
+   sitting beside it — a trap for the next editor.
+6. **`engine/assets/characters/` sharpens the asset blocker.** Its
+   README specifies GLB characters and says `cargo run -p jk_bevy`.
+   `jk_tdm` — the crate the game actually launches from — has no glTF
+   loader at all. So §23 is not "the owner points at the assets": the
+   shipping crate cannot load a mesh if pointed at one.
+7. Dead constants duplicated as bare literals: `MECH_SHIELD_ARC_COS`,
+   `TDM_TARGET_CHOICES`. Behaviour is correct; the names are unused.
+8. `shot_handgun.wav` is on disk and never loaded.
+
+### From the DEFECT scout — regressions introduced this session
+1. **Every mech's hull turret spins from the PLAYER's trigger.** One
+   rate computed from `fighters[player]` is written to every
+   `MechTurretSpinner`, which now tags both the viewmodel and a
+   per-fighter hull node. On foot, nothing spins at all. This is the
+   §32 defect the fix was written to kill, relocated.
+2. **The carried minigun's WORLD model never spins** — the spinner is
+   only tagged when `with_hands` is true, which is the viewmodel flag.
+3. **§21's jump telegraph has no client reader**, and during Compress
+   and Recover the hitbox kneels while the rendered chassis stands
+   upright — ~0.95 s of model/hitbox disagreement per jump.
+4. **The renderer re-derives mech crouch depth from INFANTRY
+   constants** (0.646 vs the sim's 0.72), so kneeling, the x2.0 visor
+   weak point lands on rendered neck and shoulder.
+5. **Third-person `crouch_drop` is double-counted for a kneeling mech.**
+6. `Fighter::pod_aim_held` is written every tick and read nowhere.
+
+Both scouts also confirmed what is NOT a gap, which is worth as much:
+the light chassis refusing to crouch, the medic having no power core,
+the armour-pip HUD excluding the medic, and 8v8/Extraction being
+withdrawn from the menu are all DELIBERATE and documented at the site.
+
 ## 0a. THE ORDER OF WORK — everything left, ranked
 
 Ranking rule, as always: an item moves up when its blocker clears, not

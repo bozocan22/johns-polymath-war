@@ -245,7 +245,7 @@ baseline 2 headshots / 8 body shots; AWM = only the head is instant;
 - **Loadouts (§6)**: primary / secondary / special picked on the intro
   screen, each slot keeps its own magazine, 1/2/3 to switch. The
   SHIELD always rides in its own slot.
-- **The shield (§7)**: E raises a tower shield — front ±60° arc only,
+- **The shield (§7)**: slot **4** raises a tower shield — front ±60° arc only,
   65% cut standing, 95% crouched, sides/rear ignore it ENTIRELY
   (flanking is the counter, by design — tested both ways). No shooting
   while raised, slow walk, bots turtle it when caught reloading.
