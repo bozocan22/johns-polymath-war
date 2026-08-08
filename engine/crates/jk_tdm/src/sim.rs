@@ -3284,6 +3284,15 @@ pub struct Fighter {
     pub flip_kind: u8,
     pub flip_used: bool,
     pub flip_recover_t: f32,
+    /// §owner AGILE SUPPORT MECH: the scout's SECOND flip charge this
+    /// airborne period. `flip_used` above stays exactly what it always
+    /// was for every other fighter - one per airborne period, reset on
+    /// landing - so this is a scout-only ADDITION next to it rather than
+    /// a change to its meaning. Only ever true when `in_scout_mech()`;
+    /// checked at the trigger, not stored conditionally, so a fighter
+    /// that boards then loses the chassis mid-air cannot carry a stray
+    /// charge into a body that should not have one.
+    pub scout_second_flip_used: bool,
     /// §6: >0 → the raised shield is DIPPED for a throw (blocks nothing).
     pub shield_dip_t: f32,
     /// Ability cooldown (repulsor).
@@ -6370,6 +6379,7 @@ impl TdmSim {
                     flip_kind: 1,
                     flip_used: false,
                     flip_recover_t: 0.0,
+                    scout_second_flip_used: false,
                     ability_cd: 0.0,
                     last_ability_at: -100.0,
                     last_dmg_at: -100.0,
@@ -6758,6 +6768,10 @@ impl TdmSim {
                 if f.flip_recover_t <= 0.0 {
                     f.flip_recover_t = 0.0;
                     f.flip_used = false; // one per airborne period
+                    // §owner: the scout's second charge resets on the same
+                    // clock as the first - both refill together at the end
+                    // of landing recovery, never independently.
+                    f.scout_second_flip_used = false;
                 }
             } else if f.grounded && f.flip_used && f.flip_t <= 0.0 {
                 f.flip_recover_t = FLIP_RECOVER_S;
@@ -6971,6 +6985,7 @@ impl TdmSim {
                     f.shield_dip_t = 0.0;
                     f.flip_t = 0.0;
                     f.flip_used = false;
+                    f.scout_second_flip_used = false;
                     f.flip_recover_t = 0.0;
                     f.spear_wind_t = 0.0;
                     f.ability_cd = 0.0;
@@ -7583,15 +7598,20 @@ impl TdmSim {
                         f.roll_t = ROLL_LOAD_S + ROLL_S + ROLL_EASE_S;
                         f.roll_cd = ROLL_LOAD_S + ROLL_S + ROLL_EASE_S + ROLL_CD_S;
                     }
-                } else if !mech
-                    && !f.grounded
-                    && f.flip_t <= 0.0
-                    && !f.flip_used
-                    && f.roll_t <= 0.0
-                {
-                    // §4: Q airborne = the flip. Direction from the stick
-                    // in body space; no input = backflip. One per airborne
-                    // period, 1.4 m/s of real travel, and the gun is
+                } else if !mech && !f.grounded && f.flip_t <= 0.0 && f.roll_t <= 0.0 && {
+                    // §4: one per airborne period for everyone. §owner
+                    // AGILE SUPPORT MECH: the scout gets a SECOND charge -
+                    // a real double-flip, not a bigger single one, so it
+                    // reads as two distinct dodges a shooter has to track
+                    // rather than one longer window. `flip_used` keeps its
+                    // original meaning (the FIRST charge) for every
+                    // fighter unchanged; `scout_second_flip_used` is an
+                    // addition consulted only here, never for the heavy
+                    // or an unarmoured fighter.
+                    !f.flip_used || (f.in_scout_mech() && !f.scout_second_flip_used)
+                } {
+                    // Direction from the stick in body space; no input =
+                    // backflip. 1.4 m/s of real travel, and the gun is
                     // locked until landing recovery.
                     let (fx, fz) = (f.yaw.sin(), f.yaw.cos());
                     let (mx, mz) = (cmd.move_x, cmd.move_z);
@@ -7617,7 +7637,13 @@ impl TdmSim {
                         _ => [-fz, fx],
                     };
                     f.flip_t = FLIP_S;
-                    f.flip_used = true;
+                    if f.flip_used {
+                        // the first charge was already spent - this IS the
+                        // scout's second one (the gate above proved it).
+                        f.scout_second_flip_used = true;
+                    } else {
+                        f.flip_used = true;
+                    }
                 }
             }
             // §21: the heavy chassis JUMPS - supersedes §4.3 (Brief VI)'s
@@ -14516,6 +14542,161 @@ mod tests {
         assert!(
             (scout_h - player_h).abs() > 0.01,
             "the whole bug: without the fix this is exactly zero"
+        );
+    }
+
+    /// §owner: does the scout chassis already get the airborne flip?
+    ///
+    /// Not obvious from reading alone - the flip's gate computes a local
+    /// `mech` that checks `ArmorSet::RobotSuit` SPECIFICALLY (the heavy),
+    /// not "any mech chassis". A `ScoutMech` pilot satisfies `!mech` and
+    /// so was never excluded - this is confirming existing behaviour, not
+    /// adding it. Written as a test rather than trusted by inspection
+    /// because the trigger path (grounded/roll_t/flip_used all correctly
+    /// zeroed, driven through a real `step()`) is exactly the kind of
+    /// multi-condition gate that reads as excluding something it does not.
+    #[test]
+    fn the_scout_chassis_already_gets_the_airborne_flip() {
+        let mut s = range(702);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.roll_t = 0.0;
+            f.roll_cd = 0.0;
+            f.flip_t = 0.0;
+            f.flip_used = false;
+        }
+        s.step(PlayerCmd {
+            dodge: true,
+            move_x: 0.0,
+            move_z: 1.0,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            s.fighters[0].flip_t > 0.0 && s.fighters[0].flip_used,
+            "the scout should already flip on Q while airborne - if this \
+             fails, the gate changed and actually excludes it now"
+        );
+
+        // and the HEAVY must still be denied it - the side-step is its
+        // whole identity (§2, Brief V): "the MECH takes a braced SIDE-STEP
+        // instead - a 2.7 m walker does not somersault."
+        let mut s2 = range(703);
+        {
+            let f = &mut s2.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.roll_t = 0.0;
+            f.roll_cd = 0.0;
+            f.flip_t = 0.0;
+            f.flip_used = false;
+        }
+        s2.step(PlayerCmd {
+            dodge: true,
+            move_x: 0.0,
+            move_z: 1.0,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            !s2.fighters[0].flip_used,
+            "the heavy must NOT flip - a 2.7m walker does not somersault"
+        );
+    }
+
+    /// §owner AGILE SUPPORT MECH: "double Q" - a genuine SECOND flip
+    /// charge for the scout, spent independently of the first.
+    ///
+    /// Isolates the TRIGGER GATE rather than playing out a full flip: sets
+    /// up "first charge already spent, still airborne, flip finished" by
+    /// hand (the same style the pre-existing `flips_force_uniform_zones`
+    /// test uses), so this fails on the exact line that matters if the
+    /// gate regresses, instead of on unrelated flip-arc arithmetic.
+    #[test]
+    fn the_scout_gets_a_genuine_second_flip_charge() {
+        let mut s = range(704);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.roll_t = 0.0;
+            f.roll_cd = 0.0;
+            // the state a scout is ACTUALLY in right after its first
+            // flip has played out and it is still falling: charge one
+            // spent, charge two untouched, no flip currently in progress.
+            f.flip_t = 0.0;
+            f.flip_used = true;
+            f.scout_second_flip_used = false;
+        }
+        s.step(PlayerCmd {
+            dodge: true,
+            move_x: 0.0,
+            move_z: 1.0,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            s.fighters[0].flip_t > 0.0,
+            "the second Q press must trigger a real flip, not be swallowed"
+        );
+        assert!(
+            s.fighters[0].scout_second_flip_used,
+            "the second charge must be marked spent"
+        );
+        assert!(
+            s.fighters[0].flip_used,
+            "the first charge's own flag must be untouched by spending the second"
+        );
+
+        // both charges now spent, still the same airborne period: a
+        // THIRD press must do nothing.
+        s.fighters[0].flip_t = 0.0;
+        s.step(PlayerCmd {
+            dodge: true,
+            move_x: 0.0,
+            move_z: 1.0,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            s.fighters[0].flip_t <= 0.0,
+            "a third press this airborne period must be denied - only two \
+             charges exist"
+        );
+
+        // a heavy in the identical "first charge spent" state must NOT
+        // gain a second flip - this is a scout-only addition.
+        let mut s2 = range(705);
+        {
+            let f = &mut s2.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.roll_t = 0.0;
+            f.roll_cd = 0.0;
+            f.flip_t = 0.0;
+            f.flip_used = true;
+        }
+        s2.step(PlayerCmd {
+            dodge: true,
+            move_x: 0.0,
+            move_z: 1.0,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            s2.fighters[0].flip_t <= 0.0,
+            "the heavy has no second charge and no flip at all - it must \
+             not somersault twice, or once, or ever"
         );
     }
 
