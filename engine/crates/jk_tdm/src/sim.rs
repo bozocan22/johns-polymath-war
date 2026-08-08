@@ -301,7 +301,27 @@ pub const MISSILE_SPEED_MULT: f32 = 1.5;
 pub const SPEAR_SPEED_EXTRA: f32 = 1.25;
 
 pub const MISSILE_G: f32 = 9.81;
-pub const GRAV_FACTOR_SPEAR: f32 = 0.72;
+/// §8/§9 (owner): 0.72 → 0.55. The javelin's arc, flattened.
+///
+/// The brief's complaint is that third-person spear throwing is "too
+/// difficult", and the arithmetic agreed: drop scales with 1/v², and
+/// even the best case (full charge, 53.6 m/s) fell 0.77 m over 30 m
+/// while a mid-charge throw fell 1.9 m. Against a 1.78 m man that is
+/// the difference between aiming at his chest and aiming at the sky
+/// above his head, with nothing on screen to tell you which.
+///
+/// 0.55 sits deliberately BETWEEN the arrow's 0.42 (near point-and-click
+/// inside 20 m, per that constant's own note) and the old 0.72: a
+/// javelin should still visibly arc - it is the heavy, committal throw -
+/// but it should arc like a spear, not like a mortar. Paired with the
+/// removal of the hip/pre-aim speed halving, the WORST case in the whole
+/// charge band now drops less over 25 m than a standing man is tall,
+/// which is the property `a_thrown_spear_reaches_where_it_is_aimed`
+/// actually measures.
+///
+/// This is a tuning judgement, not a derivation - stated plainly so
+/// nobody later mistakes it for one.
+pub const GRAV_FACTOR_SPEAR: f32 = 0.55;
 pub const GRAV_FACTOR_ARROW: f32 = 0.42;
 /// Effective gravity for a missile kind — the ONLY place the factor lives.
 pub fn missile_g(is_spear: bool) -> f32 {
@@ -312,9 +332,22 @@ pub fn missile_g(is_spear: bool) -> f32 {
             GRAV_FACTOR_ARROW
         }
 }
-/// Hip-thrown spear (no ADS settle) flies at min charge — the full 26 m/s
-/// needs the cocked, settled throw.
-pub const SPEAR_V0_MIN: f32 = 11.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA;
+/// §9 (owner): the hip-throw speed halving, NEUTRALISED.
+///
+/// This used to be `11.0 × …`, half the settled release speed, and it
+/// was the reason a javelin thrown without the pre-aim button held fell
+/// about 11 m over 30 m. The rule is gone - see the long note at its
+/// former call site in `try_fire` for why - and the branch that read it
+/// there is deleted.
+///
+/// The constant itself survives at the FULL speed because the client's
+/// arc preview still reads it for the un-settled case. Defining it as
+/// the settled speed makes that branch collapse to the right answer on
+/// its own, so the preview and the throw stay honest with each other
+/// without the client having to change in the same breath. The name is
+/// now a fossil and the client-side branch is dead weight; both should
+/// go on the presentation side's next pass.
+pub const SPEAR_V0_MIN: f32 = 22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA;
 // ---- §5.4 (BRIEF VIII): the running-throw bonus --------------------------
 // "A throw initiated at >=70% run speed with >=2 steps of momentum gets
 // velocity x1.15." The speed gate is exact per the brief; "2 steps of
@@ -2272,6 +2305,22 @@ pub struct Fighter {
     /// are always present on a live chassis - this is a targeting mode,
     /// not an inventory slot (see `MechWeapon`).
     pub mech_weapon: MechWeapon,
+    /// §12 (owner): the hull TURRET's fire mode. Read by the HUD via
+    /// `TdmSim::turret_mode_of` - one source of truth for the readout
+    /// and for the trigger.
+    ///
+    /// Cleared to `Auto` on respawn, alongside `mech_weapon`, which the
+    /// respawn block right beside it already resets to the turret: a
+    /// dead chassis takes its selector switches with it, and `Auto` is
+    /// the behaviour every caller in the file (bot brain included)
+    /// expects when nobody has said otherwise.
+    pub turret_mode: TurretMode,
+    /// §12: rounds fired so far in the CURRENT trigger pull. Drives the
+    /// growing kick and the 3-round burst cap; reset on the press edge.
+    pub turret_burst_i: u32,
+    /// §12: the settle after a burst (or after a single). The mount
+    /// takes nothing at all while this is running.
+    pub turret_recover_t: f32,
     /// §C: the hull gatling's own 0..100 heat pool and forced-vent lock.
     /// Kept SEPARATE from the minigun's `heat`/`vent_t` for the same
     /// reason `stride_heat` is: those two drive the MINIGUN's vent state
@@ -2451,7 +2500,15 @@ pub struct Fighter {
     pub grenades: [u8; 4],
     /// Selected throwable slot (G cycles).
     pub throw_sel: u8,
-    /// >0 → holding a live grenade; frags detonate IN HAND past the fuse.
+    /// §26 (owner): seconds the throw has been WOUND UP for — NOT a cook
+    /// clock any more, despite the name.
+    ///
+    /// The name is a fossil: it used to burn the frag's fuse in your
+    /// hand, and holding past 2.4 s killed you. It now buys nothing but
+    /// distance (`throw_power`), and the fuse is lit at release. The
+    /// field kept its name only because the client reads it in six
+    /// places; `throw_wind_s()` is the honest accessor and new code
+    /// should use that.
     pub cook_t: f32,
     /// §5.3 flashbang blind seconds remaining (bots aim ×4 worse).
     pub blind_t: f32,
@@ -2467,6 +2524,18 @@ pub struct Fighter {
 impl Fighter {
     pub fn alive(&self) -> bool {
         self.respawn_t <= 0.0 && self.health > 0.0
+    }
+
+    /// §26 (owner): seconds this fighter has been winding up a throw, 0
+    /// if not winding. THE name for what `cook_t` actually holds — see
+    /// that field's doc for why the storage still carries the old one.
+    ///
+    /// A HUD that wants "how charged is this throw" wants
+    /// `throw_power(f.throw_wind_s())`; a HUD that wants "how long until
+    /// this frag goes off" is asking about a grenade that has already
+    /// left the hand, and there is no such number while it is held.
+    pub fn throw_wind_s(&self) -> f32 {
+        self.cook_t
     }
     /// Is this fighter currently piloting a live chassis?
     pub fn in_mech(&self) -> bool {
@@ -2600,6 +2669,12 @@ pub struct PlayerCmd {
     pub ability: bool,
     /// §5: knife held (F). Tap = quick slash, hold = committed lunge.
     pub knife_hold: bool,
+    // §12 (owner) NOTE: there is deliberately no `cycle_fire_mode` here.
+    // The turret's mode cycles on a RE-PRESS of the mount's own number
+    // key - the same idiom G already uses for throwables ("G on an
+    // already-equipped grenade cycles the type") - so the feature needs
+    // no new input channel and no new binding. See the slot handler in
+    // `step` and `TdmSim::last_slot_cmd`.
 }
 
 // ---------------------------------------------------------------- events
@@ -2930,7 +3005,11 @@ pub struct ThrowSpec {
 pub fn throw_spec(k: ThrowKind) -> ThrowSpec {
     match k {
         ThrowKind::Frag => ThrowSpec {
-            fuse_s: 2.4,
+            // §26 (owner): FIVE seconds, and - this is the part that was
+            // wrong - measured from RELEASE, not from the moment the
+            // grenade appeared in your hand. See `THROW_FRAG_FUSE_S` and
+            // the release block in `step` for the other half of the fix.
+            fuse_s: THROW_FRAG_FUSE_S,
             restitution: 0.28,
             friction: 0.55,
             // Brief IX-B: falloff extends out to 20m (smooth taper to 0),
@@ -2982,6 +3061,16 @@ fn frag_falloff_frac(d: f32) -> f32 {
     }
 }
 
+/// §26 (owner): the frag fuse, in seconds, counted from RELEASE.
+///
+/// Named rather than inlined because two places have to agree about it -
+/// `throw_spec` hands it to the flying grenade, and the HUD's "seconds
+/// left" readout has to be reading the same number. It used to be 2.4 s
+/// AND it used to start burning the instant the grenade was equipped,
+/// which meant the displayed clock and the real one were measuring from
+/// different events.
+pub const THROW_FRAG_FUSE_S: f32 = 5.0;
+
 /// §5.1 release speeds: overhand / underhand lob / retreat drop.
 pub const THROW_V_OVER: f32 = 11.5;
 pub const THROW_V_UNDER: f32 = 6.2;
@@ -2992,10 +3081,33 @@ pub const THROW_V_DROP: f32 = 4.0;
 // at your own feet. (Frag cooking from Brief II is unchanged and rides
 // the same hold: charge and fuse risk are one decision.)
 pub const THROW_CHARGE_MIN_S: f32 = 0.15;
-pub const THROW_CHARGE_MAX_S: f32 = 1.2;
-/// Release-speed scale at zero charge / full charge.
+/// §26 (owner): a FULL wind-up is 2.3 s. Nothing is gained past it.
+pub const THROW_CHARGE_MAX_S: f32 = 2.3;
+/// §26: the distance a full wind-up carries on flat ground, at the
+/// launch angle that maximises it. This is the owner's number; the
+/// release speed below is SOLVED from it rather than the other way
+/// round, so retuning the range retunes the arm and not vice versa.
+pub const THROW_MAX_RANGE_M: f32 = 55.0;
+/// The release speed a full wind-up produces, in m/s.
+///
+/// DERIVED, not picked. The sim's own release model is a drag-free
+/// point mass launched from `pos.y + 1.45` with a fixed +2.2 m/s of
+/// overhand lift added to the aim vector, under 9.81 gravity, so the
+/// ground range of a throw at elevation θ has a closed form:
+///
+///   vy = v0·sinθ + 2.2,  vh = v0·cosθ,  h0 = 1.45
+///   t  = (vy + √(vy² + 2·g·h0)) / g,    R(θ) = vh·t
+///
+/// Maximising R over θ and inverting for R = `THROW_MAX_RANGE_M` gives
+/// v0 = 21.416 m/s, with the best angle at 42.3°. (The peak is broad -
+/// 40° and 45° are both within 25 cm of it - which is what makes the
+/// throw feel forgiving rather than knife-edge.)
+pub const THROW_V_MAX: f32 = 21.416;
+/// Release-speed scale at zero charge / full charge. The top of the
+/// range is `THROW_V_MAX` expressed against the overhand base speed, so
+/// the two cannot drift apart.
 pub const THROW_POWER_MIN: f32 = 0.55;
-pub const THROW_POWER_MAX: f32 = 1.15;
+pub const THROW_POWER_MAX: f32 = THROW_V_MAX / THROW_V_OVER;
 pub const THROW_TAP_POWER: f32 = 0.5;
 /// Aiming a throw is a two-handed thought: walk at 70%.
 pub const THROW_AIM_MOVE_MULT: f32 = 0.70;
@@ -3071,6 +3183,38 @@ pub const ROCKET_PN_N: f32 = 3.0;
 pub const ROCKET_PROX_M: f32 = 1.2;
 pub const ROCKET_SOLDIER_KILL_M: f32 = 2.0;
 
+// ---- §15 (owner): the dumb-fired missile's SHAPE -------------------------
+// A pod missile with no lock used to leave the tube and fly a dead
+// straight line to whatever it met. Nothing about that read as a rocket:
+// it read as a very slow bullet.
+//
+// It now flies at a VIRTUAL aim point held above the real one, and that
+// lift shrinks to nothing as the missile closes. One formula, no phases:
+// at launch the missile is pointed above the target and climbs; by the
+// time it is halfway the lift has fallen to a quarter of what it was, so
+// the nose comes over; at arrival the lift is zero and it is flying
+// straight at the mark. Launch, rise, curve over, arrive - and the whole
+// thing is a single expression that cannot get out of step with itself
+// the way a two-phase state machine can.
+//
+// Deliberately NOT applied to a LOCKED missile. That one already has a
+// guidance law - proportional navigation against the LOS rate - and
+// stacking a second authority on the same direction vector is exactly
+// how two rules end up quietly fighting over one number. The brief's
+// complaint ("rockets fly flat and straight") is about the ballistic
+// shot, which is also the only kind anyone gets against infantry.
+/// Lift at launch as a fraction of the distance to the aim point.
+pub const ROCKET_ARC_FRAC: f32 = 0.15;
+/// ...hard-capped, so a shot at the horizon stays a rocket rather than
+/// becoming a mortar. At long range this is what actually binds.
+pub const ROCKET_ARC_MAX_LIFT_M: f32 = 5.0;
+/// Where a shot at open sky aims, when the ray meets nothing.
+pub const ROCKET_ARC_MAX_M: f32 = 160.0;
+/// Steering rate onto the virtual point, rad/s. Well under
+/// `ROCKET_TURN_CAP` (that is the lock-chasing emergency limit): the
+/// arc has to look like a rocket leaning over, not like one snapping.
+pub const ROCKET_GUIDE_TURN: f32 = 2.6;
+
 /// §5.3: one pod missile in flight. `target = -1` → ballistic (dumb
 /// fire, dead target, or a broken lock — it never re-acquires).
 #[derive(Clone, Debug)]
@@ -3083,6 +3227,17 @@ pub struct Rocket {
     pub t: f32,
     pub los_lost: f32,
     pub prev_los: [f32; 3],
+    /// §15: the point on the ground/wall the trigger was pointed at, and
+    /// how far away it was when the tube fired. Fixed at launch: a
+    /// ballistic missile does not re-decide where it is going, and
+    /// freezing them is what keeps the arc a function of the shot rather
+    /// than of the pilot's mouse afterwards.
+    ///
+    /// Replay state, and deliberately so - both are pure functions of
+    /// the launch geometry, no RNG and no clock, so a replay that starts
+    /// from the same launch reproduces the same curve.
+    pub aim_pt: [f32; 3],
+    pub launch_dist: f32,
 }
 
 /// Rotate `dir` toward `want` by at most `max_ang` radians — the PN
@@ -3219,15 +3374,30 @@ pub fn deflect(d: [f32; 3], up_deg: f32, right_deg: f32) -> [f32; 3] {
     [np.cos() * ny.sin(), np.sin(), np.cos() * ny.cos()]
 }
 
-/// Charge fraction [0,1] for a hold: tap = the fixed 50% panic throw,
-/// then 0.15 s → 1.2 s maps linearly min → max (no overcharge penalty).
+/// §26 (owner): charge fraction for a wind-up of `hold_s`, on a SMOOTH
+/// force curve — a tap is the 50% panic throw, and the arm loads from
+/// there up to a full 1.0 at `THROW_CHARGE_MAX_S`.
+///
+/// MONOTONIC by construction, which the previous version was NOT: it
+/// returned `THROW_TAP_POWER` (0.5) below 0.15 s and then restarted the
+/// ramp at 0.0, so holding for 0.16 s threw SHORTER than a 0.14 s flick.
+/// That is the one property a wind-up must never violate — a longer hold
+/// has to be at least as strong as a shorter one, or the input teaches
+/// the player nothing. The tap value is now the FLOOR the smooth curve
+/// starts from rather than a special case beside it.
+///
+/// Smoothstep (3e² − 2e³) rather than a straight line: zero slope at
+/// both ends, so the wind-up eases in off the floor and tops out instead
+/// of hitting a corner. "Not linear steps", per the brief.
 pub fn throw_power(hold_s: f32) -> f32 {
-    if hold_s < THROW_CHARGE_MIN_S {
-        THROW_TAP_POWER
-    } else {
-        ((hold_s - THROW_CHARGE_MIN_S) / (THROW_CHARGE_MAX_S - THROW_CHARGE_MIN_S))
-            .clamp(0.0, 1.0)
+    if hold_s <= THROW_CHARGE_MIN_S {
+        return THROW_TAP_POWER;
     }
+    let e = ((hold_s - THROW_CHARGE_MIN_S)
+        / (THROW_CHARGE_MAX_S - THROW_CHARGE_MIN_S))
+        .clamp(0.0, 1.0);
+    let s = e * e * (3.0 - 2.0 * e);
+    THROW_TAP_POWER + (1.0 - THROW_TAP_POWER) * s
 }
 pub const FRAG_DMG: f32 = 118.0;
 pub const FLASH_BLIND_S: f32 = 3.2;
@@ -3787,6 +3957,10 @@ pub const GATLING_SPREAD_HOT: f32 = 0.052;
 /// gatling's spray.
 pub const AUTOCANNON_DAMAGE: f32 = 145.0;
 pub const AUTOCANNON_CYCLE_S: f32 = 1.35;
+/// §13 (owner): the cannon's kick, DERIVED - see `autocannon_kick`,
+/// which is where the number now comes from. Kept as a named constant
+/// only so the old symbol still resolves; nothing reads it.
+#[allow(dead_code)]
 pub const AUTOCANNON_UNBRACED_KICK: f32 = 6.0;
 pub const AUTOCANNON_SPREAD: f32 = 0.006;
 // NOTE: there is deliberately NO `AUTOCANNON_BRACED_KICK`. The braced
@@ -3795,6 +3969,176 @@ pub const AUTOCANNON_SPREAD: f32 = 0.006;
 // tunable numbers describing ONE relationship drift out of sync after a
 // single balance pass; §A built the damp mechanism generically for
 // exactly this consumer.
+
+// ---- §12/§13 (owner): the hull TURRET's fire modes and its recoil -------
+//
+// Recoil was ALREADY per-weapon everywhere a man carries a gun: every
+// `GunSpec` has its own `kick`, and `spray_entry` turns that into a
+// per-weapon, per-shot pattern seeded off the weapon's own slot, then
+// scales it by the scope, the lean, the walk and the brace. What was
+// missing was the hull turret, which wrote NO recoil at all - a
+// 800 RPM mount you could hold on a man's head for three hundred rounds
+// while the autocannon beside it kicked. That is the gap these fill.
+
+/// How much of a man's recoil the CHASSIS gives back. The one number in
+/// this block that is a judgement rather than a derivation, and it is
+/// the whole of the brief's sentence: "the mech manages recoil better
+/// than a man, but it still kicks hard".
+///
+/// It lands the turret's per-round kick at 8.3 deg/s of punch velocity:
+/// above the man-portable minigun's 7.2 (whose own spec says "the mass
+/// eats the recoil" - the hull mount is not that), and well under the
+/// M4's 28.8. Held on full auto it settles at about 4.2 deg of punch
+/// against the M4's 4.9, so a 800 RPM hull turret walks a little LESS
+/// than a rifle does - which is the brief's sentence stated as a
+/// measurement. Planted, the existing MECH_BRACE_RECOIL_DAMP takes the
+/// settled punch to zero, so the brace stays the answer to wanting the
+/// turret to hold still.
+///
+/// THE CEILING IS SET BY THE BOTS, not by feel. A bot has no mouse and
+/// nothing in this file makes it pull down: `punched_aim` deflects a
+/// bot's ray by the FULL RECOIL_SCALE while the player's already
+/// carries 45% in the camera. At 0.45 a bot mech's rounds walk clean
+/// over a man at 10 m within a second of holding the trigger, and
+/// `a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does`
+/// catches it. That asymmetry is older than this constant - it applies
+/// to every recoiling weapon a bot carries - and is deliberately NOT
+/// fixed here, because fixing it properly means touching the aim of
+/// every bot in the game rather than one hull mount.
+pub const MECH_RECOIL_CONTROL: f32 = 0.40;
+
+/// Per-round turret kick, in degrees per second of punch VELOCITY - the
+/// same channel and the same units `spray_entry` feeds for a rifle.
+///
+/// Derived rather than picked, against the M4, which this file's own
+/// spec table calls "THE baseline". Two honest ratios:
+///
+///   * `gun(M4).kick × 9000` is the M4's per-round table magnitude (see
+///     `spray_entry`, where that scale factor lives)
+///   * `GATLING_DAMAGE / M4 damage` says a hull round is a heavier round
+///   * `MECH_RECOIL_CONTROL` gives most of it back to the machine
+///
+/// A function rather than a `const` for the dull reason that `gun()` is
+/// not const - but that is the right trade: reading the M4's kick from
+/// the same table everything else reads it from means the turret cannot
+/// silently drift away from the weapon it is defined against.
+///
+/// ONE rule for both hull mounts (see `autocannon_kick`), so the brief's
+/// "recoil should vary with projectile power" is a single expression
+/// with `damage` in it rather than two hand-set numbers that agree
+/// today and disagree after one balance pass.
+fn mech_mount_kick(damage: f32) -> f32 {
+    let m4 = gun(GunKind::M4);
+    m4.kick * 9000.0 * (damage / m4.damage) * MECH_RECOIL_CONTROL
+}
+
+pub fn turret_kick_per_round() -> f32 {
+    mech_mount_kick(GATLING_DAMAGE)
+}
+
+/// §13 (owner): the AUTOCANNON's kick, on the same rule - and it had to
+/// change, because the 6.0 it used to be did LITERALLY NOTHING.
+///
+/// `punch` sheds `PUNCH_DECAY_LIN_DEG` (18 deg/s) on top of its
+/// exponential every tick. A lone impulse of 6 deg/s of punch VELOCITY
+/// adds about 0.05 deg of punch ANGLE in the tick it lands, and the
+/// linear term takes all of it back inside that same tick: the shell
+/// moved a number and nothing downstream ever saw it. The constant's own
+/// doc comment claimed "a kick big enough that firing it unbraced costs
+/// you the next shot's picture". It cost nothing, and no test caught it
+/// because every one of them asserted the FIELD had moved rather than
+/// that anything came of it - which is why the turret test next door
+/// measures peak punch across a window instead.
+///
+/// A 145-damage shell now kicks about 16x a 9-damage turret round,
+/// which is what "recoil varies with projectile power" has to mean if
+/// it means anything. On a 1.35 s cycle it is fully recovered before
+/// the next shell, so it is a punctuation mark rather than a tax.
+pub fn autocannon_kick() -> f32 {
+    mech_mount_kick(AUTOCANNON_DAMAGE)
+}
+
+/// §12: rounds in a BURST.
+pub const TURRET_BURST_N: u32 = 3;
+/// Growth in kick per round WITHIN a burst - round 3 leaves at 2.1x
+/// round 1. A burst you can walk onto a target and then have to let
+/// settle, which is the mode's whole reason to exist.
+pub const TURRET_BURST_GROWTH: f32 = 0.55;
+/// The settle after a burst completes. Nothing fires during it.
+pub const TURRET_BURST_RECOVER_S: f32 = 0.50;
+/// §12 AUTO: growth per round on a held trigger...
+pub const TURRET_AUTO_GROWTH: f32 = 0.14;
+/// ...and the ceiling it STABILISES at (reached on round 9). The brief
+/// asks for auto to be "sustained growing recoil, stabilising over
+/// time"; without a cap "growing" just means "unusable by round 30".
+pub const TURRET_AUTO_KICK_CAP: f32 = 2.10;
+/// §12 SINGLE: a deliberate, aimed cadence. One round per press, and
+/// this long before the mount will take another press at all.
+pub const TURRET_SINGLE_RECOVER_S: f32 = 0.18;
+/// ...and the precision that buys: the cone at a fraction of what the
+/// same mount sprays. "High precision" as a number rather than a mood.
+pub const TURRET_SINGLE_SPREAD_MULT: f32 = 0.55;
+
+/// §12 (owner): how the hull turret's trigger behaves.
+///
+/// `Auto` is the default and is EXACTLY the mount's historical
+/// behaviour, so every existing caller - the bot brain included - keeps
+/// firing the gun it has always fired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurretMode {
+    /// One round per press. Lowest sustained recoil, tightest cone.
+    Single,
+    /// `TURRET_BURST_N` per press, kick growing across the burst, then
+    /// a forced settle.
+    Burst,
+    /// Hold to fire. Recoil grows with the burst index and plateaus at
+    /// `TURRET_AUTO_KICK_CAP`.
+    Auto,
+}
+
+impl TurretMode {
+    /// Cycle order for the mode key - the same order the brief lists
+    /// them in, so the HUD reads the way the spec does.
+    pub const ALL: [TurretMode; 3] = [TurretMode::Single, TurretMode::Burst, TurretMode::Auto];
+
+    /// What the HUD prints. THE single source for the string - a second
+    /// copy in the client is how a readout starts lying about the sim.
+    pub fn label(self) -> &'static str {
+        match self {
+            TurretMode::Single => "SINGLE",
+            TurretMode::Burst => "BURST x3",
+            TurretMode::Auto => "AUTO",
+        }
+    }
+
+    pub fn next(self) -> TurretMode {
+        match self {
+            TurretMode::Single => TurretMode::Burst,
+            TurretMode::Burst => TurretMode::Auto,
+            TurretMode::Auto => TurretMode::Single,
+        }
+    }
+
+    /// Kick multiplier for round `i` of the current trigger pull (0 for
+    /// the first). Pure and shared: the shot and any readout of "how
+    /// hot is this burst" come off the same function.
+    pub fn kick_mult(self, i: u32) -> f32 {
+        match self {
+            // no growth at all - one round, then the mount settles
+            TurretMode::Single => 1.0,
+            TurretMode::Burst => 1.0 + i as f32 * TURRET_BURST_GROWTH,
+            TurretMode::Auto => (1.0 + i as f32 * TURRET_AUTO_GROWTH).min(TURRET_AUTO_KICK_CAP),
+        }
+    }
+
+    /// Cone multiplier on the mount's own spread.
+    pub fn spread_mult(self) -> f32 {
+        match self {
+            TurretMode::Single => TURRET_SINGLE_SPREAD_MULT,
+            _ => 1.0,
+        }
+    }
+}
 
 /// §D: the range at which a BOT mech stops spraying and starts aiming.
 ///
@@ -4404,7 +4748,15 @@ pub const SPEAR_CHARGE_FULL_S: f32 = 0.85;
 /// Velocity multiplier at the two ends of that window. A faster spear
 /// flies FLATTER, so this buys range and lead-time as much as speed -
 /// which is the "further" half of the ask.
-pub const SPEAR_CHARGE_V0_MIN: f32 = 0.82;
+///
+/// §9 (owner): the FLOOR came up, 0.82 → 0.90. Because drop goes as
+/// 1/v², the bottom of this window is where an unpredictable arc lives -
+/// the same 8-percentage-point move costs the top of the band almost
+/// nothing and buys the bottom a visibly flatter throw. The full-wind
+/// payoff is untouched at 1.30, so the spread between a flick and a
+/// committed throw is still 1.44x and winding up still obviously means
+/// something.
+pub const SPEAR_CHARGE_V0_MIN: f32 = 0.90;
 pub const SPEAR_CHARGE_V0_MAX: f32 = 1.30;
 
 /// How hard a javelin held for `held_s` leaves the hand, as a multiplier
@@ -4608,6 +4960,12 @@ pub struct TdmSim {
     rng: Pcg32,
     tick: u64,
     next_missile_id: u32,
+    /// §12: the slot key the player's command carried LAST tick, so a
+    /// re-press can be told from a held key. Sim state (it decides
+    /// whether a mode cycles, which decides where rounds go), seeded by
+    /// nothing and derived from the command stream alone - so it
+    /// replays exactly.
+    last_slot_cmd: Option<u8>,
 }
 
 const BLUE_NAMES: [&str; 8] = [
@@ -4818,6 +5176,9 @@ impl TdmSim {
                     mech_shield_hp: MECH_SHIELD_HP,
                     mech_shield_quiet_t: 0.0,
                     mech_weapon: MechWeapon::Gatling,
+                    turret_mode: TurretMode::Auto,
+                    turret_burst_i: 0,
+                    turret_recover_t: 0.0,
                     gatling_heat: 0.0,
                     gatling_vent_t: 0.0,
                     gatling_cd: 0.0,
@@ -4974,6 +5335,7 @@ impl TdmSim {
             rng,
             tick: 0,
             next_missile_id: 0,
+            last_slot_cmd: None,
         }
     }
 
@@ -5159,6 +5521,12 @@ impl TdmSim {
             // second; pinning a man costs a belt.
             f.suppress_t = (f.suppress_t - DT).max(0.0);
             f.gatling_trigger_t = (f.gatling_trigger_t - DT).max(0.0);
+            // §12: the burst/single settle, on the same clock as every
+            // other mount timer rather than on a `self.t` comparison -
+            // the file's other lockouts all count down, and one that
+            // counted up against a wall-clock-ish accumulator would be
+            // the odd one out AND would survive a match reset.
+            f.turret_recover_t = (f.turret_recover_t - DT).max(0.0);
             // §owner: the beam's target lasts ONE tick. It is re-asserted
             // every tick the trigger is held, so clearing it here means
             // the client's beam vanishes the frame the pilot lets go
@@ -5339,6 +5707,14 @@ impl TdmSim {
                     // leaving `gatling_vent_t` set would hand the next
                     // chassis a lockout it never earned.
                     f.mech_weapon = MechWeapon::Gatling;
+                    // §12: the selector switches die with the chassis
+                    // too. A half-fired burst that survived into the
+                    // next life would hand a fresh machine a settle it
+                    // never earned, and a burst counter of 2 means its
+                    // first press is one round long.
+                    f.turret_mode = TurretMode::Auto;
+                    f.turret_burst_i = 0;
+                    f.turret_recover_t = 0.0;
                     f.gatling_heat = 0.0;
                     f.gatling_vent_t = 0.0;
                     f.gatling_cd = 0.0;
@@ -5718,12 +6094,47 @@ impl TdmSim {
                     // slot N is by construction the mount labelled N.
                     let strip = MechWeapon::for_set(self.fighters[p].armor_set);
                     if let Some(&w) = strip.get(s as usize) {
+                        // §12 (owner): pressing the mount's OWN key again
+                        // cycles its fire mode. Exactly the grammar G
+                        // already uses for throwables - a key that means
+                        // "this one", pressed on the thing it already
+                        // selected, means "the next flavour of this one" -
+                        // so the turret gets SINGLE / BURST x3 / AUTO
+                        // without a new binding for a player to discover.
+                        //
+                        // Gated on `fresh_key`, NOT on `cmd.slot` alone.
+                        // `slot` is idempotent and the client replays the
+                        // whole command for every fixed sub-step, so at
+                        // any framerate below 120 one press arrives two or
+                        // more times - it would walk two modes per tap.
+                        // (This is the same defect the client's own
+                        // comment records for `cycle_throw`; the throwable
+                        // fixed it by clearing the flag between sub-steps,
+                        // which `slot` cannot do because "select slot 2"
+                        // has to survive the repeat.)
+                        let fresh_key = self.last_slot_cmd != Some(s);
+                        if self.fighters[p].mech_weapon == w
+                            && w == MechWeapon::Gatling
+                            && fresh_key
+                        {
+                            let f = &mut self.fighters[p];
+                            f.turret_mode = f.turret_mode.next();
+                            // a mid-burst switch drops the burst on the
+                            // floor rather than carrying its count - and
+                            // its settle - into the new mode
+                            f.turret_burst_i = 0;
+                            f.turret_recover_t = 0.0;
+                        }
                         self.fighters[p].mech_weapon = w;
                     }
                 } else {
                     self.switch_slot(p, s as usize);
                 }
             }
+            // §12: one press = one edge. Written AFTER the handler above
+            // reads it, and unconditionally (including the `None` ticks),
+            // so releasing the key is what re-arms the cycle.
+            self.last_slot_cmd = cmd.slot;
             if cmd.shield {
                 let f = &mut self.fighters[p];
                 f.shield_up = !f.shield_up;
@@ -6211,28 +6622,18 @@ impl TdmSim {
                 && self.fighters[p].roll_t <= 0.0
                 && self.fighters[p].knife_phase <= 0.0
             {
-                let f = &mut self.fighters[p];
-                f.cook_t += DT;
-                // a frag cooked past its fuse goes off IN HAND
-                if kind == ThrowKind::Frag && f.cook_t >= throw_spec(kind).fuse_s {
-                    f.grenades[sel] -= 1;
-                    f.cook_t = 0.0;
-                    let at = [f.pos[0], f.pos[1] + 1.0, f.pos[2]];
-                    let team = f.team;
-                    self.next_missile_id += 1;
-                    let id = self.next_missile_id;
-                    self.detonate(Grenade {
-                        id,
-                        kind,
-                        pos: at,
-                        vel: [0.0; 3],
-                        thrower: p,
-                        team,
-                        fuse_t: 0.0,
-                        bounces: 0,
-                        rest: true,
-                    });
-                }
+                // §26 (owner): this is a WIND-UP, not a cook. The fuse is
+                // not lit yet, so there is deliberately nothing here that
+                // can detonate the grenade in your hand — a held grenade
+                // is safe for as long as you want to hold it, and the
+                // clock starts at release below.
+                //
+                // What used to be here: `cook_t >= fuse_s` blew the frag
+                // up in the thrower's palm. With the client arming the
+                // grenade the moment G is pressed, that turned "equip a
+                // frag and think about it for three seconds" into
+                // suicide, which is the bug this section exists to fix.
+                self.fighters[p].cook_t += DT;
             } else if self.fighters[p].cook_t > 0.0 {
                 // release → throw: overhand; underhand lob when crouched;
                 // gentle drop when looking steeply down (retreat play)
@@ -6251,9 +6652,14 @@ impl TdmSim {
                     let (o, vel) = self.throw_release_velocity(p, cmd.aim, cook);
                     let f = &mut self.fighters[p];
                     let spec_t = throw_spec(kind);
+                    // §26 (owner): THE FUSE STARTS HERE. The whole fuse,
+                    // measured from release — the wind-up buys distance,
+                    // not detonation time. The old `fuse_s - cook` made a
+                    // long throw and a short fuse the same decision, so
+                    // the maximum-range throw was also the one that went
+                    // off in mid-air.
                     let fuse = if spec_t.fuse_s.is_finite() {
-                        (spec_t.fuse_s - if kind == ThrowKind::Frag { cook } else { 0.0 })
-                            .max(0.15)
+                        spec_t.fuse_s
                     } else {
                         f32::INFINITY
                     };
@@ -7234,6 +7640,28 @@ impl TdmSim {
         self.aim_spread(i, ads)
     }
 
+    /// §12 (owner): **THE accessor for the turret's fire mode.** This is
+    /// what the HUD readout reads - `turret_mode_of(sim.player).label()`
+    /// is the whole call, and `TurretMode::label` is the only place the
+    /// strings live.
+    ///
+    /// A method rather than "reach into `fighters[i].turret_mode`"
+    /// because the client asking a question about the sim should ask the
+    /// sim, and because the field can then move without every readout
+    /// moving with it.
+    pub fn turret_mode_of(&self, i: usize) -> TurretMode {
+        self.fighters[i].turret_mode
+    }
+
+    /// §12: how far into the current trigger pull the turret is - 0 on
+    /// the first round of a press. Offered alongside the mode because a
+    /// burst indicator ("2 of 3") is the obvious next thing a HUD wants
+    /// and computing it client-side would mean re-deriving the press
+    /// edge over there.
+    pub fn turret_burst_shot(&self, i: usize) -> u32 {
+        self.fighters[i].turret_burst_i
+    }
+
     fn aim_spread(&self, i: usize, ads: bool) -> f32 {
         let f = &self.fighters[i];
         let spec = gun(f.gun);
@@ -7326,6 +7754,12 @@ impl TdmSim {
         }
         // even a flick throws - a dead trigger would feel broken
         self.fighters[i].spear_power = spear_charge_mult(held_s);
+        // §9 (owner): `false` here is now inert. It used to be the whole
+        // hip/pre-aim story and it told a lie - the player's wound throw
+        // ALWAYS arrived with ads=false, so the "settled throw flies at
+        // full speed" rule the client's arc preview was drawing could
+        // never fire on this path. Every player javelin was a half-speed
+        // lob. `try_fire` no longer branches the release speed on it.
         self.try_fire(i, aim, false);
     }
 
@@ -7539,14 +7973,28 @@ impl TdmSim {
             }
         }
         if let Some((v0, dmg)) = spec.projectile {
-            // §4: the PLAYER's hip-thrown spear is a min-charge lob; the
-            // full 26 m/s needs the settled (ADS) throw. Bots always
-            // commit to the full throw — they have no hip/ADS split.
-            let v0 = if self.fighters[i].gun == GunKind::Spear && !ads && i == self.player {
-                SPEAR_V0_MIN
-            } else {
-                v0
-            };
+            // §9 (owner): THE HIP/PRE-AIM SPEED SPLIT IS GONE.
+            //
+            // What stood here halved a player's release speed unless the
+            // pre-aim button happened to be down (`SPEAR_V0_MIN`, an
+            // 11 m/s base against the settled 22). At 0.72 gravity that
+            // is ~11 m of drop over 30 m against under 1 m for the same
+            // throw pre-aimed - not a harder shot, a different weapon,
+            // chosen by a button the player is not thinking about while
+            // a javelin is in the air. The brief asks for a trajectory
+            // that is "predictable" and "consistent between first and
+            // third person"; one release button producing two parabolas
+            // is the opposite of both.
+            //
+            // It was also a live player/bot divergence - the halving was
+            // gated on `i == self.player`, so no bot ever took it, and
+            // the player's spear and the bot's spear were two different
+            // weapons wearing one name. Deleting the branch deletes the
+            // divergence instead of duplicating it into the bot path.
+            //
+            // Pre-aiming still pays: ADS_SPREAD_MULT tightens the cone
+            // and the pre-aim settles the shot. It just no longer picks
+            // which arc the spear flies.
             // §5.4: the bonus is decided at INITIATION (this instant,
             // on the momentum the thrower already has) and baked into
             // the release velocity carried through the windup - the
@@ -7799,6 +8247,19 @@ impl TdmSim {
     ///
     /// Returns true iff a round left the mount.
     pub fn try_fire_gatling(&mut self, i: usize, aim: [f32; 3]) -> bool {
+        // §12: is this a fresh PRESS or a held trigger? Read BEFORE the
+        // hold timer below is refreshed, which is the only reason this
+        // line is up here rather than beside the mode gate.
+        //
+        // `gatling_trigger_t` already carries "the trigger is down"
+        // across the ticks between rounds - it is what suppresses heat
+        // decay - so a second timer for the same fact would be a second
+        // thing to keep in sync. The cost is that the mount reads a
+        // release only after GATLING_TRIGGER_HOLD_S (70 ms) of silence,
+        // which is well inside SINGLE's own 180 ms settle and therefore
+        // invisible; it is stated here so it is not later mistaken for
+        // a bug.
+        let fresh_press = self.fighters[i].gatling_trigger_t <= 0.0;
         // A HELD trigger keeps the barrel group hot every tick it is
         // held — including the ticks inside `gatling_cd` between rounds,
         // and including the ticks of a forced vent. This must precede
@@ -7830,18 +8291,67 @@ impl TdmSim {
                 return false;
             }
         }
+        // §12: the FIRE MODE gate. A press resets the burst counter;
+        // the settle after a burst (or a single) closes the mount
+        // outright; SINGLE takes one round per press and BURST takes
+        // TURRET_BURST_N. AUTO gates on nothing at all, which is what
+        // keeps this mount bit-identical to its old self for every
+        // caller that never touches the mode - the bot brain included.
+        let mode = self.fighters[i].turret_mode;
+        let shot_i = {
+            let f = &mut self.fighters[i];
+            if fresh_press {
+                f.turret_burst_i = 0;
+            }
+            if f.turret_recover_t > 0.0 {
+                return false;
+            }
+            match mode {
+                TurretMode::Single if !fresh_press => return false,
+                TurretMode::Burst if f.turret_burst_i >= TURRET_BURST_N => return false,
+                _ => {}
+            }
+            f.turret_burst_i
+        };
         let o = self.muzzle_origin(i);
         // the cone opens as the barrels cook, exactly as the minigun's
         // does — this is the cost that makes sustained fire a choice
         let spread = {
             let f = &self.fighters[i];
-            GATLING_SPREAD_COLD
+            (GATLING_SPREAD_COLD
                 + (GATLING_SPREAD_HOT - GATLING_SPREAD_COLD)
-                    * (f.gatling_heat / 100.0).clamp(0.0, 1.0)
+                    * (f.gatling_heat / 100.0).clamp(0.0, 1.0))
+                // §12: SINGLE is the precision mode, and this is what
+                // that means in numbers rather than in prose.
+                * mode.spread_mult()
         };
         {
             let f = &mut self.fighters[i];
             f.gatling_cd = GATLING_FIRE_PERIOD;
+            // §13: the turret KICKS. It used to write no recoil at all -
+            // a 800 RPM hull mount you could hold on a man's head for
+            // three hundred rounds, sitting beside an autocannon that
+            // kicked for every shell.
+            //
+            // Same channel a rifle uses (`punch_vel[0]`, degrees per
+            // second of pitch), same brace damp the autocannon takes,
+            // and the per-mode growth comes off `TurretMode::kick_mult`
+            // so the shot and any readout of it cannot disagree.
+            let brace = if f.mech_brace { MECH_BRACE_RECOIL_DAMP } else { 1.0 };
+            f.punch_vel[0] += turret_kick_per_round() * mode.kick_mult(shot_i) * brace;
+            f.turret_burst_i += 1;
+            // §12: the settle. A completed burst is committed - you get
+            // three and then the mount takes them back for half a
+            // second; SINGLE's is shorter and is what makes its
+            // sustained recoil the lowest of the three despite each
+            // round kicking the same as AUTO's first.
+            match mode {
+                TurretMode::Single => f.turret_recover_t = TURRET_SINGLE_RECOVER_S,
+                TurretMode::Burst if f.turret_burst_i >= TURRET_BURST_N => {
+                    f.turret_recover_t = TURRET_BURST_RECOVER_S
+                }
+                _ => {}
+            }
             f.protect_t = 0.0; // opening fire drops spawn protection
             // NOTE: deliberately does NOT write `last_shot_at`. That
             // field has exactly one consumer - the carried gun's
@@ -7901,9 +8411,9 @@ impl TdmSim {
             // A second `AUTOCANNON_BRACED_KICK` constant would be a
             // duplicate of this relationship free to drift away from it.
             let kick = if f.mech_brace {
-                AUTOCANNON_UNBRACED_KICK * MECH_BRACE_RECOIL_DAMP
+                autocannon_kick() * MECH_BRACE_RECOIL_DAMP
             } else {
-                AUTOCANNON_UNBRACED_KICK
+                autocannon_kick()
             };
             f.punch_vel[0] += kick; // pitch, up
         }
@@ -8168,12 +8678,62 @@ impl TdmSim {
         let eye = self.muzzle_origin(p);
         let d = normalize(aim);
         let team = self.fighters[p].team;
+        let pos = [
+            eye[0] + d[0] * 0.6,
+            eye[1] + d[1] * 0.6 + 0.35,
+            eye[2] + d[2] * 0.6,
+        ];
+        // §15: WHERE the trigger was pointed, resolved once at launch.
+        // The first thing the aim ray meets - cover via the §9.1 grid,
+        // or the ground plane - and failing both, a point out at
+        // ROCKET_ARC_MAX_M. This is the mark the arc is built around;
+        // `step_rockets` never re-decides it.
+        let mut reach = ROCKET_ARC_MAX_M;
+        if let Some((t, _)) = self.grid.ray_hit(&self.cover, pos, d, ROCKET_ARC_MAX_M) {
+            reach = t;
+        }
+        if d[1] < -1e-4 {
+            let ground = -pos[1] / d[1];
+            if ground > 0.0 && ground < reach {
+                reach = ground;
+            }
+        }
+        // ...and a BODY under the reticle is a mark too. Without this
+        // the arc converges on whatever is BEHIND the man - typically
+        // ground eighty metres past him, because a level shot at a
+        // chest barely descends - and the missile climbs over his head
+        // on its way there. Arcing a projectile only works if "where I
+        // aimed" can mean a person; a straight line never had to care.
+        //
+        // Generous by ROCKET_PROX_M: the fuse would have caught him at
+        // that radius anyway, so anything inside it is a shot the pilot
+        // plainly meant. Fixed iteration order, no RNG, nearest wins.
+        for (j, g) in self.fighters.iter().enumerate() {
+            if j == p || g.team == team || !g.alive() {
+                continue;
+            }
+            let c = [
+                g.pos[0] - pos[0],
+                g.pos[1] + g.height() * 0.5 - pos[1],
+                g.pos[2] - pos[2],
+            ];
+            let t = c[0] * d[0] + c[1] * d[1] + c[2] * d[2];
+            if t <= 0.5 || t >= reach {
+                continue;
+            }
+            let px = [c[0] - d[0] * t, c[1] - d[1] * t, c[2] - d[2] * t];
+            let perp = (px[0] * px[0] + px[1] * px[1] + px[2] * px[2]).sqrt();
+            if perp < g.radius() + ROCKET_PROX_M {
+                reach = t;
+            }
+        }
+        let aim_pt = [
+            pos[0] + d[0] * reach,
+            pos[1] + d[1] * reach,
+            pos[2] + d[2] * reach,
+        ];
         self.rockets.push(Rocket {
-            pos: [
-                eye[0] + d[0] * 0.6,
-                eye[1] + d[1] * 0.6 + 0.35,
-                eye[2] + d[2] * 0.6,
-            ],
+            pos,
             vel: [d[0] * 20.0, d[1] * 20.0, d[2] * 20.0],
             target,
             shooter: p,
@@ -8181,6 +8741,8 @@ impl TdmSim {
             t: 0.0,
             los_lost: 0.0,
             prev_los: d,
+            aim_pt,
+            launch_dist: reach,
         });
         let f = &mut self.fighters[p];
         f.pod_ammo -= 1;
@@ -9465,6 +10027,34 @@ impl TdmSim {
                         dir = rotate_toward(dir, td, turn);
                         r.prev_los = td;
                     }
+                }
+            }
+            if r.target < 0 && r.launch_dist > 1.0 {
+                // §15: the BALLISTIC missile's arc. It steers at the aim
+                // point held `lift` metres higher than it really is, and
+                // that lift falls off with the SQUARE of the distance
+                // still to run:
+                //
+                //   lift = FRAC · rem² / launch_dist   (capped)
+                //
+                // which is FRAC · launch_dist as the tube fires, a
+                // quarter of that at the halfway mark, and exactly zero
+                // on arrival. The missile therefore climbs off the rail,
+                // leans over through the middle of the flight, and is
+                // pointed dead at the mark by the time it gets there -
+                // with no phase to switch between and nothing to keep in
+                // sync. (Locked missiles skip this - see the constants.)
+                let to = [
+                    r.aim_pt[0] - r.pos[0],
+                    r.aim_pt[1] - r.pos[1],
+                    r.aim_pt[2] - r.pos[2],
+                ];
+                let rem = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                if rem > 0.5 {
+                    let lift = (ROCKET_ARC_FRAC * rem * rem / r.launch_dist)
+                        .min(ROCKET_ARC_MAX_LIFT_M);
+                    let want = normalize([to[0], to[1] + lift, to[2]]);
+                    dir = rotate_toward(dir, want, ROCKET_GUIDE_TURN * DT);
                 }
             }
             r.vel = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
@@ -15803,6 +16393,446 @@ mod tests {
         assert!(reach > 4.0, "tap throw must be usable: reached {reach:.2} m");
     }
 
+    /// A test fixture with nothing alive that can throw, shoot or
+    /// explode except the fighter under test. The grenade tests below
+    /// measure `booms` and `grenades_air` GLOBALLY, so a bot that lobs
+    /// its own frag mid-measurement would read as the player's.
+    fn empty_range(seed: u64) -> TdmSim {
+        let mut s = range(seed);
+        let e = &mut s.fighters[1];
+        e.pos = [-140.0, 0.0, -140.0];
+        e.grenades = [0; 4];
+        e.ammo = 0;
+        e.reserve = 0;
+        e.slot_ammo = [(0, 0); 3];
+        s
+    }
+
+    /// §26 (owner) — THE bug this section exists to kill. Pressing G used
+    /// to put a grenade in your hand with its fuse ALREADY BURNING, so
+    /// equipping a frag and thinking about it for three seconds killed
+    /// you. A held grenade is now safe indefinitely, and the fuse is a
+    /// full 5 s timed from RELEASE.
+    ///
+    /// Three independent things are asserted, because the old behaviour
+    /// broke all three: nothing detonates while held, nothing is SPENT
+    /// while held, and the fuse that leaves with the throw is the whole
+    /// fuse rather than what the hold left of it.
+    #[test]
+    fn a_held_grenade_never_lights_its_fuse_and_the_clock_starts_at_release() {
+        assert_eq!(
+            ThrowKind::ALL[0],
+            ThrowKind::Frag,
+            "this test drives slot 0 and means the frag"
+        );
+        let mut s = empty_range(0x6E4D);
+        s.fighters[0].throw_sel = 0;
+        let carried = s.fighters[0].grenades[0];
+        assert!(carried > 0, "the fixture must actually issue frags");
+
+        let aim = [0.0, 0.35, 0.94_f32];
+        let held = PlayerCmd { aim, throw_hold: true, ..Default::default() };
+        let idle = PlayerCmd { aim, ..Default::default() };
+
+        // SIX seconds of holding - a full second past the fuse. The old
+        // cook model detonated this in the thrower's palm at 2.4 s.
+        let hold_s = 6.0_f32;
+        for k in 0..(hold_s / DT) as usize {
+            s.step(held);
+            assert!(
+                s.booms.is_empty(),
+                "a HELD grenade must never go off - it did at tick {k} ({:.2} s)",
+                k as f32 * DT
+            );
+            assert_eq!(
+                s.fighters[0].grenades[0], carried,
+                "holding must not SPEND the grenade (tick {k})"
+            );
+        }
+        assert!(
+            s.fighters[0].alive() && s.fighters[0].health >= MAX_HEALTH - 0.01,
+            "the thrower must be untouched, or something else made these booms"
+        );
+        assert!(
+            (s.fighters[0].throw_wind_s() - hold_s).abs() < 0.05,
+            "the wind-up clock should read {hold_s} s, reads {}",
+            s.fighters[0].throw_wind_s()
+        );
+
+        // release
+        s.step(idle);
+        assert_eq!(
+            s.fighters[0].grenades[0],
+            carried - 1,
+            "release is what spends the grenade"
+        );
+        assert_eq!(s.grenades_air.len(), 1, "release is what puts one in the air");
+
+        // ...and from HERE it is the full fuse, not what the hold left.
+        let mut ticks = 0usize;
+        while s.booms.is_empty() && ticks < (9.0 / DT) as usize {
+            s.step(idle);
+            ticks += 1;
+        }
+        let fuse = ticks as f32 * DT;
+        // 5.0 written OUT, not read from THROW_FRAG_FUSE_S: a test that
+        // sources its expectation from the constant it is checking
+        // cannot fail when that constant is wrong. The number is the
+        // owner's, out of §26.
+        assert!(
+            (fuse - 5.0).abs() <= 2.0 * DT,
+            "the fuse must run 5.0 s from RELEASE; measured {fuse:.3} s"
+        );
+    }
+
+    /// §26 (owner): "maximum throw distance 55 m, reached at a wind-up of
+    /// about 2.3 s".
+    ///
+    /// Measured as the CARRY - release point to first ground contact -
+    /// not where the grenade eventually stops rolling, which is a
+    /// property of friction rather than of the arm.
+    ///
+    /// Two checks that do not share a line of code: a closed-form
+    /// drag-free ballistic range computed here from the release vector,
+    /// and the distance the sim's own 120 Hz integrator actually flies
+    /// it. Agreement between an analytic answer and a numerical one is
+    /// evidence; the same expression twice would be none.
+    #[test]
+    fn a_full_windup_throw_carries_the_spec_55_metres() {
+        let s = empty_range(0x5501);
+        // 55 m and 2.3 s are the OWNER's numbers (§26), written out
+        // rather than read from THROW_MAX_RANGE_M / THROW_CHARGE_MAX_S:
+        // a test that sources its expectation from the constant under
+        // test cannot fail when that constant is wrong.
+        const SPEC_RANGE_M: f32 = 55.0;
+        const SPEC_WINDUP_S: f32 = 2.3;
+        // the elevation that maximises range for this release model -
+        // see THROW_V_MAX's doc for where 42.3 deg comes from
+        let th = 42.26_f32.to_radians();
+        let aim = [0.0, th.sin(), th.cos()];
+        let (o, vel) = s.throw_release_velocity(0, aim, SPEC_WINDUP_S);
+
+        // (a) closed form, owing nothing to grenade_tick
+        let g = 9.81_f32;
+        let vh = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+        let t_air = (vel[1] + (vel[1] * vel[1] + 2.0 * g * o[1]).sqrt()) / g;
+        let analytic = vh * t_air;
+        assert!(
+            (analytic - SPEC_RANGE_M).abs() < 1.0,
+            "the release vector should be worth {SPEC_RANGE_M} m by hand: got {analytic:.2} m"
+        );
+
+        // (b) the integrator, carrying the real 5 s fuse
+        let (pts, _, first) = s.predict_grenade(
+            ThrowKind::Frag,
+            o,
+            vel,
+            throw_spec(ThrowKind::Frag).fuse_s,
+            8.0,
+        );
+        let land = pts[first.expect(
+            "a max-range throw must reach the ground before its fuse - if it \
+             does not, the throw and the fuse are fighting each other",
+        )];
+        let carry = ((land[0] - o[0]).powi(2) + (land[2] - o[2]).powi(2)).sqrt();
+        assert!(
+            (carry - SPEC_RANGE_M).abs() < 2.0,
+            "a full {SPEC_WINDUP_S} s wind-up must carry \
+             ~{SPEC_RANGE_M} m (tolerance 2 m); it carried {carry:.2} m"
+        );
+        // the two methods must also agree with EACH OTHER, or one of
+        // them is measuring something else
+        assert!(
+            (carry - analytic).abs() < 1.0,
+            "analytic {analytic:.2} m vs integrated {carry:.2} m"
+        );
+
+        // 2.3 s is the TOP, not a waypoint: holding longer buys nothing
+        let (o2, v2) = s.throw_release_velocity(0, aim, SPEC_WINDUP_S * 3.0);
+        assert!(
+            (v2[2] - vel[2]).abs() < 1e-4 && (o2[1] - o[1]).abs() < 1e-6,
+            "past a full wind-up there is nothing left to charge"
+        );
+
+        // and a half-length wind-up is meaningfully shorter, or the
+        // charge is decoration
+        let (o3, v3) = s.throw_release_velocity(0, aim, SPEC_WINDUP_S * 0.5);
+        let (hp, _, half) = s.predict_grenade(ThrowKind::Frag, o3, v3, f32::INFINITY, 8.0);
+        let half = hp[half.expect("a half throw still lands")];
+        let half_carry = ((half[0] - o3[0]).powi(2) + (half[2] - o3[2]).powi(2)).sqrt();
+        assert!(
+            half_carry < carry * 0.8,
+            "half a wind-up should be well short of a full one: \
+             {half_carry:.2} m vs {carry:.2} m"
+        );
+    }
+
+    /// §26 (owner): "a smooth force curve (not linear steps)", and - the
+    /// property that actually matters at the controller - MONOTONIC. A
+    /// longer hold must never throw shorter.
+    ///
+    /// The old curve failed this at exactly one point: it returned the
+    /// 0.5 tap floor below THROW_CHARGE_MIN_S and then restarted the
+    /// ramp at 0.0, so a 0.16 s hold threw weaker than a 0.14 s flick.
+    #[test]
+    fn the_throw_force_curve_is_smooth_and_monotonic() {
+        // 1 ms resolution across three full seconds - past the top of
+        // the charge and through both joints in the old piecewise curve
+        let step = 0.001_f32;
+        let n = 3000;
+        let mut prev = throw_power(0.0);
+        let mut max_rise = 0.0_f32;
+        for k in 1..=n {
+            let h = k as f32 * step;
+            let p = throw_power(h);
+            assert!(
+                p >= prev - 1e-6,
+                "throw_power is not monotonic: {prev:.4} at {:.3} s fell to {p:.4} at {h:.3} s",
+                h - step
+            );
+            max_rise = max_rise.max(p - prev);
+            prev = p;
+        }
+        // endpoints, stated independently of the curve's shape
+        assert!((throw_power(0.0) - THROW_TAP_POWER).abs() < 1e-6, "a tap is the floor");
+        assert!(
+            (throw_power(THROW_CHARGE_MAX_S) - 1.0).abs() < 1e-4,
+            "a full wind-up is full power"
+        );
+        assert!(
+            (throw_power(THROW_CHARGE_MAX_S * 4.0) - 1.0).abs() < 1e-4,
+            "and there is no overcharge past it"
+        );
+
+        // SMOOTH: bounded by the steepest slope smoothstep can have.
+        // d/de (3e^2 - 2e^3) peaks at 1.5 (at e = 0.5), so over a 1 ms
+        // window the curve cannot rise by more than
+        //   1.5 * (1 - tap) * step / (max - min)
+        // Any staircase or discontinuity blows straight through this.
+        let bound = 1.5 * (1.0 - THROW_TAP_POWER) * step
+            / (THROW_CHARGE_MAX_S - THROW_CHARGE_MIN_S);
+        assert!(
+            max_rise <= bound * 1.02,
+            "the curve has a step in it: biggest 1 ms rise {max_rise:.6} vs \
+             smoothstep's own ceiling {bound:.6}"
+        );
+
+        // ...and NOT LINEAR: an eased curve is far shallower at the foot
+        // of the wind-up than in the middle of it. A straight ramp would
+        // score exactly 1.0 here; smoothstep scores about 5.
+        let d = 0.002_f32;
+        let e_at = |e: f32| THROW_CHARGE_MIN_S + e * (THROW_CHARGE_MAX_S - THROW_CHARGE_MIN_S);
+        let slope = |e: f32| (throw_power(e_at(e) + d) - throw_power(e_at(e) - d)) / (2.0 * d);
+        let foot = slope(0.05);
+        let mid = slope(0.5);
+        assert!(
+            mid > foot * 2.0,
+            "the force curve is a straight line, not a curve: \
+             slope {foot:.3} at the foot vs {mid:.3} in the middle"
+        );
+    }
+
+    /// §26: monotonicity where the player actually feels it - the ground
+    /// distance a throw covers, swept across the whole wind-up. This
+    /// runs through `throw_release_velocity` and the real integrator, so
+    /// it catches a non-monotonic curve AND a non-monotonic release
+    /// (crouch/drop branches, run inertia) that `throw_power` alone
+    /// could not see.
+    #[test]
+    fn a_longer_windup_never_throws_shorter() {
+        let s = empty_range(0x5502);
+        let th = 42.26_f32.to_radians();
+        let aim = [0.0, th.sin(), th.cos()];
+        let carry_for = |hold: f32| -> f32 {
+            let (o, vel) = s.throw_release_velocity(0, aim, hold);
+            let (pts, _, first) = s.predict_grenade(ThrowKind::Frag, o, vel, f32::INFINITY, 9.0);
+            let land = pts[first.expect("every throw in this sweep must land")];
+            ((land[0] - o[0]).powi(2) + (land[2] - o[2]).powi(2)).sqrt()
+        };
+        let mut prev = carry_for(0.0);
+        let mut k = 1;
+        while k <= 300 {
+            let hold = k as f32 * 0.01;
+            let d = carry_for(hold);
+            assert!(
+                d >= prev - 1e-3,
+                "a {hold:.2} s wind-up threw {d:.3} m, shorter than the \
+                 {:.2} s one at {prev:.3} m",
+                hold - 0.01
+            );
+            prev = d;
+            k += 1;
+        }
+    }
+
+    /// §8/§9 (owner): "third-person spear throwing is too difficult".
+    ///
+    /// This measures the two things that made it so, both of which are
+    /// about the ARC rather than about aim assist (the brief explicitly
+    /// rules out heavy auto-aim, and none is added):
+    ///
+    ///   1. The spear must leave along the aim the player is holding.
+    ///   2. It must still be near that line where a fight happens. Over
+    ///      `REACH_M`, at EVERY point in the charge band, it must fall
+    ///      less than a standing man is tall - i.e. aim at a man's chest
+    ///      and you reach a man, not the ground in front of him.
+    ///   3. The band itself must be tight enough to learn: the flick and
+    ///      the committed throw are the same weapon, not two.
+    ///
+    /// (2) and (3) are RELATIONSHIPS - against `BODY_HEIGHT` and against
+    /// each other - rather than drop figures, so they survive a retune
+    /// and only fail if the throw stops being aimable at a human target.
+    ///
+    /// Before this change the worst case in that band fell ~7.7 m over
+    /// 25 m: it hit the ground at 11 m and never got there at all.
+    ///
+    /// `REACH_M` is a chosen yardstick, not a measured one - a long
+    /// javelin duel, past which a bow is the right tool. Current margin
+    /// on (2) is about 0.2 m of the 1.78, i.e. this WILL start arguing
+    /// with the next person who slows the spear down or steepens its
+    /// gravity. That is the point of it.
+    #[test]
+    fn a_thrown_spear_reaches_where_it_is_aimed() {
+        const REACH_M: f32 = 28.0;
+        // a deliberately off-axis aim: a bug that snapped the throw to
+        // the body's facing, or that leaked a spread roll into it, shows
+        // up here and would not on a straight-ahead shot
+        let aim = normalize([0.31, 0.09, 0.95]);
+
+        // hold_ticks 1 = the flick (bottom of the charge band),
+        // SPEAR_CHARGE_FULL_S = the committed throw (top of it)
+        let fly = |hold_ticks: usize| -> ([f32; 3], [f32; 3], [f32; 3]) {
+            let mut s = empty_range(0x59EA);
+            {
+                let f = &mut s.fighters[0];
+                f.inventory[2] = GunKind::Spear;
+                f.active = 2;
+                f.gun = GunKind::Spear;
+                f.ammo = 1;
+                f.reserve = 5;
+            }
+            let o = s.muzzle_origin(0);
+            for _ in 0..hold_ticks {
+                s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+            }
+            // release, then run the plant out so the spear actually flies
+            for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 2) {
+                s.step(PlayerCmd { aim, ..Default::default() });
+            }
+            let launch = s
+                .missiles
+                .first()
+                .expect("the javelin must leave the hand")
+                .vel;
+            // fly it until it passes REACH_M of ground distance
+            let mut at = None;
+            for _ in 0..(4.0 / DT) as usize {
+                s.step(PlayerCmd { aim, ..Default::default() });
+                let Some(m) = s.missiles.first() else { break };
+                let d = ((m.pos[0] - o[0]).powi(2) + (m.pos[2] - o[2]).powi(2)).sqrt();
+                if d >= REACH_M {
+                    at = Some(m.pos);
+                    break;
+                }
+                if m.stuck_t.is_some() {
+                    break; // it hit something short of the mark
+                }
+            }
+            (
+                o,
+                launch,
+                at.unwrap_or_else(|| {
+                    panic!(
+                        "the spear never reached {REACH_M} m - it fell out of the \
+                         air first, which is the bug this test exists for"
+                    )
+                }),
+            )
+        };
+
+        let mut drops: Vec<f32> = Vec::new();
+        for (label, ticks) in [("flick", 1usize), ("full", (SPEAR_CHARGE_FULL_S / DT) as usize)] {
+            let (o, launch, at) = fly(ticks);
+            // (1) it left along the aim
+            let d = normalize(launch);
+            let cos = d[0] * aim[0] + d[1] * aim[1] + d[2] * aim[2];
+            let off_deg = cos.clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(
+                off_deg < 1.0,
+                "{label}: the spear left {off_deg:.2}deg off the held aim"
+            );
+            // (2) how far it has fallen off the AIMED LINE by the time it
+            // has covered REACH_M of ground. The aimed line is the launch
+            // direction extended from the muzzle; gravity is the only
+            // thing that can pull the spear off it.
+            let horiz = (d[0] * d[0] + d[2] * d[2]).sqrt().max(1e-3);
+            let flown = ((at[0] - o[0]).powi(2) + (at[2] - o[2]).powi(2)).sqrt();
+            let aimed_y = o[1] + flown * (d[1] / horiz);
+            let drop = aimed_y - at[1];
+            assert!(
+                drop >= 0.0,
+                "{label}: gravity should pull the spear DOWN off the aim line, \
+                 not up ({drop:.2} m)"
+            );
+            assert!(
+                drop < BODY_HEIGHT,
+                "{label}: the spear fell {drop:.2} m over {flown:.1} m - more than \
+                 a standing man ({BODY_HEIGHT} m) is tall, so a chest-high aim \
+                 cannot reach a chest"
+            );
+            drops.push(drop);
+        }
+        // (3) drop goes as 1/v², so the SPREAD of the charge band is
+        // what the player has to hold in their head. A flick that falls
+        // more than about twice as far as a committed throw is two
+        // weapons on one button. (0.90..1.30 puts this at 2.09; the old
+        // 0.82 floor put it at 2.51.)
+        let (flick, full) = (drops[0], drops[1]);
+        assert!(
+            flick < full * 2.2,
+            "the charge band is too wide to learn: a flick falls {flick:.2} m \
+             where a committed throw falls {full:.2} m"
+        );
+    }
+
+    /// §9 (owner): the pre-aim must be CONSISTENT. Holding the aim
+    /// button changes how tight the cone is; it must not change which
+    /// parabola the spear flies, or the same input produces two weapons.
+    ///
+    /// It must also be the same rule for a bot as for the player. The
+    /// branch this replaces was gated on `i == self.player`, which is
+    /// this file's named recurring defect (a rule that shipped
+    /// bot-broken) in its purest form.
+    #[test]
+    fn a_spear_flies_the_same_arc_pre_aimed_or_not_and_for_bot_or_player() {
+        let v0_for = |i: usize, ads: bool| -> f32 {
+            let mut s = empty_range(0x59EB);
+            for k in [0usize, 1] {
+                let f = &mut s.fighters[k];
+                f.inventory[2] = GunKind::Spear;
+                f.active = 2;
+                f.gun = GunKind::Spear;
+                f.ammo = 1;
+                f.reserve = 5;
+                f.spear_power = 1.0;
+            }
+            assert!(s.try_fire(i, [0.0, 0.0, 1.0], ads), "the throw must start");
+            s.fighters[i].spear_v0
+        };
+        let player_hip = v0_for(0, false);
+        let player_aimed = v0_for(0, true);
+        let bot_hip = v0_for(1, false);
+        assert!(player_hip > 0.0, "the fixture must actually throw something");
+        assert!(
+            (player_hip - player_aimed).abs() < 1e-4,
+            "pre-aiming must not change the arc: hip {player_hip} vs aimed {player_aimed}"
+        );
+        assert!(
+            (player_hip - bot_hip).abs() < 1e-4,
+            "the player and a bot must throw the same spear: {player_hip} vs {bot_hip}"
+        );
+    }
+
     /// §2 (Brief V): the spear THRUST connects for 70 frontal — and a
     /// WHIFF locks the weapon out visibly longer than a hit. A missed
     /// thrust is committed, not free.
@@ -16462,6 +17492,279 @@ mod tests {
         s
     }
 
+    /// §13 (owner): the hull TURRET has recoil at all, it is the right
+    /// SIZE against the two man-portable weapons it sits between, and
+    /// planting the chassis takes it back.
+    ///
+    /// The mount used to write no punch whatsoever - 800 RPM you could
+    /// hold on a man's head for three hundred rounds - while the
+    /// autocannon bolted beside it kicked for every shell.
+    ///
+    /// Every claim here is a RELATIONSHIP against numbers that already
+    /// existed (the minigun's table magnitude, the M4's, the brace
+    /// damp), so retuning any of them keeps the test meaningful.
+    #[test]
+    fn the_hull_turret_kicks_and_the_brace_takes_it_back() {
+        // The comparison anchors, read off the SAME table `spray_entry`
+        // builds a rifle's pattern from (kick x 9000) - not restated
+        // constants that could drift from it.
+        let minigun = gun(GunKind::Minigun).kick * 9000.0;
+        let m4 = gun(GunKind::M4).kick * 9000.0;
+        let turret = turret_kick_per_round();
+        assert!(
+            turret > minigun,
+            "the hull mount must kick harder per round than the man-portable \
+             minigun, whose own spec says its mass eats the recoil: \
+             {turret:.2} vs {minigun:.2}"
+        );
+        assert!(
+            turret < m4,
+            "...and less than a rifle in a man's hands, because the machine \
+             is steadier than the man: {turret:.2} vs {m4:.2}"
+        );
+
+        // and it reaches the fighter through the real fire path
+        let kick_after = |braced: bool| -> f32 {
+            let mut s = mech_range(0x7E11, MechWeapon::Gatling);
+            s.fighters[0].mech_brace = braced;
+            s.fighters[0].punch_vel = [0.0; 2];
+            assert!(s.try_fire_gatling(0, [0.0, 0.0, -1.0]), "the mount must fire");
+            s.fighters[0].punch_vel[0]
+        };
+        let free = kick_after(false);
+        let braced = kick_after(true);
+        assert!(free > 0.0, "the turret must actually kick: {free}");
+        assert!(
+            braced < free,
+            "a planted hull must eat some of it: braced {braced:.3} vs free {free:.3}"
+        );
+        // the SAME damp the autocannon takes - one relationship, not two
+        // independently tunable numbers describing it
+        let cannon = {
+            let mut s = mech_range(0x7E12, MechWeapon::Autocannon);
+            s.fighters[0].punch_vel = [0.0; 2];
+            assert!(s.try_fire_autocannon(0, [0.0, 0.0, -1.0]));
+            s.fighters[0].punch_vel[0]
+        };
+        assert!(
+            (braced / free - MECH_BRACE_RECOIL_DAMP).abs() < 1e-4,
+            "the turret's brace damp must be the mount-wide one"
+        );
+        assert!(
+            cannon > free * 3.0,
+            "a 145-damage shell must still be the heavier kick of the two \
+             hull mounts: cannon {cannon:.2} vs turret round {free:.2}"
+        );
+    }
+
+    /// §12 (owner): SINGLE / BURST x3 / AUTO must be three different
+    /// weapons in the numbers, not three labels on one.
+    ///
+    /// Rounds per press, the cone, and - the property the brief actually
+    /// asks for - sustained recoil, measured as how far the mount walks
+    /// off the aim over two seconds of the trigger discipline each mode
+    /// is FOR. Ordering rather than magnitudes, so a rebalance moves the
+    /// numbers without moving the meaning.
+    #[test]
+    fn the_three_turret_fire_modes_are_meaningfully_different() {
+        // rounds a single PRESS gets you
+        let per_press = |mode: TurretMode| -> u32 {
+            let mut s = mech_range(0x7E20, MechWeapon::Gatling);
+            s.fighters[0].turret_mode = mode;
+            let before = s.fighters[0].mech_rounds;
+            // 1.5 s of the trigger held DOWN, without ever letting go
+            for _ in 0..(1.5 / DT) as usize {
+                s.step(PlayerCmd { shoot: true, aim: [0.0, 0.0, -1.0], ..Default::default() });
+            }
+            before - s.fighters[0].mech_rounds
+        };
+        assert_eq!(per_press(TurretMode::Single), 1, "SINGLE is one per press");
+        assert_eq!(per_press(TurretMode::Burst), 3, "BURST is three per press");
+        assert!(
+            per_press(TurretMode::Auto) > 15,
+            "AUTO is hold-to-fire: {} rounds in 1.5 s",
+            per_press(TurretMode::Auto)
+        );
+
+        // Sustained recoil over two seconds, each mode driven the way it
+        // is meant to be driven - tapped for the two committed modes,
+        // held for AUTO.
+        //
+        // Measured on peak punch VELOCITY, not on punch angle, and the
+        // reason is worth writing down: `punch` sheds a flat
+        // PUNCH_DECAY_LIN_DEG (18 deg/s) as well as its exponential, so
+        // any recoil under about 18 deg/s of sustained velocity is
+        // erased inside the tick it lands and reads as exactly zero
+        // angle. SINGLE genuinely is that quiet. Velocity is the channel
+        // the mount actually writes, and comparing modes on it compares
+        // what the modes DO rather than what survives the decay floor.
+        let walk = |mode: TurretMode, tap: bool| -> (f32, f32) {
+            let mut s = mech_range(0x7E21, MechWeapon::Gatling);
+            s.fighters[0].turret_mode = mode;
+            let (mut peak_v, mut peak_a) = (0.0_f32, 0.0_f32);
+            for k in 0..(2.0 / DT) as usize {
+                // tapped: one tick down, nine up - fast enough to be a
+                // real player, slow enough to re-arm the press edge
+                let shoot = !tap || k % 10 == 0;
+                s.step(PlayerCmd { shoot, aim: [0.0, 0.0, -1.0], ..Default::default() });
+                peak_v = peak_v.max(s.fighters[0].punch_vel[0].abs());
+                peak_a = peak_a.max(s.fighters[0].punch[0].abs());
+            }
+            (peak_v, peak_a)
+        };
+        let (single, single_a) = walk(TurretMode::Single, true);
+        let (burst, _) = walk(TurretMode::Burst, true);
+        let (auto, auto_a) = walk(TurretMode::Auto, false);
+        assert!(single > 0.0, "even SINGLE must kick something: {single}");
+        assert!(
+            single < burst,
+            "BURST must kick harder than SINGLE: {single:.3} vs {burst:.3}"
+        );
+        assert!(
+            burst < auto,
+            "AUTO must kick harder than BURST: {burst:.3} vs {auto:.3}"
+        );
+        // ...and the difference is not merely arithmetic: held AUTO must
+        // push the mount past the decay floor and actually walk the
+        // muzzle off the target, where tapped SINGLE must not
+        assert!(
+            auto_a > 1.0,
+            "held AUTO must genuinely walk the muzzle: {auto_a:.3} deg"
+        );
+        assert!(
+            single_a < auto_a * 0.25,
+            "SINGLE is the mode you shoot when you have to hit something: \
+             {single_a:.3} deg vs AUTO's {auto_a:.3}"
+        );
+
+        // AUTO's growth STABILISES rather than running away - the brief
+        // says "sustained growing recoil, stabilising over time", and a
+        // curve with no ceiling only satisfies half of that
+        let a0 = TurretMode::Auto.kick_mult(0);
+        let a9 = TurretMode::Auto.kick_mult(9);
+        let a60 = TurretMode::Auto.kick_mult(60);
+        assert!(a9 > a0 * 1.5, "AUTO must actually grow: {a0} -> {a9}");
+        assert!(
+            (a60 - a9).abs() < 1e-6,
+            "AUTO must settle: round 10 kicks {a9}, round 61 kicks {a60}"
+        );
+        // BURST grows too, and steeply - three rounds is not long enough
+        // for a gentle ramp to mean anything
+        let b_first = TurretMode::Burst.kick_mult(0);
+        let b_last = TurretMode::Burst.kick_mult(TURRET_BURST_N - 1);
+        assert!(
+            b_last > b_first * 1.8,
+            "the third round of a burst must clearly outkick the first: \
+             {b_first} -> {b_last}"
+        );
+
+        // PRECISION: SINGLE's rounds land in a tighter group. Measured on
+        // where the tracers actually went, with heat and punch reset
+        // between rounds so the only difference is the mode.
+        let group = |mode: TurretMode| -> f32 {
+            let mut s = mech_range(0x7E22, MechWeapon::Gatling);
+            s.fighters[0].turret_mode = mode;
+            s.fighters[1].pos = [0.0, 0.0, -400.0]; // nothing to hit
+            let mut sum = 0.0;
+            let mut n = 0.0;
+            for _ in 0..40 {
+                {
+                    let f = &mut s.fighters[0];
+                    f.gatling_cd = 0.0;
+                    f.gatling_heat = 0.0;
+                    f.gatling_trigger_t = 0.0; // every round is a fresh press
+                    f.turret_recover_t = 0.0;
+                    f.punch = [0.0; 2];
+                    f.punch_vel = [0.0; 2];
+                }
+                s.tracers.clear();
+                assert!(s.try_fire_gatling(0, [0.0, 0.0, -1.0]));
+                let t = s.tracers.last().expect("a round draws a tracer");
+                let d = ((t.to[0] - t.from[0]).powi(2) + (t.to[1] - t.from[1]).powi(2)).sqrt()
+                    / (t.to[2] - t.from[2]).abs().max(1e-3);
+                sum += d;
+                n += 1.0;
+            }
+            sum / n
+        };
+        let tight = group(TurretMode::Single);
+        let loose = group(TurretMode::Auto);
+        assert!(
+            tight < loose * 0.8,
+            "SINGLE is the precision mode: mean off-axis {tight:.5} vs \
+             AUTO's {loose:.5}"
+        );
+    }
+
+    /// §12 (owner): the mode is reachable, cycles once per press, and
+    /// dies with the chassis.
+    ///
+    /// Pressing the mount's own number key again is the whole input -
+    /// the same grammar G uses for throwables. The once-per-press half
+    /// is the one that would break silently: `cmd.slot` is idempotent
+    /// and the client replays a command for every fixed sub-step, so at
+    /// 60 FPS one tap arrives twice.
+    #[test]
+    fn the_turret_fire_mode_cycles_once_per_press_and_dies_with_the_chassis() {
+        let mut s = mech_range(0x7E30, MechWeapon::Gatling);
+        let start = s.turret_mode_of(0);
+        assert_eq!(start, TurretMode::Auto, "a fresh chassis is on AUTO");
+
+        // ONE press delivered as two sub-steps, exactly as a 60 FPS
+        // client delivers it, must move exactly one mode
+        let press = PlayerCmd { slot: Some(0), ..Default::default() };
+        s.step(press);
+        s.step(press);
+        let after_one = s.turret_mode_of(0);
+        assert_eq!(
+            after_one,
+            start.next(),
+            "one press must advance exactly one mode, even when the client \
+             replays it across sub-steps"
+        );
+        // release, then press again
+        s.step(PlayerCmd::default());
+        s.step(press);
+        assert_eq!(s.turret_mode_of(0), start.next().next(), "and again on the next press");
+        // the whole cycle comes home
+        s.step(PlayerCmd::default());
+        s.step(press);
+        assert_eq!(s.turret_mode_of(0), start, "three presses is a full cycle");
+
+        // every mode prints something, and they are all different
+        let labels: Vec<&str> = TurretMode::ALL.iter().map(|m| m.label()).collect();
+        assert_eq!(labels.len(), 3);
+        for (i, a) in labels.iter().enumerate() {
+            assert!(!a.is_empty(), "mode {i} has no HUD label");
+            for b in labels.iter().skip(i + 1) {
+                assert_ne!(a, b, "two modes print the same thing");
+            }
+        }
+
+        // ...and a dead chassis takes the selector with it. The burst
+        // counter especially: carried across a respawn, the first press
+        // of the next life would be one round long.
+        let mut s = mech_range(0x7E31, MechWeapon::Gatling);
+        {
+            let f = &mut s.fighters[0];
+            f.turret_mode = TurretMode::Burst;
+            f.turret_burst_i = 2;
+            f.turret_recover_t = TURRET_BURST_RECOVER_S;
+        }
+        s.fighters[0].health = 0.0;
+        s.fighters[0].respawn_t = 0.01;
+        for _ in 0..(RESPAWN_S / DT) as usize + 8 {
+            s.step(PlayerCmd::default());
+            if s.fighters[0].alive() {
+                break;
+            }
+        }
+        assert!(s.fighters[0].alive(), "the fixture must actually respawn him");
+        assert_eq!(s.turret_mode_of(0), TurretMode::Auto, "the mode resets with the chassis");
+        assert_eq!(s.turret_burst_shot(0), 0, "and so does the burst counter");
+        assert_eq!(s.fighters[0].turret_recover_t, 0.0, "and its settle");
+    }
+
     /// §C.3: the gatling's identity is SUSTAIN. Its heat has to ramp
     /// slower than the man-portable minigun's in absolute terms — not
     /// merely "a constant named GATLING_HEAT_PER_SHOT exists". Both
@@ -16921,9 +18224,13 @@ mod tests {
         };
         let unbraced = kick(false);
         let braced = kick(true);
+        // STALE SETUP FIXED, not a weakened assertion: the unbraced kick
+        // is no longer a hand-set constant, it is derived from the
+        // shell's own damage (see `autocannon_kick`). Same claim, read
+        // from where the number now lives.
         assert!(
-            (unbraced - AUTOCANNON_UNBRACED_KICK).abs() < 1e-6,
-            "unbraced kick {unbraced} is not the unbraced constant"
+            (unbraced - autocannon_kick()).abs() < 1e-6,
+            "unbraced kick {unbraced} is not what the mount's own rule says"
         );
         assert!(
             braced < unbraced,
@@ -18102,6 +19409,115 @@ mod tests {
         assert!(s.rockets.is_empty());
     }
 
+    /// §15 (owner): a dumb-fired missile must ARC - rise off the rail,
+    /// lean over, and come down on the mark - instead of flying the dead
+    /// straight line it used to.
+    ///
+    /// Two assertions, and they pull against each other on purpose,
+    /// because either alone is trivially satisfiable: the flight must
+    /// rise measurably ABOVE the straight line from launch to impact
+    /// (otherwise there is no arc), and it must still ARRIVE (otherwise
+    /// the arc is just a miss). A mortar passes the first and fails the
+    /// second; the old behaviour did the reverse.
+    #[test]
+    fn a_dumb_fired_rocket_arcs_over_and_still_arrives() {
+        let mut s = mech_range(0x0AC1, MechWeapon::Rockets);
+        s.fighters[0].pod_ammo = POD_TUBES;
+        s.fighters[0].pod_cd = 0.0;
+        // 32 m apart and both well inside the arena's own bounds - a
+        // target parked outside them is quietly dragged back in by the
+        // world clamp every tick, which reads as a bot that walked
+        s.fighters[0].pos = [0.0, 0.0, -16.0];
+        s.fighters[1].pos = [0.0, 0.0, 16.0];
+        s.fighters[1].protect_t = 0.0;
+        s.fighters[1].health = MAX_HEALTH;
+        let hp_before = s.fighters[1].health;
+
+        // point at his chest from the chassis's mount height
+        let o = s.muzzle_origin(0);
+        let tgt = [0.0, s.fighters[1].height() * 0.5, 16.0];
+        let aim = normalize([tgt[0] - o[0], tgt[1] - o[1], tgt[2] - o[2]]);
+        assert!(s.try_fire_rocket(0, aim), "the tube must fire");
+        assert_eq!(s.rockets[0].target, -1, "infantry cannot be locked - ballistic");
+        let launch = s.rockets[0].pos;
+        let mark = s.rockets[0].aim_pt;
+
+        // fly it, keeping every position. The victim is PINNED each tick
+        // - this measures a trajectory, and a bot that walks two metres
+        // sideways mid-flight would be measuring the bot's legs.
+        let pinned = s.fighters[1].pos;
+        let mut path: Vec<[f32; 3]> = vec![launch];
+        let mut nearest_mark = f32::INFINITY;
+        for _ in 0..(ROCKET_TTL_S / DT) as usize {
+            s.fighters[1].pos = pinned;
+            s.step(PlayerCmd::default());
+            match s.rockets.first() {
+                Some(r) => {
+                    nearest_mark = nearest_mark.min(
+                        ((r.pos[0] - mark[0]).powi(2)
+                            + (r.pos[1] - mark[1]).powi(2)
+                            + (r.pos[2] - mark[2]).powi(2))
+                        .sqrt(),
+                    );
+                    path.push(r.pos);
+                }
+                None => break,
+            }
+        }
+        let impact = *path.last().unwrap();
+        // it arrived AT THE MARK, not merely somewhere down range.
+        // It cannot get arbitrarily close: the proximity fuse takes it
+        // at ROCKET_PROX_M off the body, and the mark sits ~0.35 m
+        // higher again because the tube is mounted above the eye the
+        // aim ray is cast from. 2 m is that floor with a little air.
+        assert!(
+            nearest_mark < 2.0,
+            "the arc must bring the missile back onto the point the trigger \
+             was aimed at: closest approach {nearest_mark:.2} m"
+        );
+        let run = ((impact[0] - launch[0]).powi(2) + (impact[2] - launch[2]).powi(2)).sqrt();
+        assert!(
+            run > 28.0,
+            "the missile must actually cross the ground to the target: {run:.1} m"
+        );
+
+        // ARRIVED: the man it was aimed at took a rocket
+        assert!(
+            s.fighters[1].health < hp_before - 1.0 || !s.fighters[1].alive(),
+            "the arc must not cost the missile its target - he took {:.1} damage",
+            hp_before - s.fighters[1].health
+        );
+
+        // AND AROSE: somewhere in the middle of the flight it was above
+        // the straight line from launch to impact. Measured against the
+        // chord itself, so it says nothing about absolute height and
+        // everything about shape.
+        let mut best = f32::NEG_INFINITY;
+        let mut best_frac = 0.0;
+        for p in &path {
+            let along = ((p[0] - launch[0]).powi(2) + (p[2] - launch[2]).powi(2)).sqrt();
+            let frac = (along / run.max(1e-3)).clamp(0.0, 1.0);
+            let chord_y = launch[1] + (impact[1] - launch[1]) * frac;
+            if p[1] - chord_y > best {
+                best = p[1] - chord_y;
+                best_frac = frac;
+            }
+        }
+        assert!(
+            best > 0.5,
+            "the missile flew flat: its highest point was {best:.2} m above the \
+             launch-to-impact line"
+        );
+        // ...and it rose in the MIDDLE of the flight, not by leaving the
+        // tube pointed at the sky. A rocket that peaks at 5% of the way
+        // there is a launch angle, not an arc.
+        assert!(
+            (0.15..0.85).contains(&best_frac),
+            "the peak of the arc sits at {best_frac:.2} of the way to the \
+             target - that is a launch angle, not a curve"
+        );
+    }
+
     /// §10 (Brief III): regen waits 12 s, heals at 8.33/s, and ANY new
     /// damage resets the clock.
     #[test]
@@ -18978,6 +20394,13 @@ mod tests {
                 out.push(f.punch_vel[1].to_bits());
                 out.push(f.mech_brace as u32);
                 out.push(f.mech_weapon as u32);
+                // §12: the turret's selector state is now part of where
+                // rounds go, so it belongs in the fingerprint. (`punch`
+                // and `spray_i` still are not, and that is a real
+                // remaining gap in this digest rather than a decision.)
+                out.push(f.turret_mode as u32);
+                out.push(f.turret_burst_i);
+                out.push(f.turret_recover_t.to_bits());
                 out.push(f.hits_dealt);
             }
             out

@@ -4581,7 +4581,30 @@ fn weapon_strip(
                     // not. A count of zero on a weapon that never counts
                     // is worse than no number at all.
                     let label = match w {
-                        sim::MechWeapon::Gatling => format!("TURRET {}", p.mech_rounds),
+                        // §30: the turret's FIRE MODE, on the mount it
+                        // belongs to. It reads from `turret_mode_of` -
+                        // the sim's own accessor - and the mode's name
+                        // comes from `TurretMode::label`, which is the
+                        // only place those three strings exist. A HUD
+                        // that spells them a second time is a HUD that
+                        // will eventually disagree with the weapon.
+                        sim::MechWeapon::Gatling => {
+                            let mode = game.sim.turret_mode_of(game.sim.player);
+                            let burst = game.sim.turret_burst_shot(game.sim.player);
+                            // mid-burst, say WHERE in the burst - the
+                            // whole point of a 3-round mode is knowing
+                            // whether the next pull starts a new one
+                            if burst > 0 {
+                                format!(
+                                    "TURRET {}  {} {}/3",
+                                    p.mech_rounds,
+                                    mode.label(),
+                                    burst
+                                )
+                            } else {
+                                format!("TURRET {}  {}", p.mech_rounds, mode.label())
+                            }
+                        }
                         sim::MechWeapon::Rockets => format!("ROCKETS {}", p.pod_ammo),
                         sim::MechWeapon::Autocannon => "AUTOCANNON".to_string(),
                         sim::MechWeapon::Plasma => {
@@ -6785,8 +6808,14 @@ fn grenade_arc(
         p.cook_t,
     );
     let spec = throw_spec(kind);
+    // §26/§27: the fuse starts at RELEASE now, so a grenade in the hand
+    // has burned none of it however long you wind up. This used to
+    // subtract `cook_t`, which was correct while the fuse ran from equip
+    // and is simply false now - it would shorten the previewed arc the
+    // longer you aimed, showing a throw that detonates early and lands
+    // short of where the real one will.
     let fuse = if spec.fuse_s.is_finite() {
-        (spec.fuse_s - if kind == ThrowKind::Frag { p.cook_t } else { 0.0 }).max(0.15)
+        spec.fuse_s
     } else {
         f32::INFINITY
     };
@@ -14463,14 +14492,23 @@ fn input_and_step(
         slot: game.pending_slot,
         shield: game.pending_shield,
         lean,
-        // §5: the grenade is HELD from the moment it is equipped, and
-        // leaves on the falling edge - which is what the sim already
-        // watches for. So LEFT CLICK throws simply by dropping this
-        // false for one tick.
+        // §26 THE WIND-UP STARTS AT THE TRIGGER, NOT AT THE EQUIP.
+        //
+        // This read `nade_ready && !just_pressed(fire)`, which is true
+        // the instant G equips a grenade - so the throw began charging
+        // the moment it was in hand and every throw arrived at very
+        // nearly full power. That was invisible while the fuse also ran
+        // from equip (the grenade blew up in your hand, which is the
+        // louder bug and the one that got reported).
+        //
+        // The sim's contract is now exactly "held = winding, falling
+        // edge = throw", so the honest expression is: G puts it in your
+        // hand and does nothing else, LMB winds, releasing LMB throws
+        // and starts the 5 s fuse.
         //
         // H and Mouse4 stay wired as the old hold-to-cook, so muscle
         // memory and the capture scripts both keep working.
-        throw_hold: (game.nade_ready && !buttons.just_pressed(fire_btn))
+        throw_hold: (game.nade_ready && buttons.pressed(fire_btn))
             || keys.pressed(KeyCode::KeyH)
             || buttons.pressed(MouseButton::Back),
         // §1 (Brief V): B cancels the aimed throw, grenade kept
@@ -18001,10 +18039,16 @@ fn arc_preview(
     // preview that was wildly long early in the draw AND completely
     // static across it, hiding the one thing the draw mechanic exists to
     // teach. `gun(Bow).projectile` is now only the bots' path.
+    // §8/§9: the spear branch is GONE. It read `SPEAR_V0_MIN` for an
+    // unsettled throw, mirroring a halving the sim applied to the player
+    // alone - and the sim has since deleted that halving as a bug (the
+    // charge path fired unconditionally, so EVERY player javelin took
+    // it while this preview drew the full-speed arc anyway). With the
+    // sim's rule now one rule for player and bot, `SPEAR_V0_MIN` equals
+    // the full speed and the branch was a no-op arguing for a behaviour
+    // that no longer exists.
     let v0 = if p.gun == GunKind::Bow {
         BOW_V0_FULL * bow_power_fraction(p.bow_draw_t).unwrap_or(BOW_POWER_MIN)
-    } else if is_spear && !settled {
-        SPEAR_V0_MIN
     } else {
         v0_full
     };
@@ -19099,11 +19143,22 @@ HEAT {:.0}%", p.mech_rounds, p.gatling_heat)
         } else if p.reload_t > 0.0 {
             "RELOADING".to_string()
         } else if p.cook_t > 0.0 {
-            // §5: the fuse in your hand
+            // §26/§27: this is a WIND-UP, not a fuse. It printed
+            // "COOKING 3.4" counting a fuse down - a readout that told
+            // the player the exact opposite of the truth, since holding
+            // longer now buys RANGE and costs nothing. Show the charge
+            // and the range it is worth instead.
             let k = ThrowKind::ALL[p.throw_sel as usize];
-            let left = (throw_spec(k).fuse_s - p.cook_t).max(0.0);
             if k == ThrowKind::Frag {
-                format!("COOKING {left:.1}")
+                let f = (p.cook_t / sim::THROW_CHARGE_MAX_S).clamp(0.0, 1.0);
+                let n = (f * 10.0).round() as usize;
+                format!(
+                    "THROW [{}{}]  {:.0} m{}",
+                    "#".repeat(n),
+                    "-".repeat(10 - n),
+                    f * sim::THROW_MAX_RANGE_M,
+                    if f >= 1.0 { "  MAX" } else { "" }
+                )
             } else {
                 format!("{} ARMED", k.name())
             }
