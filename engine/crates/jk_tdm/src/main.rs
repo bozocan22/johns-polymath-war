@@ -9425,8 +9425,31 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             ))
             .set_parent(root);
     }
-    // 6 gatling barrels in a hex ring about (0.60, 0.24), plus a hazard
-    // band - generated, not typed six times
+    // §10/§32 THE BARRELS ACTUALLY TURN IN THIRD PERSON.
+    //
+    // The rotating cluster existed only as a VIEWMODEL: `MechTurretSpinner`
+    // is spawned by `spawn_mech_turret_vm` and spun by
+    // `spin_mech_turret_barrels`, so the pilot saw his own barrels wind
+    // up while every other player on the field watched a gatling fire
+    // from a cluster welded solid. That is the §32 failure exactly - a
+    // weapon correct in one view and broken in the other.
+    //
+    // They hang off a spinner NODE at the cluster's own axis now, and
+    // the same driver turns both. The node sits at the ring centre so
+    // the barrels orbit the axis rather than swinging round the hull
+    // origin - a spinner parented at the wrong point turns a gatling
+    // into a windmill.
+    let hull_spinner = commands
+        .spawn((
+            Transform::from_xyz(0.60, 0.24, 0.64),
+            Visibility::default(),
+            MechTurretSpinner,
+        ))
+        .set_parent(root)
+        .id();
+    // 6 gatling barrels in a hex ring, plus a hazard band - generated,
+    // not typed six times. Local to the spinner, so their offsets are
+    // measured from the axis they turn about.
     for k in 0..6 {
         let ang = k as f32 * std::f32::consts::TAU / 6.0;
         commands
@@ -9434,16 +9457,12 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.mech_metal.clone()),
                 Transform {
-                    translation: Vec3::new(
-                        0.60 + 0.052 * ang.cos(),
-                        0.24 + 0.045 * ang.sin(),
-                        0.64,
-                    ),
+                    translation: Vec3::new(0.052 * ang.cos(), 0.045 * ang.sin(), 0.0),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
                     scale: Vec3::new(0.03, 0.44, 0.03),
                 },
             ))
-            .set_parent(root);
+            .set_parent(hull_spinner);
     }
     commands
         .spawn((
@@ -10149,6 +10168,77 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 },
             ))
             .set_parent(root);
+    }
+    // §10 THE MODULE RING. The spec asks for sensors, targeting and
+    // range modules, tracking components, brackets and cooling around
+    // the central minigun - and every one of them goes on the STATIC
+    // housing, never on the spinner. A rangefinder that whirls with the
+    // barrels is not a rangefinder.
+    //
+    // Four modules on the housing's forward face, each a bracket with a
+    // lit face, at the quarter angles so they frame the cluster without
+    // closing over it. The ring radius clears the 0.135 clamp rings.
+    for (k, tone) in [(0usize, 0u8), (1, 1), (2, 0), (3, 1)] {
+        let a = k as f32 * std::f32::consts::TAU / 4.0 + std::f32::consts::FRAC_PI_4;
+        let (cx, cy) = (0.60 + 0.175 * a.cos(), 0.24 + 0.175 * a.sin());
+        // the bracket that holds it off the housing
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_metal.clone()),
+                Transform {
+                    translation: Vec3::new(
+                        0.60 + 0.115 * a.cos(),
+                        0.24 + 0.115 * a.sin(),
+                        0.52,
+                    ),
+                    rotation: Quat::from_rotation_z(a),
+                    scale: Vec3::new(0.075, 0.026, 0.10),
+                },
+            ))
+            .set_parent(root);
+        // the module body
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                Transform {
+                    translation: Vec3::new(cx, cy, 0.60),
+                    rotation: Quat::from_rotation_z(a),
+                    scale: Vec3::new(0.085, 0.070, 0.115),
+                },
+            ))
+            .set_parent(root);
+        // its face: a lens on the two TRACKING modules, a fine louvre
+        // stack on the two COOLING ones - so the ring reads as four
+        // different instruments rather than four copies of one
+        if tone == 0 {
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.mech_red.clone()),
+                    Transform {
+                        translation: Vec3::new(cx, cy, 0.665),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.042, 0.018, 0.042),
+                    },
+                ))
+                .set_parent(root);
+        } else {
+            for f in 0..3 {
+                commands
+                    .spawn((
+                        Mesh3d(kit.cube.clone()),
+                        MeshMaterial3d(kit.mech_shadow.clone()),
+                        Transform {
+                            translation: Vec3::new(cx, cy - 0.022 + f as f32 * 0.022, 0.665),
+                            rotation: Quat::from_rotation_z(a),
+                            scale: Vec3::new(0.070, 0.008, 0.016),
+                        },
+                    ))
+                    .set_parent(root);
+            }
+        }
     }
     for (lx, ly, lz) in [(0.545, 0.155, 0.03), (0.525, 0.205, 0.00), (0.545, 0.255, -0.02)] {
         commands
