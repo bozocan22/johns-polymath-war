@@ -4820,6 +4820,22 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
 /// §owner MEDIC: the light chassis. Third person first so the whole
 /// silhouette reads, then V into the cockpit for the mounts and the HUD,
 /// then the plasma bow held long enough to overheat.
+/// §owner THE FOUR ARMOUR TRIMS, in one frame.
+///
+/// A variant system is only real if the variants are TELLABLE APART,
+/// and the only instrument for that is a lineup: four machines, same
+/// frame, same livery, same light, differing in nothing but plate.
+/// Reading the table proves the code branches; this proves the branches
+/// are worth having.
+const TRIMS_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.04)), ..beat(0.4) },
+    CapBeat { orbit: Some(PI), ..beat(0.8) },
+    CapBeat { snap: Some("01-trims-front"), ..beat(1.8) },
+    CapBeat { orbit: Some(PI * 0.78), ..beat(2.0) },
+    CapBeat { snap: Some("02-trims-quarter"), ..beat(2.8) },
+    CapBeat { end: true, ..beat(3.2) },
+];
+
 /// §owner THE MECH BARRIER, finally photographed.
 ///
 /// The barrier shipped, was redesigned twice, and was never once
@@ -5151,6 +5167,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // §owner MEDIC: the light chassis, in first and third person.
     "medic" => MEDIC_BEATS,
         "barrier" => BARRIER_BEATS,
+        "trims" => TRIMS_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
@@ -5193,9 +5210,10 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 24] = [
+const CAPTURE_SCRIPTS: [&str; 25] = [
     "medic",
     "barrier",
+    "trims",
     "baseline",
     "idle_life",
     "bow_draw",
@@ -5460,14 +5478,14 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     // which chassis this script needs. `barrier` photographs the HEAVY's
     // arm module, so it must not be handed the light one.
     let set = match name {
-        n if n.starts_with("medic") => sim::ArmorSet::ScoutMech,
+        n if n.starts_with("medic") | matches!(n, "trims") => sim::ArmorSet::ScoutMech,
         "barrier" => sim::ArmorSet::RobotSuit,
         _ => return,
     };
     let p = game.sim.player;
-    let (team, at) = {
+    let (team, at, game_yaw) = {
         let f = &game.sim.fighters[p];
-        (f.team, f.pos)
+        (f.team, f.pos, f.yaw)
     };
     if let Some(f) = game.sim.fighters.get_mut(p) {
         f.armor_set = set;
@@ -5485,6 +5503,44 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     // Placed by hand rather than by waiting for the match to produce one
     // naturally: a script that waits on combat to reach a state is a
     // script that captures a different frame every run.
+    // §owner THE TRIM LINEUP. Four medics abreast, evenly spaced, all
+    // facing the camera - the player is slot 0, so the other three come
+    // from the first allies found. Their trims follow slot index, which
+    // is what the lineup exists to show, so nothing here picks them.
+    if name == "trims" {
+        // Teams are contiguous blocks (`idx = team_i * per_team + k`), so
+        // the player is slot 0 and slots 1-3 are allies - which is
+        // exactly the residues 1, 2, 3 that `MechTrim::ALL[i % 4]` maps
+        // to LIGHT, FIELD and HEAVY. The player wears STRIPPED. Nothing
+        // here picks a trim: if this lineup ever shows two identical
+        // machines, the indexing is what is wrong, and that is the point
+        // of photographing it rather than trusting the table.
+        //
+        // Spacing is the whole difficulty. The third-person boom is
+        // locked behind the player, so the row has to STRADDLE him or it
+        // walks out of frame - the first attempt put all three at +3.1 m
+        // intervals on one side and photographed one and a half
+        // machines. Left-to-right the row therefore reads LIGHT,
+        // STRIPPED, FIELD, HEAVY: not monotonic, but all four in shot,
+        // which is the property that matters.
+        const TRIM_ROW_X: [f32; 3] = [-1.6, 1.6, 3.2];
+        let mut placed = 0usize;
+        for k in 0..game.sim.fighters.len() {
+            if k == p || game.sim.fighters[k].team != team || !game.sim.fighters[k].alive() {
+                continue;
+            }
+            let Some(&dx) = TRIM_ROW_X.get(placed) else { break };
+            placed += 1;
+            let g = &mut game.sim.fighters[k];
+            g.armor_set = sim::ArmorSet::ScoutMech;
+            g.hull = g.mech_hull_max();
+            g.mech_transition_t = 0.0;
+            g.crouch = false;
+            g.pos = [at[0] + dx, at[1], at[2]];
+            g.yaw = game_yaw;
+        }
+        return;
+    }
     if set == sim::ArmorSet::ScoutMech {
         if let Some(k) = (0..game.sim.fighters.len())
             .find(|&k| k != p && game.sim.fighters[k].team == team && game.sim.fighters[k].alive())
@@ -7753,6 +7809,85 @@ fn spawn_repair_emitter_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     root
 }
 
+/// §owner MECH ARMOUR TRIM: how much plate a chassis wears.
+///
+/// The owner asked for different TYPES of machine and different SIZES
+/// of armour, built the easy way. This is the easy way: the FRAME is
+/// one model and the PLATE is a table, so a new variant costs a row
+/// rather than a mesh. Four trims out of one chassis, and a lineup of
+/// medics stops looking like four copies of one machine.
+///
+/// Two dials only, and both are deliberately crude, because a variant
+/// that needs six numbers tuned is a variant nobody adds:
+///
+///  - `limb_scale` wraps thicker or thinner shell round the SAME frame.
+///    The black skeleton underneath never moves, so no trim can break
+///    the silhouette's proportions or its joints.
+///  - `plates` is a COUNT, not a set. The optional pieces have a fixed
+///    order of value - knees, pauldrons, belly, gorget - and a trim
+///    wears the first N of them. Ordering it this way means coverage
+///    can only ever grow with the trim, which is the one property the
+///    test below can check cheaply and the one a set would let drift.
+///
+/// Knees lead because a walker takes its hits from below; the gorget
+/// is last because the throat is the smallest target on the machine.
+///
+/// VISUAL ONLY. Nothing sim-side knows this exists - it is picked from
+/// the fighter's slot index at spawn, exactly as the helmet shapes are,
+/// so it cannot touch replay state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MechTrim {
+    /// Frame and mounts, nothing spare. The machine that has been
+    /// stripped for parts, or never issued any.
+    Stripped,
+    Light,
+    Field,
+    /// Everything the chassis can carry.
+    Heavy,
+}
+
+/// The optional plates, in the order a trim earns them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TrimPiece {
+    Knees = 0,
+    Pauldrons = 1,
+    Belly = 2,
+    Gorget = 3,
+}
+
+impl MechTrim {
+    const ALL: [MechTrim; 4] = [
+        MechTrim::Stripped,
+        MechTrim::Light,
+        MechTrim::Field,
+        MechTrim::Heavy,
+    ];
+
+    /// Shell thickness against the frame. 1.0 is the drawn baseline.
+    fn limb_scale(self) -> f32 {
+        match self {
+            MechTrim::Stripped => 0.70,
+            MechTrim::Light => 0.84,
+            MechTrim::Field => 1.00,
+            MechTrim::Heavy => 1.16,
+        }
+    }
+
+    /// How many of `TrimPiece`'s four this trim wears.
+    fn plates(self) -> u8 {
+        match self {
+            MechTrim::Stripped => 0,
+            MechTrim::Light => 1,
+            MechTrim::Field => 3,
+            MechTrim::Heavy => 4,
+        }
+    }
+
+    fn wears(self, piece: TrimPiece) -> bool {
+        self.plates() > piece as u8
+    }
+}
+
 /// §owner AGILE SUPPORT MECH: the light chassis, redesigned.
 ///
 /// The owner brought a reference: a squat utility robot, all rounded
@@ -7780,12 +7915,9 @@ fn spawn_repair_emitter_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
 ///    stays). Thick shins and big feet say "walks all day carrying a
 ///    toolbox", which is the truthful thing to say about a medic.
 ///
-/// `full_kit` is the armour trim. Full wears the pauldron domes, knee
-/// caps and belly band; light drops them and thins the limb shells -
-/// same frame, different plate weight, so a lineup of scouts reads as
-/// individuals the way the helmet shapes do for the infantry. Trim is
-/// VISUAL ONLY and derived from slot index at spawn: nothing sim-side
-/// knows it exists.
+/// `trim` is how much armour this one wears - see `MechTrim`. Same
+/// frame, four plate weights, so a lineup of scouts reads as
+/// individuals the way the helmet shapes do for the infantry.
 ///
 /// The mount anchors (x = +-0.445, y = 0.30) and the ground line
 /// (y = -0.52) are load-bearing: the repair-beam origin and the sim's
@@ -7796,7 +7928,7 @@ fn spawn_scout_chassis(
     commands: &mut Commands,
     kit: &ModelKit,
     ally: bool,
-    full_kit: bool,
+    trim: MechTrim,
 ) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
@@ -7809,7 +7941,7 @@ fn spawn_scout_chassis(
     // `mech_shadow` black and the bare metal always `mech_metal` -
     // shared with the heavy, because bolts and joints have no faction.
     let shell = if ally { kit.scout_hull.clone() } else { kit.scout_hull_foe.clone() };
-    let trim = if ally { kit.scout_plate.clone() } else { kit.scout_plate_foe.clone() };
+    let plate = if ally { kit.scout_plate.clone() } else { kit.scout_plate_foe.clone() };
     let line = if ally { kit.scout_line.clone() } else { kit.scout_line_foe.clone() };
     let mut part = |mesh: Handle<Mesh>,
                     mat: Handle<StandardMaterial>,
@@ -7824,8 +7956,8 @@ fn spawn_scout_chassis(
             ))
             .set_parent(root);
     };
-    // light trim thins the limb shells; the frame never changes
-    let lt = if full_kit { 1.0 } else { 0.84 };
+    // the trim thins or thickens the limb shells; the frame never moves
+    let lt = trim.limb_scale();
 
     // ---- PELVIS: a black frame block the whole machine stands on ------
     //
@@ -7848,12 +7980,27 @@ fn spawn_scout_chassis(
     // ring on the chest instead of an exposed cage
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.55, 0.275), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.14, 0.030, 0.14));
     part(cyl(), line.clone(), Vec3::new(0.0, 0.55, 0.285), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.090, 0.028, 0.090));
-    if full_kit {
+    if trim.wears(TrimPiece::Belly) {
         // belly band - the widest plate, worn low the way tool belts sit
-        part(cube(), trim.clone(), Vec3::new(0.0, 0.425, 0.235), Quat::from_rotation_x(-0.14), Vec3::new(0.36, 0.11, 0.055));
+        part(cube(), plate.clone(), Vec3::new(0.0, 0.425, 0.235), Quat::from_rotation_x(-0.14), Vec3::new(0.36, 0.11, 0.055));
+    }
+    if trim.wears(TrimPiece::Gorget) {
+        // the GORGET - a collar shielding the neck column. Last plate
+        // earned and the smallest, but it rings the one gap in the
+        // machine, so the heaviest trim announces itself at a glance.
+        //
+        // It sat at y=0.80 first, which is INSIDE the torso egg (whose
+        // crown is 0.82) - the heaviest trim's one unique plate was
+        // geometry nothing could ever see. It rides the neck now, in
+        // the 0.82-1.02 gap between the torso crown and the head.
+        part(cyl(), plate.clone(), Vec3::new(0.0, 0.875, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.075, 0.30));
+        part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.925, 0.0), Quat::IDENTITY, Vec3::new(0.22, 0.045, 0.22));
+        // and a raised lip at the front, so the collar reads as armour
+        // worn over the throat rather than as a washer on a bolt
+        part(cube(), plate.clone(), Vec3::new(0.0, 0.915, 0.115), Quat::from_rotation_x(-0.42), Vec3::new(0.24, 0.10, 0.045));
     }
     // ---- BACKPACK: the power unit, replacing the old boom -------------
-    part(cube(), trim.clone(), Vec3::new(0.0, 0.60, -0.245), Quat::IDENTITY, Vec3::new(0.30, 0.28, 0.11));
+    part(cube(), plate.clone(), Vec3::new(0.0, 0.60, -0.245), Quat::IDENTITY, Vec3::new(0.30, 0.28, 0.11));
     for sd in [-1.0_f32, 1.0] {
         part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.085, 0.60, -0.305), Quat::IDENTITY, Vec3::new(0.055, 0.20, 0.020));
     }
@@ -7864,7 +8011,7 @@ fn spawn_scout_chassis(
     part(ball(), shell.clone(), Vec3::new(0.0, 1.02, 0.01), Quat::from_rotation_x(-0.04), Vec3::new(0.50, 0.42, 0.48));
     // the brow - one trim plate over the lens, which is all the
     // "expression" a utility machine gets
-    part(cube(), trim.clone(), Vec3::new(0.0, 1.145, 0.13), Quat::from_rotation_x(-0.34), Vec3::new(0.30, 0.045, 0.16));
+    part(cube(), plate.clone(), Vec3::new(0.0, 1.145, 0.13), Quat::from_rotation_x(-0.34), Vec3::new(0.30, 0.045, 0.16));
     // THE LENS. Bezel ring, dark glass, and the lit iris - the iris is
     // the team accent at visor height, so friend-or-foe is answered by
     // the same glance that meets its eye.
@@ -7886,11 +8033,11 @@ fn spawn_scout_chassis(
     // ---- SHOULDERS + ARMS: ball joints, dome caps, chunky mitts -------
     for sd in [-1.0_f32, 1.0] {
         part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.30, 0.76, 0.0), Quat::IDENTITY, Vec3::splat(0.135));
-        if full_kit {
+        if trim.wears(TrimPiece::Pauldrons) {
             // the pauldron dome - a half-egg cap riding the joint. Low
             // and steeply canted: the first pass floated it at head
             // height and the machine grew mouse ears.
-            part(ball(), shell.clone(), Vec3::new(sd * 0.34, 0.785, 0.0), Quat::from_rotation_z(sd * 0.50), Vec3::new(0.25, 0.15, 0.27));
+            part(ball(), shell.clone(), Vec3::new(sd * 0.345, 0.775, 0.0), Quat::from_rotation_z(sd * 0.34), Vec3::new(0.26, 0.155, 0.28));
         }
         part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.365, 0.60, 0.02), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.075, 0.28, 0.075));
         part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.395, 0.45, 0.03), Quat::IDENTITY, Vec3::splat(0.10));
@@ -7908,8 +8055,8 @@ fn spawn_scout_chassis(
         part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.17, 0.18, 0.0), Quat::IDENTITY, Vec3::splat(0.125));
         part(cube(), shell.clone(), Vec3::new(sd * 0.185, 0.015, 0.02), Quat::from_rotation_x(-0.08), Vec3::new(0.165 * lt, 0.30, 0.205 * lt));
         part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.15, 0.035), Quat::IDENTITY, Vec3::splat(0.115));
-        if full_kit {
-            part(cube(), trim.clone(), Vec3::new(sd * 0.185, -0.13, 0.115), Quat::from_rotation_x(-0.28), Vec3::new(0.125, 0.10, 0.050));
+        if trim.wears(TrimPiece::Knees) {
+            part(cube(), plate.clone(), Vec3::new(sd * 0.185, -0.13, 0.115), Quat::from_rotation_x(-0.28), Vec3::new(0.125, 0.10, 0.050));
         }
         // the shin carries its mass low - a fat calf is what makes the
         // whole machine look like it cannot be knocked over
@@ -7923,7 +8070,7 @@ fn spawn_scout_chassis(
 
     // ---- MOUNTS: plasma right, repair left - same anchors, new shells -
     // Plasma: a stub cannon in a trim housing with a lit throat.
-    part(cube(), trim.clone(), Vec3::new(0.445, 0.30, 0.30), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.30));
+    part(cube(), plate.clone(), Vec3::new(0.445, 0.30, 0.30), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.30));
     for k in 0..2 {
         part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.445, 0.30, 0.40 + k as f32 * 0.08),
             Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.155, 0.035, 0.155));
@@ -7931,7 +8078,7 @@ fn spawn_scout_chassis(
     part(cyl(), line.clone(), Vec3::new(0.445, 0.30, 0.52), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.075, 0.030, 0.075));
     // Repair: the dish, unchanged in role - it PROJECTS where the
     // cannon FIRES, and the shapes still say which is which.
-    part(cube(), trim.clone(), Vec3::new(-0.445, 0.30, 0.26), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.22));
+    part(cube(), plate.clone(), Vec3::new(-0.445, 0.30, 0.26), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.22));
     part(cyl(), shell.clone(), Vec3::new(-0.445, 0.30, 0.42), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.24, 0.050, 0.24));
     part(cyl(), kit.mech_shadow.clone(), Vec3::new(-0.445, 0.30, 0.44), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.035, 0.17));
     part(ball(), line.clone(), Vec3::new(-0.445, 0.30, 0.455), Quat::IDENTITY, Vec3::splat(0.070));
@@ -11286,10 +11433,11 @@ fn spawn_fighter_rigs(
         // the class silhouettes - building one at boarding time would
         // fight the material and layer latches every other rig here has
         // had to work around.
-        // armour trim from slot index, the helmet trick again: even
-        // slots wear the full kit, odd slots the light one, and a
-        // lineup of medics reads as individuals. Visual only.
-        let scout_rig = spawn_scout_chassis(commands, kit, ally, i % 2 == 0);
+        // armour trim from slot index, the helmet trick again: four
+        // plate weights off one frame, so a lineup of medics reads as
+        // individuals rather than as four copies. Visual only - see
+        // `MechTrim`.
+        let scout_rig = spawn_scout_chassis(commands, kit, ally, MechTrim::ALL[i % MechTrim::ALL.len()]);
         commands
             .entity(scout_rig)
             .insert((Transform::IDENTITY, Visibility::Hidden))
@@ -23219,6 +23367,45 @@ mod segment_tests {
     /// reads as repair - which matters, because a beam pointed at a
     /// teammate that looks like a weapon is a beam that will make people
     /// dodge their own medic.
+    #[test]
+    /// §owner The armour trims must actually differ, and must differ in
+    /// ONE direction.
+    ///
+    /// The failure this catches is not a crash, it is a lineup where two
+    /// trims render identically - which looks exactly like a working
+    /// variant system to anyone reading the code, and like a bug to
+    /// anyone looking at the screen. Both dials are therefore checked
+    /// for strict monotonicity across `ALL`, which also fixes the
+    /// order: heavier trims can never wear LESS.
+    #[test]
+    fn every_armour_trim_is_visibly_a_different_machine() {
+        let all = MechTrim::ALL;
+        for w in all.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            assert!(
+                b.limb_scale() > a.limb_scale(),
+                "{b:?} does not wrap more shell than {a:?} - two trims                  that render the same are not two trims"
+            );
+            assert!(
+                b.plates() > a.plates(),
+                "{b:?} wears no more plates than {a:?}; coverage has to                  grow with the trim or the ordering means nothing"
+            );
+        }
+        // the count is an index into TrimPiece's four - one past the end
+        // would silently drop the last plate rather than fail
+        assert_eq!(
+            all[all.len() - 1].plates(),
+            4,
+            "the heaviest trim must wear every optional plate"
+        );
+        assert_eq!(all[0].plates(), 0, "Stripped is the bare frame");
+        // and the bare frame still has to be a machine, not a wireframe
+        assert!(
+            all[0].limb_scale() > 0.5,
+            "a trim that thin is a skeleton, not a stripped chassis"
+        );
+    }
+
     #[test]
     fn the_repair_beam_reads_as_energy_going_somewhere() {
         assert!(
