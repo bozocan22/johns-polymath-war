@@ -9,6 +9,86 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0a. THE ORDER OF WORK — everything left, ranked
+
+Ranking rule, as always: an item moves up when its blocker clears, not
+when it becomes interesting. Within a tier, cheapest-per-unit-of-felt-
+difference first. Spec section numbers in brackets.
+
+### TIER 1 — feel. Cheap, and the player notices immediately.
+
+1. **First-person aiming [§7].** The one Priority-1 item still open.
+   The spec says aiming is "too difficult"; the spear turned out to be a
+   silent 2x halving, so look for the same class of thing here before
+   tuning anything: crosshair-to-muzzle alignment, whether the aim ray
+   and the drawn barrel agree, recoil recovery rate.
+2. **Projectile origin audit [§16/§17].** Partly done historically (mech
+   fire used to leave screen centre). Nothing has ever audited ALL of
+   bullets / rockets / arrows / spears / grenades in both views at once.
+   Cheap, and it is the shared root of several "feels wrong" reports.
+3. **Grenade pre-aim [§28].** The arc preview and the 55 m/2.3 s curve
+   both exist now; what is missing is the max-range indicator and the
+   distance readout on the arc itself.
+4. **Turret recoil feel [§11].** The numbers landed with the fire modes.
+   This is the presentation half: camera kick, muzzle climb, and the
+   hull answering the shot.
+
+### TIER 2 — visible content, self-contained, one session each.
+
+5. **Rocket launcher visual detail [§14].** The mount is a housing and a
+   tube; the spec wants targeting electronics, a loading mechanism and
+   data/power hardware. Same additive method as the turret module ring.
+6. **Mech jump and crouch [§21].** SIM-side. Wants compression, launch,
+   landing impact and recovery, plus a real crouch that lowers the hull.
+   Note `set_crouch` currently REFUSES to crouch a mech by design - that
+   rule has to be revisited deliberately, not deleted.
+7. **Green plasma hit effect [§25].** Build the positive half only. The
+   "x-ray" this section asks to remove has no identified target in the
+   code (see 0b) - do not delete something on the strength of a guess.
+8. **Spacecraft cockpit [§20].** First-person mech frame, instrument
+   panels, screen glow, vibration. The `hands` capture's boom scale is
+   the instrument that makes this checkable.
+9. **HUD redesign [§19].** Consistent type, spacing, panels and
+   hierarchy across everything above. Deliberately AFTER the readouts
+   it has to unify - redesigning a HUD that is still growing elements
+   means doing it twice.
+
+### TIER 3 — large. Real multi-session work; do not rush.
+
+10. **Soldier finger ANIMATION [§4, redirected].** The hand exists and
+    poses from one `curl`. Driving that curl from the weapon, the
+    reload, the melee swing and the grip is the remaining half.
+11. **Armour damage states (Brief IX §C).** Per-piece HP so a worn plate
+    goes Fresh → Scuffed → Cracked → Severed. Needs the hit path to
+    resolve which PIECE it struck, not which zone. The biggest item
+    outside the spec.
+12. **Weapon crafting station [§24].** Category grid, attachments, stat
+    comparison. Shares its front end with the Forge per-piece grid, so
+    build them together or not at all.
+13. **Mech control scheme [§31].** Only worth doing once jump, crouch
+    and the cockpit exist to be controlled.
+14. **Castle map.** Content/geometry. The intro already offers CASTLE
+    BAILEY and CASTLE GARDENS, which today are arena-blockout layouts -
+    the menu is writing a cheque the map does not cash.
+15. **Ragdoll + hit-reaction impulse.** The 20-segment rig publishes
+    mass, length and inertia that nothing reads yet.
+
+### TIER 4 — blocked. Named unblocker, not difficulty.
+
+16. **Uploaded gun assets [§23]** - no unused image or model assets are
+    in the repo. Unblocker: the owner points at them.
+17. **Texture pipeline** - every world surface is flat colour. Unblocks
+    wear maps, decals, weapon material stacks [§12 of the backlog].
+18. **Networking** - zero deps. The deterministic sim is the right
+    foundation; nothing else exists.
+19. **Traversal (climb/vault/mantle)** - blocked on map metrics.
+
+### ONGOING, not a task
+- **Audio placeholders**: plasma, repair beam, barrier deploy and the
+  precision charge all borrow soldier sounds, marked at the call sites.
+- **§5 emotion dynamics**: keep working, verify after each rig change.
+- **§33/§34 polish and LOD**: continuous, not a milestone.
+
 ## 0b. THE 36-SECTION SPEC — status per section
 
 The owner delivered a consolidated 36-section development spec. Several
@@ -49,16 +129,14 @@ those corrections matter more than the ticks:
 - §30 firing-mode UI — needs the sim's fire-mode accessor to exist
   first. Wiring a display before then means inventing the state.
 
-**Not started (honest, ranked by cost)**
-- §12-13 fire modes + per-weapon recoil, §15 rocket curve, §8-9 spear,
-  §26-28 grenade rework — all SIM-side and in progress.
-- §14 rocket launcher detail, §11 turret recoil, §20 cockpit, §21 mech
-  jump/crouch, §22 red/yellow royal variant, §19 HUD redesign.
-- §1-4 the 3x-detail Agile Mech with articulated fingers. This is the
-  largest single item in the spec and is a rig rebuild, not a detail
-  pass — individually articulated fingers need bones the rig does not
-  have.
-- §24 crafting station, §34 LOD/performance work.
+**Done since that audit** (see section 0a for what remains)
+- §8/§9 spear, §12/§13 fire modes + recoil, §15 rocket arc,
+  §26/§27 grenade, §30 fire-mode UI, §22 royal variant,
+  §1 Agile Mech graphics pass, §2/§3 soldier hands + arm joints.
+- Three of those were DEAD CODE rather than tuning: the spear's speed
+  halving fired on every player throw while the preview drew the full
+  arc; the grenade's fuse and wind-up shared one clock; the autocannon's
+  kick was erased inside the tick it landed.
 
 ## 1. Small, one-session buildable (ranked, next up)
 
