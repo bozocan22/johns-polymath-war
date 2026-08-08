@@ -9,6 +9,100 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0-NOW. THE LIST, REBUILT AFTER THE SIX-AGENT SESSION (2026-08-08)
+
+Everything below is what is ACTUALLY left. Sections 0a and 0-SCOUT
+underneath are kept as history; where they disagree with this, this
+wins. Suite is 358 tests at commit `8482933`.
+
+### A. DEBTS FROM THIS SESSION — do these first, they are known-broken
+
+1. **The jump telegraph has no client reader.** During Compress and
+   Recover the sim kneels the hitbox (`height()` drops 0.85 m, every hit
+   band shrinks) while the rendered chassis stands upright. ~0.95 s of
+   model/hitbox disagreement per jump, and the first-person camera DOES
+   follow, so the pilot's view sinks for no visible reason. Key the rig
+   on `chassis_kneeling()` + `mech_jump_compression_of()`, not raw
+   `f.crouch`.
+2. **`gait_pose` bakes the INFANTRY crouch ratio** (0.646) against the
+   sim's `MECH_CROUCH_HEIGHT_FRAC` (0.72), which appears nowhere in
+   main.rs. Kneeling, the x2.0 visor weak point lands on rendered neck
+   and shoulder. Same class as the bug the crouch ban was holding shut.
+3. **Armour damage states have no client half.** `armor_stage_of` and
+   `armor_wear_of` are published and read by NOTHING; plates render at
+   one appearance whatever their condition. The whole feature is
+   invisible.
+4. **The barrier test is half vacuous** — its alpha and span constants
+   are copied into the test body, so mutating the real material or the
+   real disc size leaves the suite green.
+5. **Capture verification owed** for four fixes that landed unphotographed:
+   the per-owner turret spinners, the world minigun spin, the kneeling
+   crouch drop, and the grenade throw.
+6. **`gatling_heat` carries TWO scales in one sim field** — 0..100 for
+   the heavy's gatling, 0..1 for the medic's plasma. `main.rs:20167`
+   prints the raw value under a `%`, correct for one and 100x wrong for
+   the other if that branch is ever shared. Split it or document it.
+7. **DECISION NEEDED, not a bug: mech first-person aim is 1.10 m off.**
+   The camera sits at the visor (pos+2.723 m); every mech weapon fires
+   from `muzzle_origin` (pos+1.62 m), because `EYE_REL.min(height-0.12)`
+   only bites for a SHORT fighter. A hull turret genuinely IS a metre
+   below the visor, so this may be correct and merely unstated. Changing
+   it would move every mech engagement, hit test, cover line and tracer.
+   The owner should choose.
+
+### B. PROMISES THE GAME MAKES AND DOES NOT KEEP
+
+8. **Mech boarding is 8 named, tested sim stages and the client renders
+   SEVEN of them as a `debug!` line no player sees.** The largest
+   built-but-invisible system in the game.
+9. **`SCOUT_SCALE = 1.42` is read by nothing** — the Mechanical Medic
+   renders man-sized despite a constant documented as the reason it
+   "reads as a different silhouette from across a map".
+10. **CASTLE BAILEY's keep is byte-identical to DUST ARENA's centre
+    tower** (same helper, same two arguments), and **CASTLE GARDENS'
+    "stone gazebo" is a solid 8x8x2.4 m block** you can neither enter
+    nor shoot through. The rest of both maps is real.
+11. **`visor_ready` promises a camera that does not exist** — it is a
+    Bevy `Local`, so nothing outside its own system CAN read it.
+12. **Audio placeholders**: plasma, repair beam, barrier and precision
+    charge all play `shot_mp5`; every boarding stage plays `click`.
+    Unblocker is `engine/assets/audio/gen_sfx.py`, not the owner.
+
+### C. SPEC SECTIONS STILL OPEN
+
+13. §16/§17 projectile origin audit — all five projectile types, both
+    views, never checked together.
+14. §19 HUD redesign — deliberately last; it must unify readouts that
+    are still being added.
+15. §4 soldier finger ANIMATION — the hand poses from one `curl`, which
+    is still a spawn-time argument. Driving it from weapon, reload,
+    melee and grip is the remaining half.
+16. §24 crafting station — shares a front end with the Forge per-piece
+    grid; build together or not at all.
+17. §31 mech controls — only worth doing now that jump, crouch and the
+    cockpit exist to be controlled.
+18. §29 throwing consistency, §28 arc-attached distance readout.
+19. §11 turret recoil: muzzle climb and the hull answering the shot (the
+    camera-kick half is live and tested).
+20. §32 a real first/third-person consistency pass. Three separate
+    instances of that defect were found in ONE session.
+
+### D. LARGE / BLOCKED
+
+21. Ragdoll + hit-reaction impulse — the rig's mass/inertia data is
+    complete, tested, and read by nothing.
+22. Texture pipeline — every world surface is flat colour.
+23. **§23 uploaded gun assets — the blocker is now NAMED and it is not
+    the owner.** `jk_tdm`, the crate the game launches from, has NO
+    glTF loader; only `jk_bevy` does. A GLB dropped in
+    `engine/assets/characters/` changes nothing in the shipping game.
+24. Networking, traversal, full character customization.
+
+### DEAD CONSTANTS (cheap, do while passing)
+`ROBOT_SPEED_MULT` (1.12, contradicts the live 0.85 beside it),
+`MECH_SHIELD_ARC_COS`, `TDM_TARGET_CHOICES`, `FORGE_SLOTS`, and
+`shot_handgun.wav` which is on disk and never loaded.
+
 ## 0-SCOUT. WHAT TWO READ-ONLY SCOUTS FOUND (2026-08-08)
 
 **This file was stale AGAIN, for the second time.** A gap scout checked
