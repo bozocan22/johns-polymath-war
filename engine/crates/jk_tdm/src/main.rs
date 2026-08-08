@@ -3455,6 +3455,14 @@ struct ModelKit {
     mech_khaki: Handle<StandardMaterial>,
     mech_khaki_dk: Handle<StandardMaterial>,
     mech_khaki_lt: Handle<StandardMaterial>,
+    /// §22 THE ROYAL VARIANT's three body tones. Exactly the three the
+    /// heavy already paints itself with, so the variant is a swap of
+    /// handles at the top of `spawn_armor_rig` rather than a second copy
+    /// of a 53-plate table - which is the only reason a third or fourth
+    /// livery would ever be cheap enough to add.
+    mech_royal: Handle<StandardMaterial>,
+    mech_royal_dk: Handle<StandardMaterial>,
+    mech_royal_lt: Handle<StandardMaterial>,
     mech_shadow: Handle<StandardMaterial>,
     mech_metal: Handle<StandardMaterial>,
     mech_red: Handle<StandardMaterial>,
@@ -5649,6 +5657,28 @@ fn capture_board_medic(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
             g.mech_transition_t = 0.0;
             g.crouch = false;
             g.pos = [at[0] + dx, at[1], at[2]];
+            g.yaw = game_yaw;
+        }
+        return;
+    }
+    // §22: the `barrier` shot also needs the ROYAL variant in frame, and
+    // the player is slot 0 - which by the `i % 4 == 1` livery rule is
+    // never the elite one. Park an ally that IS beside him, so the two
+    // liveries are photographed together under one light. Picking the
+    // slot by the same residue the rig uses means this cannot quietly
+    // photograph two identical machines if the rule ever changes.
+    if name == "barrier" {
+        if let Some(k) = (0..game.sim.fighters.len())
+            .find(|&k| k != p && k % 4 == 1 && game.sim.fighters[k].team == team)
+        {
+            let g = &mut game.sim.fighters[k];
+            g.armor_set = sim::ArmorSet::RobotSuit;
+            g.hull = g.mech_hull_max();
+            g.mech_transition_t = 0.0;
+            g.crouch = false;
+            g.health = MAX_HEALTH;
+            g.respawn_t = 0.0;
+            g.pos = [at[0] + 4.2, at[1], at[2] - 0.6];
             g.yaw = game_yaw;
         }
         return;
@@ -9337,38 +9367,54 @@ struct MechLegArmor {
 /// height, torso-local y > 0.846) is filled by the sensor deck, and the
 /// emissive visor slit sits inside the visor-mult band - so the sim's
 /// damage model is untouched by construction.
-fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHullDetach) {
+fn spawn_armor_rig(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    // §22 THE ROYAL VARIANT. Same machine, same 53 plates, same
+    // silhouette - red lacquer over the khaki, gold where the hazard
+    // stripes sit, and a crown on the sensor deck. The spec asked for
+    // "the same mech family plus a unique elite variant", and the way
+    // to get that is to change the PAINT and one silhouette element,
+    // not to fork the model.
+    elite: bool,
+) -> (Entity, MechHullDetach) {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
     let cube = || kit.cube.clone();
     let cyl = || kit.cyl.clone();
     let ball = || kit.ball.clone();
+    // the three body tones, picked once. Every plate below names the
+    // ROLE (body / body_lt / body_dk) rather than the colour, so the two
+    // liveries cannot drift into different machines.
+    let body = if elite { kit.mech_royal.clone() } else { kit.mech_khaki.clone() };
+    let body_lt = if elite { kit.mech_royal_lt.clone() } else { kit.mech_khaki_lt.clone() };
+    let body_dk = if elite { kit.mech_royal_dk.clone() } else { kit.mech_khaki_dk.clone() };
     // (mesh, material, translation, rotation, scale) - torso-local
     let plates: [(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Quat, Vec3); 53] = [
         // ---- HULL: a slab wider than tall, over the legs (D.1/D.4) ----
-        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.50, 0.08), Quat::IDENTITY, Vec3::new(1.06, 0.44, 0.92)),
-        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.665, 0.44), Quat::from_rotation_x(0.55), Vec3::new(0.94, 0.04, 0.30)),
+        (cube(), body.clone(), Vec3::new(0.0, 0.50, 0.08), Quat::IDENTITY, Vec3::new(1.06, 0.44, 0.92)),
+        (cube(), body.clone(), Vec3::new(0.0, 0.665, 0.44), Quat::from_rotation_x(0.55), Vec3::new(0.94, 0.04, 0.30)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.52, 0.545), Quat::IDENTITY, Vec3::new(0.56, 0.18, 0.03)),
-        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.35, 0.55, 0.548), Quat::IDENTITY, Vec3::new(0.11, 0.15, 0.012)),
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.42, 0.745, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.03, 0.22)),
+        (cube(), body_lt.clone(), Vec3::new(0.35, 0.55, 0.548), Quat::IDENTITY, Vec3::new(0.11, 0.15, 0.012)),
+        (cube(), body_dk.clone(), Vec3::new(0.42, 0.745, 0.14), Quat::IDENTITY, Vec3::new(0.16, 0.03, 0.22)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.272, 0.08), Quat::IDENTITY, Vec3::new(1.00, 0.02, 0.86)),
         // two-tone break-up: a lighter deck plate + a dark chin line -
         // paint, not geometry, is what stops the slab reading flat
-        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.723, -0.06), Quat::IDENTITY, Vec3::new(0.58, 0.010, 0.50)),
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.315, 0.548), Quat::IDENTITY, Vec3::new(1.00, 0.07, 0.010)),
+        (cube(), body_lt.clone(), Vec3::new(0.0, 0.723, -0.06), Quat::IDENTITY, Vec3::new(0.58, 0.010, 0.50)),
+        (cube(), body_dk.clone(), Vec3::new(0.0, 0.315, 0.548), Quat::IDENTITY, Vec3::new(1.00, 0.07, 0.010)),
         // ---- SENSOR DECK: the "no head" head - fills the >0.82 band ----
-        (cube(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.88, 0.02), Quat::IDENTITY, Vec3::new(0.62, 0.32, 0.54)),
+        (cube(), body.clone(), Vec3::new(0.0, 0.88, 0.02), Quat::IDENTITY, Vec3::new(0.62, 0.32, 0.54)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.89, 0.297), Quat::IDENTITY, Vec3::new(0.48, 0.17, 0.012)),
         // the SENSOR VISOR strip - a thin lens line, not a lightbar
         (cube(), kit.mech_red.clone(), Vec3::new(0.0, 0.945, 0.308), Quat::IDENTITY, Vec3::new(0.40, 0.032, 0.02)),
         // brow hood over the slit + cheek blocks framing the recess -
         // NO extra mech_red anywhere: one slit is the x2 weak-point read
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.99, 0.30), Quat::from_rotation_x(-0.20), Vec3::new(0.50, 0.025, 0.12)),
-        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(-0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
-        (cube(), kit.mech_khaki_lt.clone(), Vec3::new(0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
+        (cube(), body_dk.clone(), Vec3::new(0.0, 0.99, 0.30), Quat::from_rotation_x(-0.20), Vec3::new(0.50, 0.025, 0.12)),
+        (cube(), body_lt.clone(), Vec3::new(-0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
+        (cube(), body_lt.clone(), Vec3::new(0.27, 0.89, 0.295), Quat::IDENTITY, Vec3::new(0.06, 0.17, 0.015)),
         // ---- REAR: comms/cooling drum, LEFT (right one is 40%-tagged) --
-        (cyl(), kit.mech_khaki_dk.clone(), Vec3::new(-0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22)),
+        (cyl(), body_dk.clone(), Vec3::new(-0.28, 0.86, -0.38), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.34, 0.22)),
         (cyl(), kit.mech_metal.clone(), Vec3::new(-0.28, 0.86, -0.30), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.235, 0.02, 0.235)),
         (cyl(), kit.mech_metal.clone(), Vec3::new(-0.28, 0.86, -0.46), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.235, 0.02, 0.235)),
         // ---- ANTENNAS: whip base; sensor stalk + ball tip, LEFT --------
@@ -9378,19 +9424,19 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         // ---- HIP & WAIST: the mechanism stays EXPOSED (Task 5.4) -------
         (cyl(), kit.mech_metal.clone(), Vec3::new(0.0, 0.005, 0.02), Quat::IDENTITY, Vec3::new(0.44, 0.05, 0.40)),
         // kept from the old rig, verbatim:
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.10, 0.05), Quat::IDENTITY, Vec3::new(0.40, 0.14, 0.22)),
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.02, 0.10), Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
+        (cube(), body_dk.clone(), Vec3::new(0.0, 0.10, 0.05), Quat::IDENTITY, Vec3::new(0.40, 0.14, 0.22)),
+        (cube(), body_dk.clone(), Vec3::new(0.0, -0.02, 0.10), Quat::from_rotation_x(-0.25), Vec3::new(0.34, 0.12, 0.10)),
         (cube(), kit.mech_metal.clone(), Vec3::new(0.0, 0.02, 0.18), Quat::from_rotation_x(0.15), Vec3::new(0.14, 0.06, 0.06)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.09, -0.01, 0.19), Quat::from_rotation_z(0.4), Vec3::new(0.03, 0.09, 0.03)),
         (cube(), kit.mech_metal.clone(), Vec3::new(0.09, 0.05, 0.16), Quat::from_rotation_z(0.3), Vec3::new(0.08, 0.05, 0.01)),
         // ---- SHOULDER HOUSINGS: low on the flanks, never shoulder-top --
-        (cube(), kit.mech_khaki.clone(), Vec3::new(-0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
-        (cube(), kit.mech_khaki.clone(), Vec3::new(0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
+        (cube(), body.clone(), Vec3::new(-0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
+        (cube(), body.clone(), Vec3::new(0.60, 0.42, 0.06), Quat::IDENTITY, Vec3::new(0.20, 0.28, 0.42)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(-0.60, 0.25, 0.06), Quat::IDENTITY, Vec3::new(0.16, 0.08, 0.36)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.60, 0.25, 0.06), Quat::IDENTITY, Vec3::new(0.16, 0.08, 0.36)),
         // ---- ROCKET POD, left hardpoint: rail + box + 10-tube face -----
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.735, 0.02), Quat::IDENTITY, Vec3::new(0.28, 0.04, 0.34)),
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(-0.44, 0.855, 0.02), Quat::IDENTITY, Vec3::new(0.34, 0.23, 0.42)),
+        (cube(), body_dk.clone(), Vec3::new(-0.44, 0.735, 0.02), Quat::IDENTITY, Vec3::new(0.28, 0.04, 0.34)),
+        (cube(), body_dk.clone(), Vec3::new(-0.44, 0.855, 0.02), Quat::IDENTITY, Vec3::new(0.34, 0.23, 0.42)),
         // recessed dark face so the tubes read as BORED openings
         (cube(), kit.mech_shadow.clone(), Vec3::new(-0.44, 0.855, 0.232), Quat::IDENTITY, Vec3::new(0.32, 0.20, 0.008)),
         (cyl(), kit.mech_shadow.clone(), Vec3::new(-0.575, 0.895, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.014, 0.055)),
@@ -9406,16 +9452,58 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         (cube(), kit.mech_red.clone(), Vec3::new(-0.44, 0.755, 0.235), Quat::IDENTITY, Vec3::new(0.30, 0.012, 0.01)),
         (cube(), kit.mech_hazard.clone(), Vec3::new(-0.44, 0.965, 0.225), Quat::IDENTITY, Vec3::new(0.30, 0.016, 0.014)),
         // ---- GATLING ARM, right flank: hangs LOW and FORWARD -----------
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.60, 0.24, 0.14), Quat::IDENTITY, Vec3::new(0.20, 0.20, 0.30)),
+        (cube(), body_dk.clone(), Vec3::new(0.60, 0.24, 0.14), Quat::IDENTITY, Vec3::new(0.20, 0.20, 0.30)),
         (cube(), kit.mech_metal.clone(), Vec3::new(0.60, 0.35, 0.10), Quat::IDENTITY, Vec3::new(0.09, 0.12, 0.09)),
         (cyl(), kit.mech_metal.clone(), Vec3::new(0.60, 0.24, 0.40), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.19, 0.24, 0.19)),
         (cyl(), kit.mech_metal.clone(), Vec3::new(0.60, 0.24, 0.83), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.14, 0.03, 0.14)),
-        (cube(), kit.mech_khaki_dk.clone(), Vec3::new(0.60, 0.06, 0.12), Quat::IDENTITY, Vec3::new(0.15, 0.14, 0.24)),
+        (cube(), body_dk.clone(), Vec3::new(0.60, 0.06, 0.12), Quat::IDENTITY, Vec3::new(0.15, 0.14, 0.24)),
         (cube(), kit.mech_shadow.clone(), Vec3::new(0.51, 0.15, 0.05), Quat::from_rotation_z(0.55), Vec3::new(0.14, 0.06, 0.10)),
         // ---- UNIT STENCILS: faded parchment ident plates ---------------
         (cube(), kit.mech_stencil.clone(), Vec3::new(-0.40, 0.62, 0.548), Quat::IDENTITY, Vec3::new(0.10, 0.045, 0.008)),
         (cube(), kit.mech_stencil.clone(), Vec3::new(-0.615, 0.80, 0.10), Quat::IDENTITY, Vec3::new(0.008, 0.05, 0.12)),
     ];
+    // §22 THE CROWN. The one SILHOUETTE difference between the two
+    // liveries - paint alone cannot be read at range, and a variant you
+    // can only identify from ten metres is a variant that does not exist
+    // in a firefight.
+    //
+    // Five tapering points on a band across the sensor deck, gold
+    // against the red. They sit ABOVE the deck rather than in front of
+    // it: the deck's face carries the visor slit, which is a weak point
+    // the sim resolves by height band, and hanging ornament over it
+    // would hide the thing an attacker is meant to aim at.
+    if elite {
+        commands
+            .spawn((
+                Mesh3d(cube()),
+                MeshMaterial3d(kit.gold.clone()),
+                Transform::from_xyz(0.0, 0.995, 0.10).with_scale(Vec3::new(0.56, 0.045, 0.40)),
+            ))
+            .set_parent(root);
+        for k in 0..5 {
+            // the centre point is the tallest, falling away to the
+            // sides - a flat row of equal spikes reads as a comb
+            let dx = (k as f32 - 2.0) * 0.125;
+            let h = 0.16 - (k as f32 - 2.0).abs() * 0.032;
+            commands
+                .spawn((
+                    Mesh3d(cube()),
+                    MeshMaterial3d(kit.gold.clone()),
+                    Transform::from_xyz(dx, 1.02 + h * 0.5, 0.10)
+                        .with_scale(Vec3::new(0.055, h, 0.075)),
+                ))
+                .set_parent(root);
+            // a dark bead capping each point, so the gold has an edge
+            // to end on instead of stopping in mid-air
+            commands
+                .spawn((
+                    Mesh3d(ball()),
+                    MeshMaterial3d(kit.mech_shadow.clone()),
+                    Transform::from_xyz(dx, 1.02 + h, 0.10).with_scale(Vec3::splat(0.040)),
+                ))
+                .set_parent(root);
+        }
+    }
     for (mesh, mat, tr, rot, sc) in plates {
         commands
             .spawn((
@@ -9513,7 +9601,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                MeshMaterial3d(body_lt.clone()),
                 Transform::from_xyz(sd * 0.705, 0.535, 0.06)
                     .with_scale(Vec3::new(0.012, 0.035, 0.38)),
             ))
@@ -9579,7 +9667,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                    MeshMaterial3d(body_lt.clone()),
                     Transform::from_xyz(px, py, pz).with_scale(Vec3::new(sx, sy, sz)),
                 ))
                 .set_parent(root);
@@ -9599,7 +9687,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    MeshMaterial3d(body_dk.clone()),
                     Transform {
                         translation: Vec3::new(0.0, 0.715, lz),
                         rotation: Quat::from_rotation_x(ang),
@@ -9686,7 +9774,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 commands
                     .spawn((
                         Mesh3d(cyl()),
-                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        MeshMaterial3d(body_dk.clone()),
                         Transform {
                             translation: Vec3::new(sd * bx, by, bz),
                             rotation: Quat::from_rotation_x(ang),
@@ -9765,9 +9853,9 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             // armour segmentation: a browplate, a jaw, and a split down
             // the crown, so the head reads as assembled from pieces
             for (px, py, pz, sx, sy, sz, mat) in [
-                (0.0_f32, 1.045_f32, 0.02_f32, 0.52_f32, 0.035_f32, 0.50_f32, kit.mech_khaki_lt.clone()),
-                (0.0, 0.775, 0.06, 0.46, 0.045, 0.42, kit.mech_khaki_dk.clone()),
-                (0.0, 0.90, 0.02, 0.045, 0.30, 0.52, kit.mech_khaki_dk.clone()),
+                (0.0_f32, 1.045_f32, 0.02_f32, 0.52_f32, 0.035_f32, 0.50_f32, body_lt.clone()),
+                (0.0, 0.775, 0.06, 0.46, 0.045, 0.42, body_dk.clone()),
+                (0.0, 0.90, 0.02, 0.045, 0.30, 0.52, body_dk.clone()),
             ] {
                 commands
                     .spawn((
@@ -9785,7 +9873,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 commands
                     .spawn((
                         Mesh3d(cube()),
-                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        MeshMaterial3d(body_dk.clone()),
                         Transform::from_xyz(sd * 0.235, 0.985, 0.20)
                             .with_scale(Vec3::new(0.11, 0.09, 0.16)),
                     ))
@@ -9879,7 +9967,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(ball()),
-                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    MeshMaterial3d(body.clone()),
                     Transform::from_xyz(sd * 0.635, 0.50, 0.06)
                         .with_scale(Vec3::new(0.28, 0.30, 0.44)),
                 ))
@@ -9887,7 +9975,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    MeshMaterial3d(body_dk.clone()),
                     Transform::from_xyz(sd * 0.70, 0.375, 0.06)
                         .with_scale(Vec3::new(0.10, 0.055, 0.42)),
                 ))
@@ -9896,7 +9984,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki.clone()),
+                    MeshMaterial3d(body.clone()),
                     Transform {
                         translation: Vec3::new(sd * 0.66, 0.30, 0.10),
                         rotation: Quat::from_rotation_z(sd * 0.10),
@@ -9944,7 +10032,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    MeshMaterial3d(body_dk.clone()),
                     Transform {
                         translation: Vec3::new(sd * 0.645, 0.145, 0.30),
                         rotation: Quat::from_rotation_x(-0.10),
@@ -9983,7 +10071,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    MeshMaterial3d(body_dk.clone()),
                     Transform::from_xyz(sd * 0.60, 0.50, -0.18)
                         .with_scale(Vec3::new(0.17, 0.17, 0.14)),
                 ))
@@ -10009,7 +10097,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 commands
                     .spawn((
                         Mesh3d(cyl()),
-                        MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                        MeshMaterial3d(body_dk.clone()),
                         Transform {
                             translation: Vec3::new(sd * 0.655 + es * 0.085, 0.235, 0.08),
                             rotation: Quat::from_rotation_x(0.55),
@@ -10082,7 +10170,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(cube()),
-                    MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                    MeshMaterial3d(body_lt.clone()),
                     Transform::from_xyz(sd * 0.645, 0.245, 0.30)
                         .with_scale(Vec3::new(0.13, 0.014, 0.20)),
                 ))
@@ -10110,7 +10198,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         {
             let cz = 0.556;
             for (mat, r, z, h) in [
-                (kit.mech_khaki_dk.clone(), 0.20_f32, cz - 0.014, 0.030_f32),
+                (body_dk.clone(), 0.20_f32, cz - 0.014, 0.030_f32),
                 (kit.mech_shadow.clone(), 0.155, cz + 0.002, 0.022),
                 (kit.mech_metal.clone(), 0.125, cz + 0.012, 0.018),
                 (kit.core_glow.clone(), 0.088, cz + 0.020, 0.016),
@@ -10134,7 +10222,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
                 commands
                     .spawn((
                         Mesh3d(cube()),
-                        MeshMaterial3d(kit.mech_khaki_lt.clone()),
+                        MeshMaterial3d(body_lt.clone()),
                         Transform {
                             translation: Vec3::new(
                                 a.cos() * 0.165,
@@ -10160,7 +10248,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
-                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                MeshMaterial3d(body_dk.clone()),
                 Transform {
                     translation: Vec3::new(0.60, 0.24, rz),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
@@ -10201,7 +10289,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                MeshMaterial3d(body_dk.clone()),
                 Transform {
                     translation: Vec3::new(cx, cy, 0.60),
                     rotation: Quat::from_rotation_z(a),
@@ -10271,7 +10359,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             commands
                 .spawn((
                     Mesh3d(kit.cube.clone()),
-                    MeshMaterial3d(kit.mech_khaki_dk.clone()),
+                    MeshMaterial3d(body_dk.clone()),
                     Transform {
                         translation: tr,
                         rotation: Quat::from_rotation_x(rx),
@@ -10295,7 +10383,7 @@ fn spawn_armor_rig(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechHull
             .set_parent(root)
             .id();
         for (ty, mat, sc) in [
-            (0.0, kit.mech_khaki_dk.clone(), Vec3::new(0.22, 0.34, 0.22)),
+            (0.0, body_dk.clone(), Vec3::new(0.22, 0.34, 0.22)),
             (0.08, kit.mech_metal.clone(), Vec3::new(0.235, 0.02, 0.235)),
             (-0.08, kit.mech_metal.clone(), Vec3::new(0.235, 0.02, 0.235)),
         ] {
@@ -10552,7 +10640,7 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
         PickupKind::RobotArmor => {
             // the pad floats the hull kit alone - no leg armour on a
             // totem, and its stage parts never hide (ids dropped)
-            let (e, _) = spawn_armor_rig(commands, kit);
+            let (e, _) = spawn_armor_rig(commands, kit, false);
             commands.entity(e).insert(
                 Transform::from_xyz(0.0, 0.75, 0.0).with_scale(Vec3::splat(0.9)),
             );
@@ -11613,7 +11701,11 @@ fn spawn_fighter_rigs(
         // model itself - see `spawn_weapon_model` - so it rides the draw
         // and the viewmodel gets one too.)
         // the mech hull kit + leg armour (Brief VIII-B D.1-D.6)
-        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit);
+        // §22: one royal machine per four, from the slot index - the
+        // same trick the helmets and the medic trims use, and for the
+        // same reason: a livery chosen at spawn from an index cannot
+        // reach replay state.
+        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit, i % 4 == 1);
         // §owner MECH BARRIER: on the LEFT forearm cradle, which is the
         // arm that is not holding the gatling - a shield on the gun arm
         // would be a shield you cannot use while shooting.
@@ -11995,6 +12087,28 @@ fn setup(
         // §owner: the chassis carries the brushed grain. Its plates
         // are the largest single-colour surfaces on any character, so
         // they are where flat shading showed worst.
+        // §22: deep lacquer red, with the light tone pushed toward
+        // orange rather than pink - a bright RED reads as damage warning
+        // in this game's own vocabulary, and the elite machine must not
+        // look like it is on fire.
+        mech_royal: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.52, 0.09, 0.09),
+            metallic: 0.30,
+            perceptual_roughness: 0.42,
+            ..default()
+        }),
+        mech_royal_dk: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.31, 0.05, 0.05),
+            metallic: 0.35,
+            perceptual_roughness: 0.46,
+            ..default()
+        }),
+        mech_royal_lt: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.70, 0.20, 0.10),
+            metallic: 0.28,
+            perceptual_roughness: 0.38,
+            ..default()
+        }),
         mech_khaki: materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0x8A, 0x87, 0x70),
             base_color_texture: Some(tex_kit.metal.clone()),
