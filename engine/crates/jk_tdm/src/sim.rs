@@ -2392,6 +2392,18 @@ pub struct Fighter {
     /// if the two pools were one. Same 0-100 shape and cooldown rhythm,
     /// zero cross-wiring.
     pub stride_heat: f32,
+    /// §21: which stage of a heavy-chassis JUMP this fighter is in, and
+    /// the clock for it (the compression countdown, then the landing
+    /// recovery countdown - `Air` carries no clock because the ground
+    /// decides when flight ends, not a timer).
+    ///
+    /// AUTHORITATIVE, not display: the phase gates a second jump, gates
+    /// crouch, and - through `chassis_kneeling` - moves `height()`, which
+    /// is the hitbox and the hit bands. It is reset on respawn beside
+    /// `stride_*` and is in the bot-mech replay digest for the same
+    /// reason `mech_brace` is.
+    pub mech_jump_phase: MechJumpPhase,
+    pub mech_jump_t: f32,
     /// Trigger-held HOLD TIMER (seconds): refreshed by `try_fire`, drained
     /// by the timer loop. A short 0.07 s hold (not a per-tick bool) so a
     /// far bot thinking at the 15 Hz LOD still keeps its barrels climbing
@@ -2559,17 +2571,81 @@ impl Fighter {
             _ => MECH_HULL,
         }
     }
-    /// §6: apply crouch INTENT. A mech never crouches - `height()`
-    /// returns the chassis height unconditionally for a live mech, so a
-    /// crouching mech kept its full 3.03 m hitbox while the renderer
-    /// played the soldier squat: the x2.0 visor band floated in empty air
-    /// above the model and was unreachable on it.
+    /// §21: is this fighter piloting the HEAVY chassis specifically?
+    ///
+    /// The bare `armor_set == RobotSuit && hull > 0.0` test is written out
+    /// inline in a dozen places in this file; every §21 rule asks it, so
+    /// it gets the name `in_scout_mech` already has for the other side.
+    /// "Is a mech" and "is the heavy one" are different questions, and
+    /// jumping, kneeling and the 1.7x hitbox belong only to the second.
+    pub fn in_heavy_mech(&self) -> bool {
+        self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0
+    }
+
+    /// §21: is the heavy chassis ON ITS KNEES right now?
+    ///
+    /// Three states, ONE pose: deliberately crouched, coiled for a jump,
+    /// or absorbing a landing. They are the same thing physically - hull
+    /// low, stance wide, machine planted - so they are one predicate, and
+    /// `height()` and `stance_speed_mult` both read it. Splitting them
+    /// would mean the renderer could squat for a compression the hitbox
+    /// knew nothing about, which is exactly the defect the old crouch ban
+    /// was papering over.
+    pub fn chassis_kneeling(&self) -> bool {
+        self.in_heavy_mech()
+            && (self.crouch
+                || self.mech_jump_phase == MechJumpPhase::Compress
+                || self.mech_jump_phase == MechJumpPhase::Recover)
+    }
+
+    /// §21: how far through the pre-jump COMPRESSION this chassis is,
+    /// 0 at the first tick of the coil and 1 at the launch; 0 whenever it
+    /// is not compressing.
+    ///
+    /// **The named accessor the client renders the wind-up from** - the
+    /// knees bending, the hips dropping - so the visual telegraph and the
+    /// sim's own launch timing can never disagree about how loaded the
+    /// machine is. Also reachable as `TdmSim::mech_jump_compression_of`.
+    pub fn mech_jump_compression(&self) -> f32 {
+        if self.mech_jump_phase == MechJumpPhase::Compress {
+            (1.0 - self.mech_jump_t / MECH_JUMP_COMPRESS_S).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// §6/§21: apply crouch INTENT.
+    ///
+    /// The heavy chassis CAN kneel now. It could not before, and the ban
+    /// was correct at the time: `height()` returned the full 3.03 m
+    /// unconditionally, so a crouching mech kept a standing hitbox while
+    /// the renderer played the squat and the x2.0 visor band floated in
+    /// empty air above the model. `height()` now follows the pose (see
+    /// `chassis_kneeling`), which is the fix for the CAUSE rather than
+    /// for the symptom, so the ban can go.
+    ///
+    /// What survives the ban, as rules rather than as a refusal:
+    /// - MID-AIR is not a stance. A walker cannot fold its legs with
+    ///   nothing under them, and letting it would drop the hitbox of a
+    ///   target that is already hard to lead.
+    /// - a DESTROYED chassis is not a chassis: `in_heavy_mech()` is false
+    ///   at hull 0, so the ejected pilot falls through to the soldier
+    ///   branch and crouches like the man he now is.
+    /// - the LIGHT chassis still refuses outright. Its `height()` has no
+    ///   crouch term at all, so letting it set the flag would recreate the
+    ///   original bug on the other machine. Deliberately deferred, not
+    ///   forgotten.
     ///
     /// This lives on `Fighter` so the PLAYER and BOT paths cannot drift -
-    /// the guard was originally added to the player path only, leaving
-    /// every bot-piloted mech still able to crouch.
+    /// the original guard was added to the player path only, leaving every
+    /// bot-piloted mech still able to crouch. Both callers still go
+    /// through here and so get every rule above for free.
     pub fn set_crouch(&mut self, want: bool) {
-        self.crouch = want && !self.in_mech();
+        if self.in_heavy_mech() {
+            self.crouch = want && self.grounded;
+        } else {
+            self.crouch = want && !self.in_mech();
+        }
     }
     /// How tall a ledge this body can step onto.
     ///
@@ -2593,8 +2669,20 @@ impl Fighter {
     }
 
     pub fn height(&self) -> f32 {
-        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
-            BODY_HEIGHT * MECH_SCALE // §11: a 2.7 m powered exosuit
+        if self.in_heavy_mech() {
+            // §11: a 3.03 m powered walker - and §21: it KNEELS. The
+            // hitbox (`ray_vs_cylinder`) and the hit bands (the `frac`
+            // tests in `apply_hit_dmg` and the projectile path) are both
+            // expressed against this number, so lowering it here lowers
+            // the capsule and the x2.0 visor weak point TOGETHER and
+            // leaves the visor at the same 0.90 of the machine it always
+            // sat at. That single fact is what makes the crouch legal.
+            let standing = BODY_HEIGHT * MECH_SCALE;
+            if self.chassis_kneeling() {
+                standing * MECH_CROUCH_HEIGHT_FRAC
+            } else {
+                standing
+            }
         } else if self.roll_t > 0.0 {
             ROLL_HEIGHT
         } else if self.crouch {
@@ -2610,6 +2698,23 @@ impl Fighter {
         } else {
             BODY_RADIUS
         }
+    }
+    /// §21: the pilot's eye height inside THIS hull, in world Y - the
+    /// stance-aware companion to the free function `mech_visor_eye_y`.
+    ///
+    /// Identical to it for a standing chassis (`height()` is exactly
+    /// `BODY_HEIGHT * MECH_SCALE` then), and correct for a kneeling one,
+    /// which the free function cannot be: it only ever sees `pos_y` and so
+    /// has no way to know the machine folded. The free function is kept
+    /// because the client still calls it; every NEW caller wants this.
+    ///
+    /// It is `height() * MECH_VISOR_Y_FRAC` and not a second formula on
+    /// purpose - the visor is the x2.0 weak point at frac 0.90, and
+    /// `apply_hit_dmg` finds that band by dividing by `height()`. One
+    /// expression, so the camera and the hit band cannot disagree about
+    /// where the pilot's head is.
+    pub fn visor_eye_y(&self) -> f32 {
+        self.pos[1] + self.height() * MECH_VISOR_Y_FRAC
     }
     pub fn armed(&self) -> bool {
         self.gun != GunKind::Fists
@@ -4230,6 +4335,155 @@ pub const MECH_VISOR_Y_FRAC: f32 = 0.90;
 pub fn mech_visor_eye_y(pos_y: f32) -> f32 {
     pos_y + BODY_HEIGHT * MECH_SCALE * MECH_VISOR_Y_FRAC
 }
+
+// ---- §21: the heavy chassis KNEELS and JUMPS -----------------------------
+// Both verbs were genuinely absent, and CROUCH was absent on purpose:
+// `set_crouch` refused a mech because `height()` returned the full 3.03 m
+// unconditionally, so a crouching chassis kept a standing hitbox while the
+// renderer played the squat - and the x2.0 visor band, which `apply_hit_dmg`
+// places at frac > 0.82 of `height()`, floated in empty air above the model.
+//
+// The guard was the right fix for that bug. The fix for the CAUSE is that
+// `height()` follows the pose: every consumer of the hitbox (the two
+// `ray_vs_cylinder` calls) and every consumer of the bands (the frac tests
+// in `apply_hit_dmg` and the projectile path) already divide by `height()`,
+// so one honest number moves the capsule and the weak point together and
+// keeps them in the same PROPORTION of the machine they were always in.
+/// The kneeling chassis's height, as a fraction of its standing height.
+/// ASSUMED: 0.72. Shallower than a man's squat (CROUCH_HEIGHT/BODY_HEIGHT
+/// = 0.646) because a walker's leg has hydraulic travel where a knee has
+/// fold, and deep enough that 0.85 m of hull - and the visor with it -
+/// drops behind cover a standing chassis is shot over.
+pub const MECH_CROUCH_HEIGHT_FRAC: f32 = 0.72;
+/// §21 JUMP, the wind-up. A 3 m machine telegraphs: it must COMPRESS
+/// before it launches, and the compression is a window the enemy can read
+/// and act on. ASSUMED 0.40 s - comfortably past the ~0.25 s a human
+/// takes to react, so seeing it is worth something.
+pub const MECH_JUMP_COMPRESS_S: f32 = 0.40;
+/// §21 JUMP, the landing. The chassis takes the shock through its knees:
+/// it is kneeling (low, planted, slow - see `chassis_kneeling`) for this
+/// long and cannot jump again until it is over. ASSUMED 0.55 s.
+pub const MECH_JUMP_RECOVER_S: f32 = 0.55;
+/// §21 JUMP, the price. Charged to `stride_heat` - the chassis's EXISTING
+/// mobility budget - at LAUNCH, never at the wind-up (an aborted coil owes
+/// nothing, exactly as `stride_wind_t` owes nothing).
+///
+/// Deliberately the same pool the power stride spends: jumping and
+/// striding are the same resource, so a pilot chooses between them instead
+/// of getting both. ASSUMED 45.0 of the 100 pool - two jumps back to back,
+/// the third refused, and ~2.25 s at the passive 20/s cool before the bar
+/// is clear enough to stride.
+///
+/// REJECTED: a private `mech_jump_cd` timer. It would have made the jump
+/// free of every other mech mobility system, so the strongest thing a
+/// chassis could do is alternate stride and jump forever - and it would
+/// have added a second resource where the brief already names one.
+pub const MECH_JUMP_HEAT: f32 = 45.0;
+/// §21 JUMP, the impact ring: how far the shock through the ground
+/// reaches. ASSUMED 4.5 m - about eight chassis radii, close enough that
+/// standing under a landing mech is a decision.
+pub const MECH_LAND_RADIUS_M: f32 = 4.5;
+/// §21 JUMP: damage at the epicentre, falling off linearly to zero at
+/// `MECH_LAND_RADIUS_M`. ASSUMED 40.0 before zone and armour - it lands on
+/// the LEGS band (x0.75), so a full-value hit takes 30 off an unarmoured
+/// soldier: a real consequence, never a free kill.
+pub const MECH_LAND_DMG: f32 = 40.0;
+/// §21 JUMP: and the stagger, which is the half that actually decides
+/// fights - `STAGGER_SPEED_MULT` halves the victim's pace while it runs.
+/// ASSUMED 0.7 s, under `PARRY_STAGGER_S` (0.9): being shaken off your
+/// feet is less than being beaten out of your guard.
+pub const MECH_LAND_STAGGER_S: f32 = 0.7;
+
+/// §21 JUMP: the launch velocity, DERIVED rather than picked.
+///
+/// A jump's apex is v²/2g, so scaling the apex by `MECH_SCALE` - the
+/// chassis clears exactly the obstacle a soldier clears, measured in its
+/// own body heights - means scaling v by the square root of it. At the
+/// current constants that is 7.4 x sqrt(1.7) ≈ 9.65 m/s, an apex of
+/// ~2.59 m against the soldier's ~1.52 m.
+///
+/// A function and not a `const` only because `f32::sqrt` is not const;
+/// the point is that re-scaling the chassis re-scales the jump, and no
+/// call site has to be found and edited for that to be true.
+pub fn mech_jump_speed() -> f32 {
+    JUMP_SPEED * MECH_SCALE.sqrt()
+}
+
+/// §21: which stage of a jump a heavy chassis is in.
+///
+/// `Compress` is the readable wind-up, `Air` the flight, `Recover` the
+/// landing window it cannot jump out of. Public because the client has to
+/// draw all three differently - see `TdmSim::mech_jump_phase_of`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MechJumpPhase {
+    #[default]
+    None,
+    Compress,
+    Air,
+    Recover,
+}
+
+impl MechJumpPhase {
+    /// The one place the phase strings live, on the same principle as
+    /// `TurretMode::label` - a HUD that spells them itself is a HUD that
+    /// can disagree with the sim about what the machine is doing.
+    pub fn label(self) -> &'static str {
+        match self {
+            MechJumpPhase::None => "",
+            MechJumpPhase::Compress => "COMPRESS",
+            MechJumpPhase::Air => "AIRBORNE",
+            MechJumpPhase::Recover => "RECOVER",
+        }
+    }
+}
+
+/// §21: the INFANTRY half of the stance tax.
+///
+/// Returns 1.0 for a live heavy chassis even when `crouch` is set, because
+/// a kneeling chassis is charged by `mech_stance_speed_mult` instead and
+/// charging both would multiply to 6% of walking pace for ONE pose - the
+/// exact mistake the old comment at this call site warned about ("a mech
+/// is denied crouch, so reading `cmd.crouch` here charged it the crouch
+/// speed tax for a stance it never entered"). Before §21 the mech simply
+/// could not set the flag, so the two never met; now they do.
+///
+/// Split from the chassis half rather than merged into one multiplier
+/// because the speed ladder is NOT commutative between them: the armour
+/// weight penalty in the middle is SUBTRACTIVE and then floored at
+/// `MOVE_SPEED * ARMOR_WEIGHT_SPEED_FLOOR`, so a multiplier moved across
+/// it lands on a different number. Each half keeps the position in the
+/// ladder it has always had; only the collision is new.
+///
+/// Shared by the player ladder in `step` and the bot ladder in `bot_act`,
+/// for the reason this project keeps relearning: two ladders applying the
+/// same constants independently always drift.
+pub fn crouch_speed_mult(f: &Fighter) -> f32 {
+    if f.crouch && !f.in_heavy_mech() {
+        CROUCH_SPEED_MULT
+    } else {
+        1.0
+    }
+}
+
+/// §21: the CHASSIS half of the stance tax - one multiplier for every way
+/// a heavy chassis can be planted.
+///
+/// Kneeling (`chassis_kneeling`: crouched, coiled for a jump, or absorbing
+/// a landing) and bracing (`mech_brace`) are the same physical act - wide,
+/// settled, near-stationary - and the crouch key sets both. So a planted
+/// chassis pays `MECH_BRACE_SPEED_MULT` ONCE, however many flags say it is
+/// planted, and never the infantry constant.
+///
+/// Gated on `in_heavy_mech` inside `chassis_kneeling`, and re-gated here
+/// for `mech_brace`, so a pilot whose hull was blown out from under him
+/// mid-brace does not carry a chassis pace onto his feet.
+pub fn mech_stance_speed_mult(f: &Fighter) -> f32 {
+    if f.in_heavy_mech() && (f.chassis_kneeling() || f.mech_brace) {
+        MECH_BRACE_SPEED_MULT
+    } else {
+        1.0
+    }
+}
 // §6.2 (Brief VII v2): boarding/leaving the mech is COMMITTED, not
 // instant - the chassis needs real seconds to seal up or power down.
 pub const MECH_ENTER_S: f32 = 1.6;
@@ -5196,6 +5450,8 @@ impl TdmSim {
                     stride_wind_t: 0.0,
                     stride_t: 0.0,
                     stride_heat: 0.0,
+                    mech_jump_phase: MechJumpPhase::None,
+                    mech_jump_t: 0.0,
                     prev_primary: g0,
                     punch: [0.0; 2],
                     punch_vel: [0.0; 2],
@@ -5452,6 +5708,13 @@ impl TdmSim {
                     f.hull = 0.0;
                     f.fuel = 0.0;
                     f.mech_plates_dropped = 0;
+                    // §21: the chassis takes its jump with it. Dismounting
+                    // mid-`Recover` would otherwise hand the man on foot a
+                    // chassis pose - low, planted at 12% - for the rest of
+                    // that window, and a stale `Compress` would leave him
+                    // launching at the walker's velocity.
+                    f.mech_jump_phase = MechJumpPhase::None;
+                    f.mech_jump_t = 0.0;
                     // hull climbing resets with the same discipline as
                     // every other optional combat state
                     f.climbing = None;
@@ -5606,6 +5869,60 @@ impl TdmSim {
             } else if f.grounded && f.flip_used && f.flip_t <= 0.0 {
                 f.flip_recover_t = FLIP_RECOVER_S;
             }
+            // §21: the heavy chassis's JUMP clock - compression, launch,
+            // and the end of the landing recovery.
+            //
+            // In the SHARED all-fighters timer loop and NOT in the player
+            // command block, unlike the power stride's clock right beside
+            // it. That is deliberate: `stride_wind_t` lives on the player
+            // path, which is why no bot has ever power-strided. Anything
+            // that calls `try_mech_jump` - the player today, a bot brain
+            // tomorrow - gets the identical wind-up, the identical launch
+            // velocity and the identical recovery from here, because there
+            // is only one copy of them.
+            //
+            // The transition OUT of `Air` is not here: the ground decides
+            // when flight ends, and only the physics pass knows the
+            // chassis touched down. See the landing block there.
+            if f.mech_jump_phase != MechJumpPhase::None {
+                f.mech_jump_t = (f.mech_jump_t - DT).max(0.0);
+                match f.mech_jump_phase {
+                    MechJumpPhase::Compress => {
+                        if !f.in_heavy_mech() || !f.alive() || !f.grounded {
+                            // blown up, blown off its feet, or the hull
+                            // went out from under the pilot mid-coil. The
+                            // wind-up is ABANDONED and nothing is owed -
+                            // the same bargain `stride_wind_t` strikes.
+                            f.mech_jump_phase = MechJumpPhase::None;
+                            f.mech_jump_t = 0.0;
+                        } else if f.mech_jump_t <= 0.0 {
+                            // LAUNCH. The stride budget is charged HERE
+                            // and only here, so a coil the pilot never
+                            // got to finish costs nothing.
+                            f.stride_heat = (f.stride_heat + MECH_JUMP_HEAT).min(100.0);
+                            f.vy = mech_jump_speed();
+                            // clear the support clamp so the ascent
+                            // integrates - the same 5 cm the soldier's
+                            // jump needs, for the same reason
+                            f.pos[1] += 0.05;
+                            f.grounded = false;
+                            f.mech_jump_phase = MechJumpPhase::Air;
+                            f.mech_jump_t = 0.0;
+                        }
+                    }
+                    MechJumpPhase::Air => {
+                        if !f.in_heavy_mech() || !f.alive() {
+                            f.mech_jump_phase = MechJumpPhase::None;
+                        }
+                    }
+                    MechJumpPhase::Recover => {
+                        if f.mech_jump_t <= 0.0 {
+                            f.mech_jump_phase = MechJumpPhase::None;
+                        }
+                    }
+                    MechJumpPhase::None => {}
+                }
+            }
             // §9 (Brief III): post-shot spread recovers fast — controlled
             // bursts stay tight (was 0.12/s)
             f.bloom = (f.bloom - 0.02 * DT * 10.0).max(0.0);
@@ -5739,6 +6056,15 @@ impl TdmSim {
                     f.stride_wind_t = 0.0;
                     f.stride_t = 0.0;
                     f.stride_heat = 0.0;
+                    // §21: and the jump dies with the chassis. A phase
+                    // that survived a respawn would put a fresh soldier
+                    // in `Compress` - kneeling, planted at 12% pace, and
+                    // one tick from launching at 9.65 m/s off a chassis
+                    // he is not in. State surviving a transition it
+                    // should not is this project's named recurring
+                    // defect; this is the line that stops it.
+                    f.mech_jump_phase = MechJumpPhase::None;
+                    f.mech_jump_t = 0.0;
                     f.punch = [0.0; 2];
                     f.punch_vel = [0.0; 2];
                     f.spray_i = 0.0;
@@ -6190,12 +6516,15 @@ impl TdmSim {
             } else {
                 MOVE_SPEED
             };
-            // read the AUTHORITATIVE flag, not the raw intent: a mech is
-            // denied crouch, so reading `cmd.crouch` here charged it the
-            // crouch speed tax for a stance it never entered
-            if self.fighters[p].crouch {
-                speed *= CROUCH_SPEED_MULT;
-            }
+            // read the AUTHORITATIVE state, not the raw intent - `cmd.crouch`
+            // is what the pilot asked for, `f.crouch` is what the machine
+            // actually did with it (§21 gates it on grounded).
+            //
+            // §21: the INFANTRY crouch tax, in exactly the rung of the
+            // ladder it has always occupied. A kneeling heavy chassis is
+            // charged instead by `mech_stance_speed_mult` further down -
+            // see that function for why the two cannot be one call.
+            speed *= crouch_speed_mult(&self.fighters[p]);
             // Melee v1: a staggered fighter reels at half pace
             if self.fighters[p].stagger_t > 0.0 {
                 speed *= STAGGER_SPEED_MULT;
@@ -6253,12 +6582,13 @@ impl TdmSim {
                 if f.brace {
                     speed *= BRACE_SPEED_MULT;
                 }
-                // §A.4: the mech's OWN brace multiplier. Deliberately a
-                // separate branch, not an `else if` and not a reuse of
-                // the infantry constant above - see MECH_BRACE_* .
-                if f.mech_brace {
-                    speed *= MECH_BRACE_SPEED_MULT;
-                }
+                // §A.4/§21: the mech's OWN stance multiplier - its own
+                // constant, never the infantry one (see MECH_BRACE_*).
+                // The branch became a call because §21 gave the chassis a
+                // second way to be planted (kneeling) that the crouch key
+                // sets AT THE SAME TIME as the brace, and one pose must be
+                // charged once - see `mech_stance_speed_mult`.
+                speed *= mech_stance_speed_mult(f);
                 if f.flip_recover_t > 0.0 {
                     speed *= FLIP_RECOVER_SPEED; // §4: 0.18 s landing tax
                 }
@@ -6397,13 +6727,18 @@ impl TdmSim {
                     f.flip_used = true;
                 }
             }
-            // §4.3 (Brief VI): the mech CANNOT jump — grounded is its
-            // identity; the braced side-step is its only dash
-            if cmd.jump
+            // §21: the heavy chassis JUMPS - supersedes §4.3 (Brief VI)'s
+            // "the mech CANNOT jump", which was true right up to here.
+            // It does NOT jump like a man: the soldier's branch below
+            // launches on the same tick as the keypress, and three tonnes
+            // of walker has to COMPRESS first. All of that rule is inside
+            // `try_mech_jump`, which is the only way in from either path.
+            if cmd.jump && self.fighters[p].in_heavy_mech() {
+                self.try_mech_jump(p);
+            } else if cmd.jump
                 && self.fighters[p].grounded
                 && self.fighters[p].roll_t <= 0.0
-                && !(self.fighters[p].armor_set == ArmorSet::RobotSuit
-                    && self.fighters[p].hull > 0.0)
+                && !self.fighters[p].in_heavy_mech()
             {
                 let f = &mut self.fighters[p];
                 // §C.3 (BRIEF VIII_B): the counter-movement rule is
@@ -7218,6 +7553,11 @@ impl TdmSim {
         // (dead fighters integrate too — velocity is zeroed on death, so
         // this just lets a mid-air corpse fall instead of hanging)
         let half = self.half;
+        // §21: chassis that touched down out of a JUMP this tick. Gathered
+        // inside the integrate loop (the only place that knows) and spent
+        // after it, because the shockwave reaches OTHER fighters and the
+        // loop holds a mutable borrow of the one it is integrating.
+        let mut mech_landings: Vec<usize> = Vec::new();
         for i in 0..self.fighters.len() {
             // mid-roll: the somersault owns the velocity (player and bots
             // alike — bots roll off hard landings too)
@@ -7318,7 +7658,25 @@ impl TdmSim {
                     let impact = f.vy;
                     f.vy = 0.0;
                     f.grounded = true;
-                    if impact < -HARD_LANDING_VY && f.alive() && f.roll_t <= 0.0 {
+                    if f.mech_jump_phase == MechJumpPhase::Air {
+                        // §21: the chassis LANDS. It does not breakfall -
+                        // three tonnes of walker does not tuck and roll,
+                        // and the `roll_t` it would set is the mech's
+                        // SIDE-STEP, so the old branch would have flung it
+                        // sideways at MECH_STEP_SPEED after every jump
+                        // (a mech jump lands at ~9.65 m/s, over the 9.5
+                        // HARD_LANDING_VY threshold, so it would have
+                        // fired every single time).
+                        //
+                        // It takes the shock through its knees instead:
+                        // `Recover` is a kneeling pose (low hull, low hit
+                        // bands, planted pace) that it cannot jump out of,
+                        // and the ground carries the rest to whoever is
+                        // standing in it.
+                        f.mech_jump_phase = MechJumpPhase::Recover;
+                        f.mech_jump_t = MECH_JUMP_RECOVER_S;
+                        mech_landings.push(i);
+                    } else if impact < -HARD_LANDING_VY && f.alive() && f.roll_t <= 0.0 {
                         let sp = (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt();
                         f.roll_dir = if sp > 0.5 {
                             [f.vel[0] / sp, f.vel[1] / sp]
@@ -7340,7 +7698,22 @@ impl TdmSim {
                 f.pos[1] = support;
                 f.vy = 0.0;
                 f.grounded = true;
+                // §21: the OTHER way flight ends - the support came up to
+                // meet the chassis (it drifted over a crate mid-jump) so
+                // it never fell the last 2 cm. Same landing, same
+                // consequences; leaving it out here would have made a
+                // jump onto cover the free version of a jump.
+                if f.mech_jump_phase == MechJumpPhase::Air {
+                    f.mech_jump_phase = MechJumpPhase::Recover;
+                    f.mech_jump_t = MECH_JUMP_RECOVER_S;
+                    mech_landings.push(i);
+                }
             }
+        }
+        // §21: the landings, once the integrate loop has let go of its
+        // borrows. Index order in, index order out - deterministic.
+        for i in mech_landings {
+            self.mech_landing_shock(i);
         }
 
         // ---- missiles (arrows / spears) --------------------------------
@@ -7638,6 +8011,117 @@ impl TdmSim {
     /// HUD cannot show a cone the simulation does not shoot.
     pub fn aim_spread_of(&self, i: usize, ads: bool) -> f32 {
         self.aim_spread(i, ads)
+    }
+
+    /// §21: **THE rule for starting a heavy-chassis jump** - and it starts
+    /// the COMPRESSION, never the launch. Returns whether the wind-up
+    /// actually began.
+    ///
+    /// Every gate lives here rather than at the call site, and that is the
+    /// whole point of the function existing: the mech turn rate and the
+    /// acceleration model both shipped bot-broken because their rules were
+    /// written into the player's command block, and a bot brain that ever
+    /// wants to jump must call THIS and not a second copy of it.
+    ///
+    /// Refused when:
+    /// - this is not a live heavy chassis (the light one has no jump, and
+    ///   a hull at 0 is a man on foot with the soldier jump)
+    /// - the machine is not on the ground, or is mid-side-step
+    /// - a jump is already running in ANY phase - the landing recovery is
+    ///   what makes a second jump a decision rather than a rhythm
+    /// - the chassis is sealing up or powering down (`mech_transition_t`)
+    /// - a power stride is live, or the stride budget cannot take the
+    ///   `MECH_JUMP_HEAT` charge. Jump and stride SHARE that budget on
+    ///   purpose - see the constant for what was rejected instead.
+    pub fn try_mech_jump(&mut self, i: usize) -> bool {
+        {
+            let f = &self.fighters[i];
+            if !f.in_heavy_mech()
+                || !f.alive()
+                || !f.grounded
+                || f.mech_jump_phase != MechJumpPhase::None
+                || f.roll_t > 0.0
+                || f.mech_transition_t > 0.0
+                || f.stride_t > 0.0
+                || f.stride_heat + MECH_JUMP_HEAT > 100.0
+            {
+                return false;
+            }
+        }
+        let f = &mut self.fighters[i];
+        f.mech_jump_phase = MechJumpPhase::Compress;
+        f.mech_jump_t = MECH_JUMP_COMPRESS_S;
+        true
+    }
+
+    /// §21: what a three-metre walker landing does to the men under it.
+    ///
+    /// Called once, from the physics pass, on the tick the chassis touches
+    /// down out of `Air` - so a mech that merely walked off a ledge does
+    /// nothing, and only a jump it chose to make has consequences.
+    ///
+    /// Damage falls off linearly to zero at `MECH_LAND_RADIUS_M` (standing
+    /// under the foot and standing at the edge of the ring are not the
+    /// same decision) and the STAGGER is flat, because being knocked off
+    /// your feet is not a matter of degree. Routed through `apply_hit_dmg`
+    /// at ankle height, which puts it in the LEGS band and gets the kill
+    /// feed, the assist window and the armour model for free rather than
+    /// growing a second damage path beside them.
+    ///
+    /// Two deliberate exclusions:
+    /// - TEAMMATES are spared. A mobility move that mines your own squad
+    ///   is a move nobody uses next to their own squad, and the scoring
+    ///   rules already treat team damage as the thing to punish.
+    /// - other MECHS are spared. This is a shock through the ground; a
+    ///   machine standing on its own legs rides it out. It also keeps a
+    ///   jump from being a cheap answer to the chassis-vs-chassis fight
+    ///   the angle-armour model is supposed to decide.
+    fn mech_landing_shock(&mut self, i: usize) {
+        if !self.fighters[i].alive() {
+            return;
+        }
+        let (pos, team) = (self.fighters[i].pos, self.fighters[i].team);
+        // gathered first, applied second: `apply_hit_dmg` takes &mut self.
+        // Index order, so the ring is deterministic.
+        let mut caught: Vec<(usize, f32)> = Vec::new();
+        for (j, g) in self.fighters.iter().enumerate() {
+            if j == i || g.team == team || !g.alive() || g.protect_t > 0.0 || g.in_mech() {
+                continue;
+            }
+            let (dx, dz) = (g.pos[0] - pos[0], g.pos[2] - pos[2]);
+            let d = (dx * dx + dz * dz).sqrt();
+            if d <= MECH_LAND_RADIUS_M {
+                caught.push((j, 1.0 - d / MECH_LAND_RADIUS_M));
+            }
+        }
+        for (j, falloff) in caught {
+            let f = &mut self.fighters[j];
+            // never SHORTEN a stagger already running - a man reeling from
+            // a parry does not recover early because a mech landed on him
+            f.stagger_t = f.stagger_t.max(MECH_LAND_STAGGER_S);
+            let at = [f.pos[0], f.pos[1] + 0.15, f.pos[2]];
+            self.apply_hit_dmg(i, j, at[1], at, MECH_LAND_DMG * falloff);
+        }
+    }
+
+    /// §21: **THE accessor for a chassis's jump phase** - what the client
+    /// reads to know whether to draw the coil, the flight or the landing
+    /// absorb. `mech_jump_phase_of(sim.player).label()` is the whole call,
+    /// on the same pattern as `turret_mode_of`, and `MechJumpPhase::label`
+    /// is the only place the strings live.
+    pub fn mech_jump_phase_of(&self, i: usize) -> MechJumpPhase {
+        self.fighters[i].mech_jump_phase
+    }
+
+    /// §21: **THE accessor for the pre-jump COMPRESSION**, 0..1 - how far
+    /// the knees have bent. 0 in every other phase.
+    ///
+    /// Offered beside the phase because "is it compressing" and "how
+    /// loaded is it" are different questions and a client deriving the
+    /// second from `mech_jump_t` would be re-deriving `MECH_JUMP_COMPRESS_S`
+    /// on the far side of the sim boundary.
+    pub fn mech_jump_compression_of(&self, i: usize) -> f32 {
+        self.fighters[i].mech_jump_compression()
     }
 
     /// §12 (owner): **THE accessor for the turret's fire mode.** This is
@@ -11504,9 +11988,14 @@ impl TdmSim {
         if fm.shield_up {
             vel = [vel[0] * SHIELD_SPEED_MULT, vel[1] * SHIELD_SPEED_MULT];
         }
-        if fm.crouch {
-            // bots pay the same crouch tax the player does
-            vel = [vel[0] * CROUCH_SPEED_MULT, vel[1] * CROUCH_SPEED_MULT];
+        {
+            // bots pay the same crouch tax the player does - §21 made it a
+            // shared call rather than a second copy of the constant, so a
+            // bot-piloted chassis cannot be charged on a rule the player's
+            // is not (or the reverse, which is how the spear halving came
+            // to fire only for the player)
+            let m = crouch_speed_mult(fm);
+            vel = [vel[0] * m, vel[1] * m];
         }
         // §6: bots pay the ARMOR-SET pace too. Without this a bot in a
         // mech ran at full soldier speed while the player's mech is held
@@ -11542,12 +12031,15 @@ impl TdmSim {
             if fm.brace {
                 vel = [vel[0] * BRACE_SPEED_MULT, vel[1] * BRACE_SPEED_MULT];
             }
-            // §A.4 parity: bots pay the same mech-brace tax. §D now SETS
+            // §A.4 parity: bots pay the same mech-stance tax. §D SETS
             // mech_brace on the bot path too (autocannon engagements
             // only, see `bot_act` above), so this tax is live on both
-            // sides rather than a mechanism waiting for a second caller.
-            if fm.mech_brace {
-                vel = [vel[0] * MECH_BRACE_SPEED_MULT, vel[1] * MECH_BRACE_SPEED_MULT];
+            // sides rather than a mechanism waiting for a second caller -
+            // and §21's kneel arrives on the bot path through the very
+            // same call, because `set_crouch` is shared.
+            {
+                let m = mech_stance_speed_mult(fm);
+                vel = [vel[0] * m, vel[1] * m];
             }
         }
         // §7: bots pay the same MASS tax the player does — the minigun's
@@ -15374,24 +15866,44 @@ mod tests {
         );
     }
 
-    /// §6: the crouch ban is CHASSIS state, so it must hold for a
-    /// bot-piloted mech exactly as it does for the player's. The guard
-    /// originally lived only on the player path.
+    /// §21 SUPERSEDES §6's blanket crouch ban: the heavy chassis kneels
+    /// now (see `set_crouch` for why the ban was correct until `height()`
+    /// learned to follow the pose). What survives is that the gate is
+    /// CHASSIS state on `Fighter`, so it holds for a bot-piloted mech
+    /// exactly as for the player's - the original guard lived only on the
+    /// player path, which left every bot mech still crouching.
+    ///
+    /// Five states, each independently falsifiable.
     #[test]
-    fn a_mech_never_crouches_for_either_a_player_or_a_bot() {
+    fn the_crouch_gate_is_chassis_state_for_player_and_bot_alike() {
         let mut f = TdmSim::new(cfg(83, 1, Mode::Tdm, MapKind::Arena)).fighters.remove(0);
-        // on foot, crouch intent is honoured
+        // (1) on foot, crouch intent is honoured
         f.armor_set = ArmorSet::None;
         f.hull = 0.0;
+        f.grounded = true;
         f.set_crouch(true);
         assert!(f.crouch, "a soldier crouches");
-        // boarded, the same intent is refused
+        // (2) §21: boarded and standing on something, the chassis KNEELS
         f.armor_set = ArmorSet::RobotSuit;
         f.hull = MECH_HULL;
         f.mech_rounds = MECH_ROUNDS;
+        f.set_crouch(false);
         f.set_crouch(true);
-        assert!(!f.crouch, "a live chassis must never crouch");
-        // and a destroyed chassis hands the pilot back their crouch
+        assert!(f.crouch, "§21: a grounded heavy chassis must be able to kneel");
+        // (3) mid-air is not a stance - a walker cannot fold its legs with
+        // nothing under them
+        f.grounded = false;
+        f.set_crouch(true);
+        assert!(!f.crouch, "a chassis must not kneel in mid-air");
+        f.grounded = true;
+        // (4) the LIGHT chassis still refuses outright: its `height()` has
+        // no crouch term, so a crouch flag there would recreate the exact
+        // floating-hitbox bug §21 exists to fix
+        f.armor_set = ArmorSet::ScoutMech;
+        f.hull = SCOUT_HULL;
+        f.set_crouch(true);
+        assert!(!f.crouch, "the light chassis has no kneel - see set_crouch");
+        // (5) and a destroyed chassis hands the pilot back their crouch
         f.hull = 0.0;
         f.armor_set = ArmorSet::None;
         f.set_crouch(true);
@@ -17471,6 +17983,670 @@ mod tests {
         );
     }
 
+    // ---- §21: the heavy chassis KNEELS and JUMPS -----------------------
+
+    /// A live heavy chassis as the VICTIM (index 1), facing the shooter,
+    /// so hits can be classified by band and angle. Index 0 is the man
+    /// doing the shooting, on foot at the range's default 10 m.
+    fn kneel_range(seed: u64) -> TdmSim {
+        let mut s = range(seed);
+        let f = &mut s.fighters[1];
+        f.armor_set = ArmorSet::RobotSuit;
+        f.hull = MECH_HULL;
+        f.mech_rounds = MECH_ROUNDS;
+        f.mech_transition_t = 0.0;
+        f.yaw = std::f32::consts::PI; // facing the shooter: front arc
+        f.grounded = true;
+        f.protect_t = 0.0;
+        s
+    }
+
+    /// §21 CROUCH — the whole reason the ban existed, discharged.
+    ///
+    /// `set_crouch` refused a mech because `height()` returned the full
+    /// 3.03 m unconditionally: the renderer squatted the model, the sim
+    /// did not, and the x2.0 visor band - which `apply_hit_dmg` places at
+    /// frac > 0.82 of `height()` - sat in empty air above where the
+    /// machine actually was. The fix is that `height()` follows the pose,
+    /// and this test measures the consequence from BOTH sides.
+    ///
+    /// The two quantities come from two different code paths on purpose:
+    ///  * `visor_floor` is found by SHOOTING the chassis at a sweep of
+    ///    heights and asking where the damage doubles - pure
+    ///    `apply_hit_dmg` band arithmetic, no call to `height()` here.
+    ///  * `hitbox_top` is found by sweeping `ray_vs_cylinder`, the
+    ///    collision capsule the shooting path itself uses.
+    /// A change that lowered one without the other breaks the third
+    /// assertion, which is exactly the defect being guarded against.
+    #[test]
+    fn a_kneeling_chassis_takes_its_hitbox_and_its_weak_point_down_with_it() {
+        // What one shot at world height `y` actually takes off the hull.
+        // Hull and plate state are restored each probe so the §6.3
+        // armour-drop thresholds cannot contaminate the sweep.
+        let probe = |s: &mut TdmSim, y: f32| -> f32 {
+            {
+                let f = &mut s.fighters[1];
+                f.hull = MECH_HULL;
+                f.mech_plates_dropped = 0;
+                f.health = MAX_HEALTH;
+                f.respawn_t = 0.0;
+            }
+            let h0 = s.fighters[1].hull;
+            s.apply_hit(0, 1, y, [0.0, y, 5.0]);
+            h0 - s.fighters[1].hull
+        };
+        // the lowest height at which the front visor's x2.0 fires, found
+        // by sweep against a low reference shot that is certainly not it
+        let visor_floor = |s: &mut TdmSim| -> f32 {
+            let plain = probe(s, 0.30);
+            assert!(plain > 0.0, "the reference shot must damage the hull at all");
+            let mut y = 0.30;
+            while y < 3.60 {
+                if probe(s, y) > plain * 1.5 {
+                    return y;
+                }
+                y += 0.01;
+            }
+            panic!("the visor band was not reachable at ANY height on this chassis");
+        };
+        // the highest height at which a horizontal shot still meets the
+        // collision capsule - the sim's own idea of where the machine ends
+        let hitbox_top = |s: &TdmSim| -> f32 {
+            let f = &s.fighters[1];
+            let mut y = 0.05;
+            let mut top = 0.0;
+            while y < 4.00 {
+                if ray_vs_cylinder(
+                    [0.0, y, -5.0],
+                    [0.0, 0.0, 1.0],
+                    f.pos,
+                    f.radius(),
+                    f.height(),
+                )
+                .is_some()
+                {
+                    top = y;
+                }
+                y += 0.01;
+            }
+            top
+        };
+
+        let mut standing = kneel_range(0x210);
+        standing.fighters[1].set_crouch(false);
+        let stand_visor = visor_floor(&mut standing);
+        let stand_top = hitbox_top(&standing);
+
+        let mut kneeling = kneel_range(0x210);
+        kneeling.fighters[1].set_crouch(true);
+        assert!(
+            kneeling.fighters[1].crouch,
+            "precondition: §21 must actually let a grounded chassis kneel"
+        );
+        let kneel_visor = visor_floor(&mut kneeling);
+        let kneel_top = hitbox_top(&kneeling);
+
+        // (1) the WEAK POINT came down. Nothing about `height()` in this
+        // assertion - it is two damage measurements compared.
+        assert!(
+            kneel_visor < stand_visor - 0.2,
+            "the visor band did not move with the kneel: {kneel_visor:.2} m \
+             kneeling vs {stand_visor:.2} m standing"
+        );
+        // (2) and so did the HITBOX, by a meaningful amount. "Lowers the
+        // hull meaningfully" is the requirement; a token 5 cm squat would
+        // pass a bare inequality and fail the brief.
+        assert!(
+            kneel_top < stand_top * 0.85,
+            "the capsule barely moved: {kneel_top:.2} m kneeling vs \
+             {stand_top:.2} m standing - that is not a kneel"
+        );
+        // (3) THE ONE THAT MATTERS: the weak point still sits at the same
+        // place ON THE MACHINE. Relationship, not constant, so retuning
+        // MECH_CROUCH_HEIGHT_FRAC leaves it true - while a band computed
+        // against a standing height on a squatting model (the original
+        // bug) puts the numerator above the denominator and fails.
+        let stand_frac = stand_visor / stand_top;
+        let kneel_frac = kneel_visor / kneel_top;
+        assert!(
+            (kneel_frac - stand_frac).abs() < 0.04,
+            "the visor sits at {stand_frac:.3} of a standing chassis but \
+             {kneel_frac:.3} of a kneeling one - the band and the body are \
+             no longer the same machine"
+        );
+        assert!(
+            kneel_visor < kneel_top,
+            "the visor band ({kneel_visor:.2} m) is above the top of the \
+             kneeling capsule ({kneel_top:.2} m) - unreachable, which is \
+             the exact bug the crouch ban was hiding"
+        );
+    }
+
+    /// §21: the two accessors the CLIENT renders §21 from, checked here
+    /// because the client is a separate lane and a published accessor
+    /// nobody has exercised is a published guess.
+    ///
+    /// `visor_eye_y` is the load-bearing one: the pilot's camera and the
+    /// x2.0 weak point have to be the same point on the machine, or the
+    /// pilot is looking out of a spot that is not the one being shot at.
+    #[test]
+    fn the_published_chassis_accessors_agree_with_the_machine() {
+        let mut s = kneel_range(0x21A);
+        // standing, the stance-aware method and the old free function are
+        // the same number - the client's existing call sites keep working
+        s.fighters[1].set_crouch(false);
+        let free = mech_visor_eye_y(s.fighters[1].pos[1]);
+        assert!(
+            (s.fighters[1].visor_eye_y() - free).abs() < 1e-5,
+            "standing, {} must equal the free function's {free}",
+            s.fighters[1].visor_eye_y()
+        );
+        // kneeling, it comes DOWN with the machine while the free
+        // function - which only ever sees pos[1] - cannot know it moved
+        s.fighters[1].set_crouch(true);
+        let kneeling = s.fighters[1].visor_eye_y();
+        assert!(
+            kneeling < free - 0.5,
+            "the pilot's eye stayed at {kneeling} while the chassis knelt"
+        );
+        assert!(
+            kneeling > s.fighters[1].pos[1] + 1.0,
+            "the eye ended up inside the machine's feet: {kneeling}"
+        );
+        // and the phase labels are distinct - a HUD that cannot tell
+        // COMPRESS from RECOVER is a HUD that draws the wrong telegraph
+        let labels: Vec<&str> = [
+            MechJumpPhase::None,
+            MechJumpPhase::Compress,
+            MechJumpPhase::Air,
+            MechJumpPhase::Recover,
+        ]
+        .iter()
+        .map(|p| p.label())
+        .collect();
+        let mut uniq = labels.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), labels.len(), "two phases share a label: {labels:?}");
+    }
+
+    /// §21 CROUCH, the movement half: a kneeling chassis is PLANTED, and
+    /// planted ONCE.
+    ///
+    /// The crouch key sets `crouch` and `mech_brace` together on a
+    /// chassis, and the speed ladder has a rung for each. Charging both
+    /// would put a kneeling mech at 6% of walking pace for a single pose.
+    /// The second assertion is the guard on that, and it is the one that
+    /// fails if `crouch_speed_mult` loses its `in_heavy_mech` exemption.
+    #[test]
+    fn a_kneeling_chassis_is_planted_once_and_not_twice() {
+        let travel = |crouch: bool, brace_only: bool| -> f32 {
+            let mut s = range(0x211);
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = ArmorSet::RobotSuit;
+                f.hull = MECH_HULL;
+                f.mech_rounds = MECH_ROUNDS;
+                f.mech_transition_t = 0.0;
+            }
+            // settle the §1.3 acceleration model before measuring
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    crouch,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                if brace_only {
+                    // the braced-but-standing chassis: the flag without
+                    // the pose, which is what the pre-§21 mech always was
+                    s.fighters[0].set_crouch(false);
+                    s.fighters[0].mech_brace = true;
+                }
+            }
+            let f = &s.fighters[0];
+            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
+        };
+        let standing = travel(false, false);
+        let kneeling = travel(true, false);
+        let braced = travel(false, true);
+        assert!(standing > 0.5, "precondition: a standing chassis walks");
+        // (1) kneeling COSTS movement
+        assert!(
+            kneeling < standing * 0.5,
+            "a kneeling chassis moved at {kneeling:.3} m/s against a \
+             standing {standing:.3} - the kneel is free"
+        );
+        // (2) and costs it exactly ONCE: the same pace as the brace on its
+        // own, not the brace times the infantry crouch tax on top.
+        assert!(
+            (kneeling - braced).abs() < 0.02,
+            "kneeling {kneeling:.3} m/s vs braced {braced:.3} m/s - one \
+             planted pose is being charged two multipliers"
+        );
+        assert!(
+            kneeling > standing * MECH_BRACE_SPEED_MULT * CROUCH_SPEED_MULT * 1.5,
+            "kneeling {kneeling:.3} m/s is down at the DOUBLE-charged rate"
+        );
+    }
+
+    /// §21 parity: the kneel reaches a BOT-piloted chassis on the same
+    /// terms as the player's.
+    ///
+    /// This project's most repeated defect is a rule that fired on one
+    /// path only - the mech turn rate, the acceleration model, and the
+    /// spear halving all shipped that way, and the crouch ban itself was
+    /// originally added to the player path alone. `set_crouch` and
+    /// `crouch_speed_mult`/`mech_stance_speed_mult` are shared precisely
+    /// so this test cannot fail; it exists because "cannot fail" has been
+    /// wrong here before.
+    #[test]
+    fn a_kneeling_chassis_pays_the_same_on_the_bot_path_as_the_player_path() {
+        // player path: driven by PlayerCmd through `step`
+        let player = |crouch: bool| -> f32 {
+            let mut s = range(0x212);
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = ArmorSet::RobotSuit;
+                f.hull = MECH_HULL;
+                f.mech_rounds = MECH_ROUNDS;
+                f.mech_transition_t = 0.0;
+            }
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    crouch,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+            }
+            let f = &s.fighters[0];
+            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
+        };
+        // bot path: driven by `bot_act` through the same `step`. The
+        // stance cannot be forced from outside - `bot_act` calls
+        // `set_crouch` itself every tick and would overwrite it - so it is
+        // coaxed out of the brain's own rule instead: `want_crouch` is
+        // `closing.abs() < 0.05 && dist > 9.0`, and `closing` is zero
+        // anywhere in the 6..15 m band. So 12 m kneels and 8 m does not,
+        // with the SAME zero closing input and the same gatling mount
+        // (the autocannon switch, and the brace that comes with it, is
+        // 18.9 m away from both).
+        let bot = |dist: f32| -> (f32, bool) {
+            let mut s = bot_mech(0x213, dist, GunKind::Ak47, 0, 0);
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd::default());
+                s.fighters[0].pos = [0.0, 0.0, 0.0]; // hold the range open
+                s.fighters[1].pos[2] = dist;
+            }
+            let f = &s.fighters[1];
+            (
+                (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt(),
+                f.crouch && !f.mech_brace,
+            )
+        };
+        let (p_up, p_down) = (player(false), player(true));
+        let (b_up, up_kneeling) = bot(8.0);
+        let (b_down, down_kneeling) = bot(12.0);
+        assert!(
+            !up_kneeling && down_kneeling,
+            "the fixture did not produce the stances it needed: 8 m kneeling \
+             = {up_kneeling}, 12 m kneeling = {down_kneeling}"
+        );
+        assert!(p_up > 0.5 && b_up > 0.5, "precondition: both chassis move");
+        let p_ratio = p_down / p_up;
+        let b_ratio = b_down / b_up;
+        assert!(
+            p_ratio < 0.5,
+            "the player's chassis paid nothing for the kneel ({p_ratio:.3})"
+        );
+        assert!(
+            (p_ratio - b_ratio).abs() < 0.03,
+            "a kneeling chassis keeps {p_ratio:.3} of its pace for the \
+             player and {b_ratio:.3} for a bot - the stance tax has drifted \
+             between the two paths"
+        );
+    }
+
+    /// §21 JUMP: compression, launch, landing, recovery - the whole shape.
+    ///
+    /// The apex assertion is deliberately a RELATIONSHIP against a
+    /// soldier's jump measured in the same sim: the chassis is
+    /// `MECH_SCALE` times a man, so it clears `MECH_SCALE` times the
+    /// height, and `mech_jump_speed` derives its velocity from exactly
+    /// that. Re-deriving `JUMP_SPEED * MECH_SCALE.sqrt()` in the test
+    /// would prove nothing but that multiplication works.
+    #[test]
+    fn the_mech_jump_compresses_launches_clears_its_scale_and_must_rest() {
+        let jump_cmd = PlayerCmd { jump: true, aim: [0.0, 0.0, 1.0], ..Default::default() };
+        let mut s = range(0x214);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
+            f.mech_transition_t = 0.0;
+        }
+        // (1) the press starts a COMPRESSION, not a launch. A 3 m machine
+        // that left the ground on the keypress tick would telegraph
+        // nothing, which is the half of the brief a bare jump misses.
+        s.step(jump_cmd);
+        assert_eq!(
+            s.mech_jump_phase_of(0),
+            MechJumpPhase::Compress,
+            "the jump key must buy a wind-up first"
+        );
+        let compress_ticks = (MECH_JUMP_COMPRESS_S * SIM_HZ as f32) as usize;
+        let mut last_frac = -1.0_f32;
+        for k in 0..(compress_ticks - 2) {
+            assert!(
+                s.fighters[0].grounded,
+                "the chassis left the ground {k} ticks into the coil"
+            );
+            let frac = s.mech_jump_compression_of(0);
+            assert!(
+                frac >= last_frac,
+                "the compression readout went backwards at tick {k}: \
+                 {frac} after {last_frac}"
+            );
+            assert!((0.0..=1.0).contains(&frac), "compression out of range: {frac}");
+            last_frac = frac;
+            s.step(jump_cmd);
+        }
+        assert!(
+            last_frac > 0.8,
+            "the compression readout only reached {last_frac} at the end of \
+             the wind-up - the client cannot draw a coil from that"
+        );
+        // (2) LAUNCH, and the apex it buys. Held input, because a pilot
+        // holds the key; the compression must not restart mid-flight.
+        let mut apex = 0.0_f32;
+        let mut saw_air = false;
+        let mut landed_at: Option<usize> = None;
+        for k in 0..(SIM_HZ as usize * 3) {
+            s.step(jump_cmd);
+            apex = apex.max(s.fighters[0].pos[1]);
+            if s.mech_jump_phase_of(0) == MechJumpPhase::Air {
+                saw_air = true;
+            }
+            if saw_air && landed_at.is_none() && s.fighters[0].grounded {
+                landed_at = Some(k);
+                assert_eq!(
+                    s.mech_jump_phase_of(0),
+                    MechJumpPhase::Recover,
+                    "touching down must open the recovery window"
+                );
+            }
+        }
+        assert!(saw_air, "the chassis never actually left the ground");
+        assert!(landed_at.is_some(), "the chassis never came back down");
+        // the soldier's apex, measured the same way in the same world
+        let mut m = range(0x215);
+        m.fighters[0].armor_set = ArmorSet::None;
+        m.fighters[0].hull = 0.0;
+        let mut man_apex = 0.0_f32;
+        for _ in 0..(SIM_HZ as usize * 3) {
+            m.step(jump_cmd);
+            man_apex = man_apex.max(m.fighters[0].pos[1]);
+        }
+        assert!(man_apex > 0.5, "precondition: the soldier's jump works");
+        let ratio = apex / man_apex;
+        assert!(
+            (ratio - MECH_SCALE).abs() < MECH_SCALE * 0.06,
+            "the chassis cleared {apex:.2} m against a soldier's \
+             {man_apex:.2} m - a ratio of {ratio:.2}, not the {MECH_SCALE} \
+             it is scaled to"
+        );
+        // (3) RECOVERY is a real lockout, not a label: jump held down the
+        // whole time above, and the machine is on the ground - it must
+        // still be resting rather than already coiling again.
+        let mut s = range(0x216);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
+            f.mech_transition_t = 0.0;
+            f.mech_jump_phase = MechJumpPhase::Recover;
+            f.mech_jump_t = MECH_JUMP_RECOVER_S;
+        }
+        assert!(
+            !s.try_mech_jump(0),
+            "a chassis still absorbing its landing accepted another jump"
+        );
+        assert!(
+            s.fighters[0].chassis_kneeling(),
+            "the landing absorb must be a KNEEL - low hull, low bands, \
+             planted - or the recovery costs the pilot nothing"
+        );
+        run(&mut s, 1, PlayerCmd::default());
+        assert_eq!(
+            s.mech_jump_phase_of(0),
+            MechJumpPhase::None,
+            "the recovery window never closed"
+        );
+        assert!(s.try_mech_jump(0), "and then the chassis may jump again");
+        // (4) and the jump DIES WITH THE LIFE. State surviving a
+        // transition it should not is this project's named recurring
+        // defect; a `Recover` that outlived the chassis would leave a
+        // fresh soldier kneeling and planted at 12% pace on his own two
+        // feet. `Recover` is used here rather than `Compress` on purpose:
+        // the compression aborts itself on death anyway, so it would test
+        // the timer loop instead of the respawn block.
+        {
+            let f = &mut s.fighters[0];
+            f.mech_jump_phase = MechJumpPhase::Recover;
+            f.mech_jump_t = 99.0;
+            f.health = 0.0;
+            f.respawn_t = 0.05;
+        }
+        run(&mut s, 1, PlayerCmd::default());
+        assert!(s.fighters[0].alive(), "precondition: he came back");
+        assert_eq!(
+            s.mech_jump_phase_of(0),
+            MechJumpPhase::None,
+            "a jump phase survived a respawn"
+        );
+    }
+
+    /// §21 JUMP: it is paid for out of `stride_heat`, the chassis's
+    /// EXISTING mobility budget - so jumping and power-striding compete
+    /// instead of stacking. Three properties, one of which (the aborted
+    /// coil) is the reason the charge is at launch and not at the press.
+    #[test]
+    fn a_mech_jump_is_paid_for_out_of_the_stride_budget() {
+        let jump_cmd = PlayerCmd { jump: true, aim: [0.0, 0.0, 1.0], ..Default::default() };
+        let arm = |s: &mut TdmSim| {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_rounds = MECH_ROUNDS;
+            f.mech_transition_t = 0.0;
+            f.stride_heat = 0.0;
+        };
+        // (1) the COIL is free - nothing is owed for a wind-up that has
+        // not launched, exactly as `stride_wind_t` owes nothing
+        let mut s = range(0x217);
+        arm(&mut s);
+        for _ in 0..((MECH_JUMP_COMPRESS_S * SIM_HZ as f32) as usize / 2) {
+            s.step(jump_cmd);
+        }
+        assert_eq!(
+            s.mech_jump_phase_of(0),
+            MechJumpPhase::Compress,
+            "precondition: still coiling"
+        );
+        assert!(
+            s.fighters[0].stride_heat < 1.0,
+            "an unfinished coil was already charged {} heat",
+            s.fighters[0].stride_heat
+        );
+        // (2) the LAUNCH pays. Read on the very tick the chassis leaves
+        // the ground, before the passive cooldown eats any of it.
+        let mut charged = 0.0_f32;
+        for _ in 0..(SIM_HZ as usize) {
+            let before = s.fighters[0].stride_heat;
+            s.step(jump_cmd);
+            if s.mech_jump_phase_of(0) == MechJumpPhase::Air && charged == 0.0 {
+                charged = s.fighters[0].stride_heat - before;
+                break;
+            }
+        }
+        assert!(
+            (charged - MECH_JUMP_HEAT).abs() < 1.0,
+            "the launch charged {charged} of stride heat, not \
+             MECH_JUMP_HEAT ({MECH_JUMP_HEAT})"
+        );
+        // (3) and a budget that cannot take the charge REFUSES the jump.
+        // This is the whole point of sharing the pool with the stride: a
+        // pilot who just strided cannot also leap.
+        let mut s = range(0x218);
+        arm(&mut s);
+        s.fighters[0].stride_heat = 100.0 - MECH_JUMP_HEAT + 1.0;
+        assert!(
+            !s.try_mech_jump(0),
+            "a chassis with no room left in its stride budget jumped anyway"
+        );
+        s.fighters[0].stride_heat = 100.0 - MECH_JUMP_HEAT - 1.0;
+        assert!(
+            s.try_mech_jump(0),
+            "and one with room must be allowed to - the gate is the budget, \
+             not a flat ban"
+        );
+    }
+
+    /// §21 JUMP: the landing has consequences for whoever is standing
+    /// under it, and only for them.
+    #[test]
+    fn a_landing_chassis_shocks_the_enemy_infantry_under_it_and_no_one_else() {
+        // fighters: 0 = the jumping chassis (Blue), 1 = an enemy on foot.
+        // A 4-body sim gives room for a far enemy and a teammate too.
+        let build = |enemy_at: f32| -> TdmSim {
+            let mut s = TdmSim::new(cfg(0x219, 2, Mode::Tdm, MapKind::Arena));
+            s.cover.clear();
+            s.cover_kind.clear();
+            s.rebuild_grid();
+            s.pickups.clear();
+            for f in s.fighters.iter_mut() {
+                f.class = Class::Line;
+                f.health = MAX_HEALTH;
+                f.armor_pieces = default_harness(Class::Line);
+                f.protect_t = 0.0;
+                f.pos = [0.0, 0.0, 60.0]; // parked far away by default
+                f.respawn_t = 0.0;
+            }
+            let jumper = 0;
+            s.fighters[jumper].pos = [0.0, 0.0, 0.0];
+            s.fighters[jumper].armor_set = ArmorSet::RobotSuit;
+            s.fighters[jumper].hull = MECH_HULL;
+            s.fighters[jumper].mech_rounds = MECH_ROUNDS;
+            s.fighters[jumper].mech_transition_t = 0.0;
+            s.fighters[jumper].mech_jump_phase = MechJumpPhase::Air;
+            s.fighters[jumper].pos[1] = 0.5;
+            s.fighters[jumper].vy = -6.0;
+            s.fighters[jumper].grounded = false;
+            // the enemy under (or near) the foot
+            let foe = s
+                .fighters
+                .iter()
+                .position(|f| f.team != s.fighters[jumper].team)
+                .expect("the fixture needs an enemy");
+            s.fighters[foe].pos = [0.0, 0.0, enemy_at];
+            s.fighters[foe].armor_set = ArmorSet::None;
+            // a TEAMMATE standing just as close
+            let mate = s
+                .fighters
+                .iter()
+                .enumerate()
+                .position(|(i, f)| i != jumper && f.team == s.fighters[jumper].team)
+                .expect("the fixture needs a teammate");
+            s.fighters[mate].pos = [1.0, 0.0, 0.0];
+            s.fighters[mate].armor_set = ArmorSet::None;
+            s
+        };
+        // Health lost by every fighter over the SINGLE tick the chassis
+        // touches down - not over a window. The bystanders here are live
+        // bots with live weapons, and a half-second window would fold
+        // their own crossfire into the measurement (it did, on the first
+        // cut: 43 of "shockwave damage" 4 m from the impact). Positions
+        // are re-pinned before each tick so the brain cannot walk anyone
+        // out of the ring before the foot lands either.
+        let land = |s: &mut TdmSim, pinned: Vec<[f32; 3]>| -> Vec<f32> {
+            for _ in 0..(SIM_HZ as usize) {
+                for (j, p) in pinned.iter().enumerate() {
+                    if j != 0 {
+                        s.fighters[j].pos = *p;
+                        s.fighters[j].vel = [0.0, 0.0];
+                    }
+                }
+                let before: Vec<f32> = s.fighters.iter().map(|f| f.health).collect();
+                s.step(PlayerCmd::default());
+                if s.mech_jump_phase_of(0) == MechJumpPhase::Recover {
+                    return s
+                        .fighters
+                        .iter()
+                        .zip(before)
+                        .map(|(f, b)| b - f.health)
+                        .collect();
+                }
+            }
+            panic!("the chassis never landed");
+        };
+        let foe_of = |s: &TdmSim| -> usize {
+            s.fighters.iter().position(|f| f.team != s.fighters[0].team).unwrap()
+        };
+        let mate_of = |s: &TdmSim| -> usize {
+            s.fighters
+                .iter()
+                .enumerate()
+                .position(|(i, f)| i != 0 && f.team == s.fighters[0].team)
+                .unwrap()
+        };
+
+        // (1) directly underneath: real damage and a real stagger
+        let mut s = build(0.4);
+        let (foe, mate) = (foe_of(&s), mate_of(&s));
+        let pins: Vec<[f32; 3]> = s.fighters.iter().map(|f| f.pos).collect();
+        let lost = land(&mut s, pins);
+        assert!(
+            s.fighters[0].grounded,
+            "precondition: the chassis actually came down"
+        );
+        let near = lost[foe];
+        assert!(near > 1.0, "the man under the landing took {near} damage");
+        assert!(
+            s.fighters[foe].stagger_t > 0.0,
+            "and he must be STAGGERED - the shock is half the point"
+        );
+        // (2) a TEAMMATE at the same range is spared. A mobility move that
+        // mines your own squad is a move nobody uses near their squad.
+        assert_eq!(
+            lost[mate], 0.0,
+            "the landing hurt its own team"
+        );
+        // (3) it FALLS OFF: the edge of the ring is not the epicentre
+        let mut far = build(MECH_LAND_RADIUS_M - 0.5);
+        let foe_f = foe_of(&far);
+        let pins: Vec<[f32; 3]> = far.fighters.iter().map(|f| f.pos).collect();
+        let edge = land(&mut far, pins)[foe_f];
+        assert!(
+            edge > 0.0 && edge < near * 0.5,
+            "edge-of-ring damage {edge} against epicentre {near} - the \
+             falloff is missing or inverted"
+        );
+        // (4) and it STOPS. Outside the radius is outside.
+        let mut out = build(MECH_LAND_RADIUS_M + 2.0);
+        let foe_o = foe_of(&out);
+        let pins: Vec<[f32; 3]> = out.fighters.iter().map(|f| f.pos).collect();
+        assert_eq!(
+            land(&mut out, pins)[foe_o],
+            0.0,
+            "a man {:.1} m away was hurt by a landing with a \
+             {MECH_LAND_RADIUS_M} m ring",
+            MECH_LAND_RADIUS_M + 2.0
+        );
+    }
+
     // ---- §C: the hull-mounted gatling + autocannon --------------------
 
     /// A live chassis on the range, mounts cold, both mounts ready.
@@ -18897,9 +20073,18 @@ mod tests {
             (h / want - 1.0).abs() < 0.02,
             "mech height {h:.3} vs {want:.3}"
         );
-        // GROUNDED: seeded fuzz drive with jump AND held-thrust inputs —
-        // the mech must never gain upward velocity (flight is deleted)
+        // §21 SUPERSEDES the old assertion here ("the mech must NEVER gain
+        // height"). The chassis jumps now, so that sentence is false by
+        // design - but the rule this section was really guarding, that
+        // FLIGHT is deleted, is untouched and is what it now asserts:
+        //   * the chassis leaves the ground ONLY inside a jump phase, and
+        //   * never exceeds its launch velocity, so holding the key in
+        //     mid-air buys nothing (thrust is still gone).
+        // Both are falsifiable: a mech that climbed on held jump breaks
+        // the second, and anything that added vy outside a jump breaks the
+        // first. The jump itself gets its own tests below.
         let mut rng = Pcg32::new(77, 99);
+        let mut airborne_ticks = 0usize;
         for i in 0..(60 * SIM_HZ as usize) {
             let (jx, jz) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
             s.step(PlayerCmd {
@@ -18914,11 +20099,29 @@ mod tests {
             s.fighters[1].pos = [-30.0, 0.0, -30.0];
             s.fighters[1].vel = [0.0, 0.0];
             assert!(
-                s.fighters[0].vy <= 0.01,
-                "the mech must NEVER gain height: vy {} at tick {i}",
+                s.fighters[0].mech_jump_phase != MechJumpPhase::None
+                    || s.fighters[0].vy <= 0.01,
+                "the mech gained height with no jump running: vy {} at tick {i}",
                 s.fighters[0].vy
             );
+            assert!(
+                s.fighters[0].vy <= mech_jump_speed() + 0.01,
+                "the mech went above its own launch velocity - thrust is \
+                 back: vy {} at tick {i}",
+                s.fighters[0].vy
+            );
+            if s.fighters[0].mech_jump_phase == MechJumpPhase::Air {
+                airborne_ticks += 1;
+            }
         }
+        // and prove the fuzz above actually EXERCISED the jump - without
+        // this the "never exceeds launch velocity" assertion is vacuous
+        // for the only case that could ever break it
+        assert!(
+            airborne_ticks > 0,
+            "the 60 s fuzz never once got the chassis airborne, so the \
+             flight assertions above proved nothing about a jumping mech"
+        );
         // DISMOUNT: U starts the power-down; §6.2 makes leaving COMMITTED
         // (MECH_EXIT_S) rather than a one-tick flip, so the pilot is on
         // foot only once the window closes.
@@ -20393,6 +21596,15 @@ mod tests {
                 out.push(f.punch_vel[0].to_bits());
                 out.push(f.punch_vel[1].to_bits());
                 out.push(f.mech_brace as u32);
+                // §21: the kneel and the jump are authoritative chassis
+                // state - `crouch` moves `height()`, which is the hitbox
+                // AND the hit bands, and the jump phase moves both plus
+                // the stride budget. They belong here for exactly the
+                // reason `mech_brace` does.
+                out.push(f.crouch as u32);
+                out.push(f.mech_jump_phase as u32);
+                out.push(f.mech_jump_t.to_bits());
+                out.push(f.stride_heat.to_bits());
                 out.push(f.mech_weapon as u32);
                 // §12: the turret's selector state is now part of where
                 // rounds go, so it belongs in the fingerprint. (`punch`
