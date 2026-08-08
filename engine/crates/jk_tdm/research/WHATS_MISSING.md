@@ -33,6 +33,19 @@ finished work. What follows is what is actually left.)*
    soldier arsenal. They are placeholders and are marked as such at the
    call sites.
 
+### Closed (the medic REDESIGN, and the shield put back)
+
+| Item | How it closed |
+|---|---|
+| **The mech barrier had grown hardware nobody asked for** | A later pass bolted an outer frame, a six-node emitter ring and its feed conduits around the projector, on the argument that a field that size "needs a structure to be projected from". The owner asked for the original back: just the blue transparent hologram, at 60% bigger. All of that hardware is gone and the emitter is the three-petal folding module it always was. `BARRIER_SCALE` is 1.60 against the original 1.7 m field — 2.72 m. Note the arithmetic: the tree was already at 1.55×, so reading "60% bigger" against *that* would give 4.2 m, which the file's own test rejects as "a building, not a shield" (it brackets the barrier at 2.4–3.4 m). 2.72 sits mid-band. |
+| **The barrier had never been photographed** | It shipped, was redesigned twice, and every claim about its appearance came from reading the code that spawned it — `shield_fp` captures the SOLDIER's tower shield, which is a different object. A `barrier` script now boards the heavy, raises the plate on the key a player actually presses, and orbits it: a flat disc seen edge-on is the one angle that proves nothing. |
+| **The medic was still a military machine** | The owner brought reference art: a squat utility robot, rounded masses, one big camera lens, worn amber over near-black. The chassis was rebuilt to that language — ~90 exposed struts/pistons/louvres down to ~45 nameable masses. One LENS eye with the team accent as its iris, at visor height, so friend-or-foe is answered by the glance that meets its eye. Plantigrade thick legs and big feet replaced the digitigrade frame: it read fast but also skittish, and half its hardware (boom, calf thrusters, bracing stays) existed only to explain itself. The ally shell went AMBER — the team read never rested on the shell (it rests on luminance against a near-black foe, plus the emissive accent), so a service livery is affordable and truthful: it is equipment, not a soldier. |
+| **Armour is now a trim level, not one fixed suit** | `full_kit` picks pauldron domes, knee caps and a belly band, or drops them and thins the limb shells. Derived from slot index at spawn, exactly as the helmet shapes are, so a lineup of medics reads as individuals. Visual only — nothing sim-side knows it exists. |
+| **Every mech wore the pilot's rifle** | `weapon_root` hangs off the SPINE, not an arm, so hiding the arms never hid it. Third-person only; the first-person half was fixed long ago. |
+| **A medic pilot failed every mech gate** | `let in_mech = f.armor_set == ArmorSet::RobotSuit` — written before the second chassis existed, and never revisited. The stowed rifle stayed out, rolls played the soldier shoulder-roll under a rigid hull, and the legs aimed like hips. Replaced with the sim's own `f.in_mech()`. |
+| **The medic wore the heavy's shin armour** | D.1 leg armour was gated on `is_mech`. Invisible while both liveries were grey; the amber repaint made it obvious in one frame. |
+| **The pilot's hips showed through the chassis** | The chassis shares the soldier's thorax space and its pelvis was 0.30 m against a 0.345 m waist stripe, so the man's own body was visible as a pale band through the machine. Every block from the pelvis up now has a stated minimum width. |
+
 ### Closed 2026-08-07 (the medic pass — model, HUD, and three bugs)
 
 | Item | How it closed |
