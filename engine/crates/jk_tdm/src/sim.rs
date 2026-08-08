@@ -3293,6 +3293,18 @@ pub struct Fighter {
     /// that boards then loses the chassis mid-air cannot carry a stray
     /// charge into a body that should not have one.
     pub scout_second_flip_used: bool,
+    /// §owner AGILE SUPPORT MECH: a single mid-air jump, spent once per
+    /// airborne period and restored the instant the fighter lands - NOT
+    /// on the flip's recovery-timer clock, because a jump does not gate
+    /// firing or anything else the way a flip's landing recovery does,
+    /// so there is no reason to make the pilot wait for one.
+    ///
+    /// This is not the deleted heavy thruster system come back: that was
+    /// sustained, power-metered flight (§4.3, Brief VI - "the mech never
+    /// leaves the ground now"), heavy-only, and stays deleted. This is a
+    /// single discrete impulse, scout-only, the same shape as the second
+    /// flip charge above.
+    pub scout_air_jump_used: bool,
     /// §6: >0 → the raised shield is DIPPED for a throw (blocks nothing).
     pub shield_dip_t: f32,
     /// Ability cooldown (repulsor).
@@ -6380,6 +6392,7 @@ impl TdmSim {
                     flip_used: false,
                     flip_recover_t: 0.0,
                     scout_second_flip_used: false,
+                    scout_air_jump_used: false,
                     ability_cd: 0.0,
                     last_ability_at: -100.0,
                     last_dmg_at: -100.0,
@@ -6986,6 +6999,7 @@ impl TdmSim {
                     f.flip_t = 0.0;
                     f.flip_used = false;
                     f.scout_second_flip_used = false;
+                    f.scout_air_jump_used = false;
                     f.flip_recover_t = 0.0;
                     f.spear_wind_t = 0.0;
                     f.ability_cd = 0.0;
@@ -7655,11 +7669,20 @@ impl TdmSim {
             if cmd.jump && self.fighters[p].in_heavy_mech() {
                 self.try_mech_jump(p);
             } else if cmd.jump
-                && self.fighters[p].grounded
                 && self.fighters[p].roll_t <= 0.0
                 && !self.fighters[p].in_heavy_mech()
+                && (self.fighters[p].grounded
+                    // §owner AGILE SUPPORT MECH: a scout with its air-jump
+                    // still in the bank may trigger this from the air too.
+                    // Not gated on flip_t - the ground path never gated on
+                    // it either, so this stays exactly as permissive as
+                    // the jump already was rather than inventing a new
+                    // restriction.
+                    || (self.fighters[p].in_scout_mech()
+                        && !self.fighters[p].scout_air_jump_used))
             {
                 let f = &mut self.fighters[p];
+                let grounded_jump = f.grounded;
                 // §C.3 (BRIEF VIII_B): the counter-movement rule is
                 // specified to govern "the jump, the dodge launch, and
                 // the melee thrust", not only the throw. The dodge got
@@ -7672,7 +7695,14 @@ impl TdmSim {
                 // Routed through the SAME `counter_movement_bonus` the
                 // dodge uses - prior motion down, release up - so the
                 // two can never drift apart.
-                let boost = if f.crouch {
+                //
+                // §owner AGILE SUPPORT MECH: gated on `grounded_jump` -
+                // there are no coiled legs to release mid-air, so an
+                // air-jump never earns this. Giving it the bonus anyway
+                // would have been free power with no physical story
+                // behind it, exactly the kind of thing this brief's own
+                // rule was written to prevent for the ground jump.
+                let boost = if grounded_jump && f.crouch {
                     counter_movement_bonus(-1.0, 1.0, JUMP_COUNTER_BONUS)
                 } else {
                     0.0
@@ -7680,6 +7710,9 @@ impl TdmSim {
                 f.vy = JUMP_SPEED * (1.0 + boost);
                 f.pos[1] += 0.05; // clear the support clamp so the ascent integrates
                 f.grounded = false;
+                if !grounded_jump {
+                    f.scout_air_jump_used = true;
+                }
             }
             // §4.3 (Brief VI): FLIGHT IS DELETED. The Brief IV thruster
             // block (hold SPACE airborne → climb, power-metered) lived
@@ -8577,6 +8610,10 @@ impl TdmSim {
                     let impact = f.vy;
                     f.vy = 0.0;
                     f.grounded = true;
+                    // §owner AGILE SUPPORT MECH: the scout's air-jump
+                    // refills on landing, not on a recovery timer - see
+                    // the field's own doc comment for why.
+                    f.scout_air_jump_used = false;
                     if f.mech_jump_phase == MechJumpPhase::Air {
                         // §21: the chassis LANDS. It does not breakfall -
                         // three tonnes of walker does not tuck and roll,
@@ -8617,6 +8654,14 @@ impl TdmSim {
                 f.pos[1] = support;
                 f.vy = 0.0;
                 f.grounded = true;
+                // §owner AGILE SUPPORT MECH: same as the hard-landing
+                // site above - this IS a landing too (see the comment
+                // immediately below on why), so the air-jump refills
+                // here as well. Missing this branch would have left the
+                // charge permanently spent for anyone who happened to
+                // land by drifting onto cover instead of falling onto
+                // flat ground.
+                f.scout_air_jump_used = false;
                 // §21: the OTHER way flight ends - the support came up to
                 // meet the chassis (it drifted over a crate mid-jump) so
                 // it never fell the last 2 cm. Same landing, same
@@ -14697,6 +14742,119 @@ mod tests {
             s2.fighters[0].flip_t <= 0.0,
             "the heavy has no second charge and no flip at all - it must \
              not somersault twice, or once, or ever"
+        );
+    }
+
+    /// §owner AGILE SUPPORT MECH: a single mid-air jump - NOT the deleted
+    /// heavy thruster system back from the dead, a distinct scout-only
+    /// discrete impulse. Isolates the trigger gate the same way the flip
+    /// tests do: stage the exact state a scout is in right after leaving
+    /// the ground, drive a real `step()`, check what actually moved.
+    #[test]
+    fn the_scout_gets_a_single_mid_air_jump() {
+        let mut s = range(706);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.vy = 0.5; // already rising from the real ground jump
+            f.roll_t = 0.0;
+            f.scout_air_jump_used = false;
+        }
+        s.step(PlayerCmd {
+            jump: true,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        // the jump trigger runs BEFORE gravity integration within the same
+        // tick (it is earlier in this file, in the same per-fighter pass),
+        // so by the time step() returns, one tick of GRAVITY has already
+        // been subtracted from the JUMP_SPEED this just set. Asserting
+        // against the raw constant would fail on CORRECT code - the exact
+        // expected value is computed, not approximated.
+        let expected_vy = JUMP_SPEED - GRAVITY * DT;
+        assert!(
+            (s.fighters[0].vy - expected_vy).abs() < 0.001,
+            "the air-jump must set a real upward velocity: got vy={}, expected {expected_vy}",
+            s.fighters[0].vy
+        );
+        assert!(
+            s.fighters[0].scout_air_jump_used,
+            "the charge must be marked spent"
+        );
+
+        // a second press this same airborne period must do nothing -
+        // vy should NOT jump again.
+        let vy_after_first = s.fighters[0].vy;
+        s.fighters[0].vy = 0.1; // simulate having fallen a little since
+        s.step(PlayerCmd {
+            jump: true,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        assert!(
+            (s.fighters[0].vy - JUMP_SPEED).abs() > 0.01,
+            "a second air-jump this period must be denied: vy_before_first={vy_after_first}, \
+             vy_now={}",
+            s.fighters[0].vy
+        );
+
+        // landing must refill it - both physics landing paths reset the
+        // flag, so drive an actual fall to the ground rather than set
+        // grounded directly, which would skip the code under test.
+        // `range()` clears all cover, so `support` is deterministically
+        // 0.0 everywhere - starting well below it (`pos[1] > support +
+        // 0.02` false) forces the "already at/below support" landing
+        // branch on the very FIRST step, deterministically. Not relying
+        // on how many ticks of gravity it would take to fall from some
+        // small height, which this test has no way to verify by running.
+        let mut s2 = range(707);
+        {
+            let f = &mut s2.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.grounded = false;
+            f.pos[1] = -50.0;
+            f.vy = 0.0;
+            f.scout_air_jump_used = true; // spent, as if mid-air already
+        }
+        s2.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
+        assert!(
+            s2.fighters[0].grounded,
+            "sanity: the fighter must have actually landed for this test to mean anything"
+        );
+        assert!(
+            !s2.fighters[0].scout_air_jump_used,
+            "landing must refill the air-jump charge"
+        );
+
+        // an unarmoured player, identically airborne, must not gain one -
+        // this is scout-only.
+        let mut s3 = range(708);
+        {
+            let f = &mut s3.fighters[0];
+            f.grounded = false;
+            f.pos[1] = 2.0;
+            f.vy = 0.5;
+            f.roll_t = 0.0;
+        }
+        s3.step(PlayerCmd {
+            jump: true,
+            aim: [0.0, 0.0, 1.0],
+            ..Default::default()
+        });
+        // NOT asserting an exact post-gravity value here (unlike the
+        // first sub-test above) - the only thing under test is "no jump
+        // fired", so a robust bound well clear of JUMP_SPEED is the
+        // right check: vy started at 0.5 and gravity only ever pulls it
+        // DOWN within a tick, so if a jump had fired it would read at or
+        // near JUMP_SPEED (7.4), not somewhere below its starting value.
+        assert!(
+            s3.fighters[0].vy < 1.0,
+            "an unarmoured player must not get a mid-air jump: vy={}",
+            s3.fighters[0].vy
         );
     }
 
