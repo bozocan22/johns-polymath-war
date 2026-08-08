@@ -253,8 +253,25 @@ fn bow_draw_visual(bow_draw_t: f32, fire_cd: f32, fire_period: f32, is_player: b
 // draw hand are all placed from it. They cannot drift apart because there
 // is nothing left to drift.
 
-/// Limb tip centre, ±X. The string leaves the tip here.
-const BOW_TIP_X: f32 = 0.392;
+/// Limb tip centre, ±Y. The string leaves the tip here.
+///
+/// §owner THE BOW STANDS UP AGAIN. An earlier pass laid it HORIZONTAL
+/// (limbs left and right) to stop the upper limb crossing the sight
+/// line, and solved that at the cost of the thing a bow most needs to
+/// be: a bow. In first person it read as a crossbow lying flat across
+/// the bottom of the screen - which is exactly the "rotated 90 degrees
+/// sideways" the owner reported.
+///
+/// Limbs run along Y now. The sight-line problem it was avoiding is
+/// answered the way archers answer it, by CANTING the bow rather than
+/// by felling it - see the roll in `vm_carry`.
+///
+/// Everything else about this bow was already axis-neutral: the nock
+/// sits on the centre line at (0, 0, z), the arrow rides beside the
+/// riser on X either way, and `bow_string_half` now aims itself with
+/// `from_rotation_arc`, so it spans whatever direction its endpoints
+/// actually describe.
+const BOW_TIP_Y: f32 = 0.392;
 /// Tip depth. The recurve steps backward, so the tips sit behind the riser.
 const BOW_TIP_Z: f32 = -0.088;
 /// The nock at REST - a hair behind the tips, which is what gives an
@@ -295,15 +312,19 @@ fn bow_nock_local(draw: f32) -> Vec3 {
 /// Both the length AND the angle come out of the same subtraction, so a
 /// half can never be pointing somewhere its own endpoints are not.
 fn bow_string_half(side: f32, draw: f32) -> Transform {
-    let tip = Vec3::new(side * BOW_TIP_X, 0.0, BOW_TIP_Z);
+    let tip = Vec3::new(0.0, side * BOW_TIP_Y, BOW_TIP_Z);
     let nock = bow_nock_local(draw);
     let d = nock - tip;
     let len = d.length().max(1e-4);
-    // The cube's long axis is +X. Rotating about +Y by θ maps +X to
-    // (cos θ, 0, −sin θ), so θ = atan2(−d.z, d.x) aims it down the span.
+    // The cube's long axis is +X. `from_rotation_arc` maps it onto
+    // whatever direction the endpoints describe, in any plane - which is
+    // what lets the same function serve a bow held upright, laid flat,
+    // or canted, without a second angle formula to keep in step. The
+    // previous version rotated about +Y only and was therefore silently
+    // welded to a horizontal bow.
     Transform {
         translation: (tip + nock) * 0.5,
-        rotation: Quat::from_rotation_y((-d.z).atan2(d.x)),
+        rotation: Quat::from_rotation_arc(Vec3::X, d / len),
         scale: Vec3::new(len, BOW_STRING_R, BOW_STRING_R),
     }
 }
@@ -2777,20 +2798,20 @@ fn carry_offset(
 /// off-eye.
 fn vm_carry(wk: GunKind) -> (Vec3, f32) {
     match wk {
-        // §owner: the bow went HORIZONTAL, so its bounding shape turned
-        // ninety degrees - it is now wide where it used to be tall. At
-        // the old 0.36 m carry a 0.7 m span filled the bottom third of
-        // the screen. Pushed out and centred, the way a bow is actually
-        // held, and it now leaves the sight line clear rather than
-        // putting a limb through it.
-        // §owner: and it carries LOW. The riser's grip swells top out
-        // 0.10 above the root - the tallest thing on any weapon relative
-        // to its own carry - so at -0.17 the bow's top edge sat inside
-        // the central 12%-of-screen-height circle as soon as any pose
-        // raised it. Nothing caught that while the intrusion sweep was
-        // checking a declared envelope at a generic carry instead of this
-        // weapon's real geometry at its own.
-        GunKind::Bow => (Vec3::new(-0.02, -0.22, -0.66), 0.0),
+        // §owner THE CANT. The bow stands upright again (see
+        // `BOW_TIP_Y`), which puts a 0.39 m upper limb back near the
+        // sight line - the exact problem that laying it flat was meant
+        // to solve, and the exact problem archers solve by CANTING the
+        // bow rather than by felling it.
+        //
+        // 0.42 rad (24 degrees) rolls the upper limb out of the centre
+        // while the bow still unmistakably reads as upright. Held left
+        // of centre (x -0.16) so the riser sits beside the crosshair
+        // rather than under it, and kept far forward (z -0.66) and low
+        // (y -0.24), because an upright bow is the tallest thing on any
+        // weapon relative to its own carry and the central
+        // 12%-of-screen-height circle has to stay clear at every pose.
+        GunKind::Bow => (Vec3::new(-0.16, -0.24, -0.66), 0.42),
         GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
         GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
         GunKind::M249 => (Vec3::new(0.13, -0.14, -0.42), 0.0),
@@ -7356,28 +7377,34 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             parts.push(wp(false, Tone::Mid, (0.0, 0.112, -0.02), 0.0, (0.030, 0.016, 0.048)));
         }
         GunKind::Bow => {
-            // §owner: the war bow is held HORIZONTAL, and it CURVES.
+            // §owner: the war bow is held UPRIGHT, and it CURVES.
             //
-            // It used to be two straight blocks stacked vertically, which
-            // read as a pole rather than a bow and put the upper limb
-            // through the shooter's sight line. Limbs now run left and
-            // right, and each is built from three shortening segments
-            // that step backward in z - a real recurve profile rather
-            // than one tilted slab, which is what makes the shape read as
-            // SPRUNG rather than rigid.
+            // Limbs run UP and DOWN from the riser, each built from three
+            // shortening segments that step backward in z - a real
+            // recurve profile rather than one straight slab, which is
+            // what makes the shape read as SPRUNG rather than rigid.
+            //
+            // (It was laid horizontal for a while to keep the upper limb
+            // out of the sight line. That worked, and produced something
+            // that read as a crossbow lying flat. The sight line is kept
+            // clear by CANTING it in `vm_carry` instead - which is what
+            // an archer with the same problem does.)
             //
             // The riser stays at the origin so `weapon_hand_specs`' grip
             // socket (0, 0, 0.03) and the nock at the string's centre are
             // both untouched by the reorientation.
-            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.012), 0.0, (0.052, 0.115, 0.058)));
-            // grip swell above and below the shelf, so the riser is not a
-            // plain brick
-            parts.push(wp(false, Tone::Dark, (0.0, 0.075, 0.012), 0.0, (0.040, 0.05, 0.050)));
-            parts.push(wp(false, Tone::Dark, (0.0, -0.075, 0.012), 0.0, (0.040, 0.05, 0.050)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.012), 0.0, (0.052, 0.150, 0.058)));
+            // grip swell above and below the hand, so the riser is not a
+            // plain brick. Pulled in to +-0.055 (from +-0.075): upright,
+            // the first limb segment starts at 0.115, and swells at the
+            // old spacing merged into it as one continuous post.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.055, 0.012), 0.0, (0.044, 0.05, 0.050)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.055, 0.012), 0.0, (0.044, 0.05, 0.050)));
             for side in [-1.0_f32, 1.0] {
                 // three segments per limb: each shorter, thinner, and
                 // further back than the last - the curve
-                for (dx, dz, w, h, d) in [
+                // `len` is along the limb (Y now); `thick` across it
+                for (dy, dz, len, thick, d) in [
                     (0.115, 0.000, 0.150, 0.030, 0.044),
                     (0.235, -0.030, 0.120, 0.026, 0.038),
                     (0.330, -0.072, 0.090, 0.022, 0.032),
@@ -7385,29 +7412,27 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
                     parts.push(wp(
                         false,
                         Tone::Dark,
-                        (side * dx, 0.0, 0.012 + dz),
+                        (0.0, side * dy, 0.012 + dz),
                         0.0,
-                        (w, h, d),
+                        (thick, len, d),
                     ));
                 }
                 // the light tip / string nock at the end of the recurve
                 parts.push(wp(
                     false,
                     Tone::Light,
-                    (side * BOW_TIP_X, 0.0, BOW_TIP_Z),
+                    (0.0, side * BOW_TIP_Y, BOW_TIP_Z),
                     0.0,
-                    (0.040, 0.026, 0.028),
+                    (0.026, 0.040, 0.028),
                 ));
             }
             // The string is NOT in this list - it is two live halves hung
             // below, because a drawn string is a V and this table can only
             // describe a fixed pose. See `bow_string_sync`.
             //
-            // The arrow rest moved with it. It used to be a shelf ON TOP of
-            // the riser at y +0.030, left over from the vertical bow where
-            // the arrow lay over the hand. Held horizontal there is no "on
-            // top" - the shaft passes BESIDE the riser, so the rest is a
-            // side bracket under the shaft's own line.
+            // The arrow rest. Upright there IS an "on top" again: the
+            // shaft passes beside the riser on X and rests on a shelf
+            // that stands proud of it, which is where a real one sits.
             parts.push(wd(
                 false,
                 Tone::Light,
@@ -21514,17 +21539,41 @@ mod band_tests {
                                         pose.z.abs() * VM_SWAY_CAP_DEG.to_radians().tan();
                                     let r = r_at(pose.z.abs());
                                     match prof {
-                                        // the bow is symmetric: no midline
-                                        // test, a VERTICAL one instead
+                                        // §owner The bow is held CENTRED and
+                                        // is symmetric about its own riser,
+                                        // so the MIDLINE question does not
+                                        // apply to it - a shape that reaches
+                                        // equally both ways cannot answer a
+                                        // test written for a gun carried on
+                                        // the right.
+                                        //
+                                        // What stood in for it was a vertical
+                                        // proxy: "the whole bow must sit
+                                        // BELOW the crosshair circle". That
+                                        // was free while the bow lay
+                                        // horizontal, and it forbids the very
+                                        // thing an upright bow IS. Restated
+                                        // rather than dropped, because the
+                                        // requirement was never "below the
+                                        // crosshair" - it was "not ON it".
+                                        // The bow answers the same per-corner
+                                        // circle test as every other weapon
+                                        // now, and a limb may pass above the
+                                        // circle so long as it stays out of
+                                        // it.
                                         ScreenProfile::BowDrawn => {
-                                            assert!(
-                                                pose.y + bu < -r,
-                                                "{kind:?}: the bow reaches the crosshair \
-                                                 - top {:.3} vs circle {:.3} \
-                                                 (sf {sf} th {th} pull {pull})",
-                                                pose.y + bu,
-                                                -r
-                                            );
+                                            for (pl, pu) in &corners {
+                                                let dx = pose.x - pl - sway;
+                                                let dy = pose.y + pu;
+                                                let d = (dx * dx + dy * dy).sqrt();
+                                                assert!(
+                                                    d > r,
+                                                    "{kind:?}: a bow corner sits ON the \
+                                                     crosshair - d {d:.3} <= r {r:.3} \
+                                                     (sf {sf} th {th} pull {pull} \
+                                                     cook {cook})"
+                                                );
+                                            }
                                         }
                                         _ => {
                                             // midline: the widest thing on
@@ -23096,7 +23145,7 @@ mod bow_string_tests {
                 // the rotation and the length disagree this fails
                 let half = t.rotation * Vec3::X * (t.scale.x * 0.5);
                 let (a, b) = (t.translation - half, t.translation + half);
-                let tip = Vec3::new(side * BOW_TIP_X, 0.0, BOW_TIP_Z);
+                let tip = Vec3::new(0.0, side * BOW_TIP_Y, BOW_TIP_Z);
                 // whichever end is nearer the tip must BE the tip, and the
                 // other must be the nock
                 let (near_tip, near_nock) =
@@ -23120,7 +23169,7 @@ mod bow_string_tests {
     fn the_string_lengthens_as_it_is_drawn() {
         let len = |d: f32| bow_string_half(1.0, d).scale.x;
         let rest = len(0.0);
-        assert!(rest > BOW_TIP_X, "a slack string still spans the limb");
+        assert!(rest > BOW_TIP_Y, "a slack string still spans the limb");
         let mut prev = rest;
         for d in [0.2_f32, 0.45, 0.7, 0.9, 1.0] {
             let l = len(d);
