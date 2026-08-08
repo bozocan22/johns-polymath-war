@@ -4520,7 +4520,7 @@ fn shield_readout(
             if p.shield_up {
                 format!("GUARD  UP  BLOCKS {:.0}%  FRONT {:.0}", block * 100.0, arc)
             } else {
-                "GUARD  STOWED  [4]".to_string()
+                "GUARD  STOWED".to_string()
             },
             if p.shield_up {
                 Color::srgb(0.55, 0.85, 0.98)
@@ -4873,6 +4873,9 @@ struct CapBeat {
     /// exactly where a light chassis puts the parts that distinguish
     /// it. Every model pass from here needs a real profile.
     orbit: Option<f32>,
+    /// Capture-only boom scale - see `CaptureBoom`. Held until changed,
+    /// exactly like `orbit`.
+    boom: Option<f32>,
     snap: Option<&'static str>,
     end: bool,
 }
@@ -4884,6 +4887,7 @@ const fn beat(t: f32) -> CapBeat {
         release: NO_KEYS,
         look: None,
         orbit: None,
+        boom: None,
         snap: None,
         end: false,
     }
@@ -4894,6 +4898,26 @@ const fn beat(t: f32) -> CapBeat {
 /// a model from a side a player's own camera never reaches.
 #[derive(Resource, Default)]
 struct CaptureOrbit(f32);
+
+/// Capture-only BOOM SCALE. 1.0 (or 0.0, treated as 1.0) is the normal
+/// third-person distance.
+///
+/// Added because a claim could not be checked: the soldier's new fingers
+/// are a few pixels across at the 2.2 m boom every script shoots from,
+/// so "the hand has fingers" was unverifiable by the one instrument this
+/// project trusts. Pulling the camera in is the cheapest honest fix -
+/// cheaper than a turntable state, and it composes with `orbit`, so a
+/// close shot can also come from the front.
+///
+/// Zero outside a capture, so this is inert in play.
+#[derive(Resource)]
+struct CaptureBoom(f32);
+
+impl Default for CaptureBoom {
+    fn default() -> Self {
+        CaptureBoom(1.0)
+    }
+}
 
 // §0: prove third-person-by-default, then what first person actually
 // looks like at rest, aiming, and mid-spray. Top-level `const` - a
@@ -4963,6 +4987,27 @@ const BOW_DRAW_BEATS: &[CapBeat] = &[
 /// §owner MEDIC: the light chassis. Third person first so the whole
 /// silhouette reads, then V into the cockpit for the mounts and the HUD,
 /// then the plasma bow held long enough to overheat.
+/// §2 THE SOLDIER'S HANDS, close enough to count the fingers.
+///
+/// Every other script shoots from the 2.2 m boom, where a finger is a
+/// few pixels wide - so the hand work could be built, compiled, tested
+/// and still be unverifiable. This orbits to the FRONT and pulls the
+/// camera to a third of the normal distance, which is the only view in
+/// which the claim "the hand has fingers" can be checked at all.
+const HANDS_BEATS: &[CapBeat] = &[
+    // The boom anchors on the HEAD, and pitch moves the CAMERA around
+    // that anchor - positive lifts it above and aims down, which framed
+    // the top of a hat. The hands hang BELOW the anchor, so the camera
+    // has to drop below it and look back up: pitch is negative here.
+    // Both attempts are recorded because the sign is the whole trap.
+    CapBeat { look: Some((0.0, -0.22)), ..beat(0.4) },
+    CapBeat { orbit: Some(PI), boom: Some(0.50), ..beat(0.8) },
+    CapBeat { snap: Some("01-hands-front"), ..beat(1.8) },
+    CapBeat { orbit: Some(PI * 0.6), ..beat(2.0) },
+    CapBeat { snap: Some("02-hands-quarter"), ..beat(2.8) },
+    CapBeat { end: true, ..beat(3.2) },
+];
+
 /// §owner THE FOUR ARMOUR TRIMS, in one frame.
 ///
 /// A variant system is only real if the variants are TELLABLE APART,
@@ -5311,6 +5356,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
     "medic" => MEDIC_BEATS,
         "barrier" => BARRIER_BEATS,
         "trims" => TRIMS_BEATS,
+        "hands" => HANDS_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
@@ -5353,10 +5399,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 25] = [
+const CAPTURE_SCRIPTS: [&str; 26] = [
     "medic",
     "barrier",
     "trims",
+    "hands",
     "baseline",
     "idle_life",
     "bow_draw",
@@ -5731,6 +5778,7 @@ fn capture_input_driver(
     mut buttons: ResMut<ButtonInput<MouseButton>>,
     mut cam: ResMut<CamCtl>,
     mut orbit: ResMut<CaptureOrbit>,
+    mut boom: ResMut<CaptureBoom>,
 ) {
     let Some(name) = cap.script.clone() else { return };
     cap.t += time.delta_secs();
@@ -5758,6 +5806,9 @@ fn capture_input_driver(
         // restating the orbit on every intervening beat
         if let Some(o) = b.orbit {
             orbit.0 = o;
+        }
+        if let Some(bm) = b.boom {
+            boom.0 = bm;
         }
         // queue this beat's snap/end for the screenshot driver instead of
         // letting it infer them from the cursor - a frame that passes
@@ -6490,6 +6541,7 @@ fn main() {
         // §0 (Brief VII): the capture helper - inert unless JK_CAPTURE is set
         .init_resource::<CaptureMode>()
         .init_resource::<CaptureOrbit>()
+        .init_resource::<CaptureBoom>()
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
         // menu capture runs in the MENU states, not Playing
@@ -11837,9 +11889,9 @@ fn spawn_soldier_body(
                 .spawn((
                     Mesh3d(kit.ball.clone()),
                     MeshMaterial3d(look.shell2.clone()),
-                    Transform::from_xyz(ax.signum() * 0.030, 0.022, 0.0)
-                        .with_rotation(Quat::from_rotation_z(ax.signum() * 0.35))
-                        .with_scale(Vec3::new(0.115, 0.075, 0.120)),
+                    Transform::from_xyz(ax.signum() * 0.022, 0.012, 0.0)
+                        .with_rotation(Quat::from_rotation_z(ax.signum() * 0.40))
+                        .with_scale(Vec3::new(0.098, 0.062, 0.104)),
                 ))
                 .set_parent(upper);
             // elbow hinge: the pin crosses the joint, the guard sits
@@ -17106,6 +17158,7 @@ fn camera_system(
     cam_tuning: Res<CameraTuning>,
     settings: Res<GameSettings>,
     cap_orbit: Res<CaptureOrbit>,
+    cap_boom: Res<CaptureBoom>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainCam>>,
 ) {
     cam_ctl.recoil = (cam_ctl.recoil - time.delta_secs() * 5.0).max(0.0);
@@ -17253,7 +17306,9 @@ fn camera_system(
     cam_ctl.boom = nb;
     cam_ctl.boom_vel = nv;
     cam_ctl.boom_occluded = occ;
-    let tp_pos = anchor + dirn * cam_ctl.boom.min(len);
+    // capture-only: pull the boom in so a shot can resolve detail the
+    // normal distance cannot.  is 1.0 in play.
+    let tp_pos = anchor + dirn * (cam_ctl.boom.min(len) * cap_boom.0.max(0.05));
 
     // blend eye ↔ boom on the eased person fraction; the dead spectate
     // from the boom, the scoped AWM is always the eye
