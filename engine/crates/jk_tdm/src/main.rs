@@ -16525,9 +16525,22 @@ fn sync_fighters(
             life[vis.index].leg_yaw = l;
             (l, o)
         };
-        if rolling && in_mech {
+        if rolling && f.in_heavy_mech() {
             // §2 (Brief V): the mech does NOT tumble - the side-step is a
-            // braced lean into the travel direction, tall the whole way
+            // braced lean into the travel direction, tall the whole way.
+            //
+            // §owner AGILE SUPPORT MECH: narrowed from the broad `in_mech`
+            // (true for the scout too) to heavy-only. The sim's own dodge
+            // trigger only hands out MECH_STEP_S timing to the chassis
+            // this branch's lean math assumes - a scout's `roll_t` is
+            // seeded with the PLAYER's ROLL_LOAD_S+ROLL_S+ROLL_EASE_S
+            // total instead (see the dodge trigger in sim.rs), so playing
+            // it through `total = MECH_STEP_S + ROLL_EASE_S` here would
+            // have eased a lean against a duration that was never the one
+            // actually counting down. A scout's roll now falls through to
+            // the tumble branch below, which already expects exactly the
+            // timing the sim gives it - the correct fix turned out to be
+            // reuse, not a new scout-shaped lean.
             let total = MECH_STEP_S + ROLL_EASE_S;
             let e = ((total - f.roll_t) / 0.08).clamp(0.0, 1.0)
                 * (f.roll_t / 0.10).clamp(0.0, 1.0); // in fast, out easing
@@ -16586,13 +16599,26 @@ fn sync_fighters(
                 0.35,
             );
         }
-        // §11: the MECH is the same rig at walker scale - unmistakable
-        tf.scale = Vec3::splat(
-            if f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0 {
-                MECH_SCALE
-            } else {
-                1.0
-            },
+        // §11: the MECH is the same rig at walker scale - unmistakable.
+        //
+        // §owner AGILE SUPPORT MECH: this only ever checked RobotSuit - a
+        // piloted scout rendered at exactly 1.0, the same on-screen size
+        // as an unarmoured player, regardless of any hitbox scale. Two
+        // different bugs, not one: `height()`/`radius()` in sim.rs decide
+        // what the game HITS, this decides what the game SHOWS, and
+        // neither reads the other. The scout's own case is added here,
+        // not folded into the RobotSuit arm above, because collapsing
+        // them into one `is_mech()` branch returning a single number
+        // would silently give the scout the heavy's 1.7x again the next
+        // time someone "simplifies" this - the two chassis need two
+        // numbers on purpose.
+        tf.scale = Vec3::splat(if f.in_heavy_mech() {
+            MECH_SCALE
+        } else if f.in_scout_mech() {
+            sim::SCOUT_SCALE
+        } else {
+            1.0
+        },
         );
         // spawn-protection shimmer: bob slightly
         if f.protect_t > 0.0 {
@@ -16656,7 +16682,13 @@ fn sync_fighters(
         // which is what keeps the §0.2 band test sampling the same hip
         // the renderer writes.
         let settle = if !rolling && f.roll_t <= 0.0 {
-            let cd_base = if in_mech { MECH_STEP_CD_S } else { ROLL_CD_S };
+            // §owner AGILE SUPPORT MECH: same narrowing as the roll-pose
+            // branch above, same reason - `roll_cd` for a scout is seeded
+            // against ROLL_CD_S (the player's cooldown), not
+            // MECH_STEP_CD_S, so the broad `in_mech` here would have
+            // measured the settle window against a total the sim never
+            // actually used for this chassis.
+            let cd_base = if f.in_heavy_mech() { MECH_STEP_CD_S } else { ROLL_CD_S };
             ((f.roll_cd - (cd_base - ROLL_SETTLE_S)) / ROLL_SETTLE_S).clamp(0.0, 1.0)
         } else {
             0.0
