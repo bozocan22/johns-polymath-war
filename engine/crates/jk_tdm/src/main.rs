@@ -23327,6 +23327,95 @@ mod camera_v2_tests {
     ///
     /// This pins the fix so a future clock change cannot un-wire it
     /// again without a red test.
+    /// §7 FIRST-PERSON AIM IS EXACT, and stays exact.
+    ///
+    /// The owner reported first-person aiming as "too difficult", so the
+    /// mechanism was audited end to end before any number was touched.
+    /// Five hypotheses, all cleared:
+    ///
+    ///   1. a parallax correction wrongly applied in first person
+    ///   2. the movement penalty measuring the wrong axes
+    ///   3. no feedback for the live cone
+    ///   4. the ADS spread benefit not reaching first person
+    ///   5. the ADS settle threshold being slower than a real trigger pull
+    ///
+    /// The one that MATTERS is (1), because it is the only one that could
+    /// make the crosshair lie about where the bullet goes, and it is the
+    /// one with no visible symptom until you miss. It is clear because
+    /// `muzzle_origin` returns the EYE: the two-stage aim casts from the
+    /// camera to find a point, then aims at that point from the muzzle,
+    /// and when muzzle == camera the second stage is the identity.
+    ///
+    /// That is a load-bearing coincidence, not a guarantee. The day
+    /// someone gives `muzzle_origin` a barrel offset - an entirely
+    /// reasonable thing to want - first-person aim silently acquires a
+    /// convergence error that grows as targets get closer, and no
+    /// existing test would notice. This is the test that notices.
+    #[test]
+    fn a_first_person_shot_goes_exactly_where_the_crosshair_points() {
+        let mut s = sim::TdmSim::new(sim::MatchConfig {
+            seed: 0x51AB,
+            per_team: 1,
+            ..Default::default()
+        });
+        let p = s.player;
+        s.fighters[p].lean = 0.0;
+        // THE CAMERA POSITION IS COMPUTED INDEPENDENTLY, and that is the
+        // whole test. The first version placed it at
+        // `muzzle_origin(p)` - the very function under test - so a
+        // mutation that moved the muzzle moved the camera with it and
+        // the assertion could never fail. It was proven vacuous by
+        // exactly the mutation it exists to catch.
+        //
+        // The camera in first person sits at the EYE, which is a fact
+        // about the rig and not about the muzzle, so it is derived from
+        // the fighter directly. Now the two can disagree, which is the
+        // only way this test can say anything.
+        let f = &s.fighters[p];
+        let eye = Vec3::new(
+            f.pos[0],
+            f.pos[1] + sim::EYE_REL.min(f.height() - 0.12),
+            f.pos[2],
+        );
+
+        // several look directions, including steeply up and down, since
+        // a convergence error is a function of the aim angle
+        for (yaw, pitch) in [
+            (0.0_f32, 0.0_f32),
+            (1.2, 0.0),
+            (-2.4, 0.35),
+            (0.6, -0.55),
+            (3.0, 0.20),
+        ] {
+            let fwd = Vec3::new(
+                yaw.sin() * pitch.cos(),
+                -pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            )
+            .normalize();
+            let cam = Transform::from_translation(eye).looking_to(fwd, Vec3::Y);
+            let (dir, _) = crosshair_aim_dir(&s, &cam);
+            // the shot leaves along the camera ray, to within float noise
+            let err = dir.angle_between(fwd).to_degrees();
+            assert!(
+                err < 0.05,
+                "first-person aim is off by {err:.4} deg at yaw {yaw} pitch {pitch} - \
+                 the crosshair and the bullet disagree"
+            );
+        }
+
+        // and it stays exact with something CLOSE in front, which is the
+        // case a convergence error is worst in: aiming at a wall 2 m away
+        // is where a muzzle offset would throw the shot furthest.
+        let fwd = Vec3::Z;
+        let cam = Transform::from_translation(eye).looking_to(fwd, Vec3::Y);
+        let (near_dir, _) = crosshair_aim_dir(&s, &cam);
+        assert!(
+            near_dir.angle_between(fwd).to_degrees() < 0.05,
+            "aim drifts when the aim point is near - that is a muzzle offset"
+        );
+    }
+
     #[test]
     fn shot_clock_follows_the_weapon_that_actually_fired() {
         // ..Default::default() rather than listing every field: this
