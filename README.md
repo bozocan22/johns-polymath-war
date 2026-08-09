@@ -148,13 +148,13 @@ resume where we left them):
   sudden-death overtime, auto-rematch.
 - **Pickups beyond guns**: hidden health/ammo caches behind cover, and the
   ROBOT ARMOR crowning the tower (100 armor that soaks 70 % of damage,
-  +12 % move speed, visible bulky shell).
+  -15 % move speed (85 % of soldier pace), visible bulky shell).
 - **Cute Roblox-Spartan fighters**: round heads, metal helmets with
   per-man crest colors, chunky capsule bodies, named roster (Brasidas,
   Xerxes, …) with per-man tunic shades.
 - Health bars over every head (+ armor bar), big own HP bar, TAB
   scoreboard (K / D / hits / weapon per man), kill feed by name,
-  ESC menu, LMB = aim (per-gun zoom, sniper scope) / RMB = fire.
+  ESC menu, LMB = FIRE / RMB = aim (per-gun zoom, sniper scope).
 - fully deterministic: same seed = identical match (sim tests incl.
   unarmed-can't-shoot, pickup-arms-you, TTK rule, elevation gravity,
   arrow ballistics, KOTH scoring, jump, bit-identical replay)
@@ -176,7 +176,7 @@ resume where we left them):
   team bandanas, belts with shining gold buckles, boots, and a little
   antenna. Per-man hat and visor colors are the personality.
 - **JUMP** (SPACE): real gravity, crate-clearing hops, legs tuck in
-  the air. Fire is RIGHT CLICK **or T**; aim/zoom stays LEFT CLICK.
+  the air. Fire is LEFT CLICK; aim/zoom is RIGHT CLICK. (T is INSPECT.)
 - **Status panel** (bottom right): weapon name, ammo count + ammo kind
   (5.56 / .338 / arrows…), HP + armor numbers and bars.
 - **Sound**: procedurally generated WAVs (`assets/audio/gen_sfx.py`) —
@@ -262,7 +262,7 @@ baseline 2 headshots / 8 body shots; AWM = only the head is instant;
   sideways, recoil ×0.8 while leaning.
 - **Minimap (§12)**: teammates, checkpoint rings by owner, the hill,
   your facing needle; M toggles it, so does settings.
-- **Settings & manual (§14)**: mouse-button swap (LMB-aim/RMB-fire
+- **Settings & manual (§14)**: mouse-button swap (LMB-fire/RMB-aim
   stays the default per the owner), minimap toggle, restart, change
   mode/loadout mid-session; RULES & MANUAL page generated from the
   live weapon table.

@@ -102,7 +102,7 @@ Frag, Flash, Smoke, Molotov. The throw arc preview uses the **exact same physics
 
 ### Armor sets (5)
 - **None** — no ability, baseline everything
-- **Folk** — mail and plate; Shieldwall Brace (hold F): plant, shielded, slow, damage-resistant
+- **Folk** — mail and plate; Shieldwall Brace (hold C): plant, shielded, slow, damage-resistant
 - **Pyro** — heat plate, full fire immunity, Flame Projector (hold C)
 - **Robot Suit (the mech)** — see below, its own major system
 - **Recon** — light counterweight: fast, quiet, self-healing, no active ability
