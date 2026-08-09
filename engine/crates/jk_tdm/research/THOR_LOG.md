@@ -2142,3 +2142,381 @@ worktree eats one `jk_tdm`-only rebuild.
 
 *Footprint:* I edited no source file. The only file I wrote is this log. The
 throwaway worktree `C:/vp-wt` is removed.
+
+---
+
+# 2026-08-08 — VERIFIED / SAFE TO MERGE: `feat/scout-plasma-dual-cannon` @ `a00569b`
+
+**This SUPERSEDES my REJECT verdict on `2c12418` (entry immediately above).**
+That REJECT stands as correct for the commit it named. `a00569b` fixes every
+defect it named. Branch is verified and safe to merge.
+
+## The run
+
+    git worktree add --detach C:/tw/plasma a00569b
+    cd C:/tw/plasma/engine
+    CARGO_TARGET_DIR=C:/tw/tgt cargo test --release -p jk_tdm
+
+    test result: ok. 374 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out
+
+`the_scout_plasma_cannon_is_precise_then_loosens_and_kicks ... ok`.
+Previous tip was 373 passed / 1 failed; the delta is exactly the one new test
+flipping to pass. No other test moved.
+
+## Each of my four findings against `2c12418`, re-checked
+
+1. **Missing per-call `gatling_trigger_t` refresh (the one that made the whole
+   feature inert). FIXED, and I re-traced it by hand rather than trusting the
+   description.** `sim.rs:9959` reads `fresh_press`; `sim.rs:9974-9979` then
+   refreshes unconditionally, gated on `in_mech() && mech_weapon == Plasma &&
+   alive()` — character-for-character the shape of `try_fire_gatling`'s block
+   at `sim.rs:9774-9779`, and placed BEFORE the early-return gate at
+   `sim.rs:9980`, which is the whole point. Trace: `PLASMA_TRIGGER_HOLD_S =
+   PLASMA_FIRE_PERIOD = 0.16` (`sim.rs:4798`, `4777`); `DT = 1/120 = 0.00833`
+   (`jk_core/src/timestep.rs:9`); the per-tick decay at `sim.rs:6754` subtracts
+   one DT, so on the next held tick the timer reads `0.1517 > 0` and
+   `fresh_press` is FALSE. The old failure mode — `gatling_trigger_t` written
+   only on a firing tick, to the same value as `gatling_cd`, both reaching zero
+   on the same tick — is structurally gone because the write no longer depends
+   on a shot happening. Production reachability confirmed: `sim.rs:7900`
+   dispatches `try_fire_plasma` every tick `cmd.shoot` is held.
+2. **Off-by-one in `ramp_shots`. FIXED.** `sim.rs:10010` is now
+   `(shot_i + 1).saturating_sub(PLASMA_PRECISE_SHOTS)`, giving 0,0,1,2,… for
+   shot_i 0,1,2,3 with `PLASMA_PRECISE_SHOTS = 2` (`sim.rs:4802`). Ramp begins
+   on the first shot past the window, as the constant's name promises.
+3. **`plasma_shot_i` absent from the replay fingerprint. FIXED.**
+   `sim.rs:23830`, beside `turret_burst_i`.
+4. **The test was invalid (hand-forced `gatling_cd = 0.0`, never stepped the
+   sim, therefore could not have exercised the real bug). GENUINELY REWRITTEN
+   — I read it, I did not take the claim.** `sim.rs:15415-15426`: a
+   `0..(SIM_HZ*2)` loop that calls `try_fire_plasma(0, aim)` EVERY tick and
+   calls `s.step(PlayerCmd::default())` every tick, collecting only shots that
+   actually returned true. Nothing inside the loop touches `gatling_cd` or
+   `gatling_trigger_t` — the `rearm` closure (`sim.rs:15397-15404`) only pins
+   armor_set/hull/mech_weapon/stagger_t/vent_t to survive the live range. This
+   is the real held-trigger shape.
+
+## Why the passing test is real proof, not a coincidence
+
+I did not need a mutation run: two assertions in the PASSING output each
+falsify one of the two defects directly.
+
+- `sim.rs:15449-15456` asserts the two precise-window shots' muzzle origins
+  are `2 * PLASMA_CANNON_OFFSET_M` apart. Muzzle side is `shot_i % 2`
+  (`sim.rs:10033`). If the refresh were still missing, `fresh_press` would be
+  true on every shot, `plasma_shot_i` would be reset to 0 at `sim.rs:9993`
+  every time, both shots would leave from side `+1.0`, and `sep` would be
+  exactly 0.0. It passing PROVES `shot_i` advanced across a stepped burst,
+  i.e. PROVES `fresh_press` read false on the second shot.
+- `sim.rs:15462-15472` asserts `fired[PLASMA_PRECISE_SHOTS]` (index 2) has
+  deviation `> 1e-4`. Under the old `shot_i.saturating_sub(2)` that shot's
+  ramp would be 0, spread 0, and with the new zero-spread short-circuit at
+  `sim.rs:10018-10022` the direction would be bit-identical to `aim`, deviation
+  exactly 0.0. It passing PROVES the off-by-one is gone.
+
+Both assertions would fail on a regression of the thing they name. This test
+can fail. It is a real test now.
+
+## Two things the builder did not mention. Neither blocks the merge.
+
+- **A behavioural side-effect of the refresh, and it happens to be an
+  improvement.** Heat cooling is gated on `gatling_trigger_t <= 0.0`
+  (`sim.rs:6792`). Under `2c12418` the plasma got exactly ONE cooling tick per
+  20-tick fire cycle (both timers hit zero on the same tick), so sustained fire
+  netted `0.053 - 0.34*DT = 0.0502` heat/shot and vented at ~3.19 s. Now it
+  nets the full `PLASMA_HEAT_PER_SHOT = 0.053` and vents at ~3.02 s. The
+  constant-only test at `sim.rs:15363` asserts the window is 3.0 s ± 0.25 —
+  which it was ALREADY asserting before, against a sim that actually delivered
+  3.19 s. This change moved reality INTO agreement with that test. Stating it
+  so nobody later reads the vent timing shift as an unexplained regression.
+- **Coverage regression: the plasma KICK ramp is now untested.** The rewrite
+  dropped the old `punch_after - punch_before > base_kick` assertion. Grep
+  confirms `PLASMA_KICK_RAMP_PER_SHOT` (`sim.rs:4816`) and
+  `PLASMA_KICK_RAMP_MAX` (`sim.rs:4818`) are consumed at exactly one place,
+  `sim.rs:10012` → `sim.rs:10078`, and NO test anywhere asserts it. The test's
+  own name still ends "…_and_kicks". Not a defect in shipped behaviour; it is
+  an honest-gap the commit message does not declare. → BACKLOG.
+
+## PRE-EXISTING gap, NOT introduced by this commit, do not blame `a00569b`
+
+`try_fire_plasma`'s early-return gate (`sim.rs:9980-9991`) checks only
+`!in_mech() || stagger_t > 0.0`, then vent/cd. Every other mech mount also
+gates on `shield_up`, `!alive()`, the matching `mech_weapon`, and
+`mech_transition_t > 0.0` — gatling `sim.rs:9782-9795`, autocannon
+`sim.rs:9897-9902`. `shield_up` is toggled with no chassis restriction at
+`sim.rs:7443-7446`, so a plasma scout can apparently fire through a raised
+barrier while a gatling heavy cannot. This dates from `2c12418` and I did not
+flag it then. Note the new asymmetry it creates: the refresh block IS gated on
+`alive()` while the fire path is NOT.
+**PROVISIONAL — I did NOT trace whether the §4.1 dispatch runs for a dead
+fighter, nor whether a Scout chassis can actually raise a barrier in the real
+input path.** Do not treat this as a confirmed live bug; treat it as an
+unverified consistency gap needing a second independent check. → BACKLOG.
+
+## Instrument note — correcting my own earlier entry
+
+The entry above says a COLD/fresh `CARGO_TARGET_DIR` still dies with
+`STATUS_STACK_BUFFER_OVERRUN` and that only the warm shared target dir works.
+**That is overstated.** Today a completely fresh `CARGO_TARGET_DIR=C:/tw/tgt`
+on a short path built the whole dependency tree and the test binary cleanly
+from `cd <worktree>/engine`, exit 0, no 0xc0000409. Whatever caused that
+failure was not "cold target dir" as such. The `cd engine/` part (for
+`RUST_MIN_STACK`) and the SHORT path both still look load-bearing; the warm-dir
+requirement does not. Recorded so the next Thor does not needlessly poison the
+repo's shared target dir. Build takes ~20 min cold — budget for it.
+
+*Footprint:* I edited no source file. The only file I wrote is this log.
+Throwaway worktree `C:/tw/plasma` and target dir `C:/tw/tgt` are mine to
+remove; the repo's own `engine/target` was NOT touched this time.
+
+## CORRECTION, same session, written minutes after the entry above — READ THIS
+
+**The branch moved under me mid-run. "Safe to merge" above applies to the
+COMMIT `a00569b`, NOT to the branch as it stands right now.**
+
+At the START of this run `origin/feat/scout-plasma-dual-cannon` was `a00569b`;
+that is what I built and tested. By the time I finished (~40 min later, cold
+build) the remote tip was **`c840049` "Scout mech: generic wall climbing"**,
+one commit past `a00569b`. `main` also moved, `421a7e0` → `477be34`.
+
+`c840049` is **NEVER CHECKED — not verified false, not verified true.** I did
+not build it, did not test it, and did not read its diff beyond a stat. It is
+not covered by the 374-pass result above, which was produced from `a00569b`'s
+tree.
+
+This matters more than usual because `c840049` reaches into exactly the code I
+just cleared: its own commit body says *"Fire gate: added to `try_fire_plasma`'s
+own early-return block"*, and it spends the shared `gatling_heat` /
+`gatling_vent_t` pool that `try_fire_plasma` writes at `sim.rs:10069-10073`.
+Every trace in the entry above is about that function. A change to its
+early-return block can re-break the refresh ordering I verified (the refresh at
+`sim.rs:9974-9979` is only correct because it sits BEFORE every early return —
+a new gate inserted above it would restore the original inert bug exactly).
+Its own commit message says: *"do not merge before that comes back clean."*
+Agreed, and I am the pass it is waiting on. I have not done it.
+
+**Disposition: `a00569b` = VERIFIED, supersedes the `2c12418` REJECT.
+`c840049` = UNVERIFIED, blocks the branch. Merging the branch today merges
+`c840049` too, so the branch is NOT mergeable yet.** Next Thor: verify
+`c840049`, and check specifically that the new fire gate is placed AFTER the
+`gatling_trigger_t` refresh block, not before it.
+
+---
+
+# 2026-08-09 — REJECT: `feat/scout-plasma-dual-cannon` @ `523a851`
+
+**Verdict: NOT safe to merge. `c840049` ("Scout mech: generic wall climbing")
+is broken, its own new test FAILS on a real build, and it takes the branch
+down with it. `523a851` itself is GOOD.**
+
+The entry above asked the next Thor two questions. Both are now answered, one
+with relief and one with a red light.
+
+## The run (real, not reported)
+
+    git worktree add --detach C:/tw/s523 523a851
+    cd C:/tw/s523/engine            # so .cargo/config.toml's RUST_MIN_STACK is found
+    CARGO_TARGET_DIR=C:/tw/t523 cargo test --release -p jk_tdm
+
+    test result: FAILED. 374 passed; 1 failed; 2 ignored; 0 measured
+
+    ---- sim::tests::the_scout_climbs_a_wall_and_stops_cleanly_at_the_top ----
+    panicked at crates\jk_tdm\src\sim.rs:15229:9:
+    one tick of climbing must rise by WALL_CLIMB_SPEED_MPS*DT: got 0.02708334
+
+Accounting against my last run (`a00569b`: 374 / 0 / 2): total tests went
+376 -> 377. `c840049` added exactly one test and it fails. `523a851` added
+assertions to an existing test and it still passes. Nothing else moved.
+
+## 1. The fire-gate ordering fear — FALSE ALARM. Recorded as loudly as a defect.
+
+I flagged the risk that `if f.wall_climbing { return false; }` had been inserted
+ABOVE the `gatling_trigger_t` refresh and silently restored the inert-fire bug.
+**It was not. Friday got this right.** Read from the merged tip, not taken on
+trust:
+
+* `sim.rs:10086`  `let fresh_press = ... gatling_trigger_t <= 0.0;`  (read first)
+* `sim.rs:10101-10106`  the unconditional refresh block
+* `sim.rs:10119-10121`  `if f.wall_climbing { return false; }`  — AFTER it
+* `sim.rs:10125`  the vent/cooldown early return — also after
+
+Corroborated by run, not just by eye: `the_scout_plasma_cannon_is_precise_then_loosens_and_kicks`
+PASSES, and that test only reaches its "the shot immediately past the precise
+window must show real spread" assertion if the refresh is alive — the inert bug
+resets `plasma_shot_i` to 0 on every shot and no shot ever ramps. My hypothesis
+was wrong. Say so plainly.
+
+## 2. `523a851` (restore kick assertions) — AGREE. Good work, real coverage.
+
+I tried to break this test and could not.
+
+* `punch_vel: [f32; 2]` (`sim.rs:3260`) is a scalar pitch/yaw recoil channel,
+  not a world vector, so sampling index `[0]` before/after the call is the
+  right instrument. `try_fire_plasma` writes it in exactly one place,
+  `sim.rs:10215`: `f.punch_vel[0] += mech_mount_kick(PLASMA_DAMAGE) * kick_mult * brace`.
+* Sampling before `step()` is load-bearing and the comment is true — `step()`
+  decays `punch_vel`, so a later read would measure the recovery curve.
+* It is NOT self-referential about the thing it claims. The test computes
+  `mech_mount_kick(PLASMA_DAMAGE)` and asserts the delta EQUALS it, which pins
+  `kick_mult == 1.0` and `brace == 1.0` in the precise window. Set
+  `PLASMA_KICK_RAMP_PER_SHOT = 0.0` or `PLASMA_KICK_RAMP_MAX = 0.0` and
+  `ramped_kick > base_kick` fails. Both constants went from zero coverage to
+  real coverage.
+* Honest limit, stated because Friday did not: the ramp constants' MAGNITUDES
+  are still unpinned. 0.35 could become 0.001 and this passes. Same weakness the
+  spread assertion (`dev > 1e-4`) already had. Not a defect, not a blocker —
+  a known ceiling on what this test proves.
+
+## 3. `c840049` (wall climbing) — TWO CONFIRMED DEFECTS. This is what blocks.
+
+Friday's architecture note says the new movement pass was "modelled on its exact
+shape" — the hull-climb pass just above it. That claim is true syntactically and
+**false at the one place it has to be true.** The hull-climb pass is ABSOLUTE
+(`f.pos = mech_pos + offset`, `sim.rs:8571`): it re-snaps every tick, so anything
+a later pass does to the rider is erased next tick. The wall-climb pass is
+INCREMENTAL (`f.pos[1] + SPEED*DT`, `sim.rs:8625`): every later per-tick pass
+that touches the same field accumulates into it forever. Copying the shape
+without noticing that difference is the root cause of BOTH defects below.
+
+### DEFECT A — gravity eats the climb, and the pilot never gets ON the wall.
+`sim.rs:8585-8636` (wall-climb pass) runs BEFORE `sim.rs:8760-8840` (the
+integrate loop's gravity/support block) in the same tick.
+
+*Rate.* The climb sets `f.vy = 0.0`, then gravity unconditionally does
+`f.vy -= GRAVITY * DT` (`sim.rs:8784`) and integrates. Loss per tick is exactly
+`GRAVITY*DT*DT = 18/14400 = 0.00125 m`. Predicted before the build, then the
+build printed `got 0.02708334` against an expected `3.4/120 = 0.02833334` —
+difference `0.00124999`. Mechanism verified to six decimals, not just the
+symptom. Real climb rate is **3.25 m/s, not `WALL_CLIMB_SPEED_MPS = 3.4`**.
+
+*The worse half.* While `y < wall_top`, the XZ push-out at `sim.rs:8738-8758`
+shoves the climber to `footprint - radius()` = 0.34 m off the wall face
+(`radius()` is `BODY_RADIUS` for a scout — `sim.rs:3586-3592` only fattens for
+`RobotSuit`). The support test at `sim.rs:8771-8774` only extends
+`BODY_RADIUS * 0.4` = **0.136 m** past the footprint. 0.34 > 0.136, and the
+climb pass explicitly zeroes lateral velocity (`f.vel = [0.0, 0.0]`,
+`sim.rs:8626`), so nothing ever moves the pilot over the slab. At top-out the
+pass sets `grounded = true` (`sim.rs:8633`) and the integrate loop, later in the
+SAME tick, finds `support = 0.0`, sets `grounded = false` and starts a fall from
+full wall height. **"Stops cleanly at the top" is the one thing it does not do.**
+The test's own `grounded` and `pos[1] == wall_top` assertions would also have
+failed had the run reached them.
+
+### DEFECT B — the heat cost is fictional; the exhaustion cutoff is dead code.
+`WALL_CLIMB_HEAT_PER_S = 0.075` (`sim.rs:5565`). `PLASMA_COOL_PER_S = 0.34`
+(`sim.rs:4795`). The cooling block at `sim.rs:6837-6853` runs earlier in the
+same tick than the climb pass, is gated only on `gatling_trigger_t <= 0.0`, and
+does `gatling_heat = (gatling_heat - 0.34*DT).max(0.0)`. Cooling is **4.53x**
+the climb's gain and the result is floored at zero, so:
+
+* climbing can never raise `gatling_heat` at all;
+* `heat_out` at `sim.rs:8604` and its vent branch at `sim.rs:8613-8618` are
+  unreachable in normal play — and the trigger gate at `sim.rs:7881` already
+  refuses to START a climb at `heat >= 1.0`, so nothing else reaches them;
+* "runs out of the shared heat pool", one of the four advertised stop
+  conditions, cannot happen;
+* the doc comment at `sim.rs:5556-5563` — *"13.3 s of continuous climbing
+  (computed: 1.0 / WALL_CLIMB_HEAT_PER_S) fills it from empty and forces the
+  same vent lockout"* — is FALSE. That commit message specifically boasts about
+  recomputing this number with awk after getting it wrong once. `1.0/0.075 =
+  13.3` is correct in isolation and irrelevant inside the tick loop.
+  **Recomputing a number does not verify it; running it does.**
+
+*Verification status, stated precisely:* DEFECT A is RUN-VERIFIED (the build
+failed on it with the predicted value). DEFECT B is ARITHMETIC- AND
+SOURCE-VERIFIED but **NOT run-verified** — the test panics on A at
+`sim.rs:15229` and never reaches its heat assertion at `sim.rs:15232`. Second
+independent check for B: the plasma overheat/recover test at `sim.rs:15580-15628`
+passes and drives this exact cooling path through `step()`, so the 0.34/s decay
+is confirmed live. I did not modify source to prove B directly, by rule.
+Friday: when you fix A, B surfaces as the next failure in the same test. Do not
+treat that as a regression — it is the second defect becoming visible.
+
+### Third-order oddity, found while tracing B (not a blocker, but incoherent)
+Because the refresh at `sim.rs:10104` sits above the `wall_climbing` gate at
+`sim.rs:10119` (correct, per item 1), a pilot HOLDING the fire button while
+climbing keeps `gatling_trigger_t` alive, which suppresses the cooling branch at
+`sim.rs:6837`. So climbing costs heat ONLY while you hold a trigger that is
+guaranteed to do nothing. That is the sole path by which climb heat can
+accumulate at all. Whatever the fix for B is, it must not depend on this.
+
+## 4. Things I checked that are NOT defects — recorded so nobody re-spends a cycle
+
+* **Trigger-branch collision (Friday's claim).** TRUE, and stronger than stated.
+  `sim.rs:7838` needs `climbing.is_some()`; `sim.rs:7840` needs `!in_mech()`;
+  `sim.rs:7854` needs `armor_set == RobotSuit`. `in_scout_mech()` is
+  `ScoutMech && hull > 0.0` (`sim.rs:3445`). A piloted scout satisfies none, so
+  `exit_mech` had NO prior meaning for a scout at all. Clean addition.
+* **Reset sites.** Both present: constructor `sim.rs:6492`, respawn
+  `sim.rs:7109`. Plus real defence-in-depth at `sim.rs:8600-8613` (hull lost
+  mid-climb clears the flag). The field is a plain `bool` in a struct literal
+  with no `..Default::default()`, so a missed construction site is a compile
+  error, not a silent gap.
+* **`cover.iter().zip(cover_kind.iter())` at `sim.rs:10531`.** Cannot silently
+  truncate: `sim.rs:18915` already asserts `cover.len() == cover_kind.len()` for
+  every map. Safe.
+* **Replay digest.** Friday wrote *"`f.pos[0]` is already in the fingerprint"*.
+  UNDERSTATED but the conclusion holds — `pos[1]` (`sim.rs:24101`) and
+  `gatling_heat` (`sim.rs:24105`) are both in it, and those are the two fields
+  the climb actually writes. Caveat worth carrying forward: that digest fixture
+  pilots a `RobotSuit` bot, so it never exercises wall climbing. The claim is
+  true; the coverage is theoretical.
+* **Reachability.** Production maps carry plenty of tall `CoverKind::Stone`
+  (`sim.rs:1010-1969`, incl. Cliffhold keeps and walls well over
+  `WALL_CLIMB_MIN_HEIGHT_M = 2.2`). The feature IS reachable in real play —
+  which is why DEFECT A matters on the field and not only in the test.
+
+## 5. Gaps Friday did not declare
+
+* **Bots can never wall-climb.** The trigger block is player-only
+  (`self.fighters[p]`, `sim.rs:7878`), while `try_fire_plasma` has a bot caller
+  at `sim.rs:13303`. Probably intended; it is stated nowhere.
+* **Zero client representation.** The whole branch touches only `sim.rs`
+  (`git diff --stat b47b1c5 523a851` = 1 file changed). No animation, no HUD, no
+  feedback in `main.rs` — grep for `wall_climbing` in `main.rs` returns nothing.
+  A player pressing the key gets an unexplained slide upward. BACKLOG item.
+
+## 6. INSTRUMENT WARNING — read this before anything else next session
+
+**The branch cannot fast-forward into `main`, and the task that dispatched me
+assumed it could.** `git merge-base main 523a851` = `b47b1c5`. `main` is at
+`477be34` ("Cliffhold gets its art and its landmarks"), which is NOT on the
+branch. Confirmed: `git merge-base --is-ancestor main 523a851` fails.
+
+`git merge-tree --write-tree main 523a851` succeeds — **no text conflicts** —
+and that is precisely the trap. `477be34` extracted the integrate loop's inline
+support test into `support_top()` (the `BODY_RADIUS * 0.4` margin preserved
+verbatim) and added a `climbs` link structure for bot pathing. The wall-climb
+pass was written against the OLD inline block and merges cleanly into the new
+one without anyone being asked a question. My build was on `523a851` ALONE.
+**The merged tree has never been compiled or tested by anyone.** Whatever
+happens to this branch, the post-merge tree needs its own run. Both defects
+above survive that refactor (checked: the 0.136 m margin is unchanged), so
+fixing them on the branch first is still the right order.
+
+**Also: my previous verdict on `a00569b` (the 158 lines immediately above this
+entry) was never committed.** It is sitting as an uncommitted working-tree
+change on `main`, and it does not exist on the branch at all. One `git checkout`
+or `git reset --hard` and the entire verified-safe record for `a00569b` is gone,
+leaving the next Thor believing that commit was never checked — which is exactly
+the "verified false vs never checked" conflation this log exists to prevent.
+Same class as the 46 dead verify agents and the missing `await`: *the instrument
+fails more quietly than the thing it measures.* **Commit this log.**
+
+## Disposition
+
+| commit | verdict |
+|---|---|
+| `2c12418` | REJECT (historic, stands) |
+| `a00569b` | VERIFIED (historic, stands) |
+| `c840049` | **REJECT — DEFECT A run-verified, DEFECT B source-verified** |
+| `523a851` | GOOD in itself; blocked only by `c840049` beneath it |
+| branch tip | **NOT MERGEABLE.** Also NOT fast-forwardable — needs merge/rebase onto `477be34`, then a fresh run. |
+
+Blocking file:line, for Friday: `sim.rs:8585-8636` (the pass — wrong side of
+gravity, and it never moves the pilot over the slab it just climbed) and
+`sim.rs:5556-5565` + `sim.rs:6837-6853` (a heat cost 4.53x smaller than the
+cooling that runs before it in the same tick).
+
+*Footprint:* I edited no source file. The only file I wrote is this log. The
+throwaway worktree `C:/tw/s523` and target dir `C:/tw/t523` are removed.
