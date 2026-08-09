@@ -46,6 +46,7 @@ mod cockpit;
 /// §gallery: the training range's mech exhibit. Self-contained; wired in
 /// with this line and one `add_plugins` below.
 mod mech_lineup;
+mod mech_recoil;
 mod menu_ui;
 mod sim;
 
@@ -272,6 +273,42 @@ const LOOK_PITCH_LIMIT: f32 = 1.53;
 /// player was already legitimately holding.
 fn recoil_kicked_pitch(pitch: f32, kick: f32, bloom: f32, brace: f32) -> f32 {
     (pitch - (kick * 6.0 + bloom * 1.5) * brace).clamp(-LOOK_PITCH_LIMIT, LOOK_PITCH_LIMIT)
+}
+
+/// The scale factor `sim.rs`'s `spray_entry` uses to turn a `GunSpec::kick`
+/// into punch VELOCITY in degrees per second.
+///
+/// A COPY, and knowingly so: sim.rs holds it as a bare literal inside
+/// `spray_entry` and does not export it, and `mech_mount_camera_kick` has
+/// to travel the other way down the same conversion. Pinned by
+/// `the_mount_kick_conversion_still_agrees_with_the_sim`, which rebuilds
+/// `turret_kick_per_round` out of public constants and fails the moment
+/// the two stop agreeing — so this is a guarded duplication rather than a
+/// silent one. Deleting the copy properly means a `pub const` in sim.rs,
+/// which is not this agent's file.
+const PUNCH_DEG_S_PER_SPEC_KICK: f32 = 9000.0;
+
+/// A hull mount's CAMERA kick, in the `GunSpec::kick` units
+/// `recoil_kicked_pitch` takes — derived from what the sim actually
+/// punches with, never from a table here.
+///
+/// The pod and the repair beam are the two mounts the sim writes no punch
+/// for at all; they keep a small client-side thump and a flat zero
+/// respectively, and both are labelled as such rather than hiding among
+/// numbers that look derived.
+fn mech_mount_camera_kick(w: sim::MechWeapon) -> f32 {
+    match w {
+        sim::MechWeapon::Gatling => sim::turret_kick_per_round() / PUNCH_DEG_S_PER_SPEC_KICK,
+        sim::MechWeapon::Autocannon => sim::autocannon_kick() / PUNCH_DEG_S_PER_SPEC_KICK,
+        // §C.7: a launch is a THUMP, not a crack. The sim gives a rocket
+        // no punch, so there is nothing to read and this stays a client
+        // number - stated here so nobody mistakes it for a derived one.
+        sim::MechWeapon::Rockets => 0.0110,
+        // a plasma bolt leaves with no mass behind it...
+        sim::MechWeapon::Plasma => 0.0009,
+        // ...and the beam has no impulse at all.
+        sim::MechWeapon::Repair => 0.0,
+    }
 }
 
 /// How far the bowstring is pulled back, 0..1, for rendering only.
@@ -2272,6 +2309,34 @@ fn gait_pose(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -
     (dipped, pitch)
 }
 
+/// §owner MECH JUMP LOAD POSE: how far into the kneel the heavy chassis
+/// should be DRAWN, 0 (stood up) to 1 (fully folded).
+///
+/// The sim's `chassis_kneeling()` is a boolean and is true from the very
+/// first tick of a jump's compression, which is correct for a hitbox and
+/// wrong for a pose: a 12-tonne machine that arrives at a full squat in
+/// one tick has no wind-up, and the camera riding `visor_eye_y()` drops
+/// 0.85 m instantly with it. `mech_jump_compression_of` is the ramp the
+/// sim publishes for exactly this, and nothing in the client read it.
+///
+/// The other two kneels are deliberately NOT ramped:
+///   * a held crouch has no compression clock at all, and the player's
+///     own key is the ramp;
+///   * a landing RECOVER is an impact. Arriving folded is what a landing
+///     looks like, and the sim publishes no recover progress to ease it
+///     with even if it were wanted.
+///
+/// Pure, so the ramp is testable without a chassis, a schedule or a jump.
+fn chassis_kneel_blend(kneeling: bool, phase: sim::MechJumpPhase, compression: f32) -> f32 {
+    if !kneeling {
+        return 0.0;
+    }
+    match phase {
+        sim::MechJumpPhase::Compress => compression.clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
 /// §0.2: world-Y of the head's LOWEST geometry for a grounded pose (the
 /// head pivot - geometry sits entirely above it).
 fn head_base_y(crouch: bool, theta: f32, amp: f32, accel_lean: f32, settle: f32) -> f32 {
@@ -3914,9 +3979,15 @@ fn fp_muzzle_local(p: &Fighter) -> Vec3 {
             // the launch tube: carry (0.19,-0.20,-0.46), tube runs to
             // local z 0.90 at scale 0.72
             sim::MechWeapon::Rockets => Vec3::new(0.19, -0.20, -0.46 - 0.90 * 0.72),
-            // the gatling cluster: carry (0.20,-0.22,-0.52), barrels
-            // reach local z ~0.66 at scale 0.62
-            _ => Vec3::new(0.20, -0.22, -0.52 - 0.66 * 0.62),
+            // the gatling cluster - and the autocannon, which rides the
+            // turret's viewmodel. Read off the model's OWN constants:
+            // this used to be a hand-copied `-0.52 - 0.66 * 0.62`, and
+            // the barrels have since moved twice.
+            _ => Vec3::new(
+                TURRET_VM_CARRY.x,
+                TURRET_VM_CARRY.y,
+                turret_vm_muzzle_camera_z(),
+            ),
         };
     }
     // infantry: the carried gun's own offset, run forward to about the
@@ -4616,7 +4687,18 @@ fn shield_readout(
     }
     // team-neutral chrome; the STATE is what carries colour here, and
     // only two states are worth a colour: spent, and holding.
-    let (line, col) = if p.in_mech() {
+    // §owner MEDIC: `in_heavy_mech`, not `in_mech`.
+    //
+    // The barrier is the HEAVY's forearm module. The sim's damage path
+    // returns before it ever consults the pool for a `ScoutMech`, so a
+    // medic's `mech_shield_hp` is a field nothing reads and nothing
+    // decrements - and this panel printed it as `BARRIER UP
+    // [##########] 280/280` for the whole match. Two panels away the
+    // medic's own vitals line says of exactly this class of thing: "No
+    // power core, no brace, no barrier: it has none of them, and
+    // printing dead fields is worse than printing nothing." It was
+    // printing the dead field.
+    let (line, col) = if p.in_heavy_mech() {
         let hp = p.mech_shield_hp;
         let frac = (hp / sim::MECH_SHIELD_HP).clamp(0.0, 1.0);
         let bars = (frac * 10.0).round() as usize;
@@ -4650,6 +4732,13 @@ fn shield_readout(
                 Color::srgba(0.85, 0.88, 0.92, 0.55)
             },
         )
+    } else if p.in_scout_mech() {
+        // ...and the light chassis gets an EMPTY line rather than the
+        // infantry plate's. A medic is sealed in a hull, so the tower
+        // shield is as absent as the barrier; falling through to the
+        // `GUARD` branch would swap one lie for another.
+        **t = String::new();
+        return;
     } else {
         // the plate. Its number is the fraction of a frontal hit it
         // eats, and that fraction genuinely changes with stance, so the
@@ -5724,10 +5813,15 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
         ..beat(2.4)
     },
     CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(3.2) },
-    // The ALLY SECTION. Stand 0 sits at row-offset -8.5 m along `right`,
+    // The ALLY SECTION. Stand 0 sits at row-offset -11.7 m along `right`,
     // and `right` at yaw 0 is -X - so the ally group is at POSITIVE x,
     // which in this right-handed frame is the LEFT of the screen, which
     // a POSITIVE yaw turns toward.
+    //
+    // §owner TRUE SIZES re-aimed every yaw in this table. The machines
+    // went to full scale, which widened `STAND_SPACING` and added a
+    // sixth stand, so the row's span grew from 17 m to 23.5 m and every
+    // absolute yaw below was pointing at ground the row had left.
     //
     // Both signs were wrong on the first pass and the "scout pair" frame
     // came back full of heavies. Two axis conventions compose here (the
@@ -5747,7 +5841,7 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     // while the row was chassis-major. The row is now SIDE-major, so the
     // same two camera positions photograph the two SECTIONS, which is
     // what the owner asked to be able to compare.
-    CapBeat { look: Some((1.32, 0.10)), ..beat(3.4) },
+    CapBeat { look: Some((1.25, 0.10)), ..beat(3.4) },
     CapBeat { snap: Some("03-ally-section"), ..beat(4.3) },
     // and the ENEMY SECTION - mirrored, but NOT by the same angle. It is
     // two stands rather than three and its centre sits 6.7 m off the
@@ -5755,10 +5849,16 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     // clear the pilot's own silhouette.
     //
     // -1.45 was the first try and it was not enough: SCOUT/ENEMY came
-    // back sitting directly behind the pilot's hat brim. -1.80 walks the
+    // back sitting directly behind the pilot's hat brim. -1.80 walked the
     // group a further ~0.35 rad (about 250 px at this FOV) into the
     // empty left half.
-    CapBeat { look: Some((-1.80, 0.10)), ..beat(4.5) },
+    //
+    // Eased back to -1.55 at true scale. The enemy group is now 9.7 m off
+    // the axis instead of 6.7, so it needs LESS over-turn to clear the
+    // pilot, and the machines are 1.7x bigger - at -1.80 they were being
+    // pushed against the frame edge to solve a problem they no longer
+    // had.
+    CapBeat { look: Some((-1.55, 0.10)), ..beat(4.5) },
     CapBeat { snap: Some("04-enemy-section"), ..beat(5.2) },
     // round to a three-quarter, so the machines are read as SOLIDS
     // rather than as five flat elevations
@@ -5779,13 +5879,14 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     //
     // The aim yaws are geometry, not taste. After the 0.8 s W press at
     // beat 2.4 the player stands about 3.8 m up the row's axis, and the
-    // two enemy stands are 4.9 m and 8.5 m across it at 9 m depth:
-    //   heavy  atan2(-4.9, 5.2) = -0.76
-    //   scout  from there, atan2(-5.1, 1.6) = -1.27
+    // two enemy stands are 7.7 m and 11.7 m across it at 9 m depth:
+    //   heavy  atan2(-7.7, 5.2) = -0.98
+    //   scout  from there, atan2(-8.7, 2.2) = -1.32
+    // (both were -0.76 / -1.27 against the old 17 m row)
     // `orbit` and `boom` are reset explicitly - they are persistent
     // camera state, and beat 5.4 left them at 0.85 / 1.6.
     CapBeat {
-        look: Some((-0.76, 0.02)),
+        look: Some((-0.98, 0.02)),
         orbit: Some(0.0),
         boom: Some(1.0),
         press: &[CapKey::K(KeyCode::KeyV)],
@@ -5798,12 +5899,12 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     },
     // 0.8 s at MOVE_SPEED 4.8 m/s is ~3.8 m of the 7.1 m stand-off.
     CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(7.4) },
-    CapBeat { look: Some((-0.76, 0.05)), ..beat(7.6) },
+    CapBeat { look: Some((-0.98, 0.05)), ..beat(7.6) },
     CapBeat { snap: Some("06-enemy-heavy-close"), ..beat(8.3) },
-    CapBeat { look: Some((-1.27, 0.02)), ..beat(8.5) },
+    CapBeat { look: Some((-1.32, 0.02)), ..beat(8.5) },
     CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(8.7) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(9.3) },
-    CapBeat { look: Some((-1.27, 0.05)), ..beat(9.5) },
+    CapBeat { look: Some((-1.32, 0.05)), ..beat(9.5) },
     CapBeat { snap: Some("07-enemy-scout-close"), ..beat(10.2) },
     CapBeat { end: true, ..beat(10.7) },
 ];
@@ -7074,6 +7175,7 @@ fn main() {
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
         .add_plugins(mech_lineup::MechGalleryPlugin)
+        .add_plugins(mech_recoil::MechRecoilPlugin)
         .init_resource::<IntroPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
         // the warm gold-and-sepia art on every menu screen.
@@ -9549,26 +9651,37 @@ fn mech_hud_sync(
     let mut placed = false;
     if inside {
         if let (Ok(win), Ok((cam, cam_tf))) = (windows.get_single(), cam_q.get_single()) {
-            let (sy, cy) = cam_ctl.yaw.sin_cos();
-            let pitch = cam_ctl.pitch;
-            let look = Vec3::new(sy * pitch.cos(), -pitch.sin(), cy * pitch.cos());
-            let eye = Vec3::new(p.pos[0], p.pos[1] + p.height() * 0.85, p.pos[2]);
+            // THE AIM, once, for both branches.
+            //
+            // The repair branch was corrected to use `crosshair_aim_dir`
+            // with a note saying a bracket that skipped it "would
+            // disagree with the beam by exactly that angle". The enemy
+            // branch six lines below then built its own ray out of raw
+            // `cam_ctl.yaw`/`pitch` - no third-person parallax, no punch
+            // term - so the same function was fixed on one side and left
+            // broken on the other. Over a 2.2 m boom and a 10-degree
+            // acquisition cone that is a bracket that frames the wrong
+            // body, or none, at close range.
+            let cam_t = cam_tf.compute_transform();
+            let (look, _) = crosshair_aim_dir(&game.sim, &cam_t);
+            // ...and the EYE is the visor, from the sim's own accessor.
+            //
+            // This was `p.height() * 0.85` - the ELEVENTH bare copy of a
+            // formula the sim promoted to `MECH_VISOR_Y_FRAC` (0.90) and
+            // `Fighter::visor_eye_y()` specifically to stop it being
+            // copied. It was not merely a copy, it was a copy with the
+            // wrong number in it, so this HUD measured its acquisition
+            // cone from a point 5% of a chassis below the eye the camera
+            // renders from and the sim shoots weak-point hits at.
+            let eye = Vec3::new(p.pos[0], p.visor_eye_y(), p.pos[2]);
             // the enemy closest to the aim LINE, not to the mech - the
             // bracket answers "what am I pointing at", and the nearest
             // body in space is frequently not it
             let mut best: Option<(usize, f32)> = None;
             if repairing {
-                // and the AIM this is asked with has to be the aim the
-                // sim will be handed, not a lookalike rebuilt from
-                // yaw/pitch: `crosshair_aim_dir` applies the third-person
-                // parallax correction, and a bracket that skipped it
-                // would disagree with the beam by exactly that angle -
-                // reintroducing the same bug in miniature.
-                let cam_t = cam_tf.compute_transform();
-                let (dir, _) = crosshair_aim_dir(&game.sim, &cam_t);
                 best = game
                     .sim
-                    .repair_beam_target(game.sim.player, dir.to_array())
+                    .repair_beam_target(game.sim.player, look.to_array())
                     .map(|j| (j, 1.0));
             } else {
                 for (j, g) in game.sim.fighters.iter().enumerate() {
@@ -9887,8 +10000,15 @@ fn mech_barrier_sync(
     let tnow = time.elapsed_secs();
     for (vis, bar) in &rigs {
         let Some(f) = game.sim.fighters.get(vis.index) else { continue };
-        // up only in a chassis, with the pool still standing
-        let want = f.in_mech() && f.shield_up && f.mech_shield_hp > 0.0;
+        // Up only in a HEAVY chassis, with the pool still standing.
+        //
+        // `in_mech()` included the ScoutMech, and the barrier geometry is
+        // parented to the heavy's `armor_rig` - which `sync_fighters`
+        // hides outright unless `armor_set == RobotSuit`. So a medic
+        // raising their guard ran the whole deploy animation, petals and
+        // ripple and all, on parts nobody could see, every frame, for
+        // every scout on the field.
+        let want = f.in_heavy_mech() && f.shield_up && f.mech_shield_hp > 0.0;
         // one clock, read back off the field's own scale so no extra
         // per-fighter state is needed for a purely cosmetic animation
         let cur = parts
@@ -9932,9 +10052,76 @@ fn mech_barrier_sync(
 #[derive(Component)]
 struct MechTurretSpinner;
 
+/// Where the turret viewmodel is carried, in camera space, and at what
+/// model scale.
+///
+/// Named because THREE places need the same answer and used to hold
+/// three copies of it: `setup` (which places the model), `fp_muzzle_local`
+/// (which draws the streak off the barrel tips), and the recoil shove in
+/// `mech_recoil.rs` (which has to return the mount to its rest pose).
+/// The old copies were literals in a comment - "carry (0.20,-0.22,-0.52),
+/// barrels reach local z ~0.66 at scale 0.62" - and a comment is not a
+/// dependency, so lengthening the barrels moved the geometry and left the
+/// muzzle behind it.
+const TURRET_VM_CARRY: Vec3 = Vec3::new(0.20, -0.22, -0.62);
+/// Yaw applied to every hull mount: the vm camera looks down its own -Z,
+/// so a model built muzzle-forward along +Z has to be turned to face out.
+/// The 0.026 is the convergence toe-in every mount shares.
+const MOUNT_VM_YAW: f32 = PI + 0.026;
+const TURRET_VM_SCALE: f32 = 0.58;
+/// Local Z the six barrel mouths reach in `spawn_mech_turret_vm`.
+/// THE number the whole model is staged against - see the staging rule
+/// there - and the one `fp_muzzle_local` runs the streak out to.
+const TURRET_VM_MUZZLE_Z: f32 = 1.00;
+/// Local Z of the breech face: the front of the housing, and the line
+/// forward of which nothing but barrels and their clamps may stand.
+const TURRET_VM_BREECH_Z: f32 = 0.20;
+/// Radius of the barrel ring (barrel axis to cluster axis), and the
+/// barrels' own radius. Six tubes at this spacing are individually
+/// countable at the distance a pilot sees them from, which is the
+/// difference between "a minigun" and "a cylinder".
+const TURRET_VM_RING_R: f32 = 0.078;
+const TURRET_VM_BARREL_R: f32 = 0.017;
+/// The rocket pod's carry, on the same footing — `mech_recoil` has to
+/// return it to rest and cannot do that from a literal in `setup`.
+const POD_VM_CARRY: Vec3 = Vec3::new(0.19, -0.20, -0.46);
+const POD_VM_SCALE: f32 = 0.72;
+
 /// §C.7: the TURRET hull-mount viewmodel - a gatling barrel cluster in
 /// the mech palette. No hands, no forearms, no ammo bar: a hull mount is
 /// STRUCTURAL, never held (sim.rs MechWeapon doctrine).
+///
+/// ## §owner: IT HAS TO READ AS A MINIGUN
+///
+/// *"bring back the old turret design in first person where turret looked
+/// like a minigun"*. It began as a spine, two collars and six barrels and
+/// was unmistakable. A hardware pass then added everything the owner
+/// asked for TWICE over - rotor, breech, module ring, feed, supports,
+/// sensors, energy module, cooling, articulated parts - and the result
+/// photographed as a khaki BOX with fittings on it. Not one barrel was
+/// visible in `mech_fp/01-fp-mech-turret.png`.
+///
+/// The hardware is NOT the problem and none of it is removed here. The
+/// problem was STAGING, and it had one cause worth naming: **the pilot
+/// looks DOWN at this mount** (it is carried 22 cm below the eye), so
+/// anything sitting above the barrels is a lid, whatever the comment
+/// calls it. The old "reinforced barrel shroud" was a 0.42 m khaki plate
+/// at y +0.105 with two cheek plates under it, and it roofed the cluster
+/// over its entire visible length.
+///
+/// ### The staging rule, stated once so it can be checked
+///
+/// 1. Forward of `TURRET_VM_BREECH_Z` there is NOTHING but the barrels,
+///    the rings that clamp them, and structure BELOW the cluster. That
+///    is asserted by `nothing_stands_over_the_turret_barrels`.
+/// 2. All machinery lives behind the breech face, where it is compact,
+///    dense and read as "the machine that drives the barrels".
+/// 3. Anything that must run alongside the cluster runs UNDER it, where
+///    the barrels themselves hide it from the only eye that ever sees
+///    this model.
+///
+/// A real rotary cannon is mostly barrel with a lot of machinery behind
+/// it, and that proportion is the whole read.
 fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
@@ -9943,18 +10130,45 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
         .spawn((Transform::IDENTITY, Visibility::default(), MechTurretSpinner))
         .set_parent(root)
         .id();
+    // ---- THE BARRELS. First, longest, and in front of everything. ------
+    //
+    // z 0.10 -> 1.00: they start INSIDE the housing (so they read as
+    // emerging from it rather than glued to its face) and run 0.90 out
+    // in front, which is 4.5x the depth of the entire machinery block
+    // behind them. That ratio is the silhouette.
+    let barrel_z0 = 0.10_f32;
+    let barrel_len = TURRET_VM_MUZZLE_Z - barrel_z0;
     let mut cluster: Vec<(Handle<StandardMaterial>, Vec3, Vec3)> = vec![
-        // central spine + two collar discs
-        (kit.mech_metal.clone(), Vec3::new(0.0, 0.0, 0.30), Vec3::new(0.030, 0.62, 0.030)),
-        (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.60), Vec3::new(0.100, 0.06, 0.100)),
-        (kit.grey_black.clone(), Vec3::new(0.0, 0.0, 0.20), Vec3::new(0.105, 0.06, 0.105)),
+        // central spine, running the full length of the cluster
+        (
+            kit.mech_metal.clone(),
+            Vec3::new(0.0, 0.0, (barrel_z0 + TURRET_VM_MUZZLE_Z) * 0.5),
+            Vec3::new(0.042, barrel_len, 0.042),
+        ),
+        // the two collar discs, at the muzzle end and the breech end -
+        // both INSIDE the barrel ring radius, so neither can cap the
+        // cluster the way the old front cowl did
+        (
+            kit.grey_black.clone(),
+            Vec3::new(0.0, 0.0, TURRET_VM_MUZZLE_Z - 0.055),
+            Vec3::new(0.108, 0.05, 0.108),
+        ),
+        (
+            kit.grey_black.clone(),
+            Vec3::new(0.0, 0.0, barrel_z0 + 0.04),
+            Vec3::new(0.116, 0.06, 0.116),
+        ),
     ];
     for i in 0..6 {
         let a = i as f32 * std::f32::consts::TAU / 6.0;
         cluster.push((
             kit.grey_dark.clone(),
-            Vec3::new(a.cos() * 0.064, a.sin() * 0.064, 0.32),
-            Vec3::new(0.022, 0.68, 0.022),
+            Vec3::new(
+                a.cos() * TURRET_VM_RING_R,
+                a.sin() * TURRET_VM_RING_R,
+                (barrel_z0 + TURRET_VM_MUZZLE_Z) * 0.5,
+            ),
+            Vec3::new(TURRET_VM_BARREL_R * 2.0, barrel_len, TURRET_VM_BARREL_R * 2.0),
         ));
     }
     for (mat, pos, size) in cluster {
@@ -9970,14 +10184,16 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             ))
             .set_parent(spinner);
     }
-    // hull housing: khaki plate + dark cradle + one hazard strip
+    // hull housing: khaki plate + dark cradle + one hazard strip.
+    // ALL of it behind the breech face - this used to straddle z 0 and
+    // the cradle ran forward to z 0.21, under the barrels' root.
     for (mat, pos, size) in [
-        (kit.mech_khaki.clone(), Vec3::new(0.0, -0.02, -0.10), Vec3::new(0.20, 0.16, 0.26)),
-        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.11, 0.06), Vec3::new(0.14, 0.05, 0.30)),
+        (kit.mech_khaki.clone(), Vec3::new(0.0, -0.02, -0.26), Vec3::new(0.20, 0.16, 0.26)),
+        (kit.mech_khaki_dk.clone(), Vec3::new(0.0, -0.11, -0.16), Vec3::new(0.14, 0.05, 0.30)),
         // a narrow front stripe, NOT a deck: mech_hazard is capped at
         // an accent (<=10% of surface), and a full-footprint yellow top
         // plate was the single loudest thing on the screen
-        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.081, -0.02), Vec3::new(0.20, 0.012, 0.05)),
+        (kit.mech_hazard.clone(), Vec3::new(0.0, 0.081, -0.30), Vec3::new(0.20, 0.012, 0.05)),
     ] {
         commands
             .spawn((
@@ -10022,10 +10238,14 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // ---- ON THE SPINNER: the rotating central assembly ------------
         // rotor disc between the barrels and the breech - a wide flat
         // plate is what makes rotation legible, because a cylinder
-        // turning about its own axis shows you nothing
+        // turning about its own axis shows you nothing.
+        //
+        // Pulled BACK behind the barrel roots (z 0.115/0.055 -> 0.02/
+        // -0.05): at the old z it sat level with the first 10 cm of
+        // barrel and, being wider than the ring, ate them.
         for (mat, z, r, h) in [
-            (kit.mech_metal.clone(), 0.115_f32, 0.098_f32, 0.030_f32),
-            (kit.mech_khaki_dk.clone(), 0.055, 0.086, 0.045),
+            (kit.mech_metal.clone(), 0.020_f32, 0.098_f32, 0.030_f32),
+            (kit.mech_khaki_dk.clone(), -0.050, 0.086, 0.045),
         ] {
             commands
                 .spawn((
@@ -10049,7 +10269,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.grey_black.clone()),
                     Transform {
-                        translation: Vec3::new(a.cos() * 0.082, a.sin() * 0.082, 0.115),
+                        translation: Vec3::new(a.cos() * 0.082, a.sin() * 0.082, 0.020),
                         rotation: Quat::from_rotation_z(a),
                         scale: Vec3::new(0.030, 0.018, 0.040),
                     },
@@ -10057,13 +10277,15 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 .set_parent(spinner);
         }
         // muzzle collar, also on the spinner, so the front of the
-        // machine turns with it
+        // machine turns with it. It sits INSIDE the barrel ring
+        // (r 0.044 against the ring's 0.078) so it is a hub between the
+        // tubes rather than a plate across them.
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.mech_metal.clone()),
                 Transform {
-                    translation: Vec3::new(0.0, 0.0, 0.635),
+                    translation: Vec3::new(0.0, 0.0, TURRET_VM_MUZZLE_Z - 0.025),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
                     scale: Vec3::new(0.088, 0.028, 0.088),
                 },
@@ -10071,51 +10293,61 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .set_parent(spinner);
 
         // ---- STATIC: housing, supports, mechanism --------------------
-        // BARREL SHROUD. Two flat BARS over the top of the cluster, not
-        // rings around it.
+        // BARREL HOUSING. A CAGE at the breech, not a cowl over the
+        // length.
         //
-        // The first attempt was a pair of cylinders rotated to face down
-        // the barrel axis, described in its own comment as a half-cowl
-        // open below. A cylinder facing that way is a DISC: it capped
-        // the cluster and hid the six barrels behind a plate, which is
-        // the exact opposite of the brief - the central rotating minigun
-        // has to stay recognisable. Caught by looking at it.
+        // Two previous attempts and both were lids. The first was a pair
+        // of cylinders facing down the barrel axis - a cylinder facing
+        // that way is a DISC, and it capped the cluster outright. The
+        // second replaced them with "flat BARS over the top", which is
+        // the same mistake spelled differently: the pilot looks DOWN at
+        // this mount, so a bar above the barrels is a roof over them.
         //
-        // Bars sitting ON TOP leave the barrels in full view from the
-        // pilot's eye, which is the only angle this model is seen from.
-        for (z, w) in [(0.28_f32, 0.20_f32), (0.44, 0.185)] {
+        // What is left is four short longitudinal ribs AROUND the
+        // cluster at the breech only (z 0.03 -> 0.19, ending at the
+        // breech face), spaced between the barrels rather than over
+        // them. They read as the housing the barrels run out of, and
+        // there is nothing above the tubes anywhere along their length.
+        for k in 0..4 {
+            let a = std::f32::consts::FRAC_PI_4 + k as f32 * std::f32::consts::FRAC_PI_2;
             commands
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_khaki.clone()),
-                    Transform::from_xyz(0.0, 0.098, z)
-                        .with_scale(Vec3::new(w, 0.022, 0.055)),
+                    Transform {
+                        translation: Vec3::new(a.cos() * 0.115, a.sin() * 0.115, 0.11),
+                        rotation: Quat::from_rotation_z(a),
+                        scale: Vec3::new(0.030, 0.055, 0.16),
+                    },
                 ))
                 .set_parent(root);
         }
-        // MECHANICAL SUPPORTS: two braces from the shroud down to the
-        // cradle, angled - a strut that is vertical carries nothing a
-        // player believes in
+        // MECHANICAL SUPPORTS: two braces angled up from the cradle to
+        // the housing. UNDER the cluster - a strut that is vertical
+        // carries nothing a player believes in, and a strut above the
+        // barrels is a lid with a bevel on it.
         for sd in [-1.0_f32, 1.0] {
             commands
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_metal.clone()),
                     Transform {
-                        translation: Vec3::new(sd * 0.105, -0.035, 0.20),
+                        translation: Vec3::new(sd * 0.105, -0.125, 0.02),
                         rotation: Quat::from_rotation_z(sd * -0.42),
-                        scale: Vec3::new(0.022, 0.14, 0.055),
+                        scale: Vec3::new(0.022, 0.16, 0.075),
                     },
                 ))
                 .set_parent(root);
         }
         // VISIBLE FIRING MECHANISM: the belt, its links, the feed pawl,
-        // and the bolt track the carrier runs in
+        // and the bolt track the carrier runs in. All of it behind the
+        // breech, on the outboard side, where it silhouettes against the
+        // sky instead of against a barrel.
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
-                Transform::from_xyz(-0.135, -0.055, -0.02)
+                Transform::from_xyz(-0.135, -0.055, -0.16)
                     .with_scale(Vec3::new(0.075, 0.10, 0.20)),
             ))
             .set_parent(root);
@@ -10124,7 +10356,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.gold.clone()),
-                    Transform::from_xyz(-0.108 + k as f32 * 0.017, -0.030 + k as f32 * 0.012, 0.02)
+                    Transform::from_xyz(-0.108 + k as f32 * 0.017, -0.030 + k as f32 * 0.012, -0.12)
                         .with_scale(Vec3::new(0.014, 0.026, 0.020)),
                 ))
                 .set_parent(root);
@@ -10136,7 +10368,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_shadow.clone()),
-                Transform::from_xyz(0.098, 0.010, 0.06)
+                Transform::from_xyz(0.098, 0.010, -0.10)
                     .with_scale(Vec3::new(0.014, 0.030, 0.26)),
             ))
             .set_parent(root);
@@ -10144,7 +10376,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_metal.clone()),
-                Transform::from_xyz(0.098, 0.010, 0.13)
+                Transform::from_xyz(0.098, 0.010, -0.04)
                     .with_scale(Vec3::new(0.024, 0.040, 0.055)),
             ))
             .set_parent(root);
@@ -10155,7 +10387,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_metal.clone()),
-                Transform::from_xyz(-0.085, 0.010, 0.10)
+                Transform::from_xyz(-0.085, 0.010, -0.05)
                     .with_rotation(Quat::from_rotation_z(0.55))
                     .with_scale(Vec3::new(0.075, 0.018, 0.030)),
             ))
@@ -10164,19 +10396,19 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
-                Transform::from_xyz(0.115, -0.030, -0.01)
+                Transform::from_xyz(0.115, -0.030, -0.15)
                     .with_rotation(Quat::from_rotation_x(0.42))
                     .with_scale(Vec3::new(0.020, 0.070, 0.085)),
             ))
             .set_parent(root);
 
-        // ---- COOLING -------------------------------------------------
+        // ---- COOLING: the vented jacket, stacked over the breech -----
         for k in 0..5 {
             commands
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_metal.clone()),
-                    Transform::from_xyz(0.0, 0.062, 0.10 + k as f32 * 0.052)
+                    Transform::from_xyz(0.0, 0.062, -0.26 + k as f32 * 0.052)
                         .with_scale(Vec3::new(0.15, 0.030, 0.014)),
                 ))
                 .set_parent(root);
@@ -10186,12 +10418,20 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // range finder (round lens), tracker (square window), and a data
         // module with lit rows. Three shapes, because three copies of one
         // pod is one instrument repeated, not three instruments.
+        //
+        // OUTBOARD AND AT THE BREECH. They used to stand at z 0.30 with
+        // their lenses at 0.355 - a third of the way down the barrels,
+        // level with them, one on each side, which is where two pods stop
+        // being instruments and start being the sides of a box. Now they
+        // flank the housing at |x| 0.145 and end at the breech face, and
+        // they are on the ROOT: a rangefinder that whirls with the
+        // barrels is not a rangefinder.
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
-                Transform::from_xyz(0.128, 0.055, 0.30)
-                    .with_scale(Vec3::new(0.055, 0.055, 0.10)),
+                Transform::from_xyz(0.145, 0.020, 0.09)
+                    .with_scale(Vec3::new(0.055, 0.055, 0.14)),
             ))
             .set_parent(root);
         commands
@@ -10199,7 +10439,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.mech_red.clone()),
                 Transform {
-                    translation: Vec3::new(0.128, 0.055, 0.355),
+                    translation: Vec3::new(0.145, 0.020, 0.162),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
                     scale: Vec3::new(0.024, 0.012, 0.024),
                 },
@@ -10209,15 +10449,15 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
-                Transform::from_xyz(-0.128, 0.055, 0.30)
-                    .with_scale(Vec3::new(0.055, 0.055, 0.10)),
+                Transform::from_xyz(-0.145, 0.020, 0.09)
+                    .with_scale(Vec3::new(0.055, 0.055, 0.14)),
             ))
             .set_parent(root);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.core_glow.clone()),
-                Transform::from_xyz(-0.128, 0.055, 0.352)
+                Transform::from_xyz(-0.145, 0.020, 0.159)
                     .with_scale(Vec3::new(0.034, 0.024, 0.008)),
             ))
             .set_parent(root);
@@ -10229,7 +10469,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki.clone()),
-                Transform::from_xyz(0.0, 0.075, -0.14)
+                Transform::from_xyz(0.0, 0.075, -0.34)
                     .with_scale(Vec3::new(0.17, 0.075, 0.14)),
             ))
             .set_parent(root);
@@ -10237,7 +10477,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.core_glow.clone()),
-                Transform::from_xyz(0.0, 0.075, -0.212)
+                Transform::from_xyz(0.0, 0.075, -0.412)
                     .with_scale(Vec3::new(0.12, 0.010, 0.008)),
             ))
             .set_parent(root);
@@ -10246,7 +10486,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.core_glow.clone()),
-                    Transform::from_xyz(0.0, 0.100 - k as f32 * 0.016, -0.212)
+                    Transform::from_xyz(0.0, 0.100 - k as f32 * 0.016, -0.412)
                         .with_scale(Vec3::new(w, 0.006, 0.006)),
                 ))
                 .set_parent(root);
@@ -10256,7 +10496,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.mech_shadow.clone()),
                 Transform {
-                    translation: Vec3::new(0.070, 0.030, -0.10),
+                    translation: Vec3::new(0.070, 0.030, -0.30),
                     rotation: Quat::from_rotation_x(FRAC_PI_2 - 0.5),
                     scale: Vec3::new(0.016, 0.16, 0.016),
                 },
@@ -10275,7 +10515,11 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // BARREL CLAMPS - two rings around the cluster, and the reason
         // the barrels look like an assembly instead of six loose rods.
         // On the SPINNER, so they turn with what they are clamping.
-        for (rz, r) in [(0.16_f32, 0.095_f32), (0.50, 0.088)] {
+        //
+        // Thin (0.038 deep) and spaced a third and two thirds along the
+        // exposed length. A clamp is a band; anything deeper is a sleeve,
+        // and a sleeve down a barrel cluster is the cowl again.
+        for (rz, r) in [(0.42_f32, 0.104_f32), (0.76, 0.100)] {
             commands
                 .spawn((
                     Mesh3d(kit.cyl.clone()),
@@ -10283,7 +10527,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Transform {
                         translation: Vec3::new(0.0, 0.0, rz),
                         rotation: Quat::from_rotation_x(FRAC_PI_2),
-                        scale: Vec3::new(r * 2.0, 0.045, r * 2.0),
+                        scale: Vec3::new(r * 2.0, 0.038, r * 2.0),
                     },
                 ))
                 .set_parent(spinner);
@@ -10297,9 +10541,31 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Mesh3d(kit.cyl.clone()),
                     MeshMaterial3d(kit.mech_metal.clone()),
                     Transform {
-                        translation: Vec3::new(a.cos() * 0.064, a.sin() * 0.064, 0.645),
+                        translation: Vec3::new(
+                            a.cos() * TURRET_VM_RING_R,
+                            a.sin() * TURRET_VM_RING_R,
+                            TURRET_VM_MUZZLE_Z - 0.03,
+                        ),
                         rotation: Quat::from_rotation_x(FRAC_PI_2),
-                        scale: Vec3::new(0.034, 0.035, 0.034),
+                        scale: Vec3::new(0.048, 0.048, 0.048),
+                    },
+                ))
+                .set_parent(spinner);
+            // ...and the bore itself, a dark disc set into each mouth. Six
+            // black dots at the end of six tubes is the single cheapest
+            // thing that says "this is a gun and it points at you".
+            commands
+                .spawn((
+                    Mesh3d(kit.cyl.clone()),
+                    MeshMaterial3d(kit.grey_black.clone()),
+                    Transform {
+                        translation: Vec3::new(
+                            a.cos() * TURRET_VM_RING_R,
+                            a.sin() * TURRET_VM_RING_R,
+                            TURRET_VM_MUZZLE_Z - 0.004,
+                        ),
+                        rotation: Quat::from_rotation_x(FRAC_PI_2),
+                        scale: Vec3::new(0.026, 0.010, 0.026),
                     },
                 ))
                 .set_parent(spinner);
@@ -10308,12 +10574,17 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
         // a cooling jacket and a lit power feed. Static on purpose: the
         // drive does not spin, the thing it drives does, and that
         // difference is most of what makes a gatling read correctly.
+        //
+        // Set BACK to z -0.12 and shortened. At z 0.03 it was a 0.25 m
+        // drum straddling the barrel roots, and from an eye nearly on the
+        // barrel axis a drum that wide in front of the cluster hides the
+        // cluster - the near object wins on angular size every time.
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
                 Transform {
-                    translation: Vec3::new(0.0, 0.0, 0.03),
+                    translation: Vec3::new(0.0, 0.0, -0.12),
                     rotation: Quat::from_rotation_x(FRAC_PI_2),
                     scale: Vec3::new(0.25, 0.20, 0.25),
                 },
@@ -10326,7 +10597,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_metal.clone()),
                     Transform {
-                        translation: Vec3::new(a.cos() * 0.132, a.sin() * 0.132, 0.03),
+                        translation: Vec3::new(a.cos() * 0.132, a.sin() * 0.132, -0.12),
                         rotation: Quat::from_rotation_z(a),
                         scale: Vec3::new(0.030, 0.055, 0.19),
                     },
@@ -10341,7 +10612,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 .spawn((
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_metal.clone()),
-                    Transform::from_xyz(0.0, 0.115, -0.02 + k as f32 * 0.042)
+                    Transform::from_xyz(0.0, 0.115, -0.30 + k as f32 * 0.042)
                         .with_scale(Vec3::new(0.19, 0.075, 0.016)),
                 ))
                 .set_parent(root);
@@ -10350,7 +10621,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.med_glow.clone()),
-                Transform::from_xyz(0.0, 0.075, 0.065)
+                Transform::from_xyz(0.0, 0.075, -0.20)
                     .with_scale(Vec3::new(0.17, 0.012, 0.20)),
             ))
             .set_parent(root);
@@ -10361,14 +10632,14 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki_dk.clone()),
-                Transform::from_xyz(0.0, -0.20, -0.16)
+                Transform::from_xyz(0.0, -0.20, -0.32)
                     .with_scale(Vec3::new(0.26, 0.20, 0.30)),
             ))
             .set_parent(root);
         for (lx, ly, lz) in [
-            (0.0_f32, -0.115_f32, -0.11_f32),
-            (0.0, -0.075, -0.055),
-            (0.0, -0.055, 0.00),
+            (0.0_f32, -0.115_f32, -0.27_f32),
+            (0.0, -0.075, -0.215),
+            (0.0, -0.055, -0.16),
         ] {
             commands
                 .spawn((
@@ -10387,7 +10658,7 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Mesh3d(kit.cyl.clone()),
                     MeshMaterial3d(kit.mech_shadow.clone()),
                     Transform {
-                        translation: Vec3::new(sd * 0.13, -0.09, -0.20),
+                        translation: Vec3::new(sd * 0.13, -0.09, -0.36),
                         rotation: Quat::from_rotation_x(0.55),
                         scale: Vec3::new(0.032, 0.28, 0.032),
                     },
@@ -10397,19 +10668,29 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 .spawn((
                     Mesh3d(kit.ball.clone()),
                     MeshMaterial3d(kit.core_glow.clone()),
-                    Transform::from_xyz(sd * 0.115, 0.055, -0.14)
+                    Transform::from_xyz(sd * 0.115, 0.055, -0.30)
                         .with_scale(Vec3::splat(0.024)),
                 ))
                 .set_parent(root);
         }
-        // reinforced barrel shroud - a partial cowl over the top of the
-        // cluster, open below so the barrels stay readable
+        // REINFORCED SHROUD, rebuilt as an UNDER-RAIL.
+        //
+        // This was the single worst offender: a 0.20 x 0.42 m khaki plate
+        // at y +0.105, with two cheek plates canted in under it, covering
+        // z 0.13 to 0.55. Between them they roofed and walled the whole
+        // visible barrel run, which is what turned the mount into a box.
+        //
+        // The structure it was meant to represent is real and stays, on
+        // the other side of the cluster: a spine under the barrels with
+        // two ribs standing up from it, in the one place the pilot's own
+        // barrels hide it. Nothing about the gun's strength reads worse
+        // for being under it; everything about the gun reads better.
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.mech_khaki.clone()),
-                Transform::from_xyz(0.0, 0.105, 0.34)
-                    .with_scale(Vec3::new(0.20, 0.030, 0.42)),
+                Transform::from_xyz(0.0, -0.112, 0.44)
+                    .with_scale(Vec3::new(0.16, 0.030, 0.60)),
             ))
             .set_parent(root);
         for sd in [-1.0_f32, 1.0] {
@@ -10418,15 +10699,28 @@ fn spawn_mech_turret_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                     Mesh3d(kit.cube.clone()),
                     MeshMaterial3d(kit.mech_khaki.clone()),
                     Transform {
-                        translation: Vec3::new(sd * 0.105, 0.055, 0.34),
-                        rotation: Quat::from_rotation_z(sd * 0.55),
-                        scale: Vec3::new(0.028, 0.11, 0.42),
+                        translation: Vec3::new(sd * 0.072, -0.095, 0.44),
+                        rotation: Quat::from_rotation_z(sd * 0.42),
+                        scale: Vec3::new(0.026, 0.070, 0.60),
                     },
                 ))
                 .set_parent(root);
         }
     }
     root
+}
+
+/// How far a hull mount's barrels reach in FRONT of the eye, in metres —
+/// the one number `fp_muzzle_local` needs and the one thing the model and
+/// the streak have to agree on.
+///
+/// A function of the model's own constants rather than a literal, because
+/// the literal is what broke: `fp_muzzle_local` carried
+/// `-0.52 - 0.66 * 0.62` in a comment that stopped being true the moment
+/// the barrels moved, and the streak went on leaving a point buried
+/// inside the housing.
+fn turret_vm_muzzle_camera_z() -> f32 {
+    TURRET_VM_CARRY.z - TURRET_VM_MUZZLE_Z * TURRET_VM_SCALE
 }
 
 /// §C.7: the ROCKETS hull-mount viewmodel - a LAUNCH TUBE carried
@@ -14620,10 +14914,15 @@ fn setup(
             // 0.13 m from a 68-degree lens and ate 80% of the screen.
             // Pushed back and shrunk until the cluster reads as a mount
             // in the lower right instead of a wall.
+            //
+            // §owner MINIGUN: pushed a further 10 cm out and trimmed
+            // 0.62 -> 0.58, because the barrels grew from 0.68 to 0.90
+            // long. Same on-screen bulk at the breech, a much longer
+            // gun running away from it.
             Transform {
-                translation: Vec3::new(0.20, -0.22, -0.52),
-                rotation: Quat::from_rotation_y(PI + 0.026),
-                scale: Vec3::splat(0.62),
+                translation: TURRET_VM_CARRY,
+                rotation: Quat::from_rotation_y(MOUNT_VM_YAW),
+                scale: Vec3::splat(TURRET_VM_SCALE),
             },
             Visibility::Hidden,
         ))
@@ -14636,9 +14935,9 @@ fn setup(
             // at the old placement its near face was 0.26 m out and
             // filled half the frame.
             Transform {
-                translation: Vec3::new(0.19, -0.20, -0.46),
-                rotation: Quat::from_rotation_y(PI + 0.026),
-                scale: Vec3::splat(0.72),
+                translation: POD_VM_CARRY,
+                rotation: Quat::from_rotation_y(MOUNT_VM_YAW),
+                scale: Vec3::splat(POD_VM_SCALE),
             },
             Visibility::Hidden,
         ))
@@ -16379,20 +16678,24 @@ fn input_and_step(
         // `gun(p.gun).kick` inside a mech was the same class of mistake
         // as `apply_hit` re-reading the held gun's damage - the pilot's
         // inventory silently driving a hull weapon's feel.
+        //
+        // §owner VISUAL RECOIL: and it no longer comes from a table HERE
+        // either. This block used to hold five hand-set numbers - Gatling
+        // 0.0016, Autocannon 0.0180, Rockets 0.0110, Plasma 0.0009 - which
+        // is a second recoil model for the mounts, sitting next to a sim
+        // that already states each one's kick exactly. They had drifted:
+        // the sim punches a gatling round at 8.3 deg/s (the equivalent of
+        // 0.00092 here) against this table's 0.0016, and an autocannon
+        // shell at 134 (0.0148) against 0.0180. The player felt the
+        // client's numbers and the bullets took the sim's.
+        //
+        // Now `mech_mount_camera_kick` converts the sim's own published
+        // per-round punch into the units this function wants, so a
+        // rebalance in sim.rs is visible without anyone editing main.rs -
+        // which is the point, because a rebalance in sim.rs is happening
+        // in parallel with this change.
         let kick = if p.in_mech() {
-            match p.mech_weapon {
-                // the gatling's mass eats its own recoil; heat is its cost
-                sim::MechWeapon::Gatling => 0.0016,
-                // the autocannon is the reason the brace stance exists
-                sim::MechWeapon::Autocannon => 0.0180,
-                // §C.7: a launch is a THUMP, not a crack - between the
-                // two gun mounts, nearer the belt than the cannon
-                sim::MechWeapon::Rockets => 0.0110,
-                // a plasma bolt leaves with no mass behind it; the beam
-                // has no impulse at all
-                sim::MechWeapon::Plasma => 0.0009,
-                sim::MechWeapon::Repair => 0.0,
-            }
+            mech_mount_camera_kick(p.mech_weapon)
         } else {
             gun(p.gun).kick
         };
@@ -16876,10 +17179,40 @@ fn sync_fighters(
         };
         // §1.4 pose core - the SAME pure function the §0.2 band test
         // samples, so the render cannot drift out of the hit bands
+        //
+        // §owner THE MECH JUMP HAS A LOAD POSE.
+        //
+        // This read `f.crouch` alone, and a heavy chassis coiling for a
+        // jump does not set `f.crouch` - it sets `mech_jump_phase`, which
+        // `chassis_kneeling()` folds in alongside it. So the sim dropped
+        // `height()` by 0.85 m for 0.40 s, the camera followed it down
+        // through `visor_eye_y()`, and the MACHINE stood bolt upright
+        // through the whole wind-up: a power move with no load phase, and
+        // an eye that teleported.
+        //
+        // `mech_jump_compression_of` exists precisely to fix this - its
+        // own doc calls itself "THE accessor for the pre-jump
+        // COMPRESSION" and names the knees bending as what it is for -
+        // and it had no readers anywhere in the client.
+        let kneel = chassis_kneel_blend(
+            f.chassis_kneeling(),
+            game.sim.mech_jump_phase_of(vis.index),
+            game.sim.mech_jump_compression_of(vis.index),
+        );
         let (hip_y, torso_pitch_base) = if rolling {
             (0.25, 1.0) // curled tight around the tumble pivot
         } else if airborne {
             (0.63, 0.10)
+        } else if kneel > 0.0 {
+            // blend between the two poses the pure function already
+            // knows, on the sim's own clock - so the knees bend over the
+            // compression window instead of snapping at its first tick.
+            let up = gait_pose(false, rig.phase, amp, rig.accel_lean, settle);
+            let dn = gait_pose(true, rig.phase, amp, rig.accel_lean, settle);
+            (
+                up.0 + (dn.0 - up.0) * kneel,
+                up.1 + (dn.1 - up.1) * kneel,
+            )
         } else {
             gait_pose(f.crouch, rig.phase, amp, rig.accel_lean, settle)
         };
@@ -18789,6 +19122,34 @@ fn camera_system(
     } else {
         0.0
     };
+    // §owner MECH JUMP LOAD POSE, the camera's half.
+    //
+    // `height()` drops the moment `chassis_kneeling()` goes true, and the
+    // eye above rides `visor_eye_y()`, so pressing Space used to teleport
+    // the pilot's viewpoint 0.85 m downward in a single tick and hold it
+    // there for 0.40 s. That is the sim being right about a hitbox and
+    // the client being wrong about a camera.
+    //
+    // The sink the sim just applied, measured rather than re-derived:
+    // the standing visor height less the current one. Handing it back in
+    // proportion to how UNloaded the machine still is turns the snap into
+    // the same 0.40 s ramp the knees are now bending over - one blend
+    // number driving the pose and the eye, so they cannot disagree.
+    //
+    // Zero at full compression, so the launch happens from exactly the
+    // eye the sim says the pilot has, and zero in RECOVER, where landing
+    // folded is what a landing is.
+    let mech_jump_lift = if p.chassis_kneeling() {
+        let blend = chassis_kneel_blend(
+            true,
+            game.sim.mech_jump_phase_of(game.sim.player),
+            game.sim.mech_jump_compression_of(game.sim.player),
+        );
+        let sunk = (BODY_HEIGHT * MECH_SCALE - p.height()).max(0.0) * sim::MECH_VISOR_Y_FRAC;
+        sunk * (1.0 - blend)
+    } else {
+        0.0
+    };
     // §B.2: idle life. A multi-ton machine that goes perfectly inert the
     // instant it stops moving reads as a prop, and `mech_bob` alone is
     // walk-only - it returns to exactly zero at a dead stop. These two
@@ -18853,8 +19214,10 @@ fn camera_system(
     // §A.6 brace drop settles the hull DOWN; §B.2 hull breath lifts it a
     // fraction on the intake - subtracted and added respectively, in the
     // one line that already owns vertical camera offset.
-    tf.translation.y -=
-        (land_offset + mech_bob.abs() * 0.5 + mech_brace_drop - hull_breath) * (1.0 - pe * 0.6);
+    tf.translation.y -= (land_offset + mech_bob.abs() * 0.5 + mech_brace_drop
+        - hull_breath
+        - mech_jump_lift)
+        * (1.0 - pe * 0.6);
     // §owner an orbited capture camera must AIM at the subject too.
     // Moving the boom alone leaves the camera still facing along the
     // pilot's yaw, so the machine walks straight out of frame - which is
@@ -20919,8 +21282,21 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         } else {
                             String::new()
                         };
+                        // §owner: and the JUMP's own phase, beside
+                        // [BRACED] because it is the same kind of fact -
+                        // a stance the chassis is committed to and the
+                        // pilot cannot otherwise see it is in. The
+                        // strings come from `MechJumpPhase::label()`, the
+                        // sim's single source, exactly as
+                        // `TurretMode::label()` feeds the mount readout;
+                        // an empty label for `None` means a chassis just
+                        // standing there prints nothing extra.
+                        let jump = match game.sim.mech_jump_phase_of(game.sim.player).label() {
+                            "" => String::new(),
+                            l => format!("  [{l}]"),
+                        };
                         format!("
-MECH  HULL {:.0}  PWR {:.0}{brace}{barrier}{stride}", p.hull, p.armor)
+MECH  HULL {:.0}  PWR {:.0}{brace}{jump}{barrier}{stride}", p.hull, p.armor)
                     }
                     ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
@@ -25221,6 +25597,138 @@ mod camera_v2_tests {
     /// viewmodel sway, using its own k=196, not any of the five named
     /// constants) plus a test. This is the boom-recovery fix that makes
     /// the claim true for at least this one consumer.
+    /// §owner MINIGUN: the streak has to leave the BARRELS.
+    ///
+    /// `fp_muzzle_local` used to carry the turret's geometry as a
+    /// hand-copied `-0.52 - 0.66 * 0.62` behind a comment, and the model
+    /// has since been restaged twice. This ties the two together, so the
+    /// next person who lengthens a barrel cannot leave the muzzle flash
+    /// buried inside the housing.
+    ///
+    /// Fails on the pre-change code: the old literal put the origin at
+    /// -0.929, and the barrels now reach -1.200.
+    #[test]
+    fn the_first_person_streak_leaves_the_turrets_barrel_tips() {
+        let mut s = sim::TdmSim::new(sim::MatchConfig {
+            seed: 0xB0A7,
+            per_team: 1,
+            ..Default::default()
+        });
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = sim::ArmorSet::RobotSuit;
+            f.hull = sim::MECH_HULL;
+            f.mech_weapon = sim::MechWeapon::Gatling;
+        }
+        let m = fp_muzzle_local(&s.fighters[0]);
+        assert!(
+            (m.x - TURRET_VM_CARRY.x).abs() < 1e-6 && (m.y - TURRET_VM_CARRY.y).abs() < 1e-6,
+            "the streak must leave the mount's own axis, not the eye: {m:?}"
+        );
+        let want = TURRET_VM_CARRY.z - TURRET_VM_MUZZLE_Z * TURRET_VM_SCALE;
+        assert!(
+            (m.z - want).abs() < 1e-6,
+            "the streak starts at z {} but the barrels end at {want}",
+            m.z
+        );
+        // ...and it must be IN FRONT of every piece of machinery, or it
+        // is a flash inside a box. The breech face is the line.
+        let breech = TURRET_VM_CARRY.z - TURRET_VM_BREECH_Z * TURRET_VM_SCALE;
+        assert!(
+            m.z < breech - 0.3,
+            "the muzzle at {} is only {:.3} m in front of the breech face - \
+             the barrels are not proud of the housing",
+            m.z,
+            breech - m.z
+        );
+        // the autocannon rides this same viewmodel and must agree
+        s.fighters[0].mech_weapon = sim::MechWeapon::Autocannon;
+        assert_eq!(fp_muzzle_local(&s.fighters[0]), m);
+    }
+
+    /// §owner VISUAL RECOIL: the camera's mech kick must be the SIM's
+    /// kick, converted — not a table in this file.
+    ///
+    /// Pins `PUNCH_DEG_S_PER_SPEC_KICK` against `spray_entry`, which is
+    /// the function in sim.rs that owns the scale — deliberately NOT
+    /// against `turret_kick_per_round`'s derivation, which is being
+    /// retuned right now and whose factor list is nobody's business here.
+    /// `spray_entry` jitters each round by ±12%, so the bound is that
+    /// window and nothing tighter; a changed scale factor blows through
+    /// it immediately.
+    #[test]
+    fn the_mount_kick_conversion_still_agrees_with_the_sim() {
+        for k in [sim::GunKind::M4, sim::GunKind::Ak47, sim::GunKind::Deagle] {
+            let spec_kick = gun(k).kick;
+            for i in 0..8 {
+                let ratio = sim::spray_entry(k, i).1 / spec_kick;
+                assert!(
+                    ratio > PUNCH_DEG_S_PER_SPEC_KICK * 0.85
+                        && ratio < PUNCH_DEG_S_PER_SPEC_KICK * 1.15,
+                    "sim.rs scales a spec kick to punch by {ratio} for {k:?}[{i}], \
+                     but PUNCH_DEG_S_PER_SPEC_KICK says {PUNCH_DEG_S_PER_SPEC_KICK} - \
+                     the copy is stale and the mech camera is lying about recoil"
+                );
+            }
+        }
+        // and the camera kick is the sim's own per-round punch in
+        // GunSpec units: a gatling round under a rifle round, an
+        // autocannon shell far over it, both because the sim says so and
+        // not because a table here does.
+        let gat = mech_mount_camera_kick(sim::MechWeapon::Gatling);
+        let can = mech_mount_camera_kick(sim::MechWeapon::Autocannon);
+        assert!(gat > 0.0, "a turret round must kick the camera at all");
+        assert!(
+            (gat - sim::turret_kick_per_round() / PUNCH_DEG_S_PER_SPEC_KICK).abs() < 1e-9,
+            "the gatling's camera kick is not the sim's published number"
+        );
+        // A shell is an EVENT and a turret round is a tick, so the two
+        // must not be in the same class - but the margin is deliberately
+        // loose (2x, not the 16x their damages differ by), because the
+        // sim is free to hand the turret extra FELT kick on top of what
+        // its rounds carry, and it currently does. What must never
+        // happen is the two converging, or swapping.
+        assert!(
+            can > gat * 2.0,
+            "a {}-damage shell ({can}) kicks like a {}-damage round ({gat})",
+            sim::AUTOCANNON_DAMAGE,
+            sim::GATLING_DAMAGE
+        );
+        assert_eq!(mech_mount_camera_kick(sim::MechWeapon::Repair), 0.0);
+    }
+
+    /// §owner THE MECH JUMP HAS A LOAD POSE.
+    ///
+    /// `chassis_kneeling()` is true from the first tick of the coil, so
+    /// the pose and the camera both snapped. This is the ramp, and it
+    /// fails on the pre-change code for the simple reason that no ramp
+    /// existed - `sync_fighters` read `f.crouch`, which a jumping chassis
+    /// never sets, so the machine did not bend at all.
+    #[test]
+    fn the_chassis_bends_its_knees_over_the_sims_own_compression_window() {
+        use sim::MechJumpPhase as P;
+        // not kneeling: nothing, whatever the phase says
+        assert_eq!(chassis_kneel_blend(false, P::Compress, 1.0), 0.0);
+        assert_eq!(chassis_kneel_blend(false, P::None, 0.0), 0.0);
+        // the coil RAMPS, and monotonically
+        let mut prev = -1.0_f32;
+        for k in 0..=10 {
+            let c = k as f32 / 10.0;
+            let b = chassis_kneel_blend(true, P::Compress, c);
+            assert!(b > prev, "the load pose is not monotonic at compression {c}");
+            prev = b;
+        }
+        assert_eq!(chassis_kneel_blend(true, P::Compress, 0.0), 0.0, "the first tick of a jump must not be a full squat");
+        assert_eq!(chassis_kneel_blend(true, P::Compress, 1.0), 1.0, "launch must happen from a fully folded machine");
+        // a held crouch and a landing absorb are NOT ramped - both are
+        // already at the pose the moment they begin
+        assert_eq!(chassis_kneel_blend(true, P::None, 0.0), 1.0);
+        assert_eq!(chassis_kneel_blend(true, P::Recover, 0.0), 1.0);
+        // and the camera's lift is the exact complement, so the eye is
+        // where the sim says it is at the instant of launch
+        assert_eq!(1.0 - chassis_kneel_blend(true, P::Compress, 1.0), 0.0);
+    }
+
     #[test]
     fn boom_recover_converges_without_overshoot() {
         let (mut b, mut v) = (1.0_f32, 0.0_f32);

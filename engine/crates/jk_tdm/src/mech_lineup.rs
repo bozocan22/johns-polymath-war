@@ -15,6 +15,24 @@
 //! answers "what am I looking at", and no capture script and no game mode
 //! has ever produced that frame.
 //!
+//! ## §owner: AT THEIR ORIGINAL SIZES
+//!
+//! *"have mechs displayed in training mode please in their original
+//! sizes"*.
+//!
+//! Every machine on this row used to render at scale 1.0 — the size of
+//! the SOLDIER whose skeleton it hangs on. A heavy that is 3.03 m tall in
+//! a match (`BODY_HEIGHT * MECH_SCALE`) was displayed at 1.78 m, and the
+//! scout at 1.78 m rather than 1.87 m. `sync_fighters` has always written
+//! the real scale onto a live fighter's root; this file simply never did,
+//! so the one display in the game whose entire purpose is "how big is
+//! this thing" answered wrongly. `chassis_scale` is the fix, and it reads
+//! the sim's own constants rather than restating them.
+//!
+//! A machine at true size is only legible next to something whose size
+//! you already know, so the row now opens with an unarmoured `SOLDIER` at
+//! scale 1.0 standing beside the heavy.
+//!
 //! ## Where it lives, and why
 //!
 //! `Mode::Training` is a real mode in this build (`sim.rs`: the range —
@@ -95,6 +113,57 @@ enum Chassis {
     },
     /// The light `ScoutMech` — its own chassis, bringing its own legs.
     Scout,
+    /// §owner TRUE SIZES: an ordinary fighter, unarmoured, at exactly the
+    /// size he is in a match — the RULER the row is measured against.
+    ///
+    /// "Displayed at their original sizes" is not a claim a viewer can
+    /// check against an empty field. A 3.03 m machine and a 1.87 m one
+    /// look like the same machine at two distances until something whose
+    /// height you already know is standing next to them; then the heavy
+    /// is visibly a storey tall and the scout is visibly a big man.
+    Soldier,
+}
+
+/// The rendered scale of one exhibit — THE fix this stand list exists to
+/// carry, and the whole of the owner's ask.
+///
+/// The gallery used to spawn every machine at scale 1.0, which is a
+/// SOLDIER: a heavy stood 1.78 m on its plinth instead of 3.03 m, and
+/// the scout stood 1.78 m instead of 1.87 m. Nothing here framed them
+/// small on purpose; the root scale was simply never applied, so the
+/// exhibit quietly lied about the one thing an exhibit is for.
+///
+/// These are the SAME two numbers `sync_fighters` writes onto a live
+/// fighter's root (`f.in_heavy_mech()` -> `MECH_SCALE`,
+/// `f.in_scout_mech()` -> `SCOUT_SCALE`), read from sim.rs rather than
+/// restated here. A gallery that carried its own copies would drift the
+/// first time either chassis was rebalanced, and drift in exactly the
+/// direction nobody checks - the display, not the fight.
+fn chassis_scale(c: Chassis) -> f32 {
+    match c {
+        Chassis::Heavy { .. } => crate::sim::MECH_SCALE,
+        Chassis::Scout => crate::sim::SCOUT_SCALE,
+        Chassis::Soldier => 1.0,
+    }
+}
+
+/// Where a stand's name plate floats, in metres above the plinth.
+///
+/// Derived from the machine's real standing height rather than picked by
+/// eye, so the plates cannot come adrift the next time a scale moves —
+/// which is precisely what happened when the machines went to true size
+/// and the old hand-set 2.35 / 1.95 left both captions across their own
+/// chests.
+///
+/// The multiplier is the chassis's own overhang: the heavy's hull rides
+/// well above the pilot's head, the scout's barely, and a man has none.
+fn label_height(c: Chassis) -> f32 {
+    let over = match c {
+        Chassis::Heavy { .. } => 1.32,
+        Chassis::Scout => 1.10,
+        Chassis::Soldier => 1.10,
+    };
+    crate::sim::BODY_HEIGHT * chassis_scale(c) * over
 }
 
 /// The exhibit list, left to right as the player sees it.
@@ -119,8 +188,16 @@ enum Chassis {
 /// override the side tones, so an "enemy royal" would wear the identical
 /// red lacquer and differ from this one by its lamps alone. That is not a
 /// livery, so it does not get a stand.
-const STANDS: [(Chassis, bool, &str); 5] = [
+/// §owner TRUE SIZES: the SOLDIER leads the row.
+///
+/// Leftmost, and immediately beside the heavy, because a ruler held away
+/// from the thing it measures measures nothing. Left rather than centre
+/// so the eye reads the row as a ladder — man, heavy, royal heavy, scout
+/// — and gets the two extremes of the ladder side by side at the first
+/// join.
+const STANDS: [(Chassis, bool, &str); 6] = [
     // ---- ALLY SECTION -------------------------------------------------
+    (Chassis::Soldier, true, "SOLDIER 1.8 m"),
     (Chassis::Heavy { elite: false }, true, "HEAVY/ALLY"),
     (Chassis::Heavy { elite: true }, true, "HEAVY/ROYAL"),
     (Chassis::Scout, true, "SCOUT/ALLY"),
@@ -136,7 +213,7 @@ const STANDS: [(Chassis, bool, &str); 5] = [
 /// wide enough to be unambiguous but not so wide that the two groups stop
 /// fitting in one frame, which would defeat the comparison the owner
 /// asked for.
-const SECTION_GAP: f32 = 2.6;
+const SECTION_GAP: f32 = 3.2;
 
 /// Width of a name plate's centring box, in percent of the screen.
 ///
@@ -151,16 +228,24 @@ const BANNER_BOX_PCT: f32 = 20.0;
 
 /// How high above the ground a section banner floats, in metres.
 ///
-/// Above the tallest machine on the row (the heavy's plate reads at
-/// 2.35 m) by enough that the banner never collides with a stand plate,
-/// which is the failure the narrow `LABEL_BOX_PCT` was introduced to fix
-/// one axis of.
-const BANNER_Y: f32 = 3.35;
+/// Above the tallest plate on the row by a clear margin, so the banner
+/// never collides with a stand caption — the failure the narrow
+/// `LABEL_BOX_PCT` was introduced to fix one axis of.
+///
+/// DERIVED now. It was 3.35 against a heavy whose plate read at 2.35;
+/// at true scale that plate is at 3.99 and the banner sat below the
+/// captions it was supposed to head.
+const BANNER_CLEAR_M: f32 = 0.85;
 
-/// Metres between stand centres. The heavy's hull is ~1.5 m across the
-/// shoulder housings and its gatling hangs further out again, so this is
-/// a machine's width plus a man's width of walking room.
-const STAND_SPACING: f32 = 3.6;
+/// Metres between stand centres.
+///
+/// This had to grow with the machines. The heavy's hull is ~1.5 m across
+/// the shoulder housings at model scale and its gatling hangs further out
+/// again, so at `MECH_SCALE` it is about 2.6 m wide — the old 3.6 m
+/// spacing left a hand's breadth between two of them and no room at all
+/// to walk. Two chassis radii from the sim plus a man's width of walking
+/// room, so it tracks the machine rather than a remembered picture of it.
+const STAND_SPACING: f32 = 2.0 * crate::sim::MECH_RADIUS + 2.9;
 
 /// How far in front of the player's spawn the row stands, best candidate
 /// first.
@@ -175,15 +260,18 @@ const STAND_RANGE: [f32; 5] = [9.0, 11.0, 13.0, 7.0, 15.0];
 
 /// Plinth radius — a VISUAL number.
 ///
-/// Cut from 1.30 after looking at the first good frame: at that size the
-/// dais was the widest thing on the stand and the machine read as a model
-/// on a dinner plate. It wants to be about the machine's own footprint.
-const PLINTH_R: f32 = 1.05;
+/// It wants to be about the machine's own footprint. Cut from 1.30 to
+/// 1.05 once, when the dais was the widest thing on a stand and the
+/// machine read as a model on a dinner plate — but that was a 1.78 m
+/// machine. A 3.03 m one on a 1.05 m dais reads as a machine standing on
+/// a coin, so it goes back up, now expressed against the chassis radius
+/// the sim actually uses.
+const PLINTH_R: f32 = crate::sim::MECH_RADIUS * 2.25;
 
 /// Clearance radius — a PLACEMENT number, and deliberately larger than
 /// the plinth. The machine has to fit, and so does the person walking
 /// round it.
-const STAND_CLEAR_R: f32 = 1.45;
+const STAND_CLEAR_R: f32 = PLINTH_R + 0.30;
 
 /// Both chassis wear the SAME armour trim across the row.
 ///
@@ -559,6 +647,13 @@ fn spawn_row(
         ..default()
     });
     let looks = [look_for(materials, true), look_for(materials, false)];
+    // The banner floats clear of the TALLEST caption on the row, which
+    // is now a derived number and not a remembered one.
+    let banner_y = STANDS
+        .into_iter()
+        .map(|(c, _, _)| label_height(c))
+        .fold(0.0_f32, f32::max)
+        + BANNER_CLEAR_M;
     let ring_mat = [
         materials.add(unlit(branding::signal::ALLY_ACCENT)),
         materials.add(unlit(branding::signal::ENEMY_ACCENT)),
@@ -610,7 +705,7 @@ fn spawn_row(
             },
             Visibility::Hidden,
             GalleryLabel {
-                anchor: centre + right * mid + Vec3::Y * BANNER_Y,
+                anchor: centre + right * mid + Vec3::Y * banner_y,
                 box_pct: BANNER_BOX_PCT,
             },
             GalleryVis,
@@ -645,6 +740,11 @@ fn spawn_row(
         // this project has shipped four times already. `None` for the
         // helmet — the head is hidden under either chassis, so a helmet
         // is geometry nobody will ever see.
+        // A reference soldier keeps his head, his arms and his rifle -
+        // he is not wearing anything, and a headless ruler is a worse
+        // ruler. `Some(0)` mounts the first helmet, the same call a
+        // fighter in slot 0 gets.
+        let bare = matches!(chassis, Chassis::Soldier);
         let parts = crate::spawn_soldier_body(
             commands,
             kit,
@@ -652,26 +752,39 @@ fn spawn_row(
             &looks[side],
             false,
             crate::sim::Class::Line,
-            None,
+            bare.then_some(0),
         );
+        // §owner TRUE SIZES: the ROOT scale, and the entire fix.
+        //
+        // `sync_fighters` writes exactly this onto a live fighter's root
+        // every frame; the gallery wrote nothing, so five machines stood
+        // at a soldier's height on a display whose only job is to say
+        // how big they are. Scale on the ROOT, not on the hull rig -
+        // the hull is already scaled by `MECH_HULL_SCALE` relative to
+        // the body it hangs on, and scaling it twice would grow the
+        // armour off the skeleton inside it.
         commands.entity(parts.root).insert((
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing)),
+            Transform::from_translation(pos)
+                .with_rotation(Quat::from_rotation_y(facing))
+                .with_scale(Vec3::splat(chassis_scale(chassis))),
             GalleryVis,
         ));
         // Both chassis swallow the pilot: head, arms and the carried
         // rifle all go. This is the same set `sync_fighters` hides for a
         // fighter in a mech, written once here because nothing animates
         // these rigs and the visibility is therefore permanent.
-        for e in [
-            parts.head,
-            parts.arm_l[0],
-            parts.arm_r[0],
-            parts.weapon_root,
-        ] {
-            commands.entity(e).insert(Visibility::Hidden);
+        if !bare {
+            for e in [
+                parts.head,
+                parts.arm_l[0],
+                parts.arm_r[0],
+                parts.weapon_root,
+            ] {
+                commands.entity(e).insert(Visibility::Hidden);
+            }
         }
 
-        let head_y = match chassis {
+        match chassis {
             Chassis::Heavy { elite } => {
                 let (rig, _det) = crate::spawn_armor_rig(commands, kit, ally, elite);
                 commands
@@ -708,7 +821,6 @@ fn spawn_row(
                         commands.entity(e).insert(Visibility::Inherited);
                     }
                 }
-                2.35
             }
             Chassis::Scout => {
                 let rig = crate::spawn_scout_chassis(commands, kit, ally, GALLERY_TRIM);
@@ -721,9 +833,10 @@ fn spawn_row(
                 for e in [parts.leg_l[0], parts.leg_r[0]] {
                     commands.entity(e).insert(Visibility::Hidden);
                 }
-                1.95
             }
-        };
+            // nothing to bolt on: he IS the reference.
+            Chassis::Soldier => {}
+        }
 
         // ---- the name plate.
         commands.spawn((
@@ -749,7 +862,7 @@ fn spawn_row(
             },
             Visibility::Hidden,
             GalleryLabel {
-                anchor: pos + Vec3::Y * head_y,
+                anchor: pos + Vec3::Y * label_height(chassis),
                 box_pct: LABEL_BOX_PCT,
             },
             GalleryVis,
@@ -1005,6 +1118,121 @@ mod tests {
                 "the row is mirrored at yaw {yaw}: right x forward points down"
             );
         }
+    }
+
+    /// §owner: *"have mechs displayed in training mode please in their
+    /// original sizes"*.
+    ///
+    /// ORIGINAL SIZE means the size the machine is in a match, and the
+    /// only authority on that is the same pair of numbers `sync_fighters`
+    /// writes onto a live fighter's root. The exhibit stood every machine
+    /// at 1.0 — a soldier's height — so a heavy was displayed at 59% of
+    /// itself and the display's one job went undone.
+    ///
+    /// Asserted as a RELATIONSHIP against the sim's constants rather than
+    /// against pinned metres, so a rebalance moves the gallery with the
+    /// game instead of silently desynchronising it.
+    #[test]
+    fn every_machine_stands_at_the_height_it_fights_at() {
+        use crate::sim::{BODY_HEIGHT, MECH_SCALE, SCOUT_SCALE};
+        for (c, _, name) in STANDS {
+            let want = match c {
+                Chassis::Heavy { .. } => MECH_SCALE,
+                Chassis::Scout => SCOUT_SCALE,
+                Chassis::Soldier => 1.0,
+            };
+            assert!(
+                (chassis_scale(c) - want).abs() < 1e-6,
+                "{name} renders at {} where a fighter in it stands at {want}",
+                chassis_scale(c)
+            );
+        }
+        // and the thing a viewer is actually being shown: the heavy is
+        // most of a metre and a quarter taller than the man beside it.
+        let heavy = BODY_HEIGHT * MECH_SCALE;
+        let man = BODY_HEIGHT;
+        assert!(
+            heavy - man > 1.2,
+            "a heavy at {heavy:.2} m against a man at {man:.2} m is not a \
+             size difference anyone will read"
+        );
+        // ...and the scout is a big man, not a second heavy. Guards the
+        // exact regression the sim's own SCOUT_SCALE test guards, on the
+        // display side: collapsing the two chassis into one number.
+        let scout = BODY_HEIGHT * SCOUT_SCALE;
+        assert!(
+            scout < heavy * 0.75 && scout > man,
+            "the scout at {scout:.2} m has to sit between the man and the heavy"
+        );
+    }
+
+    /// A ruler has to be ON the row, and next to the thing it measures.
+    ///
+    /// "Original sizes" is unverifiable in a frame with nothing familiar
+    /// in it — a 3 m machine and a 1.8 m machine photograph identically
+    /// at two different ranges.
+    #[test]
+    fn a_man_stands_on_the_row_beside_a_machine() {
+        let k = STANDS
+            .iter()
+            .position(|(c, _, _)| matches!(c, Chassis::Soldier))
+            .expect("no human reference on the row");
+        let neighbour = if k + 1 < STANDS.len() { k + 1 } else { k - 1 };
+        assert!(
+            !matches!(STANDS[neighbour].0, Chassis::Soldier),
+            "the reference soldier's only neighbour is another soldier"
+        );
+        // he must be one stand away, not across the section gap
+        let d = (stand_offset(neighbour) - stand_offset(k)).abs();
+        assert!(
+            (d - STAND_SPACING).abs() < 1e-4,
+            "the reference stands {d} m from the nearest machine, not the \
+             {STAND_SPACING} m a neighbour is"
+        );
+    }
+
+    /// Captions must clear the machines they name, and the section
+    /// banners must clear the captions.
+    ///
+    /// At true scale the old hand-set 2.35 m plate landed across a
+    /// 3.03 m heavy's chest and the 3.35 m banner landed BELOW it.
+    #[test]
+    fn the_captions_clear_the_machines_and_the_banner_clears_the_captions() {
+        let mut tallest_plate = 0.0_f32;
+        for (c, _, name) in STANDS {
+            let stands = crate::sim::BODY_HEIGHT * chassis_scale(c);
+            let plate = label_height(c);
+            assert!(
+                plate > stands,
+                "{name}'s caption at {plate:.2} m is inside a machine that \
+                 stands {stands:.2} m"
+            );
+            tallest_plate = tallest_plate.max(plate);
+        }
+        let banner = tallest_plate + BANNER_CLEAR_M;
+        assert!(
+            banner > tallest_plate + 0.5,
+            "the section banner at {banner:.2} m will collide with a \
+             caption at {tallest_plate:.2} m"
+        );
+    }
+
+    /// Stands must be far enough apart for the machines that are now
+    /// standing on them. At true scale a heavy is ~2.6 m across the
+    /// shoulder housings, and the old 3.6 m spacing left no room to walk
+    /// between two of them.
+    #[test]
+    fn the_stands_are_spaced_for_a_full_size_heavy() {
+        let hull_w = 2.0 * crate::sim::MECH_RADIUS;
+        assert!(
+            STAND_SPACING > hull_w + 1.4,
+            "{STAND_SPACING} m between stands leaves under 1.4 m of walking \
+             room beside a {hull_w:.2} m chassis"
+        );
+        assert!(
+            PLINTH_R > crate::sim::MECH_RADIUS,
+            "the plinth is narrower than the machine standing on it"
+        );
     }
 
     /// The exhibit must actually answer the owner's question: both
