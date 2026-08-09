@@ -434,7 +434,12 @@ pub const KOTH_TARGET_S: f32 = 90.0;
 pub const HILL_RADIUS: f32 = 4.5;
 pub const PICKUP_RADIUS: f32 = 1.1;
 pub const ROBOT_ARMOR_HP: f32 = 100.0;
-pub const ROBOT_SPEED_MULT: f32 = 1.12;
+// §owner (defect pass): `ROBOT_SPEED_MULT = 1.12` was deleted here. One
+// occurrence in the whole crate - its own definition - no doc comment,
+// and it claimed the chassis walks FASTER than a man while
+// `armor_spec(RobotSuit).move_mult` (0.85, and the number every path
+// actually multiplies) says it walks slower. A dead constant that
+// contradicts the live one is a trap for whoever reads it next.
 
 // ---------------------------------------------------------------- weapons
 
@@ -3388,7 +3393,11 @@ pub struct Fighter {
     pub pod_cd: f32,
     pub pod_lock_t: f32,
     pub pod_lock_id: i32,
-    pub pod_aim_held: bool,
+    // §owner (defect pass): `pod_aim_held` was deleted here. It was
+    // written from `cmd.pod_aim` every tick and read by NOTHING - not by
+    // the sim, not by the client. Sim state that nothing reads is state a
+    // respawn can forget to clear and a replay digest can forget to
+    // include; the pod's live aim intent is `pod_lock_t`.
     pub lock_warn_t: f32,
     /// §3: spear windup clock (counts down to the release), the aim
     /// tracked through the wind, and the charge the trigger locked in.
@@ -5105,7 +5114,143 @@ pub const AUTOCANNON_SPREAD: f32 = 0.006;
 /// to every recoiling weapon a bot carries - and is deliberately NOT
 /// fixed here, because fixing it properly means touching the aim of
 /// every bot in the game rather than one hull mount.
+///
+/// §owner "INCREASE THE RECOIL": this constant still governs where the
+/// ROUNDS go, and it is deliberately NOT the knob that got turned. The
+/// FELT half of the brief's sentence is `TURRET_FELT_FLOOR` below; see
+/// that block for why the two had to come apart.
 pub const MECH_RECOIL_CONTROL: f32 = 0.40;
+
+// ---- §owner (this pass): "increase the recoil" ------------------------
+//
+// WHY THE FELT KICK AND THE AIM ERROR ARE NOW TWO NUMBERS.
+//
+// `MECH_RECOIL_CONTROL` was doing two jobs that the brief wants moving in
+// OPPOSITE directions. "It still visibly kicks" is about the PICTURE -
+// `punch`, and through it the camera and the viewmodel. "The mech
+// controls the weapon better than a man does" is about the ROUNDS -
+// where `punched_aim` sends them. One multiplier sat on both, so every
+// degree of extra FEEL bought a degree of extra aim error, and the aim
+// error is what the BOTS eat: a bot has no mouse, and `punched_aim`
+// hands it the full `RECOIL_SCALE` with nothing to pull down. That is why
+// the previous pass measured a hard ceiling at 0.45 and stopped. The
+// ceiling was real. It was also the wrong wall to be pushing on.
+//
+// So the mount now writes a much larger impulse into `punch_vel`, and
+// `mount_punched_aim` holds most of it back out of the round.
+//
+// THE THREE OPTIONS THE BRIEF OFFERED WERE ALL REJECTED, and why:
+//   * teaching every bot to compensate for punch fixes the real root -
+//     the player/bot asymmetry in `punched_aim_stabilised` - but it is a
+//     global accuracy change to EVERY recoiling weapon in the game and it
+//     makes bots strictly deadlier everywhere. It is still the right
+//     eventual fix. It is not a minigun-recoil task, and doing it here
+//     would have meant shipping a game-wide bot rebalance under the
+//     heading "the turret kicks harder".
+//   * scaling recoil response by shooter competence invents a second aim
+//     model and a per-shooter field to carry it, and it makes the same
+//     round behave differently depending on who pulled the trigger -
+//     which is precisely the player/bot drift this file keeps paying for.
+//   * raising the value and retuning what the bot test expects moves the
+//     test to fit the code. That is the falsification the anti-patterns
+//     list names, and it would have thrown away a real measurement.
+//
+// WHAT THE PLAYER PAYS, stated because it is NOT symmetric with the bot
+// and a silent asymmetry is a defect. The player's aim ray comes off the
+// camera, which has already been rotated by `VIEW_RECOIL_TRACKING` (45%)
+// of the punch before the sim ever sees it, so the bigger impulse DOES
+// reach his rounds through that channel and no stabiliser here can take
+// it back - `mount_punched_aim` only sits on the 55% it adds itself.
+// Uncompensated, his rounds wander further than before. Compensated -
+// i.e. pulling the climb back down, which is the one thing he is asked to
+// do - they land inside where they used to. A bot's are unchanged either
+// way. That split is deliberate and it runs the direction the brief
+// wants: the extra recoil is a cost paid on the VISIBLE, fightable
+// channel, by the shooter who can see it.
+//
+// AND THE BRACE FINALLY MEANS SOMETHING. Measured on the pre-change
+// build, a braced turret held on AUTO settled at EXACTLY 0.0 degrees of
+// punch - the damp put it under the decay floor, so bracing bought a
+// number that was already zero. It now settles around what UNBRACED fire
+// cost before, which is `MECH_BRACE_RECOIL_DAMP` doing something a pilot
+// can feel and the honest answer to wanting the mount to hold still.
+
+/// §owner: the floor under the hull TURRET's felt kick, in degrees per
+/// second of punch velocity.
+///
+/// DERIVED, as the midpoint of the only window two existing numbers leave
+/// open. Both bounds are measurements, not preferences:
+///
+///   * FLOOR, 19.24 deg/s. `punch` sheds a flat `PUNCH_DECAY_LIN_DEG`
+///     (18 deg/s) on top of its exponential every tick, so an impulse
+///     under `PUNCH_DECAY_LIN_DEG * exp(PUNCH_DECAY_EXP * DT)` is erased
+///     inside the tick it lands and moves the picture by EXACTLY zero.
+///     At the old 8.29 the turret sat at 43% of that, and a single round
+///     of SINGLE - a mode a pilot selects on purpose - produced no camera
+///     movement whatsoever. THAT measurement, not a taste call, is what
+///     "the weapon does not feel heavy" is.
+///   * CEILING, 28.8 deg/s: the M4's own table magnitude, which
+///     `the_hull_turret_kicks_and_the_brace_takes_it_back` already
+///     asserts this mount must stay under, because the machine is meant
+///     to be steadier per round than the man.
+///
+/// 24.0 is the midpoint of (19.24, 28.8) to three figures: 25% clear of
+/// the floor, 17% under the M4.
+///
+/// WHY A FLOOR RATHER THAN A MULTIPLIER ON `mech_mount_kick`. A gain
+/// would have ridden the AUTOCANNON too, and that mount is nowhere near
+/// this floor - it already writes 133.6 deg/s and already throws a 6.2
+/// degree punch per shell. Multiplying it by anything turned a single
+/// shell into a 21 degree screen-flip. The autocannon needed nothing and
+/// gets nothing: `autocannon_kick` is untouched, its aim path resolves to
+/// a stabiliser of exactly 1.0, and it is bit-identical to its old self.
+pub const TURRET_FELT_FLOOR: f32 = 24.0;
+
+/// ...and the share of the resulting punch the turret's ROUNDS carry.
+///
+/// MEASURED, and the measurement is the whole reason this is not simply
+/// the reciprocal of the lift. `punch` responds SUPERLINEARLY to the
+/// impulse: `PUNCH_DECAY_LIN_DEG` shaves a CONSTANT off the angle every
+/// tick, so it is a smaller fraction of a bigger velocity. Lifting the
+/// turret's impulse 2.90x lifts its sustained punch ANGLE 3.98x
+/// (measured through the real fire path: 4.085 -> 16.27 degrees over 5 s
+/// of held AUTO). The algebraic reciprocal 1/2.90 = 0.345 would therefore
+/// have let a bot's rounds walk 38% FURTHER off the aim than before - the
+/// exact regression this whole split exists to prevent, and it would have
+/// been invisible in any test that only checked the constants.
+///
+/// 0.25 is that measured 4.085/16.27 = 0.2511, rounded DOWN so the error
+/// delivered at the plateau is at or under the pre-change value rather
+/// than at or over it. The calibration point is the PLATEAU on purpose:
+/// that is where essentially all of a bot's aim error lives, and it is
+/// where the 0.45 ceiling was measured. The trade it makes is stated
+/// rather than hidden - a TAPPED round is now delivered at 24.0 * 0.25 =
+/// 6.0 against the old 8.29, so single shots are about 28% steadier than
+/// they were. That direction is safe for bots and consistent with SINGLE
+/// being the precision mode.
+///
+/// `the_felt_kick_of_the_hull_turret_does_not_reach_its_rounds` measures
+/// the plateau through the real fire path and fails if it drifts back up.
+pub const TURRET_AIM_STABILISER: f32 = 0.25;
+
+/// The share of a hull mount's punch that reaches the ROUND it fires.
+///
+/// One table, read by `mount_punched_aim` (where the round is aimed) and
+/// by `aim_punch_of` (where a client asks the same question). Exactly
+/// 1.0 for every mount whose felt kick was not lifted, so the autocannon
+/// keeps the arithmetic it has always had, bit for bit.
+pub fn mount_aim_stabiliser(w: MechWeapon) -> f32 {
+    match w {
+        MechWeapon::Gatling => TURRET_AIM_STABILISER,
+        // the autocannon's kick is the round's own energy and always
+        // was; the pod, the plasma cannon and the beam write no punch at
+        // all, so there is nothing for a stabiliser to hold back
+        MechWeapon::Autocannon
+        | MechWeapon::Rockets
+        | MechWeapon::Plasma
+        | MechWeapon::Repair => 1.0,
+    }
+}
 
 /// Per-round turret kick, in degrees per second of punch VELOCITY - the
 /// same channel and the same units `spray_entry` feeds for a rifle.
@@ -5132,8 +5277,20 @@ fn mech_mount_kick(damage: f32) -> f32 {
     m4.kick * 9000.0 * (damage / m4.damage) * MECH_RECOIL_CONTROL
 }
 
+/// §owner: the turret's FELT kick - what it writes into `punch_vel`.
+///
+/// The `.max` is the whole change and it is written as a max rather than
+/// as a bare constant so the derivation above stays live: the round's own
+/// energy still says 8.29 deg/s, that is still read out of the M4's table
+/// so the mount cannot silently drift from the weapon it is defined
+/// against, and the floor is visibly the thing that binds. If a rebalance
+/// ever pushed a gatling round's own kick above `TURRET_FELT_FLOOR` the
+/// derivation would take back over - and `TURRET_AIM_STABILISER` is
+/// calibrated for the lifted case, so
+/// `the_felt_kick_of_the_hull_turret_does_not_reach_its_rounds` asserts
+/// the floor is the binding term and says so when it stops being.
 pub fn turret_kick_per_round() -> f32 {
-    mech_mount_kick(GATLING_DAMAGE)
+    mech_mount_kick(GATLING_DAMAGE).max(TURRET_FELT_FLOOR)
 }
 
 /// §13 (owner): the AUTOCANNON's kick, on the same rule - and it had to
@@ -5457,6 +5614,44 @@ pub fn crouch_speed_mult(f: &Fighter) -> f32 {
         CROUCH_SPEED_MULT
     } else {
         1.0
+    }
+}
+
+/// §owner (defect pass): the RAISED-GUARD half of the speed ladder - ONE
+/// rung for the infantry plate and the chassis barrier, because a fighter
+/// has one guard up at a time and it cannot cost him two multipliers.
+///
+/// THE DEFECT THIS REPLACES. `step` charged `SHIELD_SPEED_MULT` (0.55) at
+/// the infantry rung with nothing excluding a pilot from it, then charged
+/// `MECH_SHIELD_SPEED_MULT` (0.55) again forty lines later on
+/// `in_mech() && shield_up`. A heavy with its barrier up walked at
+/// **0.3025** of pace, not the 0.55 its own constant promises and its own
+/// doc comment states. `bot_act` applied only the infantry one and never
+/// the mech one - so the two paths disagreed as well, which is this
+/// file's most repeated defect class. No test referenced
+/// `MECH_SHIELD_SPEED_MULT` at all; grep found its definition and that
+/// single player-side use, and nothing else in the crate.
+///
+/// AND THE MEDIC PAID FOR A BARRIER IT DOES NOT HAVE. The mech rung was
+/// gated on `in_mech()`, which includes `ScoutMech` - but
+/// `apply_armor_tagged`'s scout branch returns before `mech_shield_hp` is
+/// ever consulted, so the light chassis has no pool, no damage reduction
+/// and (with the double charge) 30% of its pace for pressing the key. Its
+/// own vitals doc says it plainly: "No power core, no brace, no barrier:
+/// it has none of them." So the light chassis is charged NOTHING here,
+/// and `step` refuses the toggle outright; this is the second half of
+/// that, so a flag arriving from any other route is still inert.
+pub fn shield_speed_mult(f: &Fighter) -> f32 {
+    if !f.shield_up {
+        return 1.0;
+    }
+    if f.in_scout_mech() {
+        return 1.0; // hardware it does not carry
+    }
+    if f.in_heavy_mech() {
+        MECH_SHIELD_SPEED_MULT
+    } else {
+        SHIELD_SPEED_MULT
     }
 }
 
@@ -6519,7 +6714,6 @@ impl TdmSim {
                     pod_cd: 0.0,
                     pod_lock_t: 0.0,
                     pod_lock_id: -1,
-                    pod_aim_held: false,
                     lock_warn_t: 0.0,
                     shield_dip_t: 0.0,
                     spear_wind_t: 0.0,
@@ -7137,7 +7331,6 @@ impl TdmSim {
                     f.pod_cd = 0.0;
                     f.pod_lock_t = 0.0;
                     f.pod_lock_id = -1;
-                    f.pod_aim_held = false;
                     f.lock_warn_t = 0.0;
                     f.shield_dip_t = 0.0;
                     f.flip_t = 0.0;
@@ -7287,6 +7480,13 @@ impl TdmSim {
                             f.gatling_vent_t = 0.0;
                             f.mech_transition_t = MECH_ENTER_S;
                             f.crouch = false;
+                            // §owner: and the infantry plate goes down
+                            // with the rest of the man's kit. This
+                            // chassis has no barrier of its own, so a
+                            // flag carried in from on foot would be a
+                            // guard the sim never simulates and a client
+                            // would happily draw.
+                            f.shield_up = false;
                         }
                         PickupKind::RobotArmor => {
                             // §11: the pad now grants the MECH chassis
@@ -7529,7 +7729,18 @@ impl TdmSim {
             self.last_slot_cmd = cmd.slot;
             if cmd.shield {
                 let f = &mut self.fighters[p];
-                f.shield_up = !f.shield_up;
+                // §owner AGILE SUPPORT MECH: the light chassis has NO
+                // barrier. `apply_armor_tagged`'s scout branch returns
+                // before `mech_shield_hp` is ever read, so the pool it
+                // would have raised does not exist and never absorbed a
+                // round; its own vitals doc says "no power core, no
+                // brace, no barrier". Refusing the toggle is what makes
+                // that true of the INPUT as well - before this a medic
+                // pressing 4 bought no pool, no damage reduction, and a
+                // speed tax for the privilege.
+                if !f.in_scout_mech() {
+                    f.shield_up = !f.shield_up;
+                }
             }
             let p_spec = gun(self.fighters[p].gun);
             let scoped = cmd.ads && p_spec.scoped;
@@ -7596,9 +7807,12 @@ impl TdmSim {
                 speed *= STAGGER_SPEED_MULT;
             }
             // the raised shield owns the pace — ADS/scope mults don't
-            // stack on top (you're not sighting anything behind a plate)
+            // stack on top (you're not sighting anything behind a plate).
+            // §owner: THE one rung a raised guard is charged at, infantry
+            // plate or chassis barrier - see `shield_speed_mult` for the
+            // double charge this replaces.
             if self.fighters[p].shield_up {
-                speed *= SHIELD_SPEED_MULT;
+                speed *= shield_speed_mult(&self.fighters[p]);
             } else if scoped {
                 speed *= SCOPED_SPEED_MULT; // AWM glass: a crawl
             } else if drawn {
@@ -7631,11 +7845,12 @@ impl TdmSim {
                         class_spec(f.class).weight_budget_kg,
                     ))
                 .max(MOVE_SPEED * ARMOR_WEIGHT_SPEED_FLOOR);
-                // §owner MECH SHIELD: a raised barrier is a wall you
-                // walk behind, not a stance you fight from
-                if f.in_mech() && f.shield_up {
-                    speed *= MECH_SHIELD_SPEED_MULT;
-                }
+                // §owner MECH SHIELD: a raised barrier is a wall you walk
+                // behind, not a stance you fight from - and it is charged
+                // at the SHIELD rung above, once, through
+                // `shield_speed_mult`. A second application lived here and
+                // took a barriered heavy to 0.3025 of pace; deleting it is
+                // what makes MECH_SHIELD_SPEED_MULT mean what it says.
                 // §7.4: power stride OVERRIDES the walk pace outright -
                 // 110% of soldier run speed is the point, not 110% ON
                 // TOP of the 85% walk multiplier just applied above.
@@ -7960,7 +8175,6 @@ impl TdmSim {
                     f.pod_lock_t = 0.0;
                     f.pod_lock_id = -1;
                 }
-                self.fighters[p].pod_aim_held = cmd.pod_aim;
             }
             if cmd.reload {
                 self.try_reload(p);
@@ -9243,6 +9457,73 @@ impl TdmSim {
         self.fighters[i].turret_burst_i
     }
 
+    /// §owner (this pass): **THE accessor for how hard the hull mount
+    /// under `i`'s trigger is about to kick** - degrees per second of
+    /// punch velocity, mode growth and brace damp already in it, 0 for
+    /// anyone not sitting in a chassis with a recoiling mount selected.
+    ///
+    /// This is what a client drives camera kick, viewmodel shove and
+    /// muzzle climb from: the ROUND's own weight, before it has landed,
+    /// on the same scale `punch_vel` is in. `punch` tells you where the
+    /// hull has ALREADY been pushed to; this tells you how hard the next
+    /// round shoves it, which is the part an impact effect wants and the
+    /// part that differs between SINGLE, the third round of a BURST and a
+    /// held AUTO.
+    ///
+    /// It is the FIRE PATH'S own expression, not a copy of it - both hull
+    /// mounts write `punch_vel` from this exact call - so a readout and a
+    /// shot cannot disagree, which is the same rule `TurretMode::kick_mult`
+    /// was written under.
+    ///
+    /// PURE: no new field, nothing to reset on respawn, nothing added to
+    /// the replay digest. It reads `mech_weapon`, `turret_mode`,
+    /// `turret_burst_i` and `mech_brace`, all of which the sim already
+    /// keeps and already resets.
+    pub fn mount_kick_now(&self, i: usize) -> f32 {
+        let f = &self.fighters[i];
+        if !f.in_mech() {
+            return 0.0;
+        }
+        let brace = if f.mech_brace { MECH_BRACE_RECOIL_DAMP } else { 1.0 };
+        match f.mech_weapon {
+            MechWeapon::Gatling => {
+                turret_kick_per_round() * f.turret_mode.kick_mult(f.turret_burst_i) * brace
+            }
+            MechWeapon::Autocannon => autocannon_kick() * brace,
+            // the pod, the plasma cannon and the repair beam write no
+            // punch at all - a launch tube is not a recoiling mount and
+            // neither is a beam
+            MechWeapon::Rockets | MechWeapon::Plasma | MechWeapon::Repair => 0.0,
+        }
+    }
+
+    /// §owner (this pass): **THE accessor for the punch that reaches the
+    /// ROUNDS**, as opposed to `fighters[i].punch`, which is the punch
+    /// that reaches the PICTURE. Degrees, same two axes.
+    ///
+    /// Before this pass the two were the same number and a client could
+    /// read either. They are no longer: a hull mount kicks the picture
+    /// `MECH_MOUNT_KICK_GAIN` times harder than it throws the round (see
+    /// that constant). Anything drawing "where the bullets actually go"
+    /// off `punch` - an impact mark, a tracer prediction, a reticle drift
+    /// that claims to be a readout - must read THIS instead, or it will
+    /// draw a mech's rounds nearly three times further off target than
+    /// the sim sends them.
+    ///
+    /// Still the raw punch for a gun in hands, so a client can call it
+    /// unconditionally.
+    pub fn aim_punch_of(&self, i: usize) -> [f32; 2] {
+        let f = &self.fighters[i];
+        // the SAME table `mount_punched_aim` reads, so a client's mark
+        // and the sim's round cannot end up on two different rules
+        let stab = if f.in_mech() {
+            mount_aim_stabiliser(f.mech_weapon)
+        } else {
+            1.0
+        };
+        [f.punch[0] * stab, f.punch[1] * stab]
+    }
+
     fn aim_spread(&self, i: usize, ads: bool) -> f32 {
         let f = &self.fighters[i];
         let spec = gun(f.gun);
@@ -9808,12 +10089,45 @@ impl TdmSim {
     /// arithmetic `try_fire` uses (channel 1 of Brief VI §2) - shared so
     /// the punch cannot mean one thing on foot and another in a chassis.
     fn punched_aim(&self, i: usize, aim: [f32; 3]) -> [f32; 3] {
+        self.punched_aim_stabilised(i, aim, 1.0)
+    }
+
+    /// §owner: the aim ray a HULL MOUNT fires along - `punched_aim` with
+    /// the chassis' `MECH_MOUNT_STABILISER` on it.
+    ///
+    /// A named sibling rather than a bool parameter at the call sites,
+    /// because "is this a gun in hands or a gun bolted to a hull" is the
+    /// question the whole §C block is organised around, and there are
+    /// exactly two hull mounts that write punch. Both call this one; the
+    /// only way to get the stabiliser wrong is to call the wrong function,
+    /// and `the_hull_mounts_kick_the_picture_without_moving_the_rounds`
+    /// fires BOTH mounts for exactly that reason.
+    fn mount_punched_aim(&self, i: usize, aim: [f32; 3]) -> [f32; 3] {
+        let stab = mount_aim_stabiliser(self.fighters[i].mech_weapon);
+        self.punched_aim_stabilised(i, aim, stab)
+    }
+
+    /// The one expression both of the above are. `stab` is 1.0 for a
+    /// weapon in a pair of hands and `MECH_MOUNT_STABILISER` for a hull
+    /// mount; nothing else may pass anything else.
+    ///
+    /// PLAYER/BOT: the `k` split below is UNCHANGED and deliberately not
+    /// touched by this pass. It is bookkeeping, not competence - the
+    /// player's camera has already rotated his aim vector by
+    /// `VIEW_RECOIL_TRACKING` of the punch before it arrives, so only the
+    /// remaining share is added here. The real asymmetry it hides (the
+    /// player can SEE his share and pull it back down, a bot cannot) is
+    /// older than any mech and applies to every recoiling weapon in the
+    /// game; see the `MECH_MOUNT_KICK_GAIN` block for why fixing it is
+    /// not this task.
+    fn punched_aim_stabilised(&self, i: usize, aim: [f32; 3], stab: f32) -> [f32; 3] {
         let f = &self.fighters[i];
-        let k = if i == self.player {
-            RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING)
-        } else {
-            RECOIL_SCALE
-        };
+        let k = stab
+            * if i == self.player {
+                RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING)
+            } else {
+                RECOIL_SCALE
+            };
         deflect(aim, f.punch[0] * k, f.punch[1] * k)
     }
 
@@ -9894,6 +10208,12 @@ impl TdmSim {
             }
             f.turret_burst_i
         };
+        // §owner: read the impulse through the SAME accessor the client
+        // and the HUD read, before `turret_burst_i` advances. One
+        // function, so "what the mount kicks" and "what the shot wrote"
+        // cannot become two different answers.
+        let kick = self.mount_kick_now(i);
+        debug_assert_eq!(shot_i, self.fighters[i].turret_burst_i);
         let o = self.muzzle_origin(i);
         // the cone opens as the barrels cook, exactly as the minigun's
         // does — this is the cost that makes sustained fire a choice
@@ -9918,8 +10238,7 @@ impl TdmSim {
             // second of pitch), same brace damp the autocannon takes,
             // and the per-mode growth comes off `TurretMode::kick_mult`
             // so the shot and any readout of it cannot disagree.
-            let brace = if f.mech_brace { MECH_BRACE_RECOIL_DAMP } else { 1.0 };
-            f.punch_vel[0] += turret_kick_per_round() * mode.kick_mult(shot_i) * brace;
+            f.punch_vel[0] += kick;
             f.turret_burst_i += 1;
             // §12: the settle. A completed burst is committed - you get
             // three and then the mount takes them back for half a
@@ -9948,7 +10267,7 @@ impl TdmSim {
                 f.gatling_vent_t = GATLING_VENT_FORCED_S;
             }
         }
-        let aim = self.punched_aim(i, aim);
+        let aim = self.mount_punched_aim(i, aim);
         self.hitscan_burst(i, o, aim, spread, GATLING_DAMAGE, 1);
         if self.mode == Mode::Extraction {
             let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
@@ -9981,24 +10300,22 @@ impl TdmSim {
             }
         }
         let o = self.muzzle_origin(i);
+        // §A.5's damp, consumed exactly as it was designed to be: ONE
+        // unbraced constant, the braced value derived from it. A second
+        // `AUTOCANNON_BRACED_KICK` constant would be a duplicate of this
+        // relationship free to drift away from it. §owner: the derivation
+        // now lives in `mount_kick_now` so both mounts and every readout
+        // of them come off one function.
+        let kick = self.mount_kick_now(i);
         {
             let f = &mut self.fighters[i];
             f.autocannon_cd = AUTOCANNON_CYCLE_S;
             f.protect_t = 0.0;
             // NOTE: no `last_shot_at` write here either — same reason as
             // the gatling's. A hull mount has no spray table to hold.
-            // §A.5's damp, consumed exactly as it was designed to be:
-            // ONE unbraced constant, the braced value derived from it.
-            // A second `AUTOCANNON_BRACED_KICK` constant would be a
-            // duplicate of this relationship free to drift away from it.
-            let kick = if f.mech_brace {
-                autocannon_kick() * MECH_BRACE_RECOIL_DAMP
-            } else {
-                autocannon_kick()
-            };
             f.punch_vel[0] += kick; // pitch, up
         }
-        let aim = self.punched_aim(i, aim);
+        let aim = self.mount_punched_aim(i, aim);
         self.hitscan_burst(i, o, aim, AUTOCANNON_SPREAD, AUTOCANNON_DAMAGE, 1);
         if self.mode == Mode::Extraction {
             let at = [self.fighters[i].pos[0], self.fighters[i].pos[2]];
@@ -12072,6 +12389,15 @@ impl TdmSim {
             if v.armor_set == ArmorSet::RobotSuit && v.hull > 0.0 {
                 let mut red = 0.0;
                 let mut front = false;
+                // §owner (defect pass): the BARRIER's own arc, read from
+                // its own constant. It used to reuse `front` below, which
+                // is the ANGLE-ARMOUR arc computed from a bare `> 0.5`
+                // literal - so `MECH_SHIELD_ARC_COS` had exactly one
+                // occurrence in the crate (its definition) and widening
+                // the plating arc would have silently widened the
+                // barrier's without anyone touching the barrier. Same
+                // number today, on purpose; two facts, two reads.
+                let mut barrier_arc = false;
                 if let Some(fp) = from {
                     let dx = fp[0] - v.pos[0];
                     let dz = fp[2] - v.pos[2];
@@ -12079,6 +12405,7 @@ impl TdmSim {
                     // BODY facing, never the camera (§11.2 rule 1)
                     let cos = (v.yaw.sin() * dx + v.yaw.cos() * dz) / len;
                     front = cos > 0.5;
+                    barrier_arc = cos > MECH_SHIELD_ARC_COS;
                     red = if front {
                         MECH_RED_FRONT
                     } else if cos > -0.5 {
@@ -12118,7 +12445,7 @@ impl TdmSim {
                 // through: the shot that breaks the barrier still lands
                 // whatever it had left, rather than being erased by a
                 // pool with 1 point in it.
-                if f.shield_up && front && f.mech_shield_hp > 0.0 {
+                if f.shield_up && barrier_arc && f.mech_shield_hp > 0.0 {
                     let absorbed = d.min(f.mech_shield_hp);
                     f.mech_shield_hp -= absorbed;
                     f.mech_shield_quiet_t = 0.0;
@@ -13152,8 +13479,26 @@ impl TdmSim {
                 let want_crouch = closing.abs() < 0.05 && dist > 9.0;
                 self.fighters[i].set_crouch(want_crouch);
                 // shield discipline: caught reloading in the open → turtle
-                // behind the shield until the mag is back in
-                self.fighters[i].shield_up = reloading && dist < 16.0;
+                // behind the shield until the mag is back in.
+                //
+                // §owner: NOT IN A CHASSIS. `reloading` is the CARRIED
+                // gun's `reload_t`, `try_reload` has no `in_mech()` guard
+                // and the timer ticks for everyone, so a bot that topped
+                // up on the way to a pad, boarded, then found a target
+                // inside 16 m raised its barrier and went SILENT - all
+                // three hull fire paths early-return on `shield_up`. This
+                // is the defect already fixed one route over ("a hull
+                // mount has NO magazine - gating a chassis on the pilot's
+                // carried rounds is the whole defect"); that fix landed on
+                // the ammunition gate and missed this one.
+                //
+                // A bot-piloted chassis therefore never raises the barrier
+                // at all today. That is the honest state, not a hidden
+                // one: barrier discipline for a bot mech would be a new
+                // behaviour with its own rule about when a wall beats a
+                // gun, and it is not this fix.
+                self.fighters[i].shield_up =
+                    reloading && dist < 16.0 && !self.fighters[i].in_mech();
                 // §owner SQUAD AI: the ANCHOR fights the way bots always
                 // did - hold the front, strafe, trade. A FLANKER commits
                 // to one side instead of oscillating, so the pair
@@ -13298,8 +13643,15 @@ impl TdmSim {
                 // `in_mech`) so a pilot whose hull is blown out from
                 // under him mid-brace does not keep the chassis stance,
                 // and its 12% pace, on foot for the rest of the match.
+                //
+                // §owner: gated on `in_heavy_mech`, not `in_mech`. The
+                // light chassis has no brace - `mech_stance_speed_mult`,
+                // `height()` and every other consumer are heavy-gated -
+                // so setting the flag on a scout bot was inert today and
+                // one edit away from being live on a machine whose vitals
+                // doc says it has no brace at all.
                 self.fighters[i].mech_brace =
-                    want_auto && in_mech && self.fighters[i].grounded;
+                    want_auto && self.fighters[i].in_heavy_mech() && self.fighters[i].grounded;
                 if self.fighters[i].los_time > bp.reaction_s
                     && dist < bp.engage_range
                     // a hull mount has NO magazine - gating a chassis on
@@ -13360,14 +13712,30 @@ impl TdmSim {
                                 self.try_fire_autocannon(i, aim);
                             }
                             // §owner AGILE SUPPORT MECH: a bot in the
-                            // light chassis shoots plasma. It never
-                            // selects REPAIR here - healing is not a
-                            // response to seeing an enemy, and the
-                            // support pass in `bot_think` owns that
-                            // decision on its own terms.
-                            MechWeapon::Plasma | MechWeapon::Repair => {
+                            // light chassis shoots plasma.
+                            MechWeapon::Plasma => {
                                 self.try_fire_plasma(i, aim);
                             }
+                            // ...and with the BEAM selected it fires
+                            // nothing here, because the support pass
+                            // eighty lines up already spent this tick's
+                            // mount on `tick_repair_beam`.
+                            //
+                            // §owner: this arm used to fall through to
+                            // `try_fire_plasma` under a comment asserting
+                            // REPAIR was never reached - and it was
+                            // reached, every tick a bot medic had both a
+                            // patient and an enemy. `try_fire_plasma` is
+                            // the one mount trigger with no mount gate of
+                            // its own, and `tick_repair_beam` writes
+                            // `gatling_heat` but not `gatling_cd`, so the
+                            // two ran together and a bot medic healed and
+                            // shot from one shared heat budget in the same
+                            // tick. The player cannot: their routing is a
+                            // `match` and exactly one mount fires. ONE
+                            // MOUNT AT A TIME is the light chassis' whole
+                            // stated economy.
+                            MechWeapon::Repair => {}
                             // §C.7: the bot brain never SELECTS the pod
                             // (its mount choice is range-driven, above),
                             // but if it ever does, the trigger still
@@ -13439,8 +13807,14 @@ impl TdmSim {
             }
         }
         let fm = &mut self.fighters[i];
-        if fm.shield_up {
-            vel = [vel[0] * SHIELD_SPEED_MULT, vel[1] * SHIELD_SPEED_MULT];
+        {
+            // §owner: the SAME rung the player's ladder charges, through
+            // the same function. This path used to apply the infantry
+            // constant to everyone including a bot-piloted chassis, while
+            // the player's applied the mech one on top of it - two paths
+            // charging a raised guard on two different rules.
+            let m = shield_speed_mult(fm);
+            vel = [vel[0] * m, vel[1] * m];
         }
         {
             // bots pay the same crouch tax the player does - §21 made it a
@@ -15796,6 +16170,107 @@ mod tests {
         s.fighters[dying].hull = 60.0;
         s.fighters[dying].pos = [-(REPAIR_RANGE_M + 10.0), 0.0, 0.0];
         assert_eq!(s.repair_candidate(medic), None);
+    }
+
+    /// §owner (defect pass): a bot medic HEALS OR SHOOTS. Never both in
+    /// one tick.
+    ///
+    /// `bot_think`'s support pass selects `MechWeapon::Repair` and runs
+    /// `tick_repair_beam`; eighty lines below, the fire block used to
+    /// match `Plasma | Repair` onto `try_fire_plasma` under a comment
+    /// asserting REPAIR was never reached there. It was reached every tick
+    /// a bot medic had both a patient and an enemy - and `try_fire_plasma`
+    /// is the one mount trigger with no mount gate of its own, while
+    /// `tick_repair_beam` writes `gatling_heat` but not `gatling_cd`, so
+    /// nothing stopped the two running together. The player's routing is a
+    /// `match`: exactly one mount fires. This is that parity.
+    ///
+    /// The witness is a PLASMA MISSILE, because it is written by exactly
+    /// one function. Heat would not do - the beam spends it too, which is
+    /// how the defect stayed invisible.
+    #[test]
+    fn a_bot_medic_heals_or_shoots_but_never_both_in_the_same_tick() {
+        let mut s = TdmSim::new(cfg(0x9F01, 4, Mode::Tdm, MapKind::Arena));
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        for f in s.fighters.iter_mut() {
+            f.protect_t = 0.0;
+        }
+        let medic = 1usize;
+        let (patient, enemy) = (2usize, 3usize);
+        {
+            let m = &mut s.fighters[medic];
+            m.team = Team::Blue;
+            m.armor_set = ArmorSet::ScoutMech;
+            m.hull = SCOUT_HULL;
+            m.mech_transition_t = 0.0;
+            m.pos = [0.0, 0.0, 0.0];
+            m.gatling_heat = 0.0;
+            m.gatling_vent_t = 0.0;
+            m.gatling_cd = 0.0;
+        }
+        {
+            let p = &mut s.fighters[patient];
+            p.team = Team::Blue;
+            p.armor_set = ArmorSet::RobotSuit;
+            p.hull = 60.0; // dying: a real patient
+            p.mech_transition_t = 0.0;
+            p.pos = [3.0, 0.0, 0.0];
+        }
+        {
+            let e = &mut s.fighters[enemy];
+            e.team = Team::Red;
+            e.armor_set = ArmorSet::None;
+            e.hull = 0.0;
+            e.pos = [0.0, 0.0, 8.0]; // well inside any engage range
+        }
+        // the fourth body is on the medic's team and out of the way, so
+        // the only enemy in the fixture is the one placed above
+        s.fighters[0].team = Team::Blue;
+        s.fighters[0].pos = [0.0, 0.0, -30.0];
+
+        let start = s.fighters[patient].hull;
+        let mut healed = false;
+        for _ in 0..(3.0 * SIM_HZ as f32) as usize {
+            s.step(PlayerCmd::default());
+            // hold the fixture: bot movement would otherwise walk the
+            // three of them out of each other's ranges
+            s.fighters[medic].pos = [0.0, 0.0, 0.0];
+            s.fighters[patient].pos = [3.0, 0.0, 0.0];
+            s.fighters[patient].hull = s.fighters[patient].hull.min(200.0);
+            s.fighters[enemy].pos = [0.0, 0.0, 8.0];
+            s.fighters[enemy].health = MAX_HEALTH;
+            s.fighters[enemy].respawn_t = 0.0;
+            for f in s.fighters.iter_mut() {
+                f.protect_t = 0.0;
+            }
+            if s.fighters[patient].hull > start {
+                healed = true;
+            }
+            let plasma = s
+                .missiles
+                .iter()
+                .filter(|m| m.kind == MissileKind::Plasma && m.shooter == medic)
+                .count();
+            assert_eq!(
+                plasma, 0,
+                "the bot medic fired the plasma cannon on a tick it had the \
+                 repair beam selected - one mount at a time is this \
+                 chassis' whole stated economy, and the player's routing \
+                 already obeys it"
+            );
+        }
+        assert!(
+            healed,
+            "precondition: the bot medic never actually ran the beam, so \
+             this fixture proves nothing about firing while it does"
+        );
+        assert_eq!(
+            s.fighters[medic].mech_weapon,
+            MechWeapon::Repair,
+            "precondition: the support pass never selected the beam"
+        );
     }
 
     /// §owner: the war weapons BITE the light chassis.
@@ -20556,6 +21031,270 @@ mod tests {
         );
     }
 
+    /// §owner (defect pass): A RAISED GUARD IS CHARGED ONCE.
+    ///
+    /// `step` charged `SHIELD_SPEED_MULT` (0.55) at the infantry rung with
+    /// nothing excluding a pilot, then charged `MECH_SHIELD_SPEED_MULT`
+    /// (0.55) again forty lines down on `in_mech() && shield_up`. A heavy
+    /// with the barrier up walked at **0.3025** of pace, against the 0.55
+    /// its own constant and its own doc comment promise. Nothing in the
+    /// crate referenced `MECH_SHIELD_SPEED_MULT` except that one line -
+    /// there was no test to break.
+    ///
+    /// Measured through `step` on the real ladder, not by calling the
+    /// helper: a helper that returns the right number is worth nothing if
+    /// the ladder applies it twice.
+    #[test]
+    fn a_raised_guard_is_charged_once_and_the_light_chassis_not_at_all() {
+        // Speed after a second of walking forward, with the guard up or
+        // down. Everything else about the fighter is identical, so the
+        // ratio is the guard's rung and nothing else.
+        let walk = |set: ArmorSet, guard: bool| -> f32 {
+            let mut s = range(0x2C0);
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = set;
+                if set.is_mech() {
+                    f.hull = f.mech_hull_max();
+                    f.mech_transition_t = 0.0;
+                }
+                f.shield_up = guard;
+            }
+            for _ in 0..(SIM_HZ as usize) {
+                s.step(PlayerCmd {
+                    move_z: 1.0,
+                    aim: [0.0, 0.0, 1.0],
+                    ..Default::default()
+                });
+                // the toggle is an EDGE in `step`; the flag is what the
+                // ladder reads, so it is held rather than pressed
+                s.fighters[0].shield_up = guard;
+            }
+            let f = &s.fighters[0];
+            (f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt()
+        };
+
+        // (1) the HEAVY pays its own constant, once. The failure this
+        // catches is the SQUARE of it, so the tolerance is nowhere near
+        // the gap between the two.
+        let heavy_up = walk(ArmorSet::RobotSuit, true);
+        let heavy_down = walk(ArmorSet::RobotSuit, false);
+        assert!(heavy_down > 0.5, "precondition: the chassis walks at all");
+        let heavy_ratio = heavy_up / heavy_down;
+        assert!(
+            (heavy_ratio - MECH_SHIELD_SPEED_MULT).abs() < 0.02,
+            "a barriered chassis keeps {heavy_ratio:.4} of its pace against \
+             the {MECH_SHIELD_SPEED_MULT} its own constant promises \
+             (double-charged would be {:.4})",
+            MECH_SHIELD_SPEED_MULT * SHIELD_SPEED_MULT
+        );
+
+        // (2) a man on foot is unaffected by any of this - the infantry
+        // rung is exactly what it always was
+        let foot_up = walk(ArmorSet::None, true);
+        let foot_down = walk(ArmorSet::None, false);
+        let foot_ratio = foot_up / foot_down;
+        assert!(
+            (foot_ratio - SHIELD_SPEED_MULT).abs() < 0.02,
+            "the infantry plate's own rung moved: {foot_ratio:.4} vs \
+             {SHIELD_SPEED_MULT}"
+        );
+
+        // (3) and the LIGHT chassis pays NOTHING, because it has no
+        // barrier to raise. `apply_armor_tagged`'s scout branch returns
+        // before `mech_shield_hp` is ever consulted - the pool does not
+        // exist - so a speed tax for it was a bill for hardware the
+        // machine does not carry.
+        let scout_up = walk(ArmorSet::ScoutMech, true);
+        let scout_down = walk(ArmorSet::ScoutMech, false);
+        assert!(scout_down > 0.5, "precondition: the scout walks at all");
+        assert!(
+            (scout_up / scout_down - 1.0).abs() < 0.02,
+            "the medic paid {:.4} of its pace for a barrier it does not \
+             have",
+            scout_up / scout_down
+        );
+
+        // (4) ...and it cannot even raise the flag. The toggle is refused
+        // at the source, so nothing downstream has to keep guessing.
+        let mut s = range(0x2C1);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::ScoutMech;
+            f.hull = SCOUT_HULL;
+            f.mech_transition_t = 0.0;
+        }
+        s.step(PlayerCmd { shield: true, ..Default::default() });
+        assert!(
+            !s.fighters[0].shield_up,
+            "the light chassis raised a barrier it has no pool for"
+        );
+        // the heavy still can - this is a scout rule, not a mech ban
+        let mut s = range(0x2C2);
+        {
+            let f = &mut s.fighters[0];
+            f.armor_set = ArmorSet::RobotSuit;
+            f.hull = MECH_HULL;
+            f.mech_transition_t = 0.0;
+        }
+        s.step(PlayerCmd { shield: true, ..Default::default() });
+        assert!(
+            s.fighters[0].shield_up,
+            "the heavy chassis lost its barrier along with the scout's"
+        );
+    }
+
+    /// §owner (defect pass): and the BOT ladder charges the same rung.
+    ///
+    /// `bot_act` applied the INFANTRY constant to everyone, a bot-piloted
+    /// chassis included, and never applied the mech one - while the player
+    /// path applied both. Two paths, two rules, for one flag: the drift
+    /// class this file keeps paying for. Both now call
+    /// `shield_speed_mult`.
+    ///
+    /// Measured on INFANTRY, because after the companion fix a bot in a
+    /// chassis never raises the barrier at all (see
+    /// `a_bot_in_a_chassis_never_turtles_for_a_magazine_it_is_not_holding`),
+    /// so a mech leg here would be measuring an unreachable state. What is
+    /// under test is that the two ladders agree on the rung.
+    #[test]
+    fn the_guard_speed_rung_is_the_same_one_on_the_bot_path() {
+        // The flag cannot be forced from outside: `bot_think` rewrites it
+        // from its own rule every tick. So it is coaxed out of that rule -
+        // a man caught mid-reload inside 16 m turtles - and the reload is
+        // what is held instead. The bot strafes at a fixed 0.8 in the
+        // 6..15 m band either way, so the only difference between the two
+        // runs is the guard.
+        let bot_walk = |guard: bool| -> f32 {
+            let mut s = range(0x2C3);
+            s.fighters[0].pos = [0.0, 0.0, 0.0];
+            s.fighters[0].protect_t = 0.0;
+            s.fighters[1].pos = [0.0, 0.0, 10.0];
+            s.fighters[1].protect_t = 0.0;
+            let mut peak = 0.0_f32;
+            for _ in 0..(2.0 * SIM_HZ as f32) as usize {
+                s.fighters[1].reload_t = if guard { 2.5 } else { 0.0 };
+                s.step(PlayerCmd::default());
+                assert_eq!(
+                    s.fighters[1].shield_up, guard,
+                    "the fixture did not produce the guard state it needed"
+                );
+                s.fighters[0].pos = [0.0, 0.0, 0.0];
+                s.fighters[0].health = MAX_HEALTH;
+                s.fighters[0].respawn_t = 0.0;
+                s.fighters[0].protect_t = 0.0;
+                s.fighters[1].pos = [0.0, 0.0, 10.0];
+                let f = &s.fighters[1];
+                peak = peak.max((f.vel[0] * f.vel[0] + f.vel[1] * f.vel[1]).sqrt());
+            }
+            peak
+        };
+        let up = bot_walk(true);
+        let down = bot_walk(false);
+        assert!(down > 0.5, "precondition: the bot walks at all ({down})");
+        let ratio = up / down;
+        assert!(
+            (ratio - SHIELD_SPEED_MULT).abs() < 0.03,
+            "a shielded bot keeps {ratio:.4} of its pace; the player's \
+             ladder charges {SHIELD_SPEED_MULT} - the two rungs have drifted"
+        );
+        // and the shared function is what both of them ask.
+        //
+        // HONEST LIMITATION, stated rather than left for someone to
+        // discover: `SHIELD_SPEED_MULT` and `MECH_SHIELD_SPEED_MULT` are
+        // both 0.55 today, so the heavy line below cannot DISCRIMINATE -
+        // swap the two constants in `shield_speed_mult` and it still
+        // passes. It is written by name because that is the claim, and it
+        // starts discriminating the moment either constant is retuned,
+        // which is the only moment the distinction can hurt anybody. The
+        // scout line beneath it does discriminate today.
+        let mut f = range(0x2C4).fighters.remove(0);
+        f.shield_up = true;
+        f.armor_set = ArmorSet::None;
+        assert_eq!(shield_speed_mult(&f), SHIELD_SPEED_MULT);
+        f.armor_set = ArmorSet::RobotSuit;
+        f.hull = MECH_HULL;
+        assert_eq!(shield_speed_mult(&f), MECH_SHIELD_SPEED_MULT);
+        f.armor_set = ArmorSet::ScoutMech;
+        f.hull = SCOUT_HULL;
+        assert_eq!(shield_speed_mult(&f), 1.0);
+        f.shield_up = false;
+        f.armor_set = ArmorSet::None;
+        assert_eq!(shield_speed_mult(&f), 1.0);
+    }
+
+    /// §owner (defect pass): a bot in a chassis does not turtle for a
+    /// magazine it is not holding.
+    ///
+    /// `bot_think` set `shield_up = reloading && dist < 16.0`, where
+    /// `reloading` is the CARRIED gun's `reload_t`. `try_reload` has no
+    /// `in_mech()` guard and the timer ticks for everyone, so a bot that
+    /// topped up on the way to a pad, boarded, then acquired a target
+    /// inside 16 m raised the barrier and went silent - all three hull
+    /// fire paths early-return on `shield_up`. Same defect as the one
+    /// already fixed one gate over: "a hull mount has NO magazine".
+    #[test]
+    fn a_bot_in_a_chassis_never_turtles_for_a_magazine_it_is_not_holding() {
+        // 10 m: inside the 16 m turtle range, inside engage range, and on
+        // the gatling side of the mount switch
+        let mut s = bot_mech(0xD20, 10.0, GunKind::Ak47, 30, 120);
+        // the exact state the defect needs: a reload running on the gun
+        // in the pilot's lap while the chassis is sealed and live
+        s.fighters[1].reload_t = 2.5;
+        let mut ever_shielded = false;
+        let dealt = {
+            let mut d = 0.0;
+            for _ in 0..(2.0 * SIM_HZ as f32) as usize {
+                s.step(PlayerCmd::default());
+                s.fighters[1].reload_t = s.fighters[1].reload_t.max(1.0); // hold it reloading
+                ever_shielded |= s.fighters[1].shield_up;
+                let p = &mut s.fighters[0];
+                d += (MAX_HEALTH - p.health).max(0.0);
+                p.health = MAX_HEALTH;
+                p.respawn_t = 0.0;
+                p.pos = [0.0, 0.0, 0.0];
+                p.protect_t = 0.0;
+                s.fighters[1].pos = [0.0, 0.0, 10.0];
+                s.fighters[1].protect_t = 0.0;
+            }
+            d
+        };
+        assert!(
+            !ever_shielded,
+            "the bot raised its chassis barrier because the RIFLE in its \
+             lap was reloading - and a raised barrier makes every hull \
+             mount cold"
+        );
+        assert!(
+            dealt > 0.0 && s.fighters[1].gatling_heat > 0.0,
+            "the chassis went silent while its pilot changed a magazine: \
+             dealt {dealt}, heat {}",
+            s.fighters[1].gatling_heat
+        );
+        // and an INFANTRY bot still turtles - the discipline is intact,
+        // it just stops applying to a machine with no magazine
+        let mut s = range(0xD21);
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.fighters[0].protect_t = 0.0;
+        s.fighters[1].pos = [0.0, 0.0, 10.0];
+        s.fighters[1].protect_t = 0.0;
+        let mut foot_shielded = false;
+        for _ in 0..(1.0 * SIM_HZ as f32) as usize {
+            s.fighters[1].reload_t = 2.5;
+            s.step(PlayerCmd::default());
+            foot_shielded |= s.fighters[1].shield_up;
+            s.fighters[0].health = MAX_HEALTH;
+            s.fighters[0].pos = [0.0, 0.0, 0.0];
+            s.fighters[0].protect_t = 0.0;
+            s.fighters[1].pos = [0.0, 0.0, 10.0];
+        }
+        assert!(
+            foot_shielded,
+            "a man on foot caught mid-reload at 10 m stopped turtling - \
+             the fix reached further than the chassis"
+        );
+    }
+
     /// §21 parity: the kneel reaches a BOT-piloted chassis on the same
     /// terms as the player's.
     ///
@@ -20603,6 +21342,20 @@ mod tests {
             for _ in 0..(SIM_HZ as usize) {
                 s.step(PlayerCmd::default());
                 s.fighters[0].pos = [0.0, 0.0, 0.0]; // hold the range open
+                // ...and hold the man ALIVE. STALE SETUP FIXED, not a
+                // weakened assertion: `want_crouch` needs the bot to hold
+                // LOS on a live enemy for the whole second, and the
+                // `None` arm of `bot_think` clears `crouch` outright the
+                // tick the target dies. The fixture used to satisfy that
+                // by accident - the man happened to survive a second of
+                // gatling fire at 12 m. He is a MOVEMENT test's
+                // scaffolding, exactly as his pinned position already
+                // was, and `bot_engagement` next door makes its victim
+                // immortal for the same reason. §owner's recoil pass
+                // moved where the rounds land and he stopped surviving.
+                s.fighters[0].health = MAX_HEALTH;
+                s.fighters[0].respawn_t = 0.0;
+                s.fighters[0].protect_t = 0.0;
                 s.fighters[1].pos[2] = dist;
             }
             let f = &s.fighters[1];
@@ -21056,6 +21809,217 @@ mod tests {
             cannon > free * 3.0,
             "a 145-damage shell must still be the heavier kick of the two \
              hull mounts: cannon {cannon:.2} vs turret round {free:.2}"
+        );
+    }
+
+    /// §owner "increase the recoil", half one: ONE ROUND MOVES THE
+    /// PICTURE.
+    ///
+    /// This is the owner's complaint stated as a measurement rather than
+    /// as a mood. `punch` sheds a flat `PUNCH_DECAY_LIN_DEG` on top of
+    /// its exponential every tick, so an impulse under
+    /// `PUNCH_DECAY_LIN_DEG * exp(PUNCH_DECAY_EXP * DT)` is erased inside
+    /// the tick it lands. The turret used to write 8.29 deg/s against
+    /// that 19.24 floor - 43% of it - so a round of SINGLE, a mode a
+    /// pilot chooses on purpose, moved the camera by EXACTLY zero
+    /// degrees. Not "a little". Zero.
+    ///
+    /// The floor is computed here from the three decay constants, which
+    /// have nothing to do with any mech number, so this is an independent
+    /// anchor rather than a restatement of the code under test.
+    #[test]
+    fn a_single_hull_turret_round_moves_the_picture() {
+        let floor = PUNCH_DECAY_LIN_DEG * (PUNCH_DECAY_EXP * DT).exp();
+        assert!(
+            turret_kick_per_round() > floor,
+            "a turret round writes {:.2} deg/s of punch velocity against a \
+             {floor:.2} deg/s decay floor - everything under that floor is \
+             erased in the tick it lands and moves the picture by zero",
+            turret_kick_per_round()
+        );
+        // ...and the floor is what BINDS, which is the case
+        // `TURRET_AIM_STABILISER` is calibrated for. If a rebalance ever
+        // pushes the round's own energy above it, that constant has to be
+        // re-measured rather than inherited.
+        assert!(
+            mech_mount_kick(GATLING_DAMAGE) < TURRET_FELT_FLOOR,
+            "the gatling round's own energy ({:.2}) has risen above \
+             TURRET_FELT_FLOOR ({TURRET_FELT_FLOOR}) - TURRET_AIM_STABILISER \
+             was measured for the lifted case and is now wrong",
+            mech_mount_kick(GATLING_DAMAGE)
+        );
+
+        // and it reaches the picture through the REAL fire path: one
+        // press of SINGLE, then watch the punch ANGLE - the channel the
+        // camera and the viewmodel actually read.
+        let mut s = mech_range(0x7E40, MechWeapon::Gatling);
+        s.fighters[0].turret_mode = TurretMode::Single;
+        let mut peak = 0.0_f32;
+        let mut rounds = 0u32;
+        let before = s.fighters[0].mech_rounds;
+        for k in 0..(0.6 / DT) as usize {
+            s.step(PlayerCmd {
+                shoot: k < 2, // one press, then released
+                aim: [0.0, 0.0, -1.0],
+                ..Default::default()
+            });
+            peak = peak.max(s.fighters[0].punch[0].abs());
+            rounds = before - s.fighters[0].mech_rounds;
+        }
+        assert_eq!(rounds, 1, "the setup must fire exactly one round");
+        assert!(
+            peak > 0.0,
+            "one round of SINGLE moved the picture by {peak} degrees - the \
+             mount is back under the decay floor and the pilot sees nothing"
+        );
+    }
+
+    /// §owner "increase the recoil", half two - AND THE HALF THE BOTS
+    /// LIVE OR DIE ON: the bigger kick must stay in the PICTURE and not
+    /// leak into where the rounds go.
+    ///
+    /// A bot has no mouse. `punched_aim_stabilised` deflects its ray by
+    /// the full `RECOIL_SCALE` with nothing pulling down, so any extra
+    /// aim error lands straight on bot competence - which is why the
+    /// previous pass measured a ceiling at `MECH_RECOIL_CONTROL` 0.45 and
+    /// stopped. The felt kick is now roughly 4x what it was; the delivered
+    /// aim error must not be.
+    ///
+    /// Three legs, none of which restate the formula they check:
+    ///   (a) FELT - the mech's sustained punch must dwarf a rifle's. An
+    ///       AK-47 held down is the independent reference; it shares the
+    ///       decay model and nothing else.
+    ///   (b) DELIVERED - `aim_punch_of`, the channel a round rides, must
+    ///       still be rifle-sized.
+    ///   (c) GEOMETRY - and the tracers must agree, because (b) could be
+    ///       satisfied by an accessor that lies while the fire path fires
+    ///       on the un-stabilised punch. The measured deflection is
+    ///       checked against what the FELT punch would have produced -
+    ///       the value the code deliberately no longer uses.
+    #[test]
+    fn the_felt_kick_of_the_hull_turret_does_not_reach_its_rounds() {
+        // independent reference: a rifle in a man's hands, same decay
+        // constants, same punch channel, no mech constant anywhere in it
+        let rifle = {
+            let mut s = range(0x7E41);
+            {
+                let f = &mut s.fighters[0];
+                f.gun = GunKind::Ak47;
+                f.ammo = gun(GunKind::Ak47).mag;
+                f.reserve = 900;
+                f.protect_t = 0.0;
+            }
+            let mut peak = 0.0_f32;
+            for _ in 0..(3.0 / DT) as usize {
+                s.step(PlayerCmd {
+                    shoot: true,
+                    aim: [0.0, 0.0, -1.0],
+                    ..Default::default()
+                });
+                peak = peak.max(s.fighters[0].punch[0].abs());
+            }
+            peak
+        };
+        assert!(rifle > 1.0, "the rifle reference never got going: {rifle}");
+
+        // the turret, held on AUTO to its plateau. Tracer angles are
+        // sampled over the LAST second, by which point the punch has
+        // settled; the cone is zero-mean so the mean of enough rounds is
+        // the aim line the mount actually fired along.
+        let mut s = mech_range(0x7E42, MechWeapon::Gatling);
+        let mut felt = 0.0_f32;
+        let mut ang_sum = 0.0_f64;
+        let mut ang_n = 0.0_f64;
+        let mut felt_at_sample = 0.0_f64;
+        let secs = 5.0;
+        for k in 0..(secs / DT) as usize {
+            s.tracers.clear();
+            s.step(PlayerCmd {
+                shoot: true,
+                aim: [0.0, 0.0, -1.0],
+                ..Default::default()
+            });
+            felt = felt.max(s.fighters[0].punch[0].abs());
+            if (k as f32) * DT > secs - 1.0 {
+                for t in &s.tracers {
+                    let dy = t.to[1] - t.from[1];
+                    let hd = ((t.to[0] - t.from[0]).powi(2) + (t.to[2] - t.from[2]).powi(2))
+                        .sqrt()
+                        .max(1e-3);
+                    ang_sum += dy.atan2(hd).to_degrees() as f64;
+                    ang_n += 1.0;
+                    felt_at_sample += s.fighters[0].punch[0].abs() as f64;
+                }
+            }
+        }
+        assert!(ang_n > 8.0, "only {ang_n} rounds sampled - too few to mean");
+        let measured = (ang_sum / ang_n).abs() as f32;
+        let felt_mean = (felt_at_sample / ang_n) as f32;
+
+        // (a) the PICTURE really did get heavier
+        assert!(
+            felt > rifle * 3.0,
+            "a hull turret held down settles at {felt:.2} deg of punch \
+             against an AK's {rifle:.2} - the owner asked for a mount that \
+             kicks, and this one is barely a rifle"
+        );
+        // (b) ...and the ROUNDS did not
+        let delivered = s.aim_punch_of(0)[0].abs();
+        assert!(
+            delivered < rifle * 1.4,
+            "the punch the turret's ROUNDS carry ({delivered:.2} deg) is \
+             past a rifle's ({rifle:.2}) - the felt kick has leaked into \
+             the aim, which is exactly what a bot cannot pay for"
+        );
+        // (c) and the tracers agree. `unstabilised` is what the round
+        // WOULD have left along if the fire path had used the raw punch -
+        // the value this pass exists to stop it using.
+        let unstabilised =
+            felt_mean * RECOIL_SCALE * (1.0 - VIEW_RECOIL_TRACKING);
+        assert!(
+            measured < unstabilised * 0.5,
+            "rounds left {measured:.2} deg off the aim against the \
+             {unstabilised:.2} deg the raw punch would have thrown them - \
+             the fire path is not going through `mount_punched_aim`"
+        );
+        assert!(
+            measured > 0.2,
+            "the mount is delivering essentially no recoil at all \
+             ({measured:.2} deg) - over-stabilised into a laser"
+        );
+    }
+
+    /// §owner: the AUTOCANNON is deliberately NOT part of the recoil
+    /// change, and this pins that.
+    ///
+    /// Its kick is already 133.6 deg/s and a single shell already throws
+    /// a 6.2 degree punch; anything multiplied into that turned one shell
+    /// into a screen-flip. So `mount_aim_stabiliser` resolves to exactly
+    /// 1.0 for it and `autocannon_kick` is untouched - the mount is bit
+    /// identical to its old self. Written down because the obvious next
+    /// edit is "apply the turret's stabiliser to both mounts", and that
+    /// would quietly make a 145-damage shell four times more accurate.
+    #[test]
+    fn the_autocannon_is_untouched_by_the_turrets_recoil_split() {
+        assert_eq!(
+            mount_aim_stabiliser(MechWeapon::Autocannon),
+            1.0,
+            "the autocannon's rounds are being held back by a stabiliser \
+             calibrated for the turret's lifted kick"
+        );
+        assert!(
+            (autocannon_kick() - mech_mount_kick(AUTOCANNON_DAMAGE)).abs() < 1e-6,
+            "the autocannon's kick is no longer the shell's own energy"
+        );
+        // the turret is the mount that moved, and it moved on the FELT
+        // channel only
+        assert!(
+            mount_aim_stabiliser(MechWeapon::Gatling) < 1.0,
+            "the turret's rounds are riding its full felt punch"
+        );
+        assert!(
+            turret_kick_per_round() > mech_mount_kick(GATLING_DAMAGE),
+            "the turret's felt kick is back down to the round's own energy"
         );
     }
 
