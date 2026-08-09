@@ -345,6 +345,44 @@ fn build_gallery(
         row.right,
         row.facing + std::f32::consts::PI,
     );
+
+    // §owner ON THE MAP: four machines standing on the range itself, not
+    // on plinths, so a player walking the training ground meets them at
+    // the scale they fight at. See `SENTINELS` for why the row stays.
+    let limbs = LimbMeshes {
+        thigh: meshes.add(Capsule3d::new(0.072, 0.15)),
+        shin: meshes.add(Capsule3d::new(0.060, 0.15)),
+        upper: meshes.add(Capsule3d::new(0.055, 0.14)),
+        fore: meshes.add(Capsule3d::new(0.048, 0.12)),
+    };
+    let looks = [
+        look_for(&mut materials, true),
+        look_for(&mut materials, false),
+    ];
+    for (spot, (chassis, ally)) in site_sentinels(&game.sim, at, row.centre, row.right)
+        .into_iter()
+        .zip(SENTINELS)
+    {
+        // Turned to face the MAP CENTRE rather than the viewer. A statue
+        // that always looks at you follows you around the map, which
+        // reads as a live enemy tracking your movement - the one thing
+        // these must not be mistaken for. Facing inward also means the
+        // machine you walk up to from the outside is seen from behind
+        // first and turns out to be facing away, which is what a parked
+        // machine looks like.
+        let to_mid = -spot;
+        let facing = to_mid.x.atan2(to_mid.z);
+        spawn_machine(
+            &mut commands,
+            &kit,
+            &limbs,
+            &looks[usize::from(!ally)],
+            chassis,
+            ally,
+            spot,
+            facing,
+        );
+    }
 }
 
 /// The row's two horizontal axes for a facing.
@@ -732,111 +770,11 @@ fn spawn_row(
             GalleryVis,
         ));
 
-        // ---- the machine.
-        //
-        // A real gameplay rig, built the way `spawn_fighter_rigs` builds
-        // one: the soldier body is the SKELETON both chassis hang on, and
-        // rebuilding a standalone mech mesh here would be the split brain
-        // this project has shipped four times already. `None` for the
-        // helmet — the head is hidden under either chassis, so a helmet
-        // is geometry nobody will ever see.
-        // A reference soldier keeps his head, his arms and his rifle -
-        // he is not wearing anything, and a headless ruler is a worse
-        // ruler. `Some(0)` mounts the first helmet, the same call a
-        // fighter in slot 0 gets.
-        let bare = matches!(chassis, Chassis::Soldier);
-        let parts = crate::spawn_soldier_body(
-            commands,
-            kit,
-            &limbs,
-            &looks[side],
-            false,
-            crate::sim::Class::Line,
-            bare.then_some(0),
-        );
-        // §owner TRUE SIZES: the ROOT scale, and the entire fix.
-        //
-        // `sync_fighters` writes exactly this onto a live fighter's root
-        // every frame; the gallery wrote nothing, so five machines stood
-        // at a soldier's height on a display whose only job is to say
-        // how big they are. Scale on the ROOT, not on the hull rig -
-        // the hull is already scaled by `MECH_HULL_SCALE` relative to
-        // the body it hangs on, and scaling it twice would grow the
-        // armour off the skeleton inside it.
-        commands.entity(parts.root).insert((
-            Transform::from_translation(pos)
-                .with_rotation(Quat::from_rotation_y(facing))
-                .with_scale(Vec3::splat(chassis_scale(chassis))),
-            GalleryVis,
-        ));
-        // Both chassis swallow the pilot: head, arms and the carried
-        // rifle all go. This is the same set `sync_fighters` hides for a
-        // fighter in a mech, written once here because nothing animates
-        // these rigs and the visibility is therefore permanent.
-        if !bare {
-            for e in [
-                parts.head,
-                parts.arm_l[0],
-                parts.arm_r[0],
-                parts.weapon_root,
-            ] {
-                commands.entity(e).insert(Visibility::Hidden);
-            }
-        }
-
-        match chassis {
-            Chassis::Heavy { elite } => {
-                let (rig, _det) = crate::spawn_armor_rig(commands, kit, ally, elite);
-                commands
-                    .entity(rig)
-                    .insert(Transform::from_scale(Vec3::splat(MECH_HULL_SCALE)))
-                    .set_parent(parts.torso);
-                // the forearm barrier module, stowed — part of the
-                // heavy's silhouette in every match, so it is part of the
-                // heavy's portrait too. Its FIELD spawns hidden.
-                let (barrier, _) = crate::spawn_mech_barrier(commands, kit);
-                commands
-                    .entity(barrier)
-                    .insert(Transform {
-                        translation: Vec3::new(-0.645, 0.145, 0.30) * MECH_HULL_SCALE,
-                        rotation: Quat::from_rotation_x(-0.10),
-                        scale: Vec3::splat(MECH_HULL_SCALE),
-                    })
-                    .set_parent(rig);
-                // D.1 leg armour rides the soldier's own leg bones.
-                //
-                // Its three group roots spawn HIDDEN — `sync_fighters`
-                // owns them in a match, and nothing syncs a statue. The
-                // first capture of this exhibit showed three heavy hulls
-                // standing on the pilot's own bare white thighs, which
-                // is a thing no match has ever rendered. Shown here by
-                // hand, once, because these rigs never change state.
-                let l = parts.leg_l;
-                let r = parts.leg_r;
-                for la in [
-                    crate::spawn_mech_leg_armor(commands, kit, l[0], l[1], l[2], -1.0, ally, elite),
-                    crate::spawn_mech_leg_armor(commands, kit, r[0], r[1], r[2], 1.0, ally, elite),
-                ] {
-                    for e in la.roots {
-                        commands.entity(e).insert(Visibility::Inherited);
-                    }
-                }
-            }
-            Chassis::Scout => {
-                let rig = crate::spawn_scout_chassis(commands, kit, ally, GALLERY_TRIM);
-                commands
-                    .entity(rig)
-                    .insert(Transform::IDENTITY)
-                    .set_parent(parts.torso);
-                // the light chassis brings its own legs; the soldier's
-                // are hidden outright, exactly as in a match.
-                for e in [parts.leg_l[0], parts.leg_r[0]] {
-                    commands.entity(e).insert(Visibility::Hidden);
-                }
-            }
-            // nothing to bolt on: he IS the reference.
-            Chassis::Soldier => {}
-        }
+        // ---- the machine. Built by the shared `spawn_machine`,
+        // which the on-map sentinels below call too - one rig
+        // builder, so a plinth exhibit and a machine standing on the
+        // range can never be two different machines.
+        spawn_machine(commands, kit, &limbs, &looks[side], chassis, ally, pos, facing);
 
         // ---- the name plate.
         commands.spawn((
@@ -887,6 +825,221 @@ fn spawn_row(
         Transform::from_translation(centre + Vec3::Y * 6.5),
         GalleryVis,
     ));
+}
+
+/// §owner ON THE MAP, NOT ONLY ON THE PLINTHS.
+///
+/// *"in training mode and map should have mechs as displayed"*.
+///
+/// ## Why BOTH, and not the row replaced by these
+///
+/// The row and the sentinels answer different questions and neither
+/// substitutes for the other.
+///
+/// The ROW is a COMPARISON, and a comparison needs a control: same light,
+/// same range, same angle, same trim, machines a fixed distance apart in
+/// one frame. Scattering the five across a map destroys exactly the
+/// property that makes them comparable — a scout forty metres away in
+/// shadow and a heavy at nine metres in the sun tell you nothing about
+/// which is bigger. That was the owner's earlier ask and the captures
+/// show it working.
+///
+/// The SENTINELS answer "how big is this thing in the world I fight in".
+/// On a plinth under a dedicated light everything is a museum piece at
+/// museum scale; standing on the range beside a 1.2 m crate and a 2 m
+/// wall, a 3.03 m chassis is a fact you cannot argue with. That is the
+/// new ask, and the row structurally cannot make that statement.
+///
+/// So: keep the chart, and put the machines in the room as well.
+///
+/// ## What they are
+///
+/// Statues, exactly as the row is: loose entities, no `FighterVis`, no
+/// `FighterRig`, no cover box. `sync_fighters` never animates them, no bot
+/// targets one, no bullet stops on one, and the player walks through them.
+/// Training only, torn down with everything else carrying `GalleryVis`.
+/// No name plates — the row is the labelled chart, and four more captions
+/// floating over a map would read as enemy markers.
+const SENTINELS: [(Chassis, bool); 4] = [
+    (Chassis::Heavy { elite: false }, true),
+    (Chassis::Scout, true),
+    (Chassis::Heavy { elite: false }, false),
+    (Chassis::Scout, false),
+];
+
+/// How far apart sentinels must stand, in metres.
+///
+/// Wide, on purpose: two machines within sight of each other read as a
+/// second lineup, which is the thing the row already does better. The
+/// point of these is to be MET, one at a time, while walking.
+const SENTINEL_SEP_M: f32 = 22.0;
+
+/// ...and how far from the viewer's spawn the nearest may stand, so the
+/// exhibit row is what greets a player and the sentinels are found.
+const SENTINEL_MIN_FROM_SPAWN_M: f32 = 16.0;
+
+/// Site the sentinels: clear ground, well separated, spread over the map.
+///
+/// A deterministic grid scan, never the sim's RNG — the standing rule for
+/// per-entity variety, and the reason a replay is bit-identical with all
+/// of this on screen. Candidates are visited in a fixed order and taken
+/// greedily if they clear cover, the row, the spawn and every sentinel
+/// already placed.
+///
+/// Pure and testable: it takes the sim only to ask `stand_is_clear`, and
+/// returns positions. A siting rule that puts a 3 m machine inside a wall
+/// is exactly the kind of thing a screenshot from the wrong angle hides.
+fn site_sentinels(sim: &crate::TdmSim, spawn: Vec3, row: Vec3, row_right: Vec3) -> Vec<Vec3> {
+    let mut out: Vec<Vec3> = Vec::new();
+    let lim = sim.half - 4.0;
+    // the row's own span, so nothing is planted inside the exhibit
+    let row_half = stand_offset(STANDS.len() - 1).abs() + STAND_CLEAR_R;
+    let mut x = -lim;
+    while x <= lim {
+        let mut z = -lim;
+        while z <= lim {
+            if out.len() >= SENTINELS.len() {
+                return out;
+            }
+            let p = Vec3::new(x, 0.0, z);
+            z += 3.0;
+            if p.distance(spawn) < SENTINEL_MIN_FROM_SPAWN_M {
+                continue;
+            }
+            // clear of the exhibit: distance measured ALONG the row's own
+            // axis and across it, not as a circle - the row is 23 m of
+            // machines and a radius big enough to clear its ends would
+            // sterilise a quarter of the map.
+            let d = p - row;
+            if d.dot(row_right).abs() < row_half + SENTINEL_SEP_M * 0.5
+                && (d - row_right * d.dot(row_right)).length() < SENTINEL_SEP_M * 0.5
+            {
+                continue;
+            }
+            if !stand_is_clear(sim, p) {
+                continue;
+            }
+            if out.iter().any(|q| q.distance(p) < SENTINEL_SEP_M) {
+                continue;
+            }
+            out.push(p);
+        }
+        x += 3.0;
+    }
+    out
+}
+
+/// Build ONE machine, standing at `pos` and turned to `facing`.
+///
+/// Extracted from `spawn_row` when the owner asked for machines on the
+/// MAP as well as on the plinths — two callers, one rig builder, so an
+/// exhibit and a sentinel can never diverge into two different machines.
+///
+/// A real gameplay rig, built the way `spawn_fighter_rigs` builds one:
+/// the soldier body is the SKELETON both chassis hang on, and rebuilding
+/// a standalone mech mesh here would be the split brain this project has
+/// shipped four times already.
+fn spawn_machine(
+    commands: &mut Commands,
+    kit: &ModelKit,
+    limbs: &LimbMeshes,
+    look: &SoldierLook,
+    chassis: Chassis,
+    ally: bool,
+    pos: Vec3,
+    facing: f32,
+) {
+    // A reference soldier keeps his head, his arms and his rifle - he is
+    // not wearing anything, and a headless ruler is a worse ruler.
+    // `Some(0)` mounts the first helmet, the same call a fighter in slot
+    // 0 gets. Under either chassis the head is hidden, so a helmet there
+    // is geometry nobody will ever see.
+    let bare = matches!(chassis, Chassis::Soldier);
+    let parts = crate::spawn_soldier_body(
+        commands,
+        kit,
+        limbs,
+        look,
+        false,
+        crate::sim::Class::Line,
+        bare.then_some(0),
+    );
+    // §owner TRUE SIZES: the ROOT scale, and the entire fix.
+    //
+    // `sync_fighters` writes exactly this onto a live fighter's root
+    // every frame; the gallery wrote nothing, so five machines stood at a
+    // soldier's height on a display whose only job is to say how big they
+    // are. Scale on the ROOT, not on the hull rig - the hull is already
+    // scaled by `MECH_HULL_SCALE` relative to the body it hangs on, and
+    // scaling it twice would grow the armour off the skeleton inside it.
+    commands.entity(parts.root).insert((
+        Transform::from_translation(pos)
+            .with_rotation(Quat::from_rotation_y(facing))
+            .with_scale(Vec3::splat(chassis_scale(chassis))),
+        GalleryVis,
+    ));
+    // Both chassis swallow the pilot: head, arms and the carried rifle
+    // all go. This is the same set `sync_fighters` hides for a fighter in
+    // a mech, written once here because nothing animates these rigs and
+    // the visibility is therefore permanent.
+    if !bare {
+        for e in [parts.head, parts.arm_l[0], parts.arm_r[0], parts.weapon_root] {
+            commands.entity(e).insert(Visibility::Hidden);
+        }
+    }
+    match chassis {
+        Chassis::Heavy { elite } => {
+            let (rig, _det) = crate::spawn_armor_rig(commands, kit, ally, elite);
+            commands
+                .entity(rig)
+                .insert(Transform::from_scale(Vec3::splat(MECH_HULL_SCALE)))
+                .set_parent(parts.torso);
+            // the forearm barrier module, stowed - part of the heavy's
+            // silhouette in every match, so it is part of the heavy's
+            // portrait too. Its FIELD spawns hidden.
+            let (barrier, _) = crate::spawn_mech_barrier(commands, kit);
+            commands
+                .entity(barrier)
+                .insert(Transform {
+                    translation: Vec3::new(-0.645, 0.145, 0.30) * MECH_HULL_SCALE,
+                    rotation: Quat::from_rotation_x(-0.10),
+                    scale: Vec3::splat(MECH_HULL_SCALE),
+                })
+                .set_parent(rig);
+            // D.1 leg armour rides the soldier's own leg bones.
+            //
+            // Its three group roots spawn HIDDEN - `sync_fighters` owns
+            // them in a match, and nothing syncs a statue. The first
+            // capture of this exhibit showed three heavy hulls standing
+            // on the pilot's own bare white thighs, which is a thing no
+            // match has ever rendered. Shown here by hand, once, because
+            // these rigs never change state.
+            let l = parts.leg_l;
+            let r = parts.leg_r;
+            for la in [
+                crate::spawn_mech_leg_armor(commands, kit, l[0], l[1], l[2], -1.0, ally, elite),
+                crate::spawn_mech_leg_armor(commands, kit, r[0], r[1], r[2], 1.0, ally, elite),
+            ] {
+                for e in la.roots {
+                    commands.entity(e).insert(Visibility::Inherited);
+                }
+            }
+        }
+        Chassis::Scout => {
+            let rig = crate::spawn_scout_chassis(commands, kit, ally, GALLERY_TRIM);
+            commands
+                .entity(rig)
+                .insert(Transform::IDENTITY)
+                .set_parent(parts.torso);
+            // the light chassis brings its own legs; the soldier's are
+            // hidden outright, exactly as in a match.
+            for e in [parts.leg_l[0], parts.leg_r[0]] {
+                commands.entity(e).insert(Visibility::Hidden);
+            }
+        }
+        // nothing to bolt on: he IS the reference.
+        Chassis::Soldier => {}
+    }
 }
 
 fn unlit(c: Color) -> StandardMaterial {
@@ -1286,6 +1439,91 @@ mod tests {
         assert!(rl > l);
         assert!(label_screen_pct(Vec2::new(f32::NAN, 0.0), w).is_none());
         assert!(label_screen_pct(Vec2::new(4.0, 0.0), w).is_none());
+    }
+
+    /// §owner ON THE MAP: the sentinels must land on clear ground, apart
+    /// from each other, off the exhibit and off the spawn.
+    ///
+    /// Fails on the pre-change code trivially — there were no sentinels —
+    /// but every clause here is a way the siting can be wrong that a
+    /// screenshot from one angle would not show: a machine inside a wall
+    /// looks fine from the other side of it, and two machines standing
+    /// together just look like a second row.
+    #[test]
+    fn the_sentinels_stand_clear_apart_and_off_the_exhibit() {
+        let sim = crate::TdmSim::new(crate::sim::MatchConfig {
+            seed: 0x5EED,
+            per_team: 2,
+            mode: Mode::Training,
+            map: crate::sim::MapKind::Arena,
+            ..Default::default()
+        });
+        let spawn = Vec3::ZERO;
+        let (_, right) = row_axes(0.0);
+        let row_centre = spawn + Vec3::new(0.0, 0.0, STAND_RANGE[0]);
+        let spots = site_sentinels(&sim, spawn, row_centre, right);
+        assert_eq!(
+            spots.len(),
+            SENTINELS.len(),
+            "only {} of {} sentinels found a home on Arena",
+            spots.len(),
+            SENTINELS.len()
+        );
+        for (i, p) in spots.iter().enumerate() {
+            assert!(stand_is_clear(&sim, *p), "sentinel {i} at {p:?} is in cover");
+            assert!(
+                p.x.abs() <= sim.half && p.z.abs() <= sim.half,
+                "sentinel {i} is outside the map"
+            );
+            assert!(
+                p.distance(spawn) >= SENTINEL_MIN_FROM_SPAWN_M,
+                "sentinel {i} is standing on the viewer's spawn"
+            );
+            for (j, q) in spots.iter().enumerate().skip(i + 1) {
+                assert!(
+                    p.distance(*q) >= SENTINEL_SEP_M,
+                    "sentinels {i} and {j} are {} m apart - that is a second \
+                     lineup, which is what the row is for",
+                    p.distance(*q)
+                );
+            }
+        }
+        // ...and none of them inside the exhibit's own footprint
+        let row_half = stand_offset(STANDS.len() - 1).abs() + STAND_CLEAR_R;
+        for (i, p) in spots.iter().enumerate() {
+            let d = *p - row_centre;
+            let along = d.dot(right).abs();
+            let across = (d - right * d.dot(right)).length();
+            assert!(
+                along >= row_half || across >= SENTINEL_SEP_M * 0.5,
+                "sentinel {i} is standing in the exhibit ({along} m along, \
+                 {across} m across)"
+            );
+        }
+    }
+
+    /// Both liveries and both chassis have to be out on the map, or the
+    /// walk-up view shows less than the plinth row does.
+    #[test]
+    fn the_sentinels_show_both_chassis_in_both_liveries() {
+        for want_heavy in [true, false] {
+            for want_ally in [true, false] {
+                assert!(
+                    SENTINELS.iter().any(|(c, a)| matches!(c, Chassis::Heavy { .. })
+                        == want_heavy
+                        && *a == want_ally),
+                    "no {} sentinel on the {} side",
+                    if want_heavy { "heavy" } else { "scout" },
+                    if want_ally { "ally" } else { "enemy" }
+                );
+            }
+        }
+        // and the reference SOLDIER is not among them: he belongs beside
+        // the machines he measures, not alone in a field
+        assert!(
+            !SENTINELS.iter().any(|(c, _)| matches!(c, Chassis::Soldier)),
+            "a lone soldier standing in a field measures nothing"
+        );
     }
 
     /// A block standing between the viewer and a stand must be caught.

@@ -34,15 +34,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod branding;
-/// §cliffhold THE ART PASS for `MapKind::Cliffhold` — palette, air,
-/// light and the four landmark silhouettes. Its own module for the
-/// reason `branding` is: it wires in with this line and two calls
-/// below, so it costs this file almost nothing to own.
-mod cliffhold;
 /// §20 THE MECH COCKPIT - the first-person shell, its instruments and
 /// its vibration. Its own module for the reason `branding` is: it wires
 /// in with two lines here, so it costs this file nothing to own.
 mod cockpit;
+/// THE ART PASS, per map: sky, air, light, and what a stone box IS.
+///
+/// Was `cliffhold`, and outlived it. The map the research was done for
+/// has been removed on the owner's word; the Gridlock finding behind it
+/// — that art alone can make or break a layout's legibility — applies to
+/// the three core maps, which are about to grow height and structures.
+mod map_look;
 /// §gallery: the training range's mech exhibit. Self-contained; wired in
 /// with this line and one `add_plugins` below.
 mod mech_lineup;
@@ -5124,8 +5126,8 @@ struct CapBeat {
     /// power, belt and position outright). It is inert without
     /// `JK_CAPTURE`.
     hull: Option<f32>,
-    /// §cliffhold capture-only: TELEPORT the subject to this world point
-    /// at this beat.
+    /// Capture-only: TELEPORT the subject to this world point at this
+    /// beat.
     ///
     /// Added for a 600 x 600 m map. Every staging hook before this one
     /// planted the subject ONCE, in `capture_quick_deploy`, and the only
@@ -5632,6 +5634,44 @@ const MINIGUN_CHECK_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(4.9) },
 ];
 
+/// §owner THE MECH JUMP, all four phases, in third person.
+///
+/// Closing an instrument gap I reported and did not close last pass: no
+/// script in this harness had ever boarded a chassis and pressed Space,
+/// so the jump's COMPRESS, AIR and RECOVER poses had never been
+/// photographed once. That is exactly the shape of hole the first-person
+/// bow sat in for months - the feature gap was hidden by the instrument
+/// gap, and `mech_jump_compression_of` sat in sim.rs with no readers at
+/// all while the machine took off from a dead-straight stance.
+///
+/// THIRD PERSON, because the subject is the machine's own silhouette.
+/// From first person the knees bending are behind the camera and the
+/// only visible symptom is the eye moving, which is the half that was
+/// never in doubt.
+///
+/// The beat spacing is the sim's own clock: `MECH_JUMP_COMPRESS_S` is
+/// 0.40 s, so 0.15 s after the press is mid-coil and 0.30 s is nearly
+/// loaded. Snapping at 0.05 would photograph a machine that has not
+/// moved yet and prove nothing either way.
+const MECH_JUMP_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.10)), ..beat(0.4) },
+    // 01 STANDING, for the comparison every other frame is read against.
+    CapBeat { snap: Some("01-mech-standing"), ..beat(1.2) },
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(1.4) },
+    // 02 and 03 walk the COIL. If these two are indistinguishable the
+    // ramp is not running and `chassis_kneeling` is snapping again.
+    CapBeat { snap: Some("02-jump-coil-early"), ..beat(1.55) },
+    CapBeat { snap: Some("03-jump-coil-loaded"), ..beat(1.70) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(1.85) },
+    // 04 airborne, legs out of the tuck
+    CapBeat { snap: Some("04-jump-airborne"), ..beat(2.1) },
+    // 05 the landing absorb - deliberately NOT ramped (an impact arrives
+    // folded), so this one SHOULD look like a snap.
+    CapBeat { snap: Some("05-jump-landing-absorb"), ..beat(2.7) },
+    CapBeat { snap: Some("06-jump-recovered"), ..beat(3.6) },
+    CapBeat { end: true, ..beat(4.0) },
+];
+
 // Task 0 before-clip (c): every traversal move that exists - jump,
 // dodge roll (W held so it launches forward), and the air-flip (dodge
 // while airborne). Third person so the whole body reads.
@@ -5681,85 +5721,6 @@ const MAP_LAP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(6.7) },
 ];
 
-/// §cliffhold THE MAP, from the six places its art has to work from.
-///
-/// `map_lap` cannot do this job and never could: it stands wherever
-/// `capture_stage_pos` finds a clear ring within 24 m of the origin, turns
-/// on the spot and sprints for three seconds. On a 100 m map that is a
-/// lap. On a 600 m map with 32 m of relief it is nine seconds inside one
-/// district, and the castle - the whole subject - never enters frame.
-///
-/// FIRST PERSON throughout. The third-person boom parks the pilot dead
-/// centre of every frame, and the thing under test here is a skyline.
-///
-/// The yaws are geometry, not taste. Forward is `(sin yaw, cos yaw)` in
-/// (x, z) - `input_and_step` derives the move basis that way - so yaw 0
-/// looks up +z, at the mountain, and each vista below is
-/// `atan2(dx, dz)` from its stance to the thing it is meant to show.
-/// PITCH IS POSITIVE-DOWN here (see `PROJECTILE_FLIGHT_BEATS`), so the
-/// look-up shots carry a negative pitch.
-const CLIFFHOLD_BEATS: &[CapBeat] = &[
-    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.3) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.4) },
-    // 1. THE MUSTER PLAZA (origin, 7 m) looking north up the ravine at
-    //    the castle 175 m away. The headline read: does 32 m of relief
-    //    exist from the map's own centre.
-    //
-    //    SEVEN METRES SOUTH of the plaza's centre, not on it. The sim
-    //    parks a chassis pad at `[0, center_top, 0]` and `PICKUP_RADIUS`
-    //    is 1.1 m, so the first run of this script teleported the
-    //    subject onto it and photographed all eight vistas from inside a
-    //    mech cockpit - two orange struts, a turret and a hull ladder
-    //    over every frame. A capture that stages itself onto a pickup is
-    //    photographing the pickup.
-    CapBeat { pos: Some([0.0, 7.0, -7.0]), look: Some((-0.09, -0.04)), ..beat(0.6) },
-    CapBeat { snap: Some("01-plaza-north-to-the-castle"), ..beat(1.4) },
-    // 2. THE RAVINE MOUTH, at the cliff foot, looking up the Breach.
-    //    An eighteen-metre wall of rock on both sides - the one frame
-    //    that answers "does the cliff read as rock or as a grey slab".
-    CapBeat { pos: Some([0.0, 0.0, 34.0]), look: Some((0.0, -0.20)), ..beat(1.6) },
-    CapBeat { snap: Some("02-ravine-foot-cliff-line"), ..beat(2.4) },
-    // 3. THE CITY'S NORTH EDGE, looking across 230 m of open ground at
-    //    the castle. This is the readability test: a landmark that does
-    //    not survive its own map's width is set dressing, not a
-    //    landmark.
-    //
-    //    NOT from inside the city, which was the first try. Standing on
-    //    `CH_CHECKPOINT_CITY` and aiming at the keep photographs the
-    //    twenty-five buildings in between - a true finding about that
-    //    stance and a useless frame. The moment a landmark has to work
-    //    is the moment you leave cover, so the camera stands where the
-    //    city ends.
-    CapBeat { pos: Some([-30.0, 0.0, -52.0]), look: Some((0.044, -0.05)), ..beat(2.6) },
-    CapBeat { snap: Some("03-city-edge-to-the-castle"), ..beat(3.4) },
-    // 4. THE BELL TOWER, down the north-south street it stands across,
-    //    from sixty metres - the distance it has to work at. Standing
-    //    under it proves nothing: a landmark is a thing you navigate BY.
-    //
-    //    SOUTH of the aqueduct. The first try stood at z = -134 and
-    //    looked south, which is three metres off the aqueduct's north
-    //    face: the whole frame was a 222 m deck seen end-on.
-    CapBeat { pos: Some([-91.0, 0.0, -172.0]), look: Some((3.1416, -0.34)), ..beat(3.6) },
-    CapBeat { snap: Some("04-bell-tower"), ..beat(4.4) },
-    // 5. THE GATEHOUSE PAIR, from the plateau forty metres short of the
-    //    wall. Two towers and the gap between them: the shape that has
-    //    to say "the way in is here" from across the courtyard.
-    CapBeat { pos: Some([-6.0, 18.0, 96.0]), look: Some((0.0, -0.28)), ..beat(4.6) },
-    CapBeat { snap: Some("05-gatehouse-pair"), ..beat(5.4) },
-    // 6. THE KEEP, from the courtyard floor at 18 m looking up at 32.
-    CapBeat { pos: Some([6.0, 18.0, 150.0]), look: Some((-0.80, -0.42)), ..beat(5.6) },
-    CapBeat { snap: Some("06-the-keep"), ..beat(6.4) },
-    // 7. FROM THE KEEP PARAPET at 32 m, looking back south down the
-    //    whole map. Nothing else in this harness has ever stood on the
-    //    highest surface of a map and looked down it.
-    CapBeat { pos: Some([-33.0, 32.0, 175.0]), look: Some((3.1416, 0.10)), ..beat(6.6) },
-    CapBeat { snap: Some("07-parapet-south-over-the-map"), ..beat(7.4) },
-    // 8. THE COMMONS, the open half, looking north-west at the cliff
-    //    line side-on - the silhouette the whole east of the map sees.
-    CapBeat { pos: Some([150.0, 0.0, -100.0]), look: Some((-0.554, -0.05)), ..beat(7.6) },
-    CapBeat { snap: Some("08-commons-to-the-cliff-line"), ..beat(8.4) },
-    CapBeat { end: true, ..beat(8.9) },
-];
 
 /// §gallery THE MECH EXHIBIT, photographed.
 ///
@@ -5923,6 +5884,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
+        "mech_jump" => MECH_JUMP_BEATS,
         // §20: one beat table, two chassis - see COCKPIT_BEATS
         "cockpit" | "medic_cockpit" => COCKPIT_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
@@ -5935,7 +5897,6 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "minigun_check" => MINIGUN_CHECK_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
-        "cliffhold" => CLIFFHOLD_BEATS,
         _ => &[],
     }
 }
@@ -5966,8 +5927,6 @@ fn capture_dir(script: &str) -> String {
 /// human.
 const CAPTURE_SCRIPTS: [&str; 30] = [
     "medic",
-    // §cliffhold: the new map, from six vantage points across 600 m.
-    "cliffhold",
     // §gallery: the training range's exhibit - both chassis, both
     // liveries, and the royal paint, in one frame.
     "mech_gallery",
@@ -5985,6 +5944,9 @@ const CAPTURE_SCRIPTS: [&str; 30] = [
     "bow_draw_fp",
     "mech_scale",
     "mech_fp",
+    // §owner: the chassis jump, all four phases - the one thing in
+    // this game that had a sim clock and no camera on it.
+    "mech_jump",
     "shield_fp",
     "sights_a",
     "sights_b",
@@ -6121,10 +6083,6 @@ fn capture_quick_deploy(
         Some("class_marksman") => sel.class = sim::Class::Marksman,
         Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
-        // §cliffhold: the script photographs ONE map, so it picks it -
-        // `Selected::default()` is the Arena and a capture that quietly
-        // photographs the wrong map is worse than one that fails.
-        Some("cliffhold") => sel.map = MapKind::Cliffhold,
         _ => {}
     }
     // §gallery: the exhibit only exists on the RANGE, so the script that
@@ -6156,7 +6114,7 @@ fn capture_quick_deploy(
     }
     if matches!(
         cap.script.as_deref(),
-        Some("mech_scale") | Some("mech_fp") | Some("cockpit")
+        Some("mech_scale") | Some("mech_fp") | Some("mech_jump") | Some("cockpit")
     ) {
         // Task 5.7: board the mech directly - no need to walk to a pad
         // just to prove the scale/palette read. Also plant it at a KNOWN
@@ -6242,7 +6200,7 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 4] = ["minigun_check", "traversal", "map_lap", "cliffhold"];
+const CAPTURE_KEEP_ALIVE: [&str; 3] = ["minigun_check", "traversal", "map_lap"];
 
 fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     let Some(name) = cap.script.as_deref() else { return };
@@ -6444,9 +6402,9 @@ fn capture_input_driver(
                 f.hull = f.mech_hull_max() * frac;
             }
         }
-        // §cliffhold: teleport. Velocity is zeroed with it - arriving on
-        // an 18 m plateau still carrying the fall speed from the last
-        // vantage point drops the subject off the cliff before the snap.
+        // Teleport. Velocity is zeroed with it - arriving on a ledge
+        // still carrying the fall speed from the last vantage point
+        // drops the subject off it before the snap.
         if let Some(p) = b.pos {
             let i = game.sim.player;
             if let Some(f) = game.sim.fighters.get_mut(i) {
@@ -15997,9 +15955,9 @@ fn rebuild_world(
     >,
     mut clear: ResMut<ClearColor>,
     mut fog_q: Query<&mut DistanceFog, With<MainCam>>,
-    // §cliffhold: the sun and the fill are PER MAP now. They were set
-    // once at startup, which is why every map from the dust arena to a
-    // 32 m mountain was lit from the same 51-degree noon.
+    // The sun and the fill are PER MAP (`map_look::look`). They were set
+    // once at startup, which is why every map was lit from the same
+    // 51-degree noon whatever its size or relief.
     mut sun_q: Query<(Entity, &mut DirectionalLight, &mut Transform)>,
     mut ambient: ResMut<AmbientLight>,
 ) {
@@ -16029,15 +15987,15 @@ fn rebuild_world(
     );
     spawn_pickup_pads(&mut commands, &mut meshes, &mut materials, &kit, &game.sim);
     let map = game.sim.map;
-    // §cliffhold: sky / ground / border / FOG BAND / SUN, all per map and
-    // all in `cliffhold::look`. The four older maps get back exactly the
-    // numbers they shipped with; only Cliffhold moves.
+    // sky / ground / border / FOG BAND / SUN, all per map and all in
+    // `map_look::look`. Every map keeps exactly the numbers it shipped
+    // with.
     //
     // Fog distance and sun angle used to be map-INDEPENDENT - fixed at
     // 45..130 m and a 51-degree noon at startup - which is correct for a
     // 100 m arena and hides a 600 m map behind its own air. See the
     // module header.
-    let look = cliffhold::look(map);
+    let look = map_look::look(map);
     let (sky, ground_c, border_c) = (look.sky, look.ground, look.border);
     clear.0 = sky;
     if let Ok(mut fog) = fog_q.get_single_mut() {
@@ -16091,11 +16049,11 @@ fn rebuild_world(
             perceptual_roughness: 1.0,
             ..default()
         })),
-        // §cliffhold: the ground does not cast. It is a single flat
-        // plane at y = 0 and everything in the world stands ON it, so
-        // its shadow can only ever fall on itself - and at a low sun it
-        // does, badly. Dropping Cliffhold's sun to 35 degrees to rake
-        // the relief turned every square metre of open ground inside
+        // The ground does not cast. It is a single flat plane at y = 0
+        // and everything in the world stands ON it, so its shadow can
+        // only ever fall on itself - and at a low sun it does, badly.
+        // Dropping a map's sun to 35 degrees to rake its relief turned
+        // every square metre of open ground inside
         // the near shadow cascades into dark olive SHADOW ACNE, with a
         // hard edge where the cascades ran out and the correctly lit
         // ground began. Raising `shadow_normal_bias` from 1.8 to 3.4
@@ -16186,20 +16144,14 @@ fn rebuild_world(
         perceptual_roughness: 0.9,
         ..default()
     });
-    let stone_mat = materials.add(StandardMaterial {
-        base_color: match map {
-            MapKind::Arena => Color::srgb(0.52, 0.48, 0.42),
-            _ => Color::srgb(0.56, 0.56, 0.54),
-        },
-        base_color_texture: Some(tex.stone.clone()),
-        normal_map_texture: Some(tex.stone_n.clone()),
-        // cover blocks vary hugely in size; a modest tile keeps the
-        // course height believable on a low wall without turning a big
-        // one into gravel
-        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.25)),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
+    // (The single shared `stone_mat` that stood here - one colour per
+    // map, one fixed 1.25 tile for every box on it - is gone. It IS the
+    // "nowhere for your brain to focus" failure, and its own comment
+    // admitted the compromise: "cover blocks vary hugely in size; a
+    // modest tile keeps the course height believable on a low wall
+    // without turning a big one into gravel". There is no single tile
+    // count that does both, which is why `map_look::uv_tiles` derives one
+    // per box instead.)
     let hedge_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.15, 0.38, 0.14),
         // foliage borrows the GROUND generator, not a leaf one: its
@@ -16225,21 +16177,26 @@ fn rebuild_world(
         ..default()
     });
     let leaf_mesh = meshes.add(Sphere::new(1.0));
-    // §cliffhold: ONE flat grey for a mountain, a city and a castle is
-    // VM-01's second failure mode - "there's nowhere for your brain to
-    // focus" - and it is the state this map shipped in. On Cliffhold
-    // every stone box gets its own material, tinted and textured by what
-    // its own AABB says it IS (see `cliffhold::stone_of`) and tiled by
-    // its own size. 378 materials for 378 stone boxes, which is nothing
-    // beside the 378 meshes this loop already builds one at a time.
+    // ONE flat grey for every stone box on a map is VM-01's second
+    // failure mode - "there's nowhere for your brain to focus" - and it
+    // is the state every map here shipped in.
     //
-    // Every other map keeps the single shared `stone_mat` it has always
-    // had, so this cannot regress a map it was not asked to touch.
-    let cliffhold_stone = |c: &Aabb, materials: &mut Assets<StandardMaterial>| {
-        let s = cliffhold::stone_of(c);
+    // §owner "put more effort in last 3 maps": this used to run for
+    // Cliffhold ALONE, which is the map that has just been deleted. The
+    // technique is the part worth keeping (see `map_look`), so it now
+    // runs for EVERY map: each stone box gets its own material, tinted
+    // by what its own AABB says it IS and tiled by its own size. One
+    // material per stone box, which is nothing beside the one MESH per
+    // box this loop already builds.
+    //
+    // `tallest` is the ruler, read off the sim's published cover rather
+    // than from a constant - that is the change that made this portable.
+    let tallest_stone = map_look::tallest_stone(&game.sim.cover, &game.sim.cover_kind);
+    let map_stone = |c: &Aabb, materials: &mut Assets<StandardMaterial>| {
+        let s = map_look::stone_of(c, tallest_stone);
         let (tex_c, tex_n) = if s.is_rock() {
             // living rock takes the broad MOTTLED generator. The coursed
-            // blockwork is what made an 18 m cliff read as a wall.
+            // blockwork is what makes a cliff read as a wall.
             (tex.ground.clone(), tex.ground_n.clone())
         } else {
             (tex.stone.clone(), tex.stone_n.clone())
@@ -16248,7 +16205,7 @@ fn rebuild_world(
             base_color: s.color(),
             base_color_texture: Some(tex_c),
             normal_map_texture: Some(tex_n),
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(cliffhold::uv_tiles(c))),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(map_look::uv_tiles(c))),
             perceptual_roughness: s.roughness(),
             ..default()
         })
@@ -16266,10 +16223,7 @@ fn rebuild_world(
         );
         let mat = match k {
             CoverKind::Crate => crate_mat.clone(),
-            CoverKind::Stone if map == MapKind::Cliffhold => {
-                cliffhold_stone(c, &mut materials)
-            }
-            CoverKind::Stone => stone_mat.clone(),
+            CoverKind::Stone => map_stone(c, &mut materials),
             CoverKind::Hedge => hedge_mat.clone(),
             CoverKind::Tree => trunk_mat.clone(),
         };
@@ -16292,21 +16246,13 @@ fn rebuild_world(
             }
         }
     }
-    // §cliffhold: the four landmark silhouettes - the keep's crown, the
-    // gatehouse pair and its arch, the bell tower, and the broken crest
-    // along the cliff line. All of it cosmetic, all of it FOUND in the
-    // published cover list rather than restated as coordinates here, and
-    // all of it tagged `CoverVis` so the teardown above collects it.
-    if map == MapKind::Cliffhold {
-        cliffhold::spawn_landmarks(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &game.sim.cover,
-            &game.sim.cover_kind,
-            (tex.ground.clone(), tex.ground_n.clone()),
-        );
-    }
+    // (The four landmark silhouettes that stood here - a keep crown, a
+    // gatehouse arch, a bell tower, a cliff crest - went with the map
+    // they were shaped for. Every rule in them keyed off Cliffhold's own
+    // sim constants, so there was nothing portable left once those went.
+    // What was worth keeping is written down at the top of `map_look`:
+    // find every anchor in the sim's PUBLISHED cover by a geometric rule,
+    // never restate a coordinate client-side.)
     if game.sim.mode == Mode::Koth {
         commands.spawn((
             Mesh3d(meshes.add(Cylinder::new(HILL_RADIUS, 0.05))),
