@@ -5143,6 +5143,17 @@ struct CapBeat {
     /// places" is exactly the instrument gap that hides a feature gap.
     /// Inert without `JK_CAPTURE`, like every other field here.
     pos: Option<[f32; 3]>,
+    /// Capture-only: teleport back to the point `capture_quick_deploy`
+    /// STAGED the subject at.
+    ///
+    /// `pos` needs a literal, and a literal is a coordinate this file
+    /// asserts about a map it cannot see. The gallery beats that look
+    /// for the on-map sentinels tried `[0, 0, 0]` and photographed the
+    /// inside of Arena's central block: the map's ORIGIN is not clear
+    /// ground on any map, and the harness already knows a spot that is,
+    /// because it searched for one at deploy. This asks for that one
+    /// back instead of guessing a second time.
+    home: bool,
     snap: Option<&'static str>,
     end: bool,
 }
@@ -5157,6 +5168,7 @@ const fn beat(t: f32) -> CapBeat {
         boom: None,
         hull: None,
         pos: None,
+        home: false,
         snap: None,
         end: false,
     }
@@ -5167,6 +5179,16 @@ const fn beat(t: f32) -> CapBeat {
 /// a model from a side a player's own camera never reaches.
 #[derive(Resource, Default)]
 struct CaptureOrbit(f32);
+
+/// Where `capture_quick_deploy` planted the subject.
+///
+/// Written once at deploy and read by any beat carrying `home`. The
+/// staging code already SEARCHES for clear ground (`capture_stage_pos`,
+/// and the gallery's stricter `mech_lineup::capture_stage_pos`); before
+/// this it threw the answer away, so a script that wanted to come back
+/// to it had to hard-code a coordinate and hope.
+#[derive(Resource, Default)]
+struct CaptureHome(Option<[f32; 3]>);
 
 /// Capture-only BOOM SCALE. 1.0 (or 0.0, treated as 1.0) is the normal
 /// third-person distance.
@@ -5867,7 +5889,36 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
     CapBeat { release: &[CapKey::K(KeyCode::KeyW)], ..beat(9.3) },
     CapBeat { look: Some((-1.32, 0.05)), ..beat(9.5) },
     CapBeat { snap: Some("07-enemy-scout-close"), ..beat(10.2) },
-    CapBeat { end: true, ..beat(10.7) },
+    // §owner ON THE MAP: the four SENTINELS, which the seven frames above
+    // physically cannot see - every one of them is aimed at the exhibit,
+    // and the machines standing on the range are behind the camera.
+    //
+    // That is the instrument gap that hid them on the first run: the
+    // siting was wrong (all four in one corner) and the capture could not
+    // have told me either way. Teleport to the map's own centre - the
+    // sentinels ring it at ~0.62 of the half-width - and take the four
+    // compass looks.
+    //
+    // THIRD person, so the shot has the pilot in frame for scale: these
+    // machines are the answer to "how big is one of these on the ground I
+    // fight on", and a frame with nothing familiar in it does not answer.
+    CapBeat {
+        home: true,
+        look: Some((0.0, 0.02)),
+        orbit: Some(0.0),
+        boom: Some(1.0),
+        press: &[CapKey::K(KeyCode::KeyV)],
+        ..beat(10.4)
+    },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(10.5) },
+    CapBeat { snap: Some("08-sentinels-north"), ..beat(11.2) },
+    CapBeat { look: Some((1.5708, 0.02)), ..beat(11.4) },
+    CapBeat { snap: Some("09-sentinels-east"), ..beat(12.0) },
+    CapBeat { look: Some((3.1416, 0.02)), ..beat(12.2) },
+    CapBeat { snap: Some("10-sentinels-south"), ..beat(12.8) },
+    CapBeat { look: Some((4.7124, 0.02)), ..beat(13.0) },
+    CapBeat { snap: Some("11-sentinels-west"), ..beat(13.6) },
+    CapBeat { end: true, ..beat(14.1) },
 ];
 
 fn capture_script(name: &str) -> &'static [CapBeat] {
@@ -6033,6 +6084,7 @@ fn capture_quick_deploy(
     mut game: ResMut<Game>,
     mut next: ResMut<NextState<GameState>>,
     mut card: ResMut<FirstRunCard>,
+    mut home: ResMut<CaptureHome>,
 ) {
     if *started || cap.script.is_none() {
         return;
@@ -6110,6 +6162,7 @@ fn capture_quick_deploy(
             .unwrap_or_else(|| capture_stage_pos(&game.sim));
         let f = &mut game.sim.fighters[0];
         f.pos = stage;
+        home.0 = Some(stage);
         f.yaw = 0.0;
     }
     if matches!(
@@ -6130,6 +6183,7 @@ fn capture_quick_deploy(
         f.mech_rounds = MECH_ROUNDS;
         f.pod_ammo = POD_TUBES;
         f.pos = stage;
+        home.0 = Some(stage);
         f.yaw = 0.0;
     }
     if cap.script.as_deref() == Some("minigun_check") {
@@ -6147,6 +6201,7 @@ fn capture_quick_deploy(
         f.reserve = 0;
         f.reload_t = 0.0;
         f.pos = stage;
+        home.0 = Some(stage);
         f.yaw = 0.0;
     }
     // Task 0 before-clips: both need a clear stage so the moves and the
@@ -6156,6 +6211,7 @@ fn capture_quick_deploy(
         let stage = capture_stage_pos(&game.sim);
         let f = &mut game.sim.fighters[0];
         f.pos = stage;
+        home.0 = Some(stage);
         f.yaw = 0.0;
     }
 }
@@ -6361,6 +6417,7 @@ fn capture_input_driver(
     mut cam: ResMut<CamCtl>,
     mut orbit: ResMut<CaptureOrbit>,
     mut boom: ResMut<CaptureBoom>,
+    cap_home: Res<CaptureHome>,
     mut game: ResMut<Game>,
 ) {
     let Some(name) = cap.script.clone() else { return };
@@ -6405,7 +6462,10 @@ fn capture_input_driver(
         // Teleport. Velocity is zeroed with it - arriving on a ledge
         // still carrying the fall speed from the last vantage point
         // drops the subject off it before the snap.
-        if let Some(p) = b.pos {
+        // ...and `home` is the same teleport back to wherever the
+        // harness STAGED the subject, which is the one point on the
+        // map it has already proven is clear ground.
+        if let Some(p) = b.pos.or(if b.home { cap_home.0 } else { None }) {
             let i = game.sim.player;
             if let Some(f) = game.sim.fighters.get_mut(i) {
                 f.pos = p;
@@ -7147,6 +7207,7 @@ fn main() {
         .init_resource::<CaptureMode>()
         .init_resource::<CaptureOrbit>()
         .init_resource::<CaptureBoom>()
+        .init_resource::<CaptureHome>()
         .init_resource::<PlasmaHitPool>()
         .add_systems(Startup, init_capture_mode)
         .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
@@ -18876,6 +18937,36 @@ fn camera_system(
     // convention; the true screen-right is its negation
     let screen_right = -right;
 
+    // §owner MECH JUMP LOAD POSE: the height the CAMERA frames against.
+    //
+    // `height()` drops the instant `chassis_kneeling()` goes true, which
+    // is correct for a hitbox and is a step function. THREE things here
+    // read it - the first-person eye through `visor_eye_y`, the boom's
+    // anchor height, and the boom's own length - so pressing Space used
+    // to teleport the viewpoint 0.85 m down AND yank the third-person
+    // camera in by the same proportion, in one tick. The first capture
+    // of `mech_jump` shows the framing jumping between 01 and 02.
+    //
+    // `mech_kneel_unwind` is how much of that drop has NOT been earned
+    // yet: the full sink at the first tick of the coil, zero by the
+    // launch, and zero in every other kneel (a held crouch has the
+    // player's own key as its ramp; a landing absorb is an impact and
+    // should arrive folded). Same `chassis_kneel_blend` the knees bend
+    // on, so pose and camera cannot disagree.
+    let mech_kneel_unwind = if p.chassis_kneeling() {
+        let blend = chassis_kneel_blend(
+            true,
+            game.sim.mech_jump_phase_of(game.sim.player),
+            game.sim.mech_jump_compression_of(game.sim.player),
+        );
+        (BODY_HEIGHT * MECH_SCALE - p.height()).max(0.0) * (1.0 - blend)
+    } else {
+        0.0
+    };
+    // The height every camera term frames against - the sim's, plus
+    // whatever of the kneel has not visually happened yet.
+    let frame_h = p.height() + mech_kneel_unwind;
+
     // first-person eye - exact, no positional smoothing (aim never swims)
     //
     // §B.3: a pilot sees from the VISOR, not from where their own head
@@ -18921,7 +19012,7 @@ fn camera_system(
     // fighter's ACTUAL height - a hardcoded 1.6m put the camera INSIDE
     // a 3m mech's own body once the scale changed. 1.6 was tuned for a
     // 1.78m soldier; keep that same proportion for every height.
-    let anchor_h = 1.6 * (p.height() / BODY_HEIGHT);
+    let anchor_h = 1.6 * (frame_h / BODY_HEIGHT);
     let anchor = Vec3::new(p.pos[0], p.pos[1] + anchor_h - crouch_drop, p.pos[2])
         + screen_right * (p.lean * LEAN_SHIFT * 0.8);
     let ads_e = ease_out(cam_ctl.ads_t);
@@ -18937,7 +19028,7 @@ fn camera_system(
     // Task 4: the boom distance ALSO needs to grow with a taller subject
     // - otherwise the corrected anchor height still sits close enough to
     // clip the mech's own wide hull at the old 2.2m hip distance.
-    let height_boom_mult = (p.height() / BODY_HEIGHT).max(1.0);
+    let height_boom_mult = (frame_h / BODY_HEIGHT).max(1.0);
     let boom_target = (cam_ctl.sprint_boom
         + (cam_tuning.tp_boom_aim - cam_ctl.sprint_boom) * ads_e)
         * height_boom_mult;
@@ -19085,17 +19176,11 @@ fn camera_system(
     // Zero at full compression, so the launch happens from exactly the
     // eye the sim says the pilot has, and zero in RECOVER, where landing
     // folded is what a landing is.
-    let mech_jump_lift = if p.chassis_kneeling() {
-        let blend = chassis_kneel_blend(
-            true,
-            game.sim.mech_jump_phase_of(game.sim.player),
-            game.sim.mech_jump_compression_of(game.sim.player),
-        );
-        let sunk = (BODY_HEIGHT * MECH_SCALE - p.height()).max(0.0) * sim::MECH_VISOR_Y_FRAC;
-        sunk * (1.0 - blend)
-    } else {
-        0.0
-    };
+    // ...and the eye's share of it. ONE quantity (`mech_kneel_unwind`,
+    // computed with the other camera-framing terms above) turned into
+    // a visor offset, rather than a second copy of the same easing
+    // with its own chance to disagree about when a jump starts.
+    let mech_jump_lift = mech_kneel_unwind * sim::MECH_VISOR_Y_FRAC;
     // §B.2: idle life. A multi-ton machine that goes perfectly inert the
     // instant it stops moving reads as a prop, and `mech_bob` alone is
     // walk-only - it returns to exactly zero at a dead stop. These two

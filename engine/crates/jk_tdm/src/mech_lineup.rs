@@ -878,53 +878,76 @@ const SENTINEL_SEP_M: f32 = 22.0;
 /// exhibit row is what greets a player and the sentinels are found.
 const SENTINEL_MIN_FROM_SPAWN_M: f32 = 16.0;
 
-/// Site the sentinels: clear ground, well separated, spread over the map.
+/// Site the sentinels: one per QUADRANT of the map, on clear ground.
 ///
-/// A deterministic grid scan, never the sim's RNG — the standing rule for
-/// per-entity variety, and the reason a replay is bit-identical with all
-/// of this on screen. Candidates are visited in a fixed order and taken
-/// greedily if they clear cover, the row, the spawn and every sentinel
-/// already placed.
+/// Quadrants, not a plain scan. The first version walked a grid from one
+/// corner and took the first four cells that qualified, which is
+/// deterministic and useless: every sentinel landed in the same corner of
+/// the map, all four were behind the player at the exhibit, and the first
+/// capture of them photographed an empty field. "Spread over the map" has
+/// to be stated as a rule, not hoped for as an emergent property of scan
+/// order.
 ///
-/// Pure and testable: it takes the sim only to ask `stand_is_clear`, and
-/// returns positions. A siting rule that puts a 3 m machine inside a wall
-/// is exactly the kind of thing a screenshot from the wrong angle hides.
+/// Each machine is placed near a target radius from the map's centre, so
+/// they ring the play space at a similar remove and a player walking any
+/// direction out of the range meets one.
+///
+/// Deterministic — never the sim's RNG, which is the standing rule for
+/// per-entity variety and the reason a replay is bit-identical with all
+/// of this on screen.
+///
+/// Testable: it takes the sim only to ask `stand_is_clear`. A siting rule
+/// that puts a 3 m machine inside a wall is exactly the kind of thing a
+/// screenshot from one angle hides.
 fn site_sentinels(sim: &crate::TdmSim, spawn: Vec3, row: Vec3, row_right: Vec3) -> Vec<Vec3> {
-    let mut out: Vec<Vec3> = Vec::new();
     let lim = sim.half - 4.0;
     // the row's own span, so nothing is planted inside the exhibit
     let row_half = stand_offset(STANDS.len() - 1).abs() + STAND_CLEAR_R;
-    let mut x = -lim;
-    while x <= lim {
-        let mut z = -lim;
-        while z <= lim {
-            if out.len() >= SENTINELS.len() {
-                return out;
+    let want_r = lim * 0.62;
+    let ok = |p: Vec3, taken: &[Vec3]| -> bool {
+        if p.distance(spawn) < SENTINEL_MIN_FROM_SPAWN_M {
+            return false;
+        }
+        // clear of the exhibit, measured ALONG the row's own axis and
+        // across it rather than as a circle - the row is 23 m of
+        // machines and a radius big enough to clear its ends would
+        // sterilise a quarter of the map.
+        let d = p - row;
+        let along = d.dot(row_right).abs();
+        let across = (d - row_right * d.dot(row_right)).length();
+        if along < row_half + SENTINEL_SEP_M * 0.5 && across < SENTINEL_SEP_M * 0.5 {
+            return false;
+        }
+        stand_is_clear(sim, p) && !taken.iter().any(|q| q.distance(p) < SENTINEL_SEP_M)
+    };
+    let mut out: Vec<Vec3> = Vec::new();
+    // (+,+), (+,-), (-,-), (-,+) — walked in a ring so consecutive
+    // sentinels are never neighbours
+    for (sx, sz) in [(1.0_f32, 1.0_f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+        let mut best: Option<(f32, Vec3)> = None;
+        for a in 1..=3 {
+            let mut r = 6.0_f32;
+            while r <= lim {
+                // A sweep strictly INSIDE this quadrant: 22.5, 45 and
+                // 67.5 degrees, never 0 or 90. The endpoints look
+                // harmless and are not - `cos(FRAC_PI_2)` in f32 is
+                // -4.4e-8, so a machine "on the +x axis" lands at a
+                // minutely NEGATIVE x and belongs to the neighbouring
+                // quadrant, which is how the first version put two
+                // sentinels in one quadrant and none in another while
+                // every other rule here passed.
+                let ang = a as f32 * std::f32::consts::FRAC_PI_2 / 4.0;
+                let p = Vec3::new(sx * r * ang.cos(), 0.0, sz * r * ang.sin());
+                let score = (r - want_r).abs();
+                if best.map_or(true, |(bs, _)| score < bs) && ok(p, &out) {
+                    best = Some((score, p));
+                }
+                r += 2.0;
             }
-            let p = Vec3::new(x, 0.0, z);
-            z += 3.0;
-            if p.distance(spawn) < SENTINEL_MIN_FROM_SPAWN_M {
-                continue;
-            }
-            // clear of the exhibit: distance measured ALONG the row's own
-            // axis and across it, not as a circle - the row is 23 m of
-            // machines and a radius big enough to clear its ends would
-            // sterilise a quarter of the map.
-            let d = p - row;
-            if d.dot(row_right).abs() < row_half + SENTINEL_SEP_M * 0.5
-                && (d - row_right * d.dot(row_right)).length() < SENTINEL_SEP_M * 0.5
-            {
-                continue;
-            }
-            if !stand_is_clear(sim, p) {
-                continue;
-            }
-            if out.iter().any(|q| q.distance(p) < SENTINEL_SEP_M) {
-                continue;
-            }
+        }
+        if let Some((_, p)) = best {
             out.push(p);
         }
-        x += 3.0;
     }
     out
 }
@@ -1488,6 +1511,18 @@ mod tests {
                 );
             }
         }
+        // ONE PER QUADRANT. This is the clause the first version failed:
+        // a plain corner-to-corner grid scan put all four in the same
+        // corner, which is deterministic, passes every other assertion
+        // here, and photographs as an empty field from the exhibit.
+        let mut quad = [0usize; 4];
+        for p in &spots {
+            quad[usize::from(p.x < 0.0) * 2 + usize::from(p.z < 0.0)] += 1;
+        }
+        assert!(
+            quad.iter().all(|&n| n == 1),
+            "the sentinels are not spread over the map: {quad:?} per quadrant"
+        );
         // ...and none of them inside the exhibit's own footprint
         let row_half = stand_offset(STANDS.len() - 1).abs() + STAND_CLEAR_R;
         for (i, p) in spots.iter().enumerate() {
