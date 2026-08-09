@@ -165,6 +165,40 @@ pub const STEP_UP: f32 = 0.55; // how tall a ledge your legs climb
 /// the ceiling a walkable tread has to stay under, and a map cannot
 /// honour a number that has no name.
 pub const BOT_PROBE_Y: f32 = 0.75;
+// ---- §owner BOT ROUTING: the one rule that tells terrain from furniture -
+/// How far ahead a roaming bot checks the ground before committing to a
+/// waypoint (`route_waypoint`). LOCAL, on purpose: a bot re-plans several
+/// times a second, so it only ever needs the next stretch to be right —
+/// and a 600 m map would otherwise cost a 600 m walk per re-roll.
+pub const BOT_ROUTE_PROBE_M: f32 = 44.0;
+/// The sample spacing of that check. Has to be short enough that a
+/// FLIGHT never reads as a step it cannot take: the steepest run on
+/// Cliffhold gains `STAIR_RISE_M` per 1.2 m of tread, so a sample can
+/// never straddle two risers here and the biggest gain the probe ever
+/// sees on a stair is one `STAIR_RISE_M` — which is under `STEP_UP` by
+/// the same contract the map itself is built on.
+pub const BOT_ROUTE_STEP_M: f32 = 0.75;
+/// A blocker THIS far above a bot's feet is TERRAIN; anything lower is
+/// FURNITURE and gets left to the 1.2 m whisker in `bot_act`, which
+/// already rounds a crate on its own.
+///
+/// Not a taste call: the shared infill's tallest "hard cover" tops out
+/// at 3.4 m and so does its tallest tree, so this line sits immediately
+/// above everything any map calls cover and immediately below every
+/// building, cliff and curtain wall on Cliffhold (5 m and up). Routing
+/// around furniture would turn a roam into a string of two-metre hops
+/// between boxes; NOT routing around a cliff is the bug this exists for.
+pub const BOT_TERRAIN_M: f32 = 3.5;
+/// A routed waypoint is never planted closer than this. The re-roll in
+/// `bot_think` fires when a bot is inside 2 m of its waypoint, so a
+/// clamp that landed under that would have a cornered bot re-rolling —
+/// and burning `rng` — every single tick.
+pub const BOT_ROUTE_MIN_M: f32 = 2.6;
+/// How wide the lane on a stair flight is, for "am I already on this
+/// one". Generous, because a bot on a flight is being shoved sideways by
+/// `squad_spacing` the whole way up and must not be told to walk back
+/// down to the foot when it drifts.
+pub const BOT_CLIMB_LANE_M: f32 = 7.0;
 pub const JUMP_SPEED: f32 = 7.4; // clears a 1.3 m crate (v²/2g ≈ 1.5 m)
 // ---- dodge roll (v5): duck-spin dodge, and the parkour breakfall --------
 pub const ROLL_S: f32 = 0.55; // how long the somersault lasts
@@ -967,6 +1001,66 @@ pub enum CoverKind {
     Tree,
 }
 
+/// §owner BOT ROUTING: a one-way-UP link between two altitude bands —
+/// the foot of a stair flight, its head, and the two heights it joins.
+/// In FINAL (post-scale) metres, like everything the sim reads.
+///
+/// This is the whole "navigation graph", and it is deliberately not a
+/// mesh. A map that has flights knows exactly where they are at the
+/// moment it builds them, so it PUBLISHES them instead of making the AI
+/// rediscover them; the alternative — deriving links by sweeping the
+/// cover set for adjacent walkable tops — is a navmesh with extra steps
+/// and would go stale against a map that never asked for one.
+///
+/// Down is not a link, because down is free: the integrate loop has no
+/// fall damage, so stepping off a cliff is already a legal route and
+/// every planner here treats a DROP as walkable.
+#[derive(Clone, Copy, Debug)]
+pub struct Climb {
+    /// Centre of the LOWEST tread.
+    pub foot: [f32; 2],
+    /// Centre of the HIGHEST tread — which the map builder puts INSIDE
+    /// the slab the flight climbs onto, so arriving here means arriving
+    /// on the band, not on a ledge facing a wall.
+    pub head: [f32; 2],
+    /// The band the foot stands on, and the one the head lands on.
+    pub base: f32,
+    pub top: f32,
+}
+
+/// The tallest cover top under (x, z) that a body standing at `y0` with
+/// `step_up` of envelope could be supported by.
+///
+/// THE integrate loop's vertical rule, extracted so the bot planner asks
+/// the same question the body answers. Two copies of this would drift,
+/// and a planner that disagreed with the body about where the ground is
+/// is worse than no planner: it would route bots confidently into
+/// geometry they cannot stand on. Player and bot are the same body here,
+/// so sharing it is also the parity fix.
+pub(crate) fn support_top(cover: &[Aabb], x: f32, z: f32, y0: f32, step_up: f32) -> f32 {
+    let mut s = 0.0_f32;
+    for c in cover {
+        if x > c.min[0] - BODY_RADIUS * 0.4
+            && x < c.max[0] + BODY_RADIUS * 0.4
+            && z > c.min[2] - BODY_RADIUS * 0.4
+            && z < c.max[2] + BODY_RADIUS * 0.4
+            && c.max[1] <= y0 + step_up
+            && c.max[1] > s
+        {
+            s = c.max[1];
+        }
+    }
+    s
+}
+
+/// What a body DROPPED FROM THE SKY at (x, z) would land on — the same
+/// rule with the reachability ceiling taken off. This is "how high is
+/// the ground here", which is the question a route planner asks and the
+/// body never does.
+pub(crate) fn terrain_top(cover: &[Aabb], x: f32, z: f32) -> f32 {
+    support_top(cover, x, z, f32::INFINITY, 0.0)
+}
+
 /// Everything a map defines: its architecture, its size, and where the
 /// two respawn checkpoints sit.
 struct MapLayout {
@@ -975,6 +1069,11 @@ struct MapLayout {
     center_top: f32,
     half: f32,
     checkpoints: [[f32; 2]; 2],
+    /// The ways UP this map publishes for the bot planner. Empty on
+    /// every map that predates it — those are flat enough that the
+    /// whisker is the whole of their navigation, and an empty list means
+    /// `route_waypoint` degenerates to exactly what it does today.
+    climbs: Vec<Climb>,
 }
 
 /// A rectangle, in FINAL (post-scale) metres, the shared infill pass is
@@ -1028,6 +1127,8 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
     let checkpoints;
     // set pieces the shared infill below must keep out of — see `NoInfill`
     let mut no_infill: Vec<NoInfill> = Vec::new();
+    // the ways UP this map publishes for the bot planner — see `Climb`
+    let mut climbs: Vec<Climb> = Vec::new();
     match map {
         MapKind::Arena => {
             half = ARENA_HALF;
@@ -1389,7 +1490,7 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
             }
         }
         MapKind::Cliffhold => {
-            build_cliffhold(&mut cover, &mut kind, &mut no_infill);
+            build_cliffhold(&mut cover, &mut kind, &mut no_infill, &mut climbs);
             half = CLIFFHOLD_HALF_M / MAP_SCALE;
             checkpoints = [
                 // the city street crossing, on the floor of the low band
@@ -1544,6 +1645,7 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
         center_top: top,
         half,
         checkpoints,
+        climbs,
     }
 }
 
@@ -1643,6 +1745,7 @@ fn build_cliffhold(
     cover: &mut Vec<Aabb>,
     kind: &mut Vec<CoverKind>,
     no_infill: &mut Vec<NoInfill>,
+    climbs: &mut Vec<Climb>,
 ) {
     // a box given in FINAL metres — see the note above on why
     let slab = |cover: &mut Vec<Aabb>,
@@ -1668,8 +1771,17 @@ fn build_cliffhold(
     // Treads are solid to the ground rather than floating, because they
     // have to be: see the no-overhangs note. A flight up a 12 m shelf is
     // a row of pillars whose tops happen to form a ramp.
+    //
+    // §owner BOT ROUTING: every flight also PUBLISHES itself as a
+    // `Climb`. Derived from the same eight numbers that lay the treads,
+    // in the same call, so the link list cannot go stale against the
+    // geometry — the failure mode of every hand-maintained nav graph.
+    // The `slab` round trip (÷ MAP_SCALE here, × MAP_SCALE in the
+    // expansion pass) is the identity on CENTRES, so a tread centre in
+    // authored metres IS its final sim coordinate and needs no scaling.
     let flight = |cover: &mut Vec<Aabb>,
                   kind: &mut Vec<CoverKind>,
+                  climbs: &mut Vec<Climb>,
                   x0: f32,
                   z0: f32,
                   x1: f32,
@@ -1690,6 +1802,22 @@ fn build_cliffhold(
                 base + STAIR_RISE_M * (s + 1) as f32,
                 CoverKind::Stone,
             );
+        }
+        if n > 0 {
+            let (cx, cz) = ((x0 + x1) * 0.5, (z0 + z1) * 0.5);
+            let last = (n - 1) as f32;
+            climbs.push(Climb {
+                foot: [cx, cz],
+                // the TOP TREAD, not a point past it: the map already
+                // sinks the top tread INSIDE the slab it climbs onto
+                // (see the note above the flight table), so this is
+                // already a point on the destination band. Overshooting
+                // by a tread would step off the keep stair's head into
+                // the courtyard eighteen metres below.
+                head: [cx + dx * last, cz + dz * last],
+                base,
+                top: base + STAIR_RISE_M * n as f32,
+            });
         }
     };
 
@@ -1746,7 +1874,7 @@ fn build_cliffhold(
         // the QUARRY STEPS: 12 -> 18, west bench onto the west spur
         (-168.5, 118.0, -167.0, 130.0, 1.5, 0.0, CH_SHELF, 12),
     ] {
-        flight(cover, kind, x0, z0, x1, z1, dx, dz, base, n);
+        flight(cover, kind, climbs, x0, z0, x1, z1, dx, dz, base, n);
     }
 
     // ---- THE MUSTER PLAZA (the map origin, the KOTH hill) ------------
@@ -1755,8 +1883,8 @@ fn build_cliffhold(
     // stair is a hill one team owns, and a bot approaching the blank
     // face just slides along it.
     slab(cover, kind, -10.0, -10.0, 10.0, 10.0, CH_PLAZA_TOP, CoverKind::Stone);
-    flight(cover, kind, -5.0, -25.6, 5.0, -24.4, 0.0, 1.2, 0.0, 14);
-    flight(cover, kind, -5.0, 24.4, 5.0, 25.6, 0.0, -1.2, 0.0, 14);
+    flight(cover, kind, climbs, -5.0, -25.6, 5.0, -24.4, 0.0, 1.2, 0.0, 14);
+    flight(cover, kind, climbs, -5.0, 24.4, 5.0, 25.6, 0.0, -1.2, 0.0, 14);
     // corner merlons: hard cover ON the hill, clear of the 4.5 m capture
     // ring so they never wall the objective off from itself
     for (x0, z0, x1, z1) in [
@@ -1796,7 +1924,7 @@ fn build_cliffhold(
         slab(cover, kind, x0, z0, x1, z1, h, CoverKind::Stone);
     }
     // the mural stair, 18 -> 24, against the inside of the west wall
-    flight(cover, kind, -69.0, 180.1, -62.0, 181.4, 0.0, 1.3, CH_PLATEAU, 12);
+    flight(cover, kind, climbs, -69.0, 180.1, -62.0, 181.4, 0.0, 1.3, CH_PLATEAU, 12);
 
     // ---- THE KEEP ----------------------------------------------------
     // The centrepiece, and the one piece of this map with a named
@@ -1820,11 +1948,11 @@ fn build_cliffhold(
         slab(cover, kind, x0, z0, x1, z1, CH_KEEP_TOP, CoverKind::Stone);
     }
     // first flight, 18 -> 25, north up the inside of the west wall
-    flight(cover, kind, -31.0, 166.5, -26.0, 167.8, 0.0, 1.3, CH_PLATEAU, 14);
+    flight(cover, kind, climbs, -31.0, 166.5, -26.0, 167.8, 0.0, 1.3, CH_PLATEAU, 14);
     // the half-landing that turns the stair back on itself
     slab(cover, kind, -26.0, 184.0, -14.0, 186.0, 25.0, CoverKind::Stone);
     // second flight, 25 -> 32, south up the inside of the east wall
-    flight(cover, kind, -14.0, 183.4, -9.0, 184.7, 0.0, -1.3, 25.0, 14);
+    flight(cover, kind, climbs, -14.0, 183.4, -9.0, 184.7, 0.0, -1.3, 25.0, 14);
 
     // ---- THE LOWER CITY (south-west) ---------------------------------
     // "Half a city": built out to the west and centre, and simply NOT
@@ -1860,7 +1988,7 @@ fn build_cliffhold(
     // is safe, but running the deck out over the lower treads would bury
     // half the flight under it)
     slab(cover, kind, -262.0, -143.0, -40.0, -138.0, CH_ROOF_LOW, CoverKind::Stone);
-    flight(cover, kind, -29.6, -143.0, -28.3, -138.0, -1.3, 0.0, 0.0, 10);
+    flight(cover, kind, climbs, -29.6, -143.0, -28.3, -138.0, -1.3, 0.0, 0.0, 10);
     // and a six-tread stub off the deck onto the 8 m course. Kept to
     // 2.5 m of the deck's 5 m width so the deck stays a through route
     // under it (2.5 m still passes a 1.16 m chassis).
@@ -1871,16 +1999,16 @@ fn build_cliffhold(
     // map is decided, not left to chance — 5.0, 5.4, 8.0 and 11.0 have
     // grounded routes; 7.6 and 14.0 are deliberately air-only and are
     // the tallest things in the city, which is how they read as such.
-    flight(cover, kind, -173.0, -143.0, -171.0, -140.5, -2.0, 0.0, CH_ROOF_LOW, 6);
+    flight(cover, kind, climbs, -173.0, -143.0, -171.0, -140.5, -2.0, 0.0, CH_ROOF_LOW, 6);
     // the BELL TOWER: the grounded way onto the 11 m course. Its head is
     // FLUSH with a real eleven-metre roof rather than a lonely platform
     // of its own, and it stands south of the aqueduct so the two routes
     // cross nowhere.
     slab(cover, kind, -98.0, -236.0, -84.0, -224.0, 11.0, CoverKind::Stone);
-    flight(cover, kind, -95.0, -198.8, -87.0, -197.6, 0.0, -1.2, 0.0, 22);
+    flight(cover, kind, climbs, -95.0, -198.8, -87.0, -197.6, 0.0, -1.2, 0.0, 22);
     // two rubble ramps onto low roofs, mid-city
-    flight(cover, kind, -118.0, -93.3, -110.0, -92.0, 0.0, -1.3, 0.0, 10);
-    flight(cover, kind, -160.0, -100.0, -152.0, -98.7, 0.0, 1.3, 0.0, 10);
+    flight(cover, kind, climbs, -118.0, -93.3, -110.0, -92.0, 0.0, -1.3, 0.0, 10);
+    flight(cover, kind, climbs, -160.0, -100.0, -152.0, -98.7, 0.0, 1.3, 0.0, 10);
 
     // ---- THE COMMONS (south-east) ------------------------------------
     // The open half. Field walls, hedgerows and orchard, at heights that
@@ -1939,7 +2067,7 @@ fn build_cliffhold(
         slab(cover, kind, x0, z0, x0 + 3.0, z0 + 3.0, h, CoverKind::Crate);
     }
     slab(cover, kind, 150.0, -170.0, 180.0, -140.0, 4.0, CoverKind::Stone);
-    flight(cover, kind, 158.0, -180.4, 168.0, -179.1, 0.0, 1.3, 0.0, 8);
+    flight(cover, kind, climbs, 158.0, -180.4, 168.0, -179.1, 0.0, 1.3, 0.0, 8);
 
     // ---- THE CLIFF FOOT and THE QUARRY -------------------------------
     // Talus below the cliff line, so the eighteen-metre face meets the
@@ -6028,6 +6156,11 @@ pub struct TdmSim {
     pub fighters: Vec<Fighter>,
     pub cover: Vec<Aabb>,
     pub cover_kind: Vec<CoverKind>,
+    /// §owner BOT ROUTING: the map's published ways UP, read by
+    /// `route_waypoint`. Static map data — built with the cover set,
+    /// never mutated, so it is not replay state and needs no respawn
+    /// reset (a respawn moves a fighter, it does not move a staircase).
+    pub climbs: Vec<Climb>,
     pub checkpoints: Vec<Checkpoint>,
     pub pickups: Vec<Pickup>,
     pub missiles: Vec<Missile>,
@@ -6110,8 +6243,13 @@ impl TdmSim {
         let per_team = cfg.per_team.clamp(1, 8);
         let mut rng = Pcg32::new(cfg.seed, 0x7D7D);
         let layout = build_map(cfg.map, &mut rng);
-        let (cover, cover_kind, center_top, half) =
-            (layout.cover, layout.kind, layout.center_top, layout.half);
+        let (cover, cover_kind, center_top, half, climbs) = (
+            layout.cover,
+            layout.kind,
+            layout.center_top,
+            layout.half,
+            layout.climbs,
+        );
 
         // ---- pickups: health / ammo / the robot armor -------------------
         // (weapon pads are gone in v6 — you BRING your loadout; the map
@@ -6472,6 +6610,7 @@ impl TdmSim {
             fighters,
             cover,
             cover_kind,
+            climbs,
             checkpoints,
             pickups,
             missiles: Vec::new(),
@@ -8585,22 +8724,11 @@ impl TdmSim {
             let f = &mut self.fighters[i];
             f.pos[0] = px;
             f.pos[2] = pz;
-            let support = {
-                let y0 = f.pos[1];
-                let mut s = 0.0_f32;
-                for c in &self.cover {
-                    if px > c.min[0] - BODY_RADIUS * 0.4
-                        && px < c.max[0] + BODY_RADIUS * 0.4
-                        && pz > c.min[2] - BODY_RADIUS * 0.4
-                        && pz < c.max[2] + BODY_RADIUS * 0.4
-                        && c.max[1] <= y0 + step_up
-                        && c.max[1] > s
-                    {
-                        s = c.max[1];
-                    }
-                }
-                s
-            };
+            // the SHARED rule (`support_top`) — the bot route planner
+            // asks the same function, so a planner cannot come to a
+            // different conclusion about where the ground is than the
+            // body it is planning for
+            let support = support_top(&self.cover, px, pz, f.pos[1], step_up);
             if f.pos[1] > support + 0.02 {
                 f.vy -= GRAVITY * DT;
                 // §9.3 soft ceiling: flyers get pushed back down into the
@@ -12636,6 +12764,243 @@ impl TdmSim {
         best.map(|(p, h)| (p, h, false))
     }
 
+    /// How far along `dir` a body standing at `y` can walk before the
+    /// GROUND stops it, capped at `max` — and the height it would be
+    /// standing at when it got there. Returns `(metres, height)`.
+    ///
+    /// The height half is what tells "the straight line already climbs"
+    /// (the map aims two of its flights down the x = 0 line for exactly
+    /// this) from "the straight line is flat and the destination is up a
+    /// cliff", which are the two cases `route_waypoint` has to separate.
+    ///
+    /// Walks the sim's own support rule (`support_top`) forward in
+    /// `BOT_ROUTE_STEP_M` samples, carrying the height it would be
+    /// standing at — so a stair flight reads as walkable (each riser is
+    /// inside the step-up) and a cliff face does not. Two things it
+    /// deliberately does NOT do:
+    ///
+    /// * it does not stop for FURNITURE. Anything under
+    ///   `BOT_TERRAIN_M` is stepped past with the carried height
+    ///   unchanged, because `bot_act`'s 1.2 m whisker already rounds a
+    ///   crate and re-planning around one would shred a roam into
+    ///   two-metre hops.
+    /// * it does not stop for a DROP. There is no fall damage in this
+    ///   project, so walking off a ledge is a legal (one-way) route and
+    ///   the carried height simply falls to whatever is below.
+    ///
+    /// It is a centre-line probe with no body radius, which is the cheap
+    /// half of the trade: it can pass a bot through a gap narrower than
+    /// its shoulders. The whisker catches that case at 1.2 m, the same
+    /// way it always has.
+    fn ground_reach(
+        &self,
+        from: [f32; 2],
+        y: f32,
+        dir: [f32; 2],
+        max: f32,
+        step_up: f32,
+    ) -> (f32, f32) {
+        let mut cur = y;
+        let mut d = 0.0_f32;
+        while d < max {
+            let next = (d + BOT_ROUTE_STEP_M).min(max);
+            let (x, z) = (from[0] + dir[0] * next, from[1] + dir[1] * next);
+            let t = terrain_top(&self.cover, x, z);
+            if t > cur + step_up {
+                if t > cur + BOT_TERRAIN_M {
+                    return (d, cur); // a cliff, a building, a curtain wall
+                }
+                // furniture: the whisker's problem, not the planner's
+            } else {
+                cur = t;
+            }
+            d = next;
+        }
+        (max, cur)
+    }
+
+    /// Distance from `p` to the segment `a`—`b`, in XZ. Used to ask "is
+    /// this bot already ON that flight", which has to be a segment test
+    /// and not a foot test: a bot twenty treads up the Breach is nowhere
+    /// near the foot, and telling it to go back down there is how a
+    /// stair turns into a treadmill.
+    fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+        let (vx, vz) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = vx * vx + vz * vz;
+        let t = if len2 < 1e-6 {
+            0.0
+        } else {
+            (((p[0] - a[0]) * vx + (p[1] - a[1]) * vz) / len2).clamp(0.0, 1.0)
+        };
+        let (dx, dz) = (p[0] - (a[0] + vx * t), p[1] - (a[1] + vz * t));
+        (dx * dx + dz * dz).sqrt()
+    }
+
+    /// §owner BOT ROUTING: turn a bot's chosen DESTINATION into a
+    /// waypoint it can actually walk at.
+    ///
+    /// The problem this exists for: `waypoint` is `[f32; 2]` with no
+    /// height, sampled from a square and never checked, and `bot_act`
+    /// steers straight at it. On a flat arena that reads as roaming. On
+    /// CLIFFHOLD — 32 m of relief, an objective eighteen metres up — the
+    /// sample lands on top of the mountain, the bot presses into rock
+    /// until the 15%/tick re-roll fires, and no bot has ever chosen to
+    /// go UP because the waypoint has nowhere to put the intention.
+    ///
+    /// Four rules, in order, and none of them is a pathfinder:
+    ///
+    /// 0. **Finish the flight you are on.** See below — this is the one
+    ///    that actually makes the map climbable.
+    /// 1. **Probe the straight line.** If the ground gets you there AND
+    ///    the destination is not up a band you are still at the bottom
+    ///    of, steer at it. That covers everything the old code did, plus
+    ///    the case the map was shaped for: two flights are aimed down the
+    ///    x = 0 line, so a bot walking at the castle capture ring is
+    ///    already climbing and must not be diverted off it.
+    /// 2. **If the destination is a band up, take a stair.** The map
+    ///    publishes its flights (`Climb`); pick the one that minimises
+    ///    walk-to-foot plus head-to-destination and aim at its foot.
+    ///    Deliberately NOT gated on the probe being blocked: from two
+    ///    hundred metres out the mountain is past the probe's horizon,
+    ///    and a bot that only re-plans once it can see the cliff has
+    ///    already spent the walk going the wrong way.
+    /// 3. **Otherwise, stop at the last standable point on the line.**
+    ///    The bot walks to the foot of the wall instead of into it and
+    ///    re-rolls somewhere else — the existing re-roll doing duty as a
+    ///    rejection sampler, at no cost in `rng` draws.
+    ///
+    /// DETERMINISM: this draws NOTHING from `rng` and reads no clock. It
+    /// is a pure function of the fighter's position and the static map,
+    /// applied AFTER the sample, so the draw sequence in `bot_think` is
+    /// byte for byte what it was — every seeded test and every replay
+    /// sees the same stream it always did.
+    fn route_waypoint(&self, i: usize, want: [f32; 2]) -> [f32; 2] {
+        let f = &self.fighters[i];
+        let from = [f.pos[0], f.pos[2]];
+        let y = f.pos[1];
+        // the fighter's OWN envelope, so a bot mech (1.7x step-up) plans
+        // against the ledges it can really take rather than a soldier's
+        let step_up = f.step_up();
+        let (dx, dz) = (want[0] - from[0], want[1] - from[1]);
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < BOT_ROUTE_MIN_M {
+            return want; // already there; nothing to plan
+        }
+        // 0. COMMITMENT. A bot standing PART WAY UP a flight finishes
+        //    it, whatever it just rolled.
+        //
+        //    This is the rule that actually makes the map climbable, and
+        //    it took a measurement to find: `bot_think` re-rolls on 15%
+        //    of ticks, so a plan survives about half a second — two
+        //    metres of walking, four risers. Reaching the plateau off
+        //    the ravine floor needs thirty-six of them IN A ROW, and a
+        //    bot that re-decides twice a second never gets a run of
+        //    thirty-six. Without this it climbs four treads, rolls
+        //    somewhere south, and walks back down; the peak height in a
+        //    two-minute roam was 8 m of an 18 m cliff.
+        //
+        //    Stateless on purpose — it is read off the bot's POSITION,
+        //    not remembered — so there is no new `Fighter` field, no
+        //    respawn reset to get wrong, and nothing to leave stale when
+        //    a bot dies half way up a staircase.
+        if let Some(c) = self.climb_underfoot(from, y, step_up) {
+            return c.head;
+        }
+        let dir = [dx / len, dz / len];
+        let cap = len.min(BOT_ROUTE_PROBE_M);
+        let (reach, end_y) = self.ground_reach(from, y, dir, cap, step_up);
+        let open = reach >= cap - 1e-3;
+        // Is the destination a BAND UP, or merely somewhere else on
+        // mine? Only the first is a routing problem: a same-band
+        // destination behind a building is handled by walking to the
+        // building and re-rolling, which is what rule 3 does.
+        let needs_up = terrain_top(&self.cover, want[0], want[1]) > y + step_up;
+        // ...and if this line is ALREADY gaining height, it has found a
+        // way up on its own and must be left alone.
+        let climbing = end_y > y + step_up;
+        if open && (!needs_up || climbing) {
+            return want;
+        }
+        if needs_up {
+            if let Some(c) = self.best_climb(from, y, step_up, want) {
+                // get to the foot the same careful way, so the approach
+                // to a stair cannot itself aim through rock
+                let (fx, fz) = (c.foot[0] - from[0], c.foot[1] - from[1]);
+                let flen = (fx * fx + fz * fz).sqrt();
+                if flen < BOT_ROUTE_MIN_M {
+                    return c.head;
+                }
+                let fdir = [fx / flen, fz / flen];
+                let fcap = flen.min(BOT_ROUTE_PROBE_M);
+                let (freach, _) = self.ground_reach(from, y, fdir, fcap, step_up);
+                if freach >= fcap - 1e-3 {
+                    return c.foot;
+                }
+                let d = freach.max(BOT_ROUTE_MIN_M);
+                return [from[0] + fdir[0] * d, from[1] + fdir[1] * d];
+            }
+        }
+        if open {
+            return want; // nothing in the way and no stair to take
+        }
+        // The last standable point on the line — never closer than
+        // `BOT_ROUTE_MIN_M`, or a cornered bot would sit inside the
+        // arrival radius and re-roll (and draw from `rng`) every tick.
+        let d = reach.max(BOT_ROUTE_MIN_M);
+        [from[0] + dir[0] * d, from[1] + dir[1] * d]
+    }
+
+    /// The flight this body is CURRENTLY STANDING ON, if any: inside the
+    /// lane, above the foot band, and not yet at the head.
+    ///
+    /// "Above the foot band" is `base + step_up` rather than `base`,
+    /// which is what keeps a bot merely WALKING PAST the bottom of a
+    /// staircase from being press-ganged up it — one tread is an
+    /// accident, two is a decision.
+    fn climb_underfoot(&self, from: [f32; 2], y: f32, step_up: f32) -> Option<Climb> {
+        self.climbs
+            .iter()
+            .find(|c| {
+                y > c.base + step_up * 0.5
+                    && y < c.top - 0.01
+                    && Self::seg_dist(from, c.foot, c.head) < BOT_CLIMB_LANE_M
+            })
+            .copied()
+    }
+
+    /// The flight that best serves "I am at `from`, standing at `y`, and
+    /// I want to get to `want`".
+    ///
+    /// Cost is walk-to-foot plus head-to-destination, straight-line both
+    /// halves — the same greedy one-hop choice a person makes looking at
+    /// a hillside, and deliberately not a search. A flight whose foot is
+    /// on a band this body cannot reach, or whose head is not actually
+    /// higher than where it already stands, is not a candidate.
+    ///
+    /// A bot ALREADY on a flight never gets here — `route_waypoint`
+    /// answers that case from `climb_underfoot` before it asks, because
+    /// re-scoring every re-roll against a freshly rolled destination is
+    /// exactly how a bot ends up half way up two different stairs and
+    /// neither.
+    fn best_climb(&self, from: [f32; 2], y: f32, step_up: f32, want: [f32; 2]) -> Option<Climb> {
+        let mut best: Option<(f32, Climb)> = None;
+        for c in &self.climbs {
+            // can this body start it, and does it go anywhere useful?
+            if c.base > y + step_up || c.top <= y + step_up {
+                continue;
+            }
+            let to_foot =
+                ((c.foot[0] - from[0]).powi(2) + (c.foot[1] - from[1]).powi(2)).sqrt();
+            let to_want =
+                ((want[0] - c.head[0]).powi(2) + (want[1] - c.head[1]).powi(2)).sqrt();
+            let cost = to_foot + to_want;
+            if best.map_or(true, |(b, _)| cost < b) {
+                best = Some((cost, *c));
+            }
+        }
+        best.map(|(_, c)| c)
+    }
+
     fn bot_think(&mut self, i: usize) {
         // §owner: on the RANGE the targets are targets. They hold their
         // ground and they never fire, so the only thing being tested is
@@ -12685,10 +13050,15 @@ impl TdmSim {
             };
             // keep waypoints INSIDE the walls — the biased roam sum can
             // land past the border, pinning bots against it
-            self.fighters[i].waypoint = [
+            let target = [
                 target[0].clamp(-half + 3.0, half - 3.0),
                 target[1].clamp(-half + 3.0, half - 3.0),
             ];
+            // §owner BOT ROUTING: and then make it a place this bot can
+            // actually WALK to. Deliberately after the last `rng` draw
+            // and drawing nothing itself, so the stream is untouched —
+            // see `route_waypoint`.
+            self.fighters[i].waypoint = self.route_waypoint(i, target);
         }
     }
 
@@ -24720,6 +25090,365 @@ mod tests {
             "walking straight up the Breach must reach the plateau, stopped at {y:.2} m"
         );
         assert!(climbed > 20, "only {climbed} risers — that is not a flight");
+    }
+
+    // ------------------------------------------- §owner BOT ROUTING
+
+    /// Roam a single team from `from` for `secs`, with nobody to shoot
+    /// at, and report (peak height per fighter, % of live ticks with the
+    /// obstacle whisker blocked, % of live ticks above 12 m).
+    ///
+    /// ONE TEAM on purpose: with two, `bot_act` takes the combat branch
+    /// and the waypoint is never read at all, so a mixed drop measures a
+    /// firefight and calls it navigation. (It measured exactly that
+    /// once, and the numbers were noise.)
+    ///
+    /// The whisker count is the honest "is it grinding into rock"
+    /// measure: it is `bot_act`'s OWN 1.2 m probe, re-evaluated here
+    /// with the sim's own `los_clear`, and it knows nothing whatever
+    /// about the route planner under test.
+    fn ch_roam(seed: u64, from: [f32; 3], secs: usize) -> (Vec<f32>, f32, f32) {
+        let mut s = cliffhold(seed, 4);
+        for (k, f) in s.fighters.iter_mut().enumerate() {
+            f.team = Team::Blue;
+            f.pos = [from[0] + (k as f32 - 3.5) * 3.0, from[1], from[2]];
+            f.protect_t = 0.0;
+        }
+        let n = s.fighters.len();
+        let mut peak = vec![0.0f32; n];
+        let (mut high, mut veer, mut total) = (0u32, 0u32, 0u32);
+        for _ in 0..(secs * SIM_HZ as usize) {
+            s.step(PlayerCmd::default());
+            for i in 1..n {
+                let f = &s.fighters[i];
+                if !f.alive() {
+                    continue;
+                }
+                if f.pos[1] > peak[i] {
+                    peak[i] = f.pos[1];
+                }
+                total += 1;
+                if f.pos[1] > 12.0 {
+                    high += 1;
+                }
+                let (dx, dz) = (f.waypoint[0] - f.pos[0], f.waypoint[1] - f.pos[2]);
+                let d = (dx * dx + dz * dz).sqrt().max(0.01);
+                let eye = [f.pos[0], f.pos[1] + BOT_PROBE_Y, f.pos[2]];
+                let ahead = [
+                    f.pos[0] + dx / d * 1.2,
+                    f.pos[1] + BOT_PROBE_Y,
+                    f.pos[2] + dz / d * 1.2,
+                ];
+                if !s.los_clear(eye, ahead) {
+                    veer += 1;
+                }
+            }
+        }
+        let pct = |v: u32| 100.0 * v as f32 / total.max(1) as f32;
+        (peak, pct(veer), pct(high))
+    }
+
+    /// §owner BOT ROUTING: every link the map publishes is a flight a
+    /// BODY can walk up, arriving on the band it advertises.
+    ///
+    /// The link list is generated inside the `flight` helper from the
+    /// same eight numbers that lay the treads, which makes it cheap and
+    /// makes it possible to be quietly, systematically wrong — an
+    /// off-by-one on the head puts every route on the map one tread
+    /// short of its landing, and nothing else would notice.
+    ///
+    /// So each one is WALKED, with `ch_walk`: 0.25 m at a time, with a
+    /// body radius, obeying the support and push-out rules, over
+    /// geometry those rules have never seen. `ch_walk` predates this
+    /// work and knows nothing about `Climb`, so agreeing with it is a
+    /// real check and not a restatement.
+    #[test]
+    fn every_cliffhold_climb_is_a_flight_a_body_can_walk_up() {
+        let s = cliffhold(0xC130, 2);
+        assert!(
+            s.climbs.len() >= 15,
+            "Cliffhold lays eighteen flights; only {} links published",
+            s.climbs.len()
+        );
+        for c in &s.climbs {
+            assert!(
+                c.top > c.base + STEP_UP,
+                "a link from {:.1} m to {:.1} m is not a way UP",
+                c.base,
+                c.top
+            );
+            // the foot is reachable from the band it claims to start on
+            let at_foot = terrain_top(&s.cover, c.foot[0], c.foot[1]);
+            assert!(
+                at_foot <= c.base + STEP_UP + 0.01,
+                "the foot of the {:.0}->{:.0} m flight stands {at_foot:.2} m up, \
+                 out of reach of its own base",
+                c.base,
+                c.top
+            );
+            // ...and walking it lands on the band it claims to end on.
+            //
+            // A WINDOW rather than an equality, and the window is one
+            // step-up wide on the high side for a reason the aqueduct
+            // stair found: its head abuts a 5.4 m roof, so a body
+            // walking the last tread of a "0 -> 5" flight is standing on
+            // 5.4. That is the flight doing its job — it delivered you
+            // onto the band and the band has a kerb — and pinning it to
+            // 5.00 would be a test that only fits the geometry it was
+            // written against.
+            let y = ch_walk(&s.cover, c.foot, c.head, c.base, STEP_UP, BODY_RADIUS)
+                .unwrap_or_else(|e| {
+                    panic!("the {:.0}->{:.0} m flight is not walkable: {e}", c.base, c.top)
+                });
+            assert!(
+                y >= c.top - 0.01 && y <= c.top + STEP_UP,
+                "the {:.0}->{:.0} m flight arrives at {y:.2} m, not the {:.1} m band \
+                 it advertises",
+                c.base,
+                c.top,
+                c.top
+            );
+            // and standing on the head really is standing on that band,
+            // not on a ledge with the band still in your face
+            let at_head = terrain_top(&s.cover, c.head[0], c.head[1]);
+            assert!(
+                at_head >= c.top - 0.01 && at_head <= c.top + STEP_UP,
+                "the head of the {:.0}->{:.0} m flight sits on {at_head:.2} m",
+                c.base,
+                c.top
+            );
+        }
+    }
+
+    /// §owner BOT ROUTING: the planner and the BODY agree about where
+    /// the ground is.
+    ///
+    /// `support_top` is the integrate loop's own vertical rule, pulled
+    /// out so the route planner asks the same question the body answers.
+    /// An extraction is exactly the change that can silently alter a
+    /// comparison, so it is checked against `ch_support` — a separate
+    /// statement of the same rule, written for the Cliffhold walker
+    /// before any of this existed — over the map with the most vertical
+    /// geometry in the game.
+    #[test]
+    fn the_route_planners_ground_and_the_bodys_ground_are_the_same_ground() {
+        let s = cliffhold(0xC131, 2);
+        let mut sampled = 0u32;
+        let mut nonzero = 0u32;
+        for gx in 0..41 {
+            for gz in 0..41 {
+                let x = -260.0 + gx as f32 * 13.0;
+                let z = -260.0 + gz as f32 * 13.0;
+                for y in [0.0_f32, 5.0, 12.0, 18.0, 24.0] {
+                    let mine = support_top(&s.cover, x, z, y, STEP_UP);
+                    let theirs = ch_support(&s.cover, x, z, y, STEP_UP);
+                    assert_eq!(
+                        mine.to_bits(),
+                        theirs.to_bits(),
+                        "support disagreement at ({x:.0}, {z:.0}) standing at {y:.0} m"
+                    );
+                    sampled += 1;
+                    if mine > 0.0 {
+                        nonzero += 1;
+                    }
+                }
+                // and the planner's "how high is the ground here", which
+                // is the same rule with the reachability ceiling removed
+                let dropped = terrain_top(&s.cover, x, z);
+                assert_eq!(
+                    dropped.to_bits(),
+                    ch_support(&s.cover, x, z, 1.0e6, 0.0).to_bits(),
+                    "terrain disagreement at ({x:.0}, {z:.0})"
+                );
+            }
+        }
+        // a sweep that never touched geometry would agree about nothing.
+        // Measured: 1370 of 8405 land on something, which is what a
+        // 600 m map with a mountain in one corner looks like.
+        assert!(
+            nonzero > 800,
+            "only {nonzero} of {sampled} samples landed on anything — \
+             this sweep is not testing the map"
+        );
+    }
+
+    /// §owner BOT ROUTING: a bot that wants the castle takes a STAIR.
+    ///
+    /// Four cases, and the second is the one it would be easy to break
+    /// by being clever: the map deliberately aims two flights down the
+    /// x = 0 line so a bot steering at the courtyard capture ring climbs
+    /// by accident, and a planner that "helpfully" re-routed that bot to
+    /// a staircase it was already on would undo the one piece of
+    /// AI-shaping the map already had.
+    #[test]
+    fn a_bot_that_wants_the_castle_routes_onto_a_flight() {
+        let mut s = cliffhold(0xC132, 2);
+        let castle = [CH_CHECKPOINT_KEEP[0], CH_CHECKPOINT_KEEP[1]];
+        // THE BREACH, found by what it does rather than by index: the
+        // ground-level flight up the ravine, south of the head block.
+        let breach = s
+            .climbs
+            .iter()
+            .find(|c| c.base == 0.0 && c.top == CH_PLATEAU && c.foot[1] < 100.0)
+            .copied()
+            .expect("the Breach must be published");
+
+        // 1. OFF the spine, at the foot of the east massif: the straight
+        //    line is eighteen metres of rock, so the route must bend to
+        //    a flight rather than press into it.
+        s.fighters[1].pos = [60.0, 0.0, 20.0];
+        let wp = s.route_waypoint(1, castle);
+        assert!(
+            wp != castle,
+            "a bot at the foot of the cliff still steers straight at the courtyard"
+        );
+        // The raw sample is a point EIGHTEEN METRES UP A CLIFF; the
+        // routed one is on ground this bot can stand on. Measured with
+        // `ch_support`, which is the walker's own independent statement
+        // of the support rule and knows nothing about the planner.
+        assert!(
+            ch_support(&s.cover, castle[0], castle[1], 1.0e6, 0.0) > 12.0,
+            "this test assumes the castle ring is high ground; it is not"
+        );
+        assert!(
+            ch_support(&s.cover, wp[0], wp[1], 1.0e6, 0.0) <= BOT_TERRAIN_M,
+            "routed onto ({:.0}, {:.0}), which is still up a cliff",
+            wp[0],
+            wp[1]
+        );
+        assert!(
+            TdmSim::seg_dist(wp, breach.foot, breach.head) < BOT_CLIMB_LANE_M * 2.0,
+            "routed to ({:.0}, {:.0}), which is not on the way to any flight",
+            wp[0],
+            wp[1]
+        );
+
+        // 2. ON the spine: the line already climbs the Breach, so leave
+        //    it alone. This is the map's own design working.
+        s.fighters[1].pos = [0.0, 0.0, 20.0];
+        assert_eq!(
+            s.route_waypoint(1, castle),
+            castle,
+            "the x = 0 spine already climbs; diverting it wastes the map's shaping"
+        );
+
+        // 3. PART WAY UP, wanting somewhere far to the south: finish the
+        //    flight. Without this the plan dies to the next re-roll and
+        //    the bot walks back down — measured at 0 of 35 bots ever
+        //    reaching the plateau off the ravine floor.
+        s.fighters[1].pos = [0.0, 6.0, 65.0];
+        assert_eq!(
+            s.route_waypoint(1, [-200.0, -200.0]),
+            breach.head,
+            "a bot six metres up a flight abandoned it for a southern waypoint"
+        );
+
+        // 4. and once it is UP, the plateau is ordinary ground again
+        s.fighters[1].pos = [0.0, CH_PLATEAU, 120.0];
+        assert_eq!(
+            s.route_waypoint(1, castle),
+            castle,
+            "a bot on the plateau should walk at the courtyard, not at a stair"
+        );
+    }
+
+    /// §owner BOT ROUTING, the end-to-end claim: bots on Cliffhold reach
+    /// the plateau, and stop grinding into the mountain on the way.
+    ///
+    /// Both halves are measured with instruments that know nothing about
+    /// the planner — peak height off the fighters' own positions, and
+    /// the grinding rate off `bot_act`'s own whisker. Measured on the
+    /// pre-change code, same seeds, same fixtures:
+    ///
+    /// ```text
+    ///                  bots reaching 18 m   ticks with the whisker blocked
+    ///   ravine floor      0 / 35 -> 14 / 35        14.3%  ->  7.2%
+    ///   north plain       2 / 35 -> 27 / 35        36.2%  ->  8.5%
+    /// ```
+    ///
+    /// The thresholds sit between the two columns in every case, so this
+    /// fails loudly on the old behaviour and still has room for the AI
+    /// to be retuned without going red.
+    #[test]
+    fn cliffhold_bots_reach_the_plateau_and_stop_grinding_into_it() {
+        let seeds = [0xC301u64, 0xC302, 0xC303, 0xC304, 0xC305];
+        for (name, from, want_plateau, veer_cap) in [
+            ("the ravine floor", [0.0_f32, 0.0, 20.0], 5usize, 11.0_f32),
+            ("Red's north plain", [0.0_f32, 0.0, 285.0], 12, 20.0),
+        ] {
+            let mut reached = 0usize;
+            let mut veer_sum = 0.0_f32;
+            let mut best = 0.0_f32;
+            for seed in seeds {
+                let (peak, veer, _) = ch_roam(seed, from, 90);
+                reached += peak.iter().skip(1).filter(|p| **p > CH_PLATEAU - 0.5).count();
+                veer_sum += veer;
+                best = best.max(peak.iter().skip(1).cloned().fold(0.0, f32::max));
+            }
+            let veer = veer_sum / seeds.len() as f32;
+            assert!(
+                (best - CH_PLATEAU).abs() < 0.01,
+                "{name}: the highest a bot ever got was {best:.1} m, not the \
+                 {CH_PLATEAU} m plateau"
+            );
+            assert!(
+                reached >= want_plateau,
+                "{name}: only {reached} bots of 35 reached the plateau in 90 s"
+            );
+            assert!(
+                veer < veer_cap,
+                "{name}: bots spent {veer:.1}% of their time with the obstacle \
+                 whisker blocked — that is grinding, not roaming"
+            );
+        }
+    }
+
+    /// §owner BOT ROUTING: and the FLAT maps are left where they were.
+    ///
+    /// A navigation change is exactly the kind that quietly re-tunes
+    /// every other map's AI as a side effect. This is the guard: the old
+    /// layouts publish no flights, and their waypoints come back BITWISE
+    /// unchanged, so a bot on the Arena roams exactly as far as it
+    /// always did.
+    ///
+    /// The Battlefield gets a floor rather than an equality, and should:
+    /// it has 6 m structures on it, which are over `BOT_TERRAIN_M` and
+    /// are meant to be routed around. Measured at 92.9% untouched.
+    #[test]
+    fn bot_routing_leaves_the_older_maps_where_it_found_them() {
+        for (map, floor) in [
+            (MapKind::Arena, 100.0_f32),
+            (MapKind::Bailey, 100.0),
+            (MapKind::Gardens, 100.0),
+            (MapKind::Battlefield, 85.0),
+        ] {
+            let mut s = TdmSim::new(cfg(0xF00D, 2, Mode::Tdm, map));
+            assert!(
+                s.climbs.is_empty(),
+                "{map:?} predates published flights and must publish none"
+            );
+            let h = s.half;
+            let (mut same, mut n) = (0u32, 0u32);
+            for gx in 0..21 {
+                for gz in 0..21 {
+                    let px = -h * 0.9 + gx as f32 * h * 0.09;
+                    let pz = -h * 0.9 + gz as f32 * h * 0.09;
+                    s.fighters[1].pos = [px, terrain_top(&s.cover, px, pz), pz];
+                    for want in [[h * 0.7, h * 0.7], [-h * 0.7, h * 0.5], [0.0, -h * 0.8]] {
+                        n += 1;
+                        if s.route_waypoint(1, want) == want {
+                            same += 1;
+                        }
+                    }
+                }
+            }
+            let pct = 100.0 * same as f32 / n as f32;
+            assert!(
+                pct >= floor,
+                "{map:?}: only {pct:.1}% of waypoints came back unchanged — this \
+                 change has re-tuned a map it was not asked to touch"
+            );
+        }
     }
 
     /// §owner CLIFFHOLD: the shared infill keeps OUT of the set pieces,

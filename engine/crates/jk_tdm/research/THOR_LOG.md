@@ -1898,3 +1898,247 @@ taken.
 detached worktree (`<scratch>/wt`) for the build; it is gone, and
 `git worktree list` above is the state I left. The only file I wrote in this
 repo is this log.
+
+---
+
+# 2026-08-08 — CONFIRMATION PASS: `feat/scoutmech-scale-and-height` @ `824cd38`
+
+Short entry, one job: re-run the branch after Friday's fix commit and say
+whether the regression I bisected is actually gone. It is.
+
+## Result: GREEN
+
+    test result: ok. 362 passed; 0 failed; 2 ignored; 0 measured
+    rustc release, worktree at 824cd38
+
+Previous run on this branch (tip `9b467f3`) was **361 passed / 1 FAILED / 2
+ignored**. The delta is exactly the one test, plus zero new failures:
+
+    cargo test --release -p jk_tdm -- --exact \
+      sim::tests::a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does
+    test ... ok      (1 passed; 363 filtered out)
+
+Ran it standalone *by name* as well as in the suite, because "the count went
+up by one" is not the same claim as "that specific test passes".
+
+## The revert does what its message says
+
+- `sim.rs:62` — `pub const BODY_HEIGHT: f32 = 1.78;`  reverted, as claimed.
+- `sim.rs:4193` — `pub const SCOUT_SCALE: f32 = 1.05;`  unchanged, as claimed.
+  Against the reverted 1.78 this still means 1.869 m, i.e. the "5% over the
+  player" the owner asked for. `sim.rs:3021` (`BODY_HEIGHT * SCOUT_SCALE`)
+  is the live consumer in `height()`; `main.rs:16225` is the visual one.
+- Grepped the whole crate for `1.691`: **zero hits.** No stale copy of the
+  shrunk value left behind in a comment, a test, or a second constant.
+- `sim.rs:14236` — the un-failable assertion is really fixed:
+  `assert!(s.fighters[0].vy < 1.0, ...)`. Re-derived the bound myself: vy is
+  forced to 0.1 before the second press, so a *denied* jump lands at
+  0.1 - GRAVITY*DT = -0.05, while a *wrongly fired* one lands at
+  JUMP_SPEED - GRAVITY*DT = 7.25. The bound sits between them with room on
+  both sides. This assertion can now fail, which is the whole point.
+- Bonus check, since I was there: the sibling ratio test is **not**
+  self-referential. `sim.rs:14001` does rebuild `player_h * SCOUT_SCALE`,
+  but `sim.rs:14008` independently pins `(ratio - 1.05).abs() < 0.001`
+  against a literal, so a wrong SCOUT_SCALE would still be caught.
+
+## VERDICT: the 5-commit branch is clean and safe to merge to main
+
+`9a0c666` (SCOUT_SCALE into `height()`), `a4da1f5` (double flip charge),
+`3e8dcc3` (motion dynamics scale/timing), `9b467f3` (mid-air jump),
+`824cd38` (this revert + assertion fix). Tip: **`824cd38`**.
+
+## Instrument note — READ THIS BEFORE YOU BUILD (it cost me a cycle today)
+
+My first run today failed, and **it was not the code**:
+
+    MASM : fatal error A1009: line too long
+    error occurred in cc-rs: ... ml64.exe ... blake3_sse2_x86-64_windows_msvc.asm
+
+That is `ml64.exe` choking on the *length of the output path*, because a
+cold build inside the scratchpad worktree puts `target/` under
+`...\AppData\Local\Temp\claude\c--Users-bozov-...\<uuid>\scratchpad\wt-...\engine\target\...`.
+It is a **different** failure from the `STATUS_STACK_BUFFER_OVERRUN` one
+already documented in this log, and it looks alarming in the same way:
+a scary toolchain error on a branch you are trying to judge. Note also that
+piping cargo through `tail` makes the *pipeline* exit 0, so the harness
+reported "completed (exit code 0)" for a build that had failed outright —
+the instrument reporting success for its own failure, again.
+
+The old recipe still works and dodges both, because it never rebuilds the
+C crates at all:
+
+    git worktree add --detach <scratch>/wt-x <ref>
+    cd <scratch>/wt-x/engine        # MUST be engine/, for RUST_MIN_STACK
+    CARGO_TARGET_DIR="<repo>/engine/target" cargo test --release -p jk_tdm
+
+Same courtesy note as before: this overwrites the shared target dir's
+`jk_tdm` artifacts only. Dependencies untouched.
+
+*Footprint:* I edited no source file. The only file I wrote is this log.
+The `wt-scoutmech` worktree at `824cd38` was already present and I left it
+in place, clean.
+
+---
+
+# 2026-08-08 — `feat/scout-plasma-dual-cannon` @ `2c12418`: **REJECT. Do not merge.**
+
+Branch: `feat/scout-plasma-dual-cannon`, one commit `2c12418` ("Scout plasma
+cannon: twin revolving muzzles, precise-then-loosening fire") on top of
+`main` @ `b47b1c5`. Diff is 181 insertions in `sim.rs` only. Author had NOT
+build-verified it. I did.
+
+## Test result (mine, not a reported number)
+
+    373 passed; 1 failed; 2 ignored
+
+    ---- sim::tests::the_scout_plasma_cannon_is_precise_then_loosens_and_kicks ----
+    panicked at crates/jk_tdm/src/sim.rs:15390:
+    the shot past the precise window must show real spread, deviation was 0
+
+**The branch's own new test fails.** Everything else on the branch is green.
+
+## Defect 1 (why the test fails) — off-by-one in the ramp
+
+`sim.rs:9977`
+
+    let ramp_shots = shot_i.saturating_sub(PLASMA_PRECISE_SHOTS) as f32;
+
+`PLASMA_PRECISE_SHOTS = 2` (`sim.rs:4791`). Shots are indexed from 0, so
+indices 0 and 1 are the precise window — correct. But index **2**, the first
+shot the doc comment says must be past the window, yields
+`2.saturating_sub(2) = 0`, hence `spread = 0.0` and `kick_mult = 1.0`. The
+third shot is silently precise too; the ramp does not begin until index 3.
+The test asserts on exactly index 2 and dies. `ramp_shots` needs to be
+`shot_i.saturating_sub(PLASMA_PRECISE_SHOTS - 1)` (or the window redefined),
+and the KICK half of the same test (`sim.rs:15396`,
+`punch_after - punch_before > base_kick`) would have failed on the next line
+for the same reason — `kick_mult` is exactly 1.0 there, so the difference
+equals `base_kick` rather than exceeding it.
+
+## Defect 2 (worse, and caught by NO test) — the feature is inert in production
+
+`sim.rs:9949`
+
+    let fresh_press = self.fighters[p].gatling_trigger_t <= 0.0;
+
+`try_fire_plasma` then writes `gatling_trigger_t` only at the very END of a
+SUCCESSFUL shot, `sim.rs:10015-10016`:
+
+    f.gatling_cd = PLASMA_FIRE_PERIOD;
+    f.gatling_trigger_t = PLASMA_FIRE_PERIOD;
+
+Both fields are seeded with the **same** constant (0.16) and then decayed in
+the same straight-line block of the same tick loop with the same `DT` and the
+same clamp — `gatling_cd` at `sim.rs:6738`, `gatling_trigger_t` at
+`sim.rs:6744`. They are therefore bit-identical at every tick. The fire gate
+is `gatling_cd > 0.0 -> return false` (`sim.rs:9958`). So at the exact tick a
+plasma shot becomes legal, `gatling_trigger_t` is also exactly `0.0`, and
+`fresh_press` is **true on every single shot**.
+
+Consequence in the real game (held trigger; player path `sim.rs:7890`, bot
+path `sim.rs:13082`, both called once per tick):
+`plasma_shot_i` is reset to 0 before every shot, so `shot_i` is always 0.
+Spread is always 0, `kick_mult` is always 1.0, and `shot_i % 2 == 0` is
+always true — **the twin muzzles never alternate; every bolt leaves the same
+barrel.** The entire advertised feature never fires once outside the test.
+
+The contrast is the point: the gatling refreshes its hold timer BEFORE every
+early return (`sim.rs:9766-9768`), inside a block whose own comment
+(`sim.rs:9759-9765`) says *"This must precede every early return... or the
+heat suppression stutters between shots"*. The plasma copied the
+`fresh_press` READ from that function and left the REFRESH behind.
+
+Note also `GATLING_TRIGGER_HOLD_S` (0.07) equals `GATLING_FIRE_PERIOD`
+(0.07) — the gatling is correct only because of that early refresh, not
+because of any margin in the constants. Anyone fixing this should not assume
+"pick a bigger hold constant" is the same fix.
+
+## Defect 3 (test design) — the new test cannot see Defect 2
+
+The new test asserts against **state the tick loop cannot produce**. It
+advances the mount by hand — `s.fighters[0].gatling_cd = 0.0;`
+(`sim.rs:15344`, `15380`, `15406`) — while never touching
+`gatling_trigger_t`, so `gatling_trigger_t` stays at 0.16 and `fresh_press`
+reads false. That is the ONLY reason `plasma_shot_i` ever exceeds 0 anywhere
+in this branch. A test that stepped the sim (`s.step(...)`) between shots — as
+the pre-existing `plasma_leaves_nothing_to_pick_up` at `sim.rs:15120` already
+does — would have exposed Defect 2 immediately. Any fix MUST come with a
+stepped test, or the next pass will re-certify a dead feature.
+
+## What the author got RIGHT — do not re-litigate these
+
+- **Constructor coverage: complete.** There is exactly one `Fighter { ... }`
+  literal in the crate (`sim.rs:6333`); `plasma_shot_i: 0` is at `sim.rs:6356`.
+  No `Default` impl, no `..` struct-update syntax, no second site. It compiles,
+  which proves it.
+- **Reset-site parity: complete.** `turret_burst_i` is reset at `sim.rs:6995`
+  (respawn — mirrored by `plasma_shot_i` at `sim.rs:7001`), at `sim.rs:9799`
+  (in-function fresh press — mirrored at `sim.rs:9963`), and at `sim.rs:7420`
+  (gatling FIRE-MODE cycle, gated on `w == MechWeapon::Gatling`, genuinely
+  N/A to plasma). **No missed site.** I checked this specifically because it
+  was the headline suspicion; it is a false alarm and will be raised again if
+  nobody records that.
+- **No borrow-order bug.** `muzzle_origin(&self)` at `sim.rs:9989` releases its
+  immutable borrow before `let f = &mut self.fighters[p]` at `sim.rs:10014`;
+  the inline `self.fighters[p].yaw` read at `sim.rs:9990` sits between them and
+  is fine. The suspicion was reasonable and is **wrong**.
+- **The right-vector is correct.** `[-yaw.cos(), 0.0, yaw.sin()]`
+  (`sim.rs:9991`) is character-for-character the project's own convention from
+  `muzzle_origin` (`sim.rs:8880`). It is a unit vector, so the muzzle
+  separation really is exactly `2 * PLASMA_CANNON_OFFSET_M`, and that
+  assertion in the test is sound (it is one of the assertions that PASSED).
+
+## Three things stated inaccurately, worth correcting
+
+1. The kick is described as "a multiplier on the existing
+   `mech_mount_kick(PLASMA_DAMAGE)` formula". There was no existing plasma
+   kick — `sim.rs:10023-10024` ADDS recoil to the rapid plasma for the first
+   time. Even at `kick_mult == 1.0` that is a live balance change, and right
+   now (Defect 2) `kick_mult == 1.0` is the only thing that would ship.
+2. `self.rng.range(...)` is drawn twice per plasma shot unconditionally
+   (`sim.rs:9980`), including when `spread == 0.0`. Determinism within a run is
+   preserved (the fingerprint test passes), but the shared RNG stream now
+   diverges from `main` for any seed where plasma fires. Acceptable, but it is
+   a replay-parity fact, not a no-op.
+3. Forward-looking: `plasma_shot_i` is NOT in the determinism fingerprint at
+   `sim.rs:23749`, where `turret_burst_i` deliberately is. Harmless today only
+   because Defect 2 pins the field to 0. **The moment Defect 2 is fixed this
+   becomes a real digest gap** of exactly the class that block's own comment
+   names. Fix both in the same commit.
+
+## Handoff to FRIDAY
+
+In order: (a) refresh `gatling_trigger_t` on the plasma path BEFORE every
+early return, mirroring `sim.rs:9766-9768`, with a hold value strictly greater
+than `PLASMA_FIRE_PERIOD` (or refresh on non-firing ticks); (b) fix the
+`ramp_shots` off-by-one at `sim.rs:9977`; (c) add `plasma_shot_i` to the
+fingerprint at `sim.rs:23749`; (d) rewrite the new test to STEP the sim
+between shots instead of hand-zeroing `gatling_cd`, and assert the muzzle
+actually ALTERNATES across a stepped burst. Must NOT change: gatling
+behaviour — `gatling_trigger_t` is shared and load-bearing for gatling heat
+suppression, so any new hold constant must be applied only on the plasma path.
+
+## Instrument note — a THIRD distinct build failure on this machine
+
+My first attempt today used a FRESH short target dir (`C:\verify-plasma-target`)
+instead of the repo's warm one. It failed with `STATUS_STACK_BUFFER_OVERRUN`
+(0xc0000409) in `naga`, `ash`, `ttf-parser`, `windows`, `read-fonts` — **even
+though I was cd'd into `engine/` and `RUST_MIN_STACK` was in scope.** So the
+earlier note in this log that `RUST_MIN_STACK` alone cures 0xc0000409 is
+**overstated**: it cures it for `jk_tdm` itself, but a COLD dependency build
+still dies. Also, `cargo ... > C:/file 2>&1` fails with "Permission denied" on
+this machine — write build logs into the scratchpad.
+
+The recipe that worked, unchanged, and still the only one I trust:
+
+    git worktree add --detach C:/vp-wt <ref>
+    cd C:/vp-wt/engine                # MUST be engine/, for RUST_MIN_STACK
+    CARGO_TARGET_DIR="<repo>/engine/target" cargo test --release -p jk_tdm
+
+i.e. the WARM shared target dir is not an optimisation, it is what makes the
+build succeed at all. Courtesy note as before: this rebuilt the shared target
+dir's `jk_tdm` artifacts from `2c12418`, so the next build from the main
+worktree eats one `jk_tdm`-only rebuild.
+
+*Footprint:* I edited no source file. The only file I wrote is this log. The
+throwaway worktree `C:/vp-wt` is removed.
