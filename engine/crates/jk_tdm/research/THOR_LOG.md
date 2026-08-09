@@ -2520,3 +2520,483 @@ cooling that runs before it in the same tick).
 
 *Footprint:* I edited no source file. The only file I wrote is this log. The
 throwaway worktree `C:/tw/s523` and target dir `C:/tw/t523` are removed.
+
+---
+
+# 2026-08-09 — THOR: operation audit + verification of `477be34`, `77b9805`, `2c2f863`
+
+## 0. PROVENANCE OF THIS RUN — read before trusting any number below
+
+* **Tree tested:** `e57943c` (source identical to `477be34`; `e57943c` is
+  log-only). `md5 main.rs = 4b0ea533f1f03c0723a53bd13b73475d`,
+  `md5 sim.rs = 02832610f38ba7a415b8eec6ac09f072`,
+  `md5 cliffhold.rs = 0ef7bfc93369b04083761ed494aaf1e2`.
+  I copied those three files to scratch BEFORE analysing, and re-checked
+  the md5s after the suite ran: unchanged. So the suite result and the
+  file:line evidence describe the same bytes.
+* **My run:** `cargo test --release -p jk_tdm` -> **386 passed, 0 failed,
+  2 ignored**, 1.40 s. That is mine, not a reported number.
+  Note `477be34`'s message says "369 -> 382 tests". The real count on
+  that tree is 386/0/2. Off by four; harmless, but it is a stated number
+  that does not hold.
+* **THE TREE MOVED UNDER ME MID-RUN.** At the start `git status` was
+  clean at `e57943c`. Partway through, HEAD was `cf51f19` ("Rule 13:
+  retire the research tier") and `sim.rs` was ` M` with
+  `md5 = 569870df3b701cc060b79c4705e3b272`. A builder is live in `sim.rs`
+  right now. **Any test run from this point forward is a run on the
+  builder's in-flight edit, not on the commits under review.** Do not
+  compare a later count to my 386.
+* **MUTATION TESTING WAS BLOCKED THIS RUN.** I created a throwaway
+  worktree at `C:/thor9` specifically so I could mutate a copy without
+  touching the repo's source, and the harness's permission classifier
+  refused the write. The worktree is removed. **Everything below that
+  would normally be mutation-proved is labelled `PROVISIONAL / never
+  mutation-verified`.** It is NOT "verified false" and it is NOT
+  "verified true". Next Thor: this is the gap to close first.
+* **Footprint:** I edited no source file. The only file I wrote is this
+  log.
+
+---
+
+## 1. CLIFFHOLD — the reachability test HOLDS. Landmarks are REAL geometry.
+
+**AGREE, and this is the strongest work in the three commits.**
+
+`every_cliffhold_band_is_reachable_on_foot` (`sim.rs:24964`) passes in my
+own run. It is not self-referential in the way that matters:
+
+* the walker `ch_walk`/`ch_support` (`sim.rs:24739`, `24774`) is a
+  SEPARATE statement of the movement rule, applied to geometry authored
+  in `build_cliffhold`;
+* and — the part that makes it hold up over time —
+  `the_route_planners_ground_and_the_bodys_ground_are_the_same_ground`
+  (`sim.rs:25234`) asserts `support_top(...).to_bits() ==
+  ch_support(...).to_bits()` over 8,405 samples. So the test walker is
+  pinned BITWISE to the function the body actually uses.
+* And `support_top` IS the production rule: **`sim.rs:8731`**, inside the
+  integrate loop's vertical step. Enumerated every consumer; that is the
+  only non-test caller and it is the right one.
+
+That is a properly closed chain: production rule -> extracted function ->
+bitwise-equal test restatement -> route walked over real map geometry.
+
+**Landmarks: real geometry, not a commit-message claim.**
+`cliffhold::spawn_landmarks` is called from production at
+**`main.rs:16002`**, gated on `map == MapKind::Cliffhold`. All four
+spawn real meshes: `spawn_keep_crown` (`cliffhold.rs:678`),
+`spawn_gatehouse` (`:749`), `spawn_bell_tower` (`:846`),
+`spawn_cliff_crest` (`:943`). `find()` (`:526`) locates them from the
+sim's published cover list against sim CONSTANTS, and
+`landmarks_are_found_where_the_sim_put_them` asserts 5 keep walls, 2
+gatehouse towers straddling x=0 with a gap, 1 bell tower in the
+south-west, 6 plateau slabs.
+
+Honest exception the builder DECLARED and I confirm is true: the bell
+tower's belfry stands on posts above an 11 m sim block with **no
+collision above 11 m** (`cliffhold.rs:826-846` doc). It looks like a
+tower and is not one to a flier. Stated deferral, correctly stated.
+
+### 1a. DEFECT (small, real): one landmark test cannot fail for the thing it says it guards
+
+`nothing_decorative_lands_on_a_standable_surface` (`cliffhold.rs:1331`)
+says in its own doc: *"This test exists so that a later 'just nudge it
+down a bit' cannot pass unnoticed."* It then does:
+
+```rust
+let arch_bottom = CH_RAMPART; // band centre CH_RAMPART + 1.1, half-height 1.1
+assert!(arch_bottom - CH_PLATEAU >= 5.0, ...);
+```
+
+`arch_bottom` is a LITERAL RESTATEMENT of the spawn, not a read of it.
+The arch is actually spawned at `cliffhold.rs:807-813` with
+`Transform::from_xyz(_, CH_RAMPART + 1.1, _)` and height 2.2. Change
+that Y to anything at all and this assertion is untouched — it compares
+two map constants to each other. It is rule 12's failure mode verbatim,
+in a test whose doc comment claims the opposite.
+
+I was blocked from running the mutation, but the vacuity is visible by
+reading: the mutated value does not appear in the assertion's dataflow
+at all.
+
+**For Friday:** make the arch's Y a `const` (or return it from a helper)
+and assert on THAT. Two lines. Same for the pinnacle base if you touch it.
+
+### 1b. OVERSTATED: "the same eight shots"
+
+`477be34` says *"`cliffhold-before/` and `cliffhold/` are the same eight
+shots, so the comparison is a diff rather than an impression."*
+
+Seven are. The eighth is not:
+`cliffhold-before/03-city-street-to-the-castle.png` vs
+`cliffhold/03-city-edge-to-the-castle.png`. The beat was renamed AND
+re-aimed between the two passes — `main.rs:5645` now only has
+`03-city-edge-to-the-castle`, and the before-pass beat table was never
+committed separately (the whole thing landed in one commit), so the
+old framing is unrecoverable. On that one frame the before/after IS an
+impression. Everywhere else the claim holds.
+
+---
+
+## 2. BOT NAVIGATION — replay-safety argument is EXACT. Behaviour change is real. One undeclared side effect.
+
+**Determinism: AGREE, and it is exact rather than approximate.**
+`route_waypoint` is declared `fn route_waypoint(&self, ...)`
+(`sim.rs:12877`). An immutable borrow of `self` **cannot** advance
+`self.rng`. That is compiler-enforced, not argued. Every helper it calls
+(`ground_reach` `:12795`, `seg_dist` `:12827`, `climb_underfoot`
+`:12960`, `best_climb` `:12985`, `terrain_top` `:1060`) is likewise
+`&self` or free. It is invoked at the end of `bot_think`, AFTER the last
+draw. No clock read, no map iteration order, no `partial_cmp` on floats
+in the selection path (`best_climb` uses a strict `<`, so ties resolve by
+list order). **The RNG stream is byte-identical. I re-derived it; I did
+not take it.**
+
+**But note what that makes the evidence worth.** The commit says "The
+replay tests pass unchanged." Those tests re-run the same build twice
+with the same seed. Given a pure `&self` function, they would pass no
+matter what `route_waypoint` returned. The determinism suite is NOT the
+guard here — the `&self` signature and
+`bot_routing_leaves_the_older_maps_where_it_found_them` are. Anyone
+citing the replay tests as proof of this change's safety is citing the
+weakest available evidence for it.
+
+**Behaviour did change, demonstrably.**
+`a_bot_that_wants_the_castle_routes_onto_a_flight` (`sim.rs:25284`)
+asserts `route_waypoint(1, castle) != castle` from the cliff foot, and
+`== breach.head` from six metres up the flight. Both pass. That is a
+direct, non-vacuous demonstration that the function is not the identity.
+
+**UNDECLARED SIDE EFFECT — the Battlefield's bots changed too.**
+The commit message says the change is about Cliffhold. It does not say
+that `route_waypoint` runs on EVERY map. Arena / Bailey / Gardens are
+held to 100% waypoints-unchanged, and pass. **`MapKind::Battlefield` is
+held to an 85% floor and the test's own doc records it as "Measured at
+92.9% untouched"** (`sim.rs:25406-25423`). So roughly **7% of Battlefield
+waypoints are now rerouted** — bots on a shipped map behave differently
+after this commit. It is deliberate (6 m structures over `BOT_TERRAIN_M`
+are meant to be routed around) and it is honestly documented IN THE TEST.
+It is absent from the commit message, which is where anyone looking for
+"what else did this change" will look. That is a silent deferral by
+contract item 5, one layer down.
+
+**The end-to-end claim I could NOT verify.**
+`cliffhold_bots_reach_the_plateau_and_stop_grinding_into_it`
+(`sim.rs:25373`) carries a before/after table (0/35->14/35 and 2/35->27/35
+reaching 18 m; 14.3%->7.2% and 36.2%->8.5% whisker-blocked) and claims the
+thresholds "sit between the two columns in every case, so this fails
+loudly on the old behaviour". I checked the ARITHMETIC — `want_plateau`
+5 and 12, `veer_cap` 11.0 and 20.0, all four do sit strictly between the
+stated columns. But the "before" column itself is a builder-reported
+measurement of code that no longer exists, and I was blocked from
+re-running it. **`PROVISIONAL / never verified` — the test's ability to
+fail on the old behaviour rests entirely on numbers nobody has
+independently reproduced.** Flagging it because this is exactly the shape
+of the vacuous first-person-aim test that rule 12 was written for.
+
+---
+
+## 3. MECH LIVERY — separable at range, YES. But the stated rule is now false, and nothing tests it.
+
+The owner asked a luminance question. Here is the arithmetic, from the
+material values, in **linear** relative luminance (sRGB->linear then
+0.2126/0.7152/0.0722). Sources: `main.rs:13757-13812`, `13934-14005`.
+
+| role | ALLY | ENEMY |
+|---|---|---|
+| heavy BODY | khaki `0x8A8770` -> **0.239** | navy `(0.085,0.135,0.275)` -> **0.0178** |
+| heavy STRUCTURE | `0x5F5E52` -> 0.110 | `(0.038,0.062,0.135)` -> **0.0054** |
+| heavy DETAIL | `0x9A9384` -> 0.294 | `(0.44,0.63,0.86)` -> **0.340** |
+| scout SHELL | amber `(0.86,0.60,0.16)` -> **0.380** | `(0.075,0.125,0.265)` -> **0.0158** |
+| scout PLATE | ochre `(0.60,0.40,0.11)` -> 0.164 | `(0.42,0.58,0.78)` -> **0.284** |
+
+**The owner's question — are they still separable at range? YES, and by
+a wide margin.** The masses that carry a silhouette are body/structure
+and shell: ally 0.239 vs enemy 0.0178 is **13.4x** (delta-L* ~ 42), and the
+scout is 0.380 vs 0.0158, **24x**. In perceptual terms these are not
+close. The commit's headline is right and the "dark blue body is still
+dark" reasoning holds.
+
+**But the RULE as the commit states it is now false.** `2c2f863` says:
+*"This game separates sides by LUMINANCE — the ally is the brightest
+thing on the field, the enemy the darkest"* and *"an earlier version ...
+would have put two BRIGHT tones on the enemy ... Dark blue does not."*
+
+`mech_navy_lt` at **0.340 is the brightest body-tone material on either
+heavy** — brighter than the ally's own brightest, `mech_khaki_lt` at
+0.294. And the enemy scout's plate (0.284) is **1.7x** the ally scout's
+plate (0.164). The enemy DID get a bright tone. What saves the read is
+COVERAGE, not value: `body_lt` appears at 9 sites on the heavy rig
+against 11 `body` and 26 `body_dk` (`main.rs:10942`, `10947`, `10957-8`,
+`11147`, `11213`, `11399`, `11716`, `11774`), and the parts are thin —
+e.g. a `0.58 x 0.010 x 0.50` deck plate and `0.06 x 0.17 x 0.015` cheek
+strips.
+
+**And there is no test.** Grepped both files: the only luminance
+assertions in this codebase are in `cliffhold.rs:1146-1159`, for MAP
+STONE. The faction livery rule — the one the commit calls the thing the
+whole change had to protect — is guarded by nothing. The map's rock got
+a luminance test; the mechs did not.
+
+So the safeguard is "the light-blue strips are currently narrow", which
+is an unwritten invariant. The next dispatch that says "make the light
+blue more legible on the detail" has nothing standing in its way.
+
+**For Friday (cheap, high value):** port `cliffhold.rs`'s `lum()` helper
+into a test over `mech_body_tones` and the scout materials, and assert
+the ordering the commit message claims — area-weighted if you want to be
+honest, or at minimum `max(ally tones) > max(enemy tones)`. Right now
+that assertion would FAIL, which is precisely why it is worth writing.
+
+**Gallery: real and wired.** `MechGalleryPlugin` is registered in
+production at `main.rs:7076`. `every_chassis_appears_in_both_liveries`
+(`mech_lineup.rs:1013`) is a TABLE test only — it checks `STANDS`
+contains the five entries, not that `ally` reaches the spawner. The
+threading is fine by inspection (`mech_lineup.rs:620` destructures
+`ally` from `STANDS` into the spawn loop; `spawn_scout_chassis`
+`main.rs:8904-8906` and `mech_body_tones` `main.rs:10873` both branch on
+it), but the test would survive a spawner that ignored the flag. Low
+severity — the captures cover it — recorded so nobody calls it proof.
+
+---
+
+## 4. SOMETHING CLAIMED AS VERIFIED THAT IS NOT — and the owner's 1.10 m is EXACTLY right
+
+`a_first_person_shot_goes_exactly_where_the_crosshair_points`
+(`main.rs:24788`) is a good test that was correctly de-vacuumed after
+rule 12. **Its name asserts a universal it never checks.** It builds a
+fighter from `MatchConfig::default()` and never enters a mech.
+
+The mech case is broken, and here is the derivation:
+
+* `sim::muzzle_origin` (`sim.rs:8962`) puts the shot origin at
+  `pos.y + EYE_REL.min(height() - 0.12)`. `EYE_REL = 1.62`
+  (`sim.rs:46`); a mech's `height()-0.12` is ~2.91, so the min picks
+  **1.62 m** — infantry eye height, in a mech.
+* The production first-person camera does NOT (`main.rs:18608`):
+  `let eye = if p.in_mech() { ...the FIGHTER's own visor height... }`,
+  which is `height() * MECH_VISOR_Y_FRAC` =
+  `BODY_HEIGHT(1.78) * MECH_SCALE(1.7) * 0.90` = **2.7234 m**
+  (`sim.rs:5323`, `5330`, `3707`).
+* **2.7234 - 1.62 = 1.1034 m.** The owner's "1.10 m off in a mech" is
+  exact. Confirmed by arithmetic, independently.
+
+What that costs: `crosshair_aim_dir` (`main.rs:1264`) is two-stage — it
+casts from the camera to find `aim_point`, then aims from
+`muzzle_origin`. So a mech shot still CONVERGES on the crosshair's aim
+point at the aim distance. Two residuals:
+
+1. `t_hit` defaults to **200.0** when nothing is hit. Firing at open sky
+   in a mech, the shot leaves `atan(1.1034/200) = 0.316` degrees off the
+   camera ray. The test's threshold is `< 0.05` degrees. It would fail by 6x.
+2. At all ranges the bullet travels a line 1.10 m below the one the
+   player is sighting along, so a mech shooting over a low wall the
+   camera clears puts the round into the wall.
+
+The test's doc says the only way this breaks is *"the day someone gives
+`muzzle_origin` a barrel offset."* That day already happened, from the
+other side — the CAMERA moved, in §21, and `muzzle_origin` did not
+follow. `main.rs:18609`'s own comment says "the FIGHTER's own visor
+height, not the free function," which shows the client knows about
+`visor_eye_y` and the sim's `muzzle_origin` does not use it. By this
+project's own naming that is **the split brain**.
+
+**This is the highest-severity verification finding in the run.** For
+Friday (sim lane): either `muzzle_origin` gains the mech branch and uses
+`visor_eye_y`, or the test is renamed to say "on foot" and a second test
+pins the mech's actual (documented, chosen) offset. Do not do both
+silently. NOTE: this is a SIM change on a hot path — it moves every
+shot's origin, so it will move replay outcomes. It needs its own
+dispatch, not a drive-by.
+
+---
+
+## 5. OPERATION AUDIT — where the effort actually goes
+
+### 5a. THE HIGHEST-LEVERAGE CHANGE: the capture script is CODE, and it should be DATA
+
+`CapBeat` (`main.rs:5000`) holds `&'static [CapKey]` and
+`Option<&'static str>`. `CAPTURE_SCRIPTS` (`main.rs:5866`) is a
+`const [&str; 30]`. **Every capture beat is a compile-time constant
+inside the 27,998-line `main.rs`.** Therefore every camera-framing tweak
+— every yaw, every `orbit`, every `boom`, every `pos` teleport — costs a
+release rebuild and relink of a Bevy binary. That is the ~6-minute cycle.
+
+The cost is not hypothetical and it is not once:
+
+* rule 8b: "Framing it took three attempts."
+* `cliffhold.rs:1216-1222`: the sun-below-horizon bug "cost three capture
+  cycles and two wrong fixes, and it is nine lines of arithmetic."
+* the owner: "several tasks needed 3+ iterations purely on camera framing."
+
+Three iterations x 6 min = 18 minutes of pure rebuild to move a camera.
+
+**Change:** when `JK_CAPTURE` is set, read the beat table from a RON/JSON
+file next to the binary instead of the `const`. Keep the `const` as the
+default so nothing regresses and the existing
+`capture_path_tests`/`CAPTURE_SCRIPTS` validation still applies. A
+framing iteration then becomes "edit a text file, re-run the binary
+already built" — roughly 40 seconds instead of 6 minutes. **On the loop
+rule 8 says is the project's primary instrument, that is a ~9x
+speed-up, and it is a one-file change in the `main.rs` lane.**
+
+This is my answer to "the single highest-leverage operation change."
+
+### 5b. WHERE THE OPERATION IS SILENTLY LOSING WORK
+
+**`FRIDAY_LOG.md` has been dead since 2026-08-03.** `git log` on it:
+last commit `f5b1bda`, 2026-08-03. Since then ~22 commits have landed,
+most of them builds. `OPERATION.md`'s own table assigns Friday that log.
+The Friday->Thor contract items 4 ("what Friday is least sure about") and
+5 ("what was deferred and why") have had **nowhere to land for six
+days**. They survive only when the committing session happens to write
+them into a commit message — which is exactly what `477be34` did, and
+only because that message was written after the agents had already
+died. Nobody has noticed this. It is the single largest silent leak in
+the operation, and it is why "their own reports did not land" reads as a
+one-off incident when it is a six-day pattern.
+
+**Two plan documents, and the agents point at the stale one.**
+`BACKLOG.md` last changed `33e46f6`, 2026-08-07. `WHATS_MISSING.md` has
+been REBUILT FOUR TIMES in three days (`05770b5`, `ea38d96`, `ffca042`,
+`421a7e0` — one of them literally titled "the plan was stale again").
+Grepping `.claude/agents/*.md`: **`BACKLOG.md` is referenced by
+`scout-gap.md` and `thor.md`. `WHATS_MISSING.md` is referenced by
+NOTHING.** So the live plan is invisible to every agent, and the plan
+the agents are told to read is two days behind. That is the mechanism
+behind "the plan went stale TWICE" — not authorship, ADDRESSING. Pick
+one file, delete or stub the other, and update the agent prompts.
+
+**`OPERATION.md` is referenced by ZERO agent files.** Rules 1-13 — every
+lesson this project paid for — reach an agent only if the dispatcher
+pastes them. All ten agent definitions are dated 2026-08-03/04 and have
+not been touched since; rules 8-12 landed 08-08 and rule 13 landed
+08-09. `friday33.md:35` still says "`main.rs` is ~12,000 lines." It is
+**27,998**. The agents' own orientation is off by 2.3x.
+
+**Uncommitted verdicts.** `e57943c` exists only because a previous Thor
+noticed its own 378-line verdict was sitting untracked and one
+`git reset` from deletion. That is the third instance of the named
+pattern (46 dead verify agents, the missing `await`, this). The fix is
+mechanical: **a Thor/Friday run's last action is a commit of its own
+log**, before anything else can run git.
+
+### 5c. WHICH TIERS PAID — and a correction to Rule 13
+
+`cf51f19` retired the research tier while I was running, with a cost
+table. I agree with the CONCLUSION and I want to correct the framing,
+because the table as written could be read as "research is worthless."
+
+* **Scouts: clearly paid.** Their findings shipped as fixes, and the
+  fixes are visible in the commit log (`ffca042` "I broke the turret",
+  the dead grenade throw in `8482933`, the three inert values in
+  `6a46f61`).
+* **Research: did not pay HERE, for a specific reason.** Both dispatches
+  asked for knowledge the builder then had to weigh against a design.
+  Where Toto's output DID survive is where it was a NUMBER or a named
+  precedent with a consumer — the citation surviving in `477be34` is the
+  Gridlock art-pass finding, which is a design argument, not a value.
+  Rule 13's own carve-out ("dispatch a researcher only when a specific
+  unknown NUMBER blocks a build and is named in the dispatch") is the
+  right rule and I would keep it. Do not read the table as "never
+  research"; read it as "never research an unnamed question."
+* **Thor: paid, but not by finding game bugs.** In this run the
+  highest-value outputs were (a) the 1.10 m mech aim, which no
+  screenshot would have found, (b) a test that cannot fail, and (c) the
+  FRIDAY_LOG being dead. Two of those three are instrument failures, not
+  game bugs. Note that for the roster: verification's yield here is
+  mostly in auditing the operation's own instruments.
+
+### 5d. THE DISPATCH RULE THAT WORKS — confirmed, with a limit
+
+**"Hand the next agent the TRAP, not just the feature" is borne out, and
+`477be34` is a second data point beyond the crouch dispatch.** The bot
+routing task shipped with the trap named in advance (waypoint selection
+sits in the seeded RNG stream). The builder's response was not "be
+careful" — it was a `&self` signature that makes the failure
+*impossible to compile*. That is the difference between a warning and a
+guard. Compare the mech livery, where the risk ("do not collapse the
+luminance separation") was named in prose in the commit message and
+produced no test at all: the invariant is now unguarded and already
+technically violated. **Named trap -> structural guard. Named-in-prose
+risk -> nothing.** So the rule should be sharpened: name the trap AND
+demand the guard be structural (a type, a signature, a shared function,
+an assertion) rather than a comment.
+
+**Its limit:** it does nothing for misrouting. Both refusals were
+correct, and `friday22.md:3,19` and `friday33.md:3,19` state the lanes
+unambiguously — the agents' own docs were adequate. The failure was at
+the ROUTING step, before an agent existed. Cheapest fix: **the first line
+of every build dispatch names the files to be edited.** A dispatch whose
+first line says `sim.rs` cannot be sent to Thor or to the main.rs lane
+without the mismatch being visible before launch, at zero cost.
+
+### 5e. CHECKPOINT DISCIPLINE — yes, builders should commit incrementally
+
+Four mid-task deaths, twice leaving compiling+passing uncommitted work.
+`OPERATION.md` rule 7 already says "commit an agent's output as soon as
+it lands," but it is addressed to the DISPATCHER, who is the party that
+just died. Move it to the builder: **commit when the suite is green,
+not when the task is done.** `477be34` is the counter-example that
+proves it — ~1,230 lines across two lanes recovered in one lump by
+somebody who had to reconstruct the intent from the code, and who
+correctly wrote "this message describes what the code and captures show,
+not what they claimed." That commit message is honest and it is also a
+2,577-line unreviewable diff. Two green commits would have cost the
+builders nothing.
+
+### 5f. TWO SESSIONS, ONE REPO
+
+`git worktree list` shows three live worktrees plus this one, on
+`feat/scout-plasma-dual-cannon` and `feat/tdm-customization-bow-recoil`.
+The rejected push and rebase are the visible symptom; the invisible one
+is what I hit in section 0 — **HEAD moved and `sim.rs` changed underneath
+a verification run.** Rule 2 ("never let two agents write the same
+file") does not cover this, because the second writer is a different
+SESSION. Add: **a verifier must record the tree hash/md5 it measured and
+re-check it at the end.** I did; that is the only reason I can say the
+386 result belongs to the commits under review and not to a builder's
+half-finished edit.
+
+---
+
+## 6. RANKED, by what would actually hurt
+
+1. **The mech first-person aim is 1.10 m off and a test named
+   `..._goes_exactly_where_the_crosshair_points` never enters a mech.**
+   Derived exactly: `2.7234 - 1.62 = 1.1034`. 0.316 deg error at the
+   200 m fallback, vs a 0.05 deg assertion. Sim-lane fix, own dispatch.
+2. **The faction luminance rule is unguarded and already violated at the
+   material level.** `mech_navy_lt` (0.340) is brighter than the ally's
+   brightest tone (0.294). Still separable in practice — coverage saves
+   it — but nothing enforces the coverage. One test would fix it.
+3. **`FRIDAY_LOG.md` dead for six days / `WHATS_MISSING.md` invisible to
+   every agent / `OPERATION.md` referenced by none of them.** The
+   operation's memory is leaking at three points at once.
+4. **`nothing_decorative_lands_on_a_standable_surface` cannot fail for
+   the thing it claims to guard.** Two-line fix.
+5. **Battlefield bot behaviour changed (~7% of waypoints) and the commit
+   message does not say so.** Deliberate and documented in the test;
+   undeclared where anyone would look.
+6. **`477be34`'s "same eight shots"** — seven of eight. Minor, but it is
+   the one frame where the before/after is not a diff.
+7. **Test count 382 vs actual 386/0/2.** Cosmetic; recorded so nobody
+   treats a later mismatch as a regression.
+
+## 7. WHAT HELD — stated plainly, not padded
+
+* Cliffhold's reachability test holds, and its chain to the production
+  movement rule is bitwise-closed. That is better than most of what I
+  check.
+* The bot routing change is replay-safe by CONSTRUCTION (`&self`), not by
+  argument. I re-derived it. It is exact.
+* All four landmarks are real spawned geometry called from production.
+* Ally and enemy are still separable at range, comfortably — 13x on the
+  heavy, 24x on the scout.
+* The gallery plugin is registered in production and shows all five
+  machines.
+* No defect found in `77b9805`'s `mech_body_tones` unification; the
+  hard-coded `mech_khaki` sites I chased are all VIEWMODELS
+  (`spawn_plasma_bow_vm`, `spawn_repair_emitter_vm`,
+  `spawn_mech_turret_vm`, `spawn_mech_pod_vm`) and one team-neutral
+  pickup pad. **FALSE ALARM, recorded as loudly as a defect so nobody
+  re-spends the cycle.**
