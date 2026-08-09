@@ -1322,3 +1322,93 @@ throwaway `config/settings.txt` deleted before committing.
    size 1..12 / gap −5..12 / thickness 1..5 / outline 0..3 are chosen to
    match the CS-lineage feel these values come from. They are the numbers
    the clamp tests assert, so changing them later means changing tests.
+
+---
+
+## FRIDAY22 — the hull turret kicks hard, and the bots never see it (d6e35d1)
+
+**Task.** §owner: "increase the recoil" on the heavy mech's minigun turret.
+The interesting constraint, handed to me up front: `MECH_RECOIL_CONTROL` is
+bounded by BOT COMPETENCE, not by feel — at 0.45 `a_bot_mech_never_runs_dry…`
+fails because `punched_aim` deflects a bot's ray by the full `RECOIL_SCALE`
+with no mouse to pull down.
+
+**What I found by measuring first.** The wall was real, but it was the wrong
+wall. One constant governed two things the brief wants moving in opposite
+directions: the PICTURE (`punch`, camera, viewmodel) and the ROUNDS
+(`punched_aim`). Every degree of extra feel bought a degree of extra aim
+error, and the aim error is what bots eat.
+
+The owner's complaint also had an exact numeric form I did not expect. A
+lone impulse under `PUNCH_DECAY_LIN_DEG * exp(PUNCH_DECAY_EXP * DT)` =
+19.24 °/s is erased inside the tick it lands. The turret wrote 8.29 — 43% of
+that. **One round of SINGLE moved the camera by exactly 0.0000 degrees.**
+Not "a little". Zero. Measured through the real fire path before I touched
+anything.
+
+**The split.** `TURRET_FELT_FLOOR` 24.0 (midpoint of the window between that
+floor and the M4's 28.8, which an existing test already caps the mount at)
+and `TURRET_AIM_STABILISER` 0.25 in the new `mount_punched_aim`.
+
+**The trap I nearly shipped.** I first wrote the stabiliser as the algebraic
+reciprocal of the lift, and reasoned in the commit-in-progress that bots were
+protected "by construction". They were not. Punch ANGLE is **superlinear** in
+the impulse — `PUNCH_DECAY_LIN_DEG` shaves a *constant* off every tick, so it
+is a smaller fraction of a bigger velocity. A 2.90x impulse gives a 3.98x
+sustained angle (4.085 → 16.22° over 5 s of held AUTO). The reciprocal would
+have let a bot's rounds walk **38% further** than before. Nothing that read
+only constants could have caught it. I only caught it because I measured the
+plateau instead of trusting the algebra, and I have written that into the
+constant's doc comment so the next person does not re-derive the wrong thing.
+
+**Evidence.** felt kick 8.29 → 24.00 °/s; one SINGLE round 0.000 → 0.101°;
+AUTO plateau 4.09 → 16.22°; braced AUTO 0.00 → 3.24° (the brace damp finally
+buys something that was not already zero); autocannon 133.63 → 133.63 with a
+stabiliser of exactly 1.0 — bit identical, deliberately untouched. Bot damage
+over 4 s at six ranges 6–18 m: 1667.8 → 1757.2 (+5.4%) on identical round
+counts.
+
+**Also folded in: five defects from the scout.** Barrier speed tax charged
+twice (0.3025 of pace, player only, with the bot path on a different rule);
+the medic paying for a barrier that does not exist; a bot medic healing and
+firing plasma in one tick; a bot mech turtling for a magazine it is not
+holding; and three dead values plus a constant that was never read.
+
+Tests 386 → 404. Seven added, every one mutation-proven from a file copy.
+
+### What I am least sure about
+
+1. **The AUTO plateau is 4x what it was — 16.2° of punch, ~14.6° of camera
+   climb on sustained fire.** That is by far the biggest recoil in the game
+   (an AK settles at 3.18°). I believe it is right: the owner asked for more
+   recoil, the brace takes it to 3.24° which is *below* today's unbraced, and
+   every fire mode stays clearly ordered. But it is a large feel change and
+   it is the one number a playtest could send back. `TURRET_FELT_FLOOR` is
+   the single knob — and if it moves, `TURRET_AIM_STABILISER` must be
+   RE-MEASURED, not scaled, for the superlinearity reason above.
+2. **Braced fire is no longer perfectly accurate.** It used to deliver
+   exactly 0° of aim error because the damped punch fell under the decay
+   floor. It now delivers ~1.6°. Bots never brace with the gatling so this is
+   a player-only change, and I think "bracing damps recoil" reading as
+   "bracing deletes recoil" was the anomaly — but it is a nerf nobody asked
+   for.
+3. **Taps got ~28% steadier** (24.0 × 0.25 = 6.0 delivered against the old
+   8.29). The stabiliser is calibrated at the plateau because that is where
+   all of a bot's aim error lives; the tap regime falls out of that choice
+   rather than being chosen.
+4. **`the_guard_speed_rung_is_the_same_one_on_the_bot_path` cannot
+   discriminate the heavy's rung today.** `SHIELD_SPEED_MULT` and
+   `MECH_SHIELD_SPEED_MULT` are both 0.55, so swapping them in
+   `shield_speed_mult` still passes. I left the assertion written by name and
+   said so in the test; it starts discriminating the moment either constant
+   is retuned, which is the only moment it matters.
+5. **A bot-piloted chassis now never raises its barrier at all.** That is the
+   honest consequence of fixing the reload gate, not a hidden one — barrier
+   discipline for a bot mech is a new behaviour with its own "when is a wall
+   better than a gun" rule, and I did not invent it.
+6. **The player/bot asymmetry in `punched_aim_stabilised` is untouched.**
+   It is the real root and it applies to every recoiling weapon in the game.
+   Fixing it is a game-wide bot accuracy change and it does not belong in a
+   commit titled "the turret kicks harder".
+
+— **FRIDAY22**
