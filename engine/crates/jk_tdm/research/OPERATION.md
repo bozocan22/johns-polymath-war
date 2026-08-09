@@ -244,6 +244,47 @@ the only thing that distinguishes a test from a comment.
 
 ---
 
+## RULE 13 — THE RESEARCH TIER IS RETIRED. SCOUTS SCALE INSTEAD.
+
+Owner's instruction, 2026-08-09: *"dont be doing reserch try to be more
+built and friday orienatted"*, and then *"cancel research but also you
+can tell them to become scouts to help you build"*.
+
+**The evidence backs it.** Measured over this week:
+
+| tier | cost | what reached the code |
+|---|---|---|
+| `toto` armour failure | ~187k tokens | a positional-damage model the builder weighed and did NOT adopt |
+| `toto33` vertical maps | ~211k tokens | one usable line ("what you see is what you get") + a bot finding the builder could have grepped in a minute |
+| `scout-defect` | ~150k | dead grenade throw, turret spinning off the wrong fighter, 3 inert constants, doc rot cluster |
+| `scout-gap` | ~127k | 8 boarding stages rendering nothing, medic rendering man-sized, two castle centrepieces that are solid boxes |
+
+The scouts found things that SHIPPED AS FIXES. The researchers produced
+knowledge that mostly did not survive contact with a builder's judgement.
+On a game where the owner iterates from screenshots, a defect someone can
+see beats a citation.
+
+**The new roster:**
+- **Two builder LANES, and only two**: `friday22` owns `sim.rs`,
+  `friday33` owns `main.rs` + client modules. A third builder has
+  nowhere to go. This is the hard ceiling on parallel building.
+- **Scale with SCOUTS, not researchers.** `scout-defect`, `scout-gap`,
+  `scout-map` are read-only, collide with nothing, and can run many at
+  once. Their output is a work queue for the two Fridays.
+- **`thor` stays.** Verification is NOT research: it caught a totally
+  dead grenade throw that 320 passing tests missed. Wake it to check
+  shipped claims, not to study process.
+- **`toto*` only when a specific unknown NUMBER blocks a build**, and it
+  must be named in the dispatch. Never to survey a topic, never "for
+  background", never speculatively ahead of a build.
+
+**The pattern that works:** scouts sweep -> findings become a ranked
+queue -> the two Fridays build the queue -> thor verifies -> repeat.
+Research enters only when a builder stops and says "I cannot pick this
+number".
+
+---
+
 ## Standing rules all three inherit
 
 - **Never invent a source.** This project has caught one fabricated
