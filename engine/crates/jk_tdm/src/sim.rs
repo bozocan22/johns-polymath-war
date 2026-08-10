@@ -3552,10 +3552,38 @@ impl Fighter {
         self.armor_set == ArmorSet::ScoutMech && self.hull > 0.0
     }
 
+    /// §owner SPEC15 P2: is this the ROYAL chassis?
+    ///
+    /// Named for the same reason `in_scout_mech` is: a rule that belongs
+    /// to the top tier only wants to say so, rather than compare an enum
+    /// inline and become the thirty-first site the next tier has to find.
+    pub fn in_royal_mech(&self) -> bool {
+        self.armor_set == ArmorSet::RoyalMech && self.hull > 0.0
+    }
+
+    /// §owner SPEC15 P2: the BARRIER pool this fighter's chassis holds.
+    ///
+    /// A second live durability channel, and one of the "relevant
+    /// attributes" the tier is 10% stronger in. Same shape as
+    /// `mech_hull_max` and for the same reason: one definition of
+    /// `MECH_SHIELD_HP * ROYAL_MULT`, read by the spawn, the recharge
+    /// gate and the recharge clamp, so a barrier cannot end up capped at
+    /// one tier's pool and topped up towards another's.
+    pub fn mech_shield_max(&self) -> f32 {
+        if self.armor_set == ArmorSet::RoyalMech {
+            MECH_SHIELD_HP * ROYAL_MULT
+        } else {
+            MECH_SHIELD_HP
+        }
+    }
+
     /// The hull this fighter's chassis spawns with.
     pub fn mech_hull_max(&self) -> f32 {
         match self.armor_set {
             ArmorSet::ScoutMech => SCOUT_HULL,
+            // §owner SPEC15 P2: "~10% stronger", against the heavy's own
+            // pool rather than a second literal beside it
+            ArmorSet::RoyalMech => MECH_HULL * ROYAL_MULT,
             _ => MECH_HULL,
         }
     }
@@ -3566,8 +3594,15 @@ impl Fighter {
     /// it gets the name `in_scout_mech` already has for the other side.
     /// "Is a mech" and "is the heavy one" are different questions, and
     /// jumping, kneeling and the 1.7x hitbox belong only to the second.
+    ///
+    /// §owner SPEC15 P2: "the heavy one" is now TWO sets - the Big Mech
+    /// and the Royal above it - and this is the single place that fact
+    /// lives. Every rule that used to spell out `== RobotSuit && hull >
+    /// 0.0` in this file comes through here, so the tier inherited the
+    /// jump, the kneel, the power core, the turn-rate lag, the hull-mount
+    /// pair and the mech armour model without thirty separate edits.
     pub fn in_heavy_mech(&self) -> bool {
-        self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0
+        self.armor_set.is_heavy_chassis() && self.hull > 0.0
     }
 
     /// §21: is the heavy chassis ON ITS KNEES right now?
@@ -3649,8 +3684,8 @@ impl Fighter {
     /// and `radius()` are: every consumer then scales for free, and a
     /// future chassis size cannot leave one call site behind.
     pub fn step_up(&self) -> f32 {
-        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
-            STEP_UP * MECH_SCALE
+        if self.in_heavy_mech() {
+            STEP_UP * self.armor_set.chassis_scale()
         } else {
             STEP_UP
         }
@@ -3665,7 +3700,7 @@ impl Fighter {
             // the capsule and the x2.0 visor weak point TOGETHER and
             // leaves the visor at the same 0.90 of the machine it always
             // sat at. That single fact is what makes the crouch legal.
-            let standing = BODY_HEIGHT * MECH_SCALE;
+            let standing = BODY_HEIGHT * self.armor_set.chassis_scale();
             if self.chassis_kneeling() {
                 standing * MECH_CROUCH_HEIGHT_FRAC
             } else {
@@ -3679,7 +3714,7 @@ impl Fighter {
             // none - see `chassis_kneeling`'s heavy-only gate), so this is
             // unconditional: the whole point of the light chassis is that
             // it does not fold.
-            BODY_HEIGHT * SCOUT_SCALE
+            BODY_HEIGHT * self.armor_set.chassis_scale()
         } else if self.roll_t > 0.0 {
             ROLL_HEIGHT
         } else if self.crouch {
@@ -3689,9 +3724,18 @@ impl Fighter {
         }
     }
     /// §11: the chassis is wide — it cannot fit through doorways.
+    /// §owner SPEC15 P2: `BODY_RADIUS * chassis_scale()` rather than the
+    /// `MECH_RADIUS` constant, so the Royal is genuinely wider and not
+    /// merely taller. Bit-identical to `MECH_RADIUS` for the Big Mech -
+    /// that constant IS `BODY_RADIUS * MECH_SCALE`, and it stays as the
+    /// heavy's named width for the doorway comment that reads it.
+    ///
+    /// Deliberately still gated on the HEAVY chassis: the light one has
+    /// scaled `height()` and plain `BODY_RADIUS` today, and widening it
+    /// here would be a nav and hit-test change nobody asked for.
     pub fn radius(&self) -> f32 {
-        if self.armor_set == ArmorSet::RobotSuit && self.hull > 0.0 {
-            MECH_RADIUS
+        if self.in_heavy_mech() {
+            BODY_RADIUS * self.armor_set.chassis_scale()
         } else {
             BODY_RADIUS
         }
@@ -4053,6 +4097,11 @@ pub enum PickupKind {
     Ammo,
     /// §6: equips the Robot Suit (power core full).
     RobotArmor,
+    /// §owner SPEC15 P2: equips the ROYAL chassis - the tier above the
+    /// heavy. Its own pad kind for the same reason `ScoutArmor` is:
+    /// walking to a pad is choosing which machine to be, and a pad that
+    /// handed you one of two would make that a coin toss.
+    RoyalArmor,
     /// §owner AGILE SUPPORT MECH: equips the LIGHT chassis. Its own pad
     /// kind rather than a flag on the heavy one, because a player
     /// walking to a pad is choosing which machine to be, and a pad that
@@ -4750,21 +4799,133 @@ pub enum ArmorSet {
     /// what it is afraid of - and a boolean would have meant a branch at
     /// every one of those.
     ScoutMech,
+    /// §owner SPEC15 P2: the ROYAL chassis - the heavy's tier above it.
+    /// "~10% larger and ~10% stronger than the Big Mech", and every one
+    /// of those numbers comes off `ROYAL_MULT` against the heavy's own,
+    /// so re-tuning the Big Mech carries and re-tuning the tier is one
+    /// edit. See `armor_spec`, `chassis_scale` and `mech_hull_max`.
+    ///
+    /// WHY A THIRD SET, AND THE TWO SHAPES REJECTED.
+    ///
+    ///   REJECTED - `Fighter::royal: bool` on the heavy. It is the
+    ///   cheaper-looking option and it makes trap 2 ("adding tiers means
+    ///   auditing every `== RobotSuit`") structurally impossible, since
+    ///   every heavy gate would keep matching untouched. What it cannot
+    ///   do is carry the DATA. `armor_spec`, `mech_hull_max`,
+    ///   `MechWeapon::for_set`/`valid_for` and `PickupKind` are all keyed
+    ///   on `ArmorSet`, and a tier that is "10% stronger" IS a row in the
+    ///   first two - the spec's own trap 1 says a tier is a data
+    ///   question. A bool would have meant a second lookup beside every
+    ///   one of those tables, plus a new field to clear on respawn and to
+    ///   argue about in the replay digest. `armor_set` already has all of
+    ///   that plumbing, already resets, and is already what the pads
+    ///   write.
+    ///
+    ///   REJECTED - a `MechTier` enum orthogonal to `armor_set`, the way
+    ///   `Class`/`class_spec` sits beside it. Same data problem, and it
+    ///   admits a state the spec does not describe: `ScoutMech` +
+    ///   `Royal`. Three tiers, three variants, nothing unrepresentable
+    ///   and nothing representable that is not a machine.
+    ///
+    /// The price was paid in the same commit rather than deferred: every
+    /// inline `armor_set == ArmorSet::RobotSuit` in this file is now
+    /// `in_heavy_mech()` or `is_heavy_chassis()`. That is what trap 2
+    /// asks for, and it is what `is_mech()` already did for the second
+    /// chassis.
+    RoyalMech,
 }
+
+/// §owner SPEC15 P2: "~10% larger and ~10% stronger". THE constant.
+///
+/// One number, consumed by `chassis_scale`, `armor_spec` and
+/// `mech_hull_max`, so a later "make it 15%" is a single edit and no
+/// call site can be left behind. That is the lesson `MECH_SCALE` taught
+/// twice: it moved to 1.7 and `STEP_UP` was still a flat global, and
+/// `SCOUT_SCALE` was declared and consumed by nothing at all.
+///
+/// It multiplies UP the things that make a chassis stronger and DIVIDES
+/// the one thing that pays for them (`move_mult`), so the tier is a
+/// trade rather than a strict upgrade - see `armor_spec`.
+pub const ROYAL_MULT: f32 = 1.10;
 
 impl ArmorSet {
     /// Is this set a WALKER - a piloted chassis rather than worn kit?
     ///
-    /// The two mechs share the whole chassis vocabulary: no crouching, a
+    /// The mechs share the whole chassis vocabulary: no crouching, a
     /// hull pool instead of armour, mount weapons instead of carried
     /// ones, committal entry and exit. Everything that asked
     /// `== RobotSuit` to mean "in a mech" asks this instead, which is
     /// what stopped the second chassis from having to be retro-fitted
     /// into thirty comparisons one at a time.
     pub fn is_mech(self) -> bool {
-        matches!(self, ArmorSet::RobotSuit | ArmorSet::ScoutMech)
+        matches!(
+            self,
+            ArmorSet::RobotSuit | ArmorSet::ScoutMech | ArmorSet::RoyalMech
+        )
+    }
+
+    /// Is this a HEAVY chassis - the Big Mech, or the Royal above it?
+    ///
+    /// The companion to `is_mech`, and the whole answer to trap 2. "Is a
+    /// mech", "is the heavy one" and "is the light one" are three
+    /// different questions; the jump, the kneel, the 1.7x hitbox, the
+    /// power core, the hull-mount pair and the turn-rate lag all belong
+    /// to the middle one. A FOURTH tier now lands in this one `matches!`
+    /// instead of in thirty comparisons.
+    pub fn is_heavy_chassis(self) -> bool {
+        matches!(self, ArmorSet::RobotSuit | ArmorSet::RoyalMech)
+    }
+
+    /// How large this chassis stands, as a multiple of a soldier.
+    ///
+    /// THE one place a chassis size lives. `Fighter::height`, `radius`,
+    /// `step_up` and `mech_jump_speed_of` all read it, so "the Royal is
+    /// 10% larger" is one multiplication in one function - hitbox, hit
+    /// bands, visor weak point, nav radius, ledge envelope and jump apex
+    /// all follow without a call site being found and edited. That is
+    /// exactly what `SCOUT_SCALE` did NOT get: it was declared, consumed
+    /// by nothing, and a piloted scout hit-tested at plain player size
+    /// for a whole brief.
+    pub fn chassis_scale(self) -> f32 {
+        match self {
+            ArmorSet::RobotSuit => MECH_SCALE,
+            ArmorSet::RoyalMech => MECH_SCALE * ROYAL_MULT,
+            ArmorSet::ScoutMech => SCOUT_SCALE,
+            _ => 1.0,
+        }
+    }
+
+    /// What a lineup screen, a pad hint or a HUD calls this chassis;
+    /// `None` for kit that is worn rather than piloted.
+    ///
+    /// **THE names.** The client had three hand-typed strings and a
+    /// 1-in-4-by-slot-index "royal" livery flag with no sim existence
+    /// behind it; this is the sim's answer to which machine that is.
+    /// Same rule as `TurretMode::label` - one place the strings live.
+    pub fn chassis_name(self) -> Option<&'static str> {
+        match self {
+            ArmorSet::ScoutMech => Some("AGILE"),
+            ArmorSet::RobotSuit => Some("BIG"),
+            ArmorSet::RoyalMech => Some("ROYAL"),
+            _ => None,
+        }
     }
 }
+
+/// §owner SPEC15 P1 "six mech variants registered": the THREE chassis
+/// tiers, smallest first. Six is these three on either team - a faction
+/// is `Fighter::team`, not a chassis, and nothing about how a machine
+/// behaves changes with the colour it is painted.
+///
+/// Named so a lineup screen, a gallery capture and any future selector
+/// enumerate the same list instead of hand-typing three variants each -
+/// the mistake `FORGE_SLOTS` and `TDM_TARGET_CHOICES` are both sitting
+/// in right now (declared here, hand-typed over there).
+pub const CHASSIS_TIERS: [ArmorSet; 3] = [
+    ArmorSet::ScoutMech,
+    ArmorSet::RobotSuit,
+    ArmorSet::RoyalMech,
+];
 
 /// §6.1: flat per-zone reduction applied AFTER the zone multiplier, with
 /// a floor of 15% of base damage — heavy sets never make limb shots free,
@@ -4823,6 +4984,47 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
             move_mult: 1.28,
             explosive_resist: 0.0,
         },
+        // §owner SPEC15 P2: the ROYAL row is DERIVED from the heavy's,
+        // never hand-typed. Retuning the Big Mech's plate carries to the
+        // tier above it automatically, which is the whole reason a tier
+        // is a data row and not a copied spawn path.
+        //
+        // AND WHAT IT PAYS. `move_mult` is DIVIDED where the flats are
+        // multiplied: 0.85 / 1.10 = 0.773, about 9% off the heavy's
+        // walking pace. "10% stronger" applied to every attribute in the
+        // same direction is not a tier, it is a strictly better machine,
+        // and the spec asks for it "kept balanced". The second half of
+        // that price is not in this table at all - `chassis_scale` makes
+        // the Royal a 10% larger CYLINDER, and `ray_vs_cylinder`,
+        // `apply_hit_dmg`'s bands and the projectile path all measure
+        // against `height()`/`radius()`, so the extra hull is being
+        // carried by a target that is measurably easier to hit.
+        //
+        // `explosive_resist` is NOT scaled: the heavy's is 0.0, and 0.0
+        // times anything is the number this comment would otherwise be
+        // pretending to change.
+        //
+        // FOUND WHILE DOING THIS, and stated rather than hidden: the
+        // flats in this row are currently UNREACHABLE for a piloted
+        // heavy chassis. `apply_armor` takes the `in_heavy_mech` branch,
+        // spends the damage against the hull through the ANGLE model and
+        // returns before the per-set flats are ever consulted - which is
+        // true of the Big Mech's row too and has been since the mech
+        // damage model landed. The Royal's LIVE durability is its hull
+        // pool and its barrier (`mech_hull_max`, `mech_shield_max`).
+        // These flats are kept scaled anyway so the table stays
+        // internally consistent, and so that whoever wakes the flats up
+        // does not have to remember the tier.
+        ArmorSet::RoyalMech => {
+            let h = armor_spec(ArmorSet::RobotSuit);
+            ArmorSpec {
+                flat_head: h.flat_head * ROYAL_MULT,
+                flat_torso: h.flat_torso * ROYAL_MULT,
+                flat_limb: h.flat_limb * ROYAL_MULT,
+                move_mult: h.move_mult / ROYAL_MULT,
+                explosive_resist: h.explosive_resist,
+            }
+        }
     }
 }
 
@@ -5542,7 +5744,19 @@ pub const MECH_LAND_STAGGER_S: f32 = 0.7;
 /// the point is that re-scaling the chassis re-scales the jump, and no
 /// call site has to be found and edited for that to be true.
 pub fn mech_jump_speed() -> f32 {
-    JUMP_SPEED * MECH_SCALE.sqrt()
+    mech_jump_speed_of(ArmorSet::RobotSuit)
+}
+
+/// §owner SPEC15 P2: the same derivation, per CHASSIS.
+///
+/// The apex scales with `chassis_scale()`, so every tier clears exactly
+/// the obstacle a soldier clears measured in its OWN body heights - the
+/// Royal's 10% more size buys 10% more apex and not a metre more, and a
+/// future tier needs no edit here at all. `mech_jump_speed()` is kept
+/// because a test and a doc name it, and it is now literally the heavy's
+/// case of this rather than a second copy of the formula.
+pub fn mech_jump_speed_of(set: ArmorSet) -> f32 {
+    JUMP_SPEED * set.chassis_scale().sqrt()
 }
 
 /// §21: which stage of a jump a heavy chassis is in.
@@ -5709,7 +5923,7 @@ pub fn mech_enter_stage(elapsed_s: f32) -> MechEnterStage {
 /// entering - `mech_exiting` reuses the same timer for the power-DOWN
 /// countdown, which has no stage list of its own).
 pub fn mech_enter_stage_for(f: &Fighter) -> Option<MechEnterStage> {
-    if f.armor_set != ArmorSet::RobotSuit || f.mech_transition_t <= 0.0 || f.mech_exiting {
+    if !f.armor_set.is_heavy_chassis() || f.mech_transition_t <= 0.0 || f.mech_exiting {
         return None;
     }
     Some(mech_enter_stage(MECH_ENTER_S - f.mech_transition_t))
@@ -6449,6 +6663,16 @@ impl TdmSim {
                 respawn_t: 0.0,
             });
         }
+        // §owner SPEC15 P2: ONE royal pad, and only one. The tier is
+        // ~10% larger and ~10% stronger than the heavy, so three of them
+        // scattered the way the heavy's pads are would make the Big Mech
+        // the machine nobody walks to. One, in the quadrant the heavy
+        // pads leave empty, contested by both teams equally.
+        pickups.push(Pickup {
+            kind: PickupKind::RoyalArmor,
+            pos: [14.0, 0.0, -19.0],
+            respawn_t: 0.0,
+        });
         // §owner AGILE SUPPORT MECH: two light pads, on the flanks the
         // heavy pads do not use. Deliberately OFF the centre structure -
         // a support unit wants to arrive from the side of a fight, and
@@ -6554,6 +6778,9 @@ impl TdmSim {
                     PickupKind::FolkArmor => [-90.0, 0.0, -58.0],
                     PickupKind::ReconWeave => [110.0, 0.0, 30.0], // head of the Great Stair
                     PickupKind::Minigun => [16.0, 0.0, 200.0],    // the castle courtyard
+                    // the top tier sits at the head of the Great Stair's
+                    // opposite approach - the longest walk on the map
+                    PickupKind::RoyalArmor => [-150.0, 0.0, 150.0],
                 };
             }
         }
@@ -6969,11 +7196,17 @@ impl TdmSim {
             // The delay is what stops it being free - a mech pinned by
             // steady fire never gets it back, so the pool rewards
             // BREAKING contact rather than tanking through.
-            if f.mech_shield_hp < MECH_SHIELD_HP {
+            // §owner SPEC15 P2: the CAP is per-chassis (`mech_shield_max`),
+            // so the Royal's larger barrier both gates and clamps against
+            // its own pool. Two copies of `MECH_SHIELD_HP` here is how a
+            // tier ends up recharging forever towards a number it can
+            // never reach, or stopping short of the one it owns.
+            let shield_max = f.mech_shield_max();
+            if f.mech_shield_hp < shield_max {
                 f.mech_shield_quiet_t += DT;
                 if f.mech_shield_quiet_t >= MECH_SHIELD_RECHARGE_DELAY_S {
                     f.mech_shield_hp =
-                        (f.mech_shield_hp + MECH_SHIELD_RECHARGE_PER_S * DT).min(MECH_SHIELD_HP);
+                        (f.mech_shield_hp + MECH_SHIELD_RECHARGE_PER_S * DT).min(shield_max);
                 }
             }
             // §7: minigun barrels and heat. `spin_cmd` is the trigger
@@ -7138,7 +7371,10 @@ impl TdmSim {
                             // and only here, so a coil the pilot never
                             // got to finish costs nothing.
                             f.stride_heat = (f.stride_heat + MECH_JUMP_HEAT).min(100.0);
-                            f.vy = mech_jump_speed();
+                            // §owner SPEC15 P2: per-CHASSIS, so the Royal
+                            // clears the same obstacle in its own body
+                            // heights that the Big Mech does in its
+                            f.vy = mech_jump_speed_of(f.armor_set);
                             // clear the support clamp so the ascent
                             // integrates - the same 5 cm the soldier's
                             // jump needs, for the same reason
@@ -7193,7 +7429,8 @@ impl TdmSim {
             }
             // §6 per-set upkeep: power recharge, Recon regen
             match f.armor_set {
-                ArmorSet::RobotSuit => {
+                // §owner SPEC15 P2: the Royal runs the same power core
+                ArmorSet::RobotSuit | ArmorSet::RoyalMech => {
                     if f.grounded && t_now - f.last_ability_at > POWER_REGEN_DELAY {
                         f.armor = (f.armor + POWER_REGEN * DT).min(POWER_MAX);
                     }
@@ -7461,12 +7698,28 @@ impl TdmSim {
                             // would happily draw.
                             f.shield_up = false;
                         }
-                        PickupKind::RobotArmor => {
+                        // §owner SPEC15 P2: ONE arm for both heavy tiers.
+                        // The pad decides WHICH chassis; everything after
+                        // that - the power core, the seal window, the cold
+                        // mounts, the belt, the tubes - is the same
+                        // boarding, and a copied `RoyalArmor` arm beside
+                        // this one is precisely the "duplicate mech logic"
+                        // the spec forbids and the shape that would let
+                        // the two drift on the next fix.
+                        PickupKind::RobotArmor | PickupKind::RoyalArmor => {
                             // §11: the pad now grants the MECH chassis
+                            let set = if kind == PickupKind::RoyalArmor {
+                                ArmorSet::RoyalMech
+                            } else {
+                                ArmorSet::RobotSuit
+                            };
                             let f = &mut self.fighters[i];
-                            f.armor_set = ArmorSet::RobotSuit;
+                            f.armor_set = set;
                             f.armor = POWER_MAX;
-                            f.hull = MECH_HULL;
+                            // the tier's hull comes off `mech_hull_max`,
+                            // not a literal, so `MECH_HULL * ROYAL_MULT`
+                            // has exactly one definition
+                            f.hull = f.mech_hull_max();
                             f.mech_rounds = MECH_ROUNDS;
                             // §6.2 (Brief VII v2): boarding is committed,
                             // not instant - the chassis seals for 1.6s
@@ -7714,8 +7967,7 @@ impl TdmSim {
             let drawn = cmd.ads && p_spec.projectile.is_some();
             // §4.3 (Brief VI): the mech does not sprint — its one pace
             // is the 85% walk; the side-step is the only burst
-            let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
-                && self.fighters[p].hull > 0.0;
+            let in_mech = self.fighters[p].in_heavy_mech();
             // §7.4 (BRIEF VIII): sprint on a mech now means something -
             // it winds up power stride instead of being a pure no-op.
             // Windup is cancellable (nothing's been paid yet); once the
@@ -7821,7 +8073,7 @@ impl TdmSim {
                 if f.stride_t > 0.0 {
                     speed = MOVE_SPEED * POWER_STRIDE_SPEED_MULT;
                 }
-                if f.armor_set == ArmorSet::RobotSuit && f.armor <= 0.0 {
+                if f.armor_set.is_heavy_chassis() && f.armor <= 0.0 {
                     speed *= ROBOT_DRAINED_MOVE;
                 }
                 if f.brace {
@@ -7848,9 +8100,7 @@ impl TdmSim {
                 }
                 // §1 (Brief V): aiming a throw is a commitment — 70%
                 // walk. The mech's LAUNCHER carries no such tax.
-                if f.cook_t > 0.0
-                    && !(f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0)
-                {
+                if f.cook_t > 0.0 && !f.in_heavy_mech() {
                     speed *= THROW_AIM_MOVE_MULT;
                 }
             }
@@ -7881,8 +8131,7 @@ impl TdmSim {
             // §11: a mech TURNS at a capped rate — facing a new threat is
             // a visible, punishable commitment (the armor follows the
             // body, the pilot's view stays free)
-            if self.fighters[p].armor_set == ArmorSet::RobotSuit && self.fighters[p].hull > 0.0
-            {
+            if self.fighters[p].in_heavy_mech() {
                 let f = &mut self.fighters[p];
                 let d = wrap_angle(cmd.yaw - f.yaw);
                 // §7.4: the burst caps turning harder than the normal
@@ -7904,8 +8153,7 @@ impl TdmSim {
             // the MECH takes a braced SIDE-STEP instead — tall, grounded,
             // committed — a 2.7 m walker does not somersault.
             if cmd.dodge {
-                let mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
-                    && self.fighters[p].hull > 0.0;
+                let mech = self.fighters[p].in_heavy_mech();
                 let f = &mut self.fighters[p];
                 if f.grounded && f.roll_t <= 0.0 && f.roll_cd <= 0.0 {
                     let m = (cmd.move_x * cmd.move_x + cmd.move_z * cmd.move_z).sqrt();
@@ -8068,8 +8316,7 @@ impl TdmSim {
                 }
             }
             if cmd.exit_mech
-                && self.fighters[p].armor_set == ArmorSet::RobotSuit
-                && self.fighters[p].hull > 0.0
+                && self.fighters[p].in_heavy_mech()
                 && self.fighters[p].mech_transition_t <= 0.0
             {
                 let f = &mut self.fighters[p];
@@ -8082,8 +8329,7 @@ impl TdmSim {
             // RELEASE with a full 1.3 s lock = homing launch; a quick
             // tap dumb-fires straight. Never locks infantry.
             {
-                let in_mech = self.fighters[p].armor_set == ArmorSet::RobotSuit
-                    && self.fighters[p].hull > 0.0;
+                let in_mech = self.fighters[p].in_heavy_mech();
                 let can_pod = in_mech
                     && self.fighters[p].pod_ammo > 0
                     && self.fighters[p].pod_cd <= 0.0
@@ -8099,7 +8345,7 @@ impl TdmSim {
                         if j == p
                             || g.team == pteam
                             || !g.alive()
-                            || !(g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0)
+                            || !g.in_heavy_mech()
                         {
                             continue; // mechs ONLY — never infantry
                         }
@@ -8297,7 +8543,10 @@ impl TdmSim {
                     let f = &mut self.fighters[p];
                     f.brace = cmd.ability && f.grounded && !f.shield_up && f.roll_t <= 0.0;
                 }
-                ArmorSet::RobotSuit => {
+                // §owner SPEC15 P2: ONE ability arm for both heavy tiers -
+                // the Royal side-steps and blasts exactly as the Big Mech
+                // does, and a second copied arm is how the two would drift
+                ArmorSet::RobotSuit | ArmorSet::RoyalMech => {
                     self.fighters[p].brace = false;
                     // §A.3: the crouch key is DEAD INPUT in a mech -
                     // `set_crouch` refuses it outright (`want && !in_mech()`).
@@ -8405,10 +8654,7 @@ impl TdmSim {
                 // slot may carry the AXE — slower, harder, and the swing
                 // SWEEPS the arc.
                 let thrust = self.fighters[p].gun == GunKind::Spear;
-                let tmul = if thrust
-                    && self.fighters[p].armor_set == ArmorSet::RobotSuit
-                    && self.fighters[p].hull > 0.0
-                {
+                let tmul = if thrust && self.fighters[p].in_heavy_mech() {
                     MECH_THRUST_TIME_MULT
                 } else {
                     1.0
@@ -8783,7 +9029,7 @@ impl TdmSim {
                         // ramps it down to walking pace over 0.14 s. The
                         // mech's side-step skips the load (servos don't
                         // crouch) but keeps the ease.
-                        let mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+                        let mech = f.in_heavy_mech();
                         // roll_boost: Task 3 rule 3's counter-movement
                         // launch, snapshotted at the trigger (1.0 unless
                         // the dodge cut against real prior movement)
@@ -9642,9 +9888,7 @@ impl TdmSim {
                 // blown out) mid-entry used to stay disarmed on foot for
                 // the rest of the window, with nothing in the HUD saying
                 // why.
-                || (f.mech_transition_t > 0.0
-                    && f.armor_set == ArmorSet::RobotSuit
-                    && f.hull > 0.0)
+                || (f.mech_transition_t > 0.0 && f.in_heavy_mech())
             {
                 return false;
             }
@@ -9705,7 +9949,7 @@ impl TdmSim {
                 // here (not as an autocannon special case) so §C's
                 // autocannon gets braced-vs-unbraced kick for free by
                 // multiplying the same constant at its own call site.
-                let brace_scale = if f.armor_set == ArmorSet::RobotSuit && f.mech_brace {
+                let brace_scale = if f.armor_set.is_heavy_chassis() && f.mech_brace {
                     MECH_BRACE_RECOIL_DAMP
                 } else {
                     1.0
@@ -10802,8 +11046,7 @@ impl TdmSim {
         // M4A1 lands the owner's tuned rule: 2 headshots / 8 body shots.
         // §4.5 (Brief VI): proportional zones do NOT apply to a mech —
         // the angle model (+ visor ×2, inside apply_armor) replaces them.
-        let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
-            && self.fighters[j].hull > 0.0;
+        let in_mech = self.fighters[j].in_heavy_mech();
         let mut dmg = base_dmg * if in_mech { 1.0 } else { zone.mult() };
         // §C tier 2: a segment whose plate is missing is FRAGILE. Not a
         // health change - max HP is untouched, per the brief - a bare
@@ -11208,8 +11451,7 @@ impl TdmSim {
             // leg reduction - piercing is the arrow's whole fantasy).
             // Neither applies against a mech - angle-armor replaces zone
             // bands there entirely.
-            let in_mech = self.fighters[j].armor_set == ArmorSet::RobotSuit
-                && self.fighters[j].hull > 0.0;
+            let in_mech = self.fighters[j].in_heavy_mech();
             let zone_mult = if !in_mech {
                 let base = self.fighters[j].pos[1];
                 let h = self.fighters[j].height();
@@ -11857,7 +12099,7 @@ impl TdmSim {
         hold_s: f32,
     ) -> ([f32; 3], [f32; 3]) {
         let f = &self.fighters[i];
-        let mech = f.armor_set == ArmorSet::RobotSuit && f.hull > 0.0;
+        let mech = f.in_heavy_mech();
         let eff_hold = if f.shield_up && !mech {
             hold_s * THROW_SHIELD_CHARGE_MULT
         } else {
@@ -11905,7 +12147,7 @@ impl TdmSim {
             let mut dir = normalize(r.vel);
             if r.target >= 0 {
                 let g = &self.fighters[r.target as usize];
-                if !(g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0 && g.alive()) {
+                if !(g.in_heavy_mech() && g.alive()) {
                     r.target = -1; // the chassis is gone — fly straight
                 } else {
                     let c = [g.pos[0], g.pos[1] + g.height() * 0.5, g.pos[2]];
@@ -12040,7 +12282,7 @@ impl TdmSim {
                     // raised shield can at best halve.
                     let is_mech = {
                         let g = &self.fighters[j];
-                        g.armor_set == ArmorSet::RobotSuit && g.hull > 0.0
+                        g.in_heavy_mech()
                     };
                     if is_mech {
                         let braced = self.fighters[j].mech_brace;
@@ -12286,7 +12528,7 @@ impl TdmSim {
                 }
                 return through;
             }
-            if v.armor_set == ArmorSet::RobotSuit && v.hull > 0.0 {
+            if v.in_heavy_mech() {
                 let mut red = 0.0;
                 let mut front = false;
                 // §owner (defect pass): the BARRIER's own arc, read from
@@ -12356,7 +12598,14 @@ impl TdmSim {
                 // §6.3: HP-threshold plate-detach events - each stage
                 // fires exactly once (bitmask), replay-identical since
                 // it's driven purely by hull/MECH_HULL.
-                let frac = f.hull / MECH_HULL;
+                // §owner SPEC15 P2: against the CHASSIS' OWN pool, not
+                // the global `MECH_HULL`. With a flat denominator a Royal
+                // (660 hull) would sit at frac 1.10 fresh and shed its
+                // first plate 10% of a pool late, and any future chassis
+                // with a smaller pool would spawn with plates already
+                // gone. The stages are still driven purely by hull, so
+                // they are still replay-identical.
+                let frac = f.hull / f.mech_hull_max();
                 if frac <= MECH_PLATE_70_PCT {
                     f.mech_plates_dropped |= 0b001;
                 }
@@ -12442,7 +12691,7 @@ impl TdmSim {
         let mut d = dmg;
         if explosive {
             d *= 1.0 - armor_spec(vset).explosive_resist;
-            if vset == ArmorSet::RobotSuit {
+            if vset.is_heavy_chassis() {
                 let f = &mut self.fighters[victim];
                 f.armor = (f.armor - EXPLOSIVE_POWER_DRAIN).max(0.0);
             }
@@ -13496,7 +13745,7 @@ impl TdmSim {
                 } else {
                     false
                 };
-                if in_mech && self.fighters[i].armor_set == ArmorSet::RobotSuit {
+                if in_mech && self.fighters[i].armor_set.is_heavy_chassis() {
                     self.fighters[i].mech_weapon = if want_auto {
                         MechWeapon::Autocannon
                     } else {
@@ -13755,7 +14004,7 @@ impl TdmSim {
                     vel = [vel[0] * k, vel[1] * k];
                 }
             }
-            if fm.armor_set == ArmorSet::RobotSuit && fm.armor <= 0.0 {
+            if fm.armor_set.is_heavy_chassis() && fm.armor <= 0.0 {
                 vel = [vel[0] * ROBOT_DRAINED_MOVE, vel[1] * ROBOT_DRAINED_MOVE];
             }
             if fm.brace {
@@ -13792,7 +14041,7 @@ impl TdmSim {
         // this; the bot path snapped instantly to any new facing, so a
         // bot mech could whip around in one tick and the "commitment"
         // that balances the chassis only cost the human.
-        if fm.armor_set == ArmorSet::RobotSuit && fm.hull > 0.0 {
+        if fm.in_heavy_mech() {
             let d = wrap_angle(yaw - fm.yaw);
             let step = (MECH_TURN_RATE * DT).min(d.abs());
             fm.yaw += d.signum() * step;
@@ -15239,6 +15488,470 @@ mod tests {
             (scout_h - player_h).abs() > 0.01,
             "the whole bug: without the fix this is exactly zero"
         );
+    }
+
+    // ---- §owner SPEC15 P2: the ROYAL tier ----------------------------
+
+    /// Set up fighter 0 as a live chassis of `set` and read back the five
+    /// numbers a tier is made of.
+    ///
+    /// Deliberately reads them through the PUBLISHED accessors rather
+    /// than from the constants: `height`, `radius` and `step_up` each own
+    /// a separate branch, and the point of the test below is that all
+    /// three followed one constant without being edited one at a time.
+    fn chassis_metrics(set: ArmorSet) -> [f32; 6] {
+        let mut s = range(0x5041);
+        let f = &mut s.fighters[0];
+        f.armor_set = set;
+        f.crouch = false;
+        f.mech_jump_phase = MechJumpPhase::None;
+        let hull = f.mech_hull_max();
+        f.hull = hull;
+        let spec = armor_spec(set);
+        [
+            f.height(),
+            f.radius(),
+            f.step_up(),
+            hull,
+            f.mech_shield_max(),
+            spec.flat_torso,
+        ]
+    }
+
+    /// §owner SPEC15 P2: the ROYAL chassis is ~10% larger and ~10%
+    /// stronger than the Big Mech, and every one of those tens comes off
+    /// ONE constant.
+    ///
+    /// THE ANCHOR IS THE OWNER'S SENTENCE, not `ROYAL_MULT`. Each ratio
+    /// is asserted inside a 5%-15% band written from the spec's "~10%".
+    /// `assert!((ratio - ROYAL_MULT).abs() < eps)` would rebuild the
+    /// expression under test out of the very constant that drives it and
+    /// could never fail - the self-referential shape the barrier test was
+    /// caught in.
+    ///
+    /// THE SECOND LEG IS THE ARCHITECTURE. The five ratios must AGREE
+    /// with each other. They are computed by four different functions in
+    /// three different parts of the file - `chassis_scale` reached
+    /// through `height`/`radius`/`step_up`, `mech_hull_max`, and
+    /// `armor_spec` - so their agreeing is the evidence that one number
+    /// drives them all and not five literals that happen to match today
+    /// and drift on the next balance pass.
+    #[test]
+    fn the_royal_tier_is_ten_percent_over_the_big_mech_from_one_constant() {
+        let heavy = chassis_metrics(ArmorSet::RobotSuit);
+        let royal = chassis_metrics(ArmorSet::RoyalMech);
+        let names = [
+            "height", "radius", "step_up", "hull", "barrier", "flat_torso",
+        ];
+
+        let mut ratios = [0.0_f32; 6];
+        for k in 0..names.len() {
+            assert!(heavy[k] > 0.0, "{}: the heavy reads zero", names[k]);
+            ratios[k] = royal[k] / heavy[k];
+            // the owner's "~10%", as a band rather than as the constant
+            assert!(
+                ratios[k] > 1.05 && ratios[k] < 1.15,
+                "{}: the Royal is {:.3}x the Big Mech ({} vs {}), which is \
+                 not the spec's '~10% larger / ~10% stronger'",
+                names[k],
+                ratios[k],
+                royal[k],
+                heavy[k]
+            );
+        }
+        // ...and they are the SAME ten percent. This is the leg that
+        // fails if a later hand adds a bespoke Royal literal anywhere.
+        for k in 1..names.len() {
+            assert!(
+                (ratios[k] - ratios[0]).abs() < 1e-4,
+                "{} scales by {:.4} while height scales by {:.4} - the tier \
+                 has stopped flowing from one constant",
+                names[k],
+                ratios[k],
+                ratios[0]
+            );
+        }
+
+        // the JUMP is the same constant seen through a square root: apex
+        // is v^2/2g, so a chassis 10% larger must launch at sqrt(1.10) to
+        // clear the same obstacle in its OWN body heights.
+        let vr = mech_jump_speed_of(ArmorSet::RoyalMech)
+            / mech_jump_speed_of(ArmorSet::RobotSuit);
+        assert!(
+            (vr * vr - ratios[0]).abs() < 1e-4,
+            "the Royal launches at {vr:.4}x the heavy, an apex ratio of \
+             {:.4} against a size ratio of {:.4} - it clears more or less \
+             than its own size",
+            vr * vr,
+            ratios[0]
+        );
+    }
+
+    /// §owner SPEC15 P2: and it PAYS for the tier.
+    ///
+    /// "~10% stronger across relevant attributes, kept balanced". Ten
+    /// percent applied to every attribute in the same direction is not a
+    /// tier, it is a strictly better machine and the Big Mech becomes the
+    /// pad nobody walks to. Two prices, both stated as relationships so a
+    /// retune moves them together:
+    ///   (a) it is SLOWER - `move_mult` goes down where the flats go up;
+    ///   (b) it is a BIGGER TARGET - the capsule every hit test measures
+    ///       against is wider and taller, so the extra hull is being
+    ///       carried by something easier to hit.
+    #[test]
+    fn the_royal_tier_pays_for_its_size() {
+        let heavy = armor_spec(ArmorSet::RobotSuit);
+        let royal = armor_spec(ArmorSet::RoyalMech);
+        assert!(
+            royal.flat_torso > heavy.flat_torso,
+            "the tier has to be stronger to be a tier"
+        );
+        assert!(
+            royal.move_mult < heavy.move_mult,
+            "the Royal walks at {:.3} against the Big Mech's {:.3} - a \
+             bigger, tougher chassis that is not slower is a free upgrade",
+            royal.move_mult,
+            heavy.move_mult
+        );
+        // and the pace penalty is the same size as the gain, not a token
+        let gain = royal.flat_torso / heavy.flat_torso;
+        let cost = heavy.move_mult / royal.move_mult;
+        assert!(
+            (gain - cost).abs() < 1e-4,
+            "gained {gain:.4}x armour for {cost:.4}x the pace - the trade \
+             is no longer symmetric"
+        );
+
+        let h = chassis_metrics(ArmorSet::RobotSuit);
+        let r = chassis_metrics(ArmorSet::RoyalMech);
+        assert!(
+            r[0] > h[0] && r[1] > h[1],
+            "the Royal must present a LARGER capsule ({:.2}m x {:.2}m \
+             against {:.2}m x {:.2}m) - that is the other half of what it \
+             pays",
+            r[0],
+            r[1],
+            h[0],
+            h[1]
+        );
+    }
+
+    /// §owner SPEC15 P2, TRAP 2 written down as behaviour: the Royal is a
+    /// TIER of the heavy, not a fork of it.
+    ///
+    /// The spec's own warning: "`armor_set` is an enum the sim branches
+    /// on in many places. Adding tiers means auditing every
+    /// `== ArmorSet::RobotSuit` - that exact pattern already caused the
+    /// medic pilot to fail every mech gate."
+    ///
+    /// So this is that audit, expressed as: every gate the Big Mech
+    /// passes, the Royal passes on the same terms. It fails the moment
+    /// anyone adds a heavy-chassis rule spelled `== RobotSuit` and a
+    /// Royal quietly falls out of it. Each leg drives the REAL function,
+    /// never a restatement of its condition.
+    #[test]
+    fn every_heavy_chassis_gate_answers_the_same_for_the_royal() {
+        // (1) the three predicates the rest of the file asks
+        assert!(ArmorSet::RoyalMech.is_mech(), "it walks, so it is a mech");
+        assert!(
+            ArmorSet::RoyalMech.is_heavy_chassis(),
+            "the tier above the heavy is a heavy"
+        );
+        assert!(
+            !ArmorSet::ScoutMech.is_heavy_chassis(),
+            "and the light chassis still is not - a predicate that is true \
+             for everything gates nothing"
+        );
+
+        // (2) the MOUNTS. Same hull weapons, same UI list, same bot list.
+        assert_eq!(
+            MechWeapon::for_set(ArmorSet::RoyalMech),
+            MechWeapon::for_set(ArmorSet::RobotSuit),
+            "the Royal has been given its own mount list"
+        );
+        assert_eq!(
+            MechWeapon::valid_for(ArmorSet::RoyalMech),
+            MechWeapon::valid_for(ArmorSet::RobotSuit),
+            "the Royal cannot hold a mount the bot brain will select"
+        );
+
+        // (3) BOARDING. `mech_enter_stage_for` gates on the set, and it
+        // is the only thing standing between the client's eight boarding
+        // stages and a Royal that seals up invisibly.
+        for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
+            let mut s = range(0x5042);
+            let f = &mut s.fighters[0];
+            f.armor_set = set;
+            f.hull = f.mech_hull_max();
+            f.mech_transition_t = MECH_ENTER_S * 0.5;
+            f.mech_exiting = false;
+            assert!(
+                mech_enter_stage_for(&s.fighters[0]).is_some(),
+                "{set:?} boards without a single readable stage"
+            );
+        }
+
+        // (4) THE KNEEL, driven through `set_crouch` - the shared entry
+        // point the player and the bot both use.
+        for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
+            let mut s = range(0x5043);
+            let f = &mut s.fighters[0];
+            f.armor_set = set;
+            f.hull = f.mech_hull_max();
+            f.grounded = true;
+            let tall = f.height();
+            f.set_crouch(true);
+            assert!(f.chassis_kneeling(), "{set:?} refused to kneel");
+            assert!(
+                f.height() < tall,
+                "{set:?} knelt without taking its hitbox down - the exact \
+                 defect the crouch ban existed to paper over"
+            );
+        }
+
+        // (5) THE POWER CORE. An explosive drains it for the heavy; the
+        // Royal runs the same core and must pay the same.
+        for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
+            let mut s = range(0x5044);
+            {
+                let f = &mut s.fighters[1];
+                f.armor_set = set;
+                f.hull = f.mech_hull_max();
+                f.armor = POWER_MAX;
+                f.protect_t = 0.0;
+            }
+            s.apply_plain_damage(0, 1, 30.0, [0.0, 0.0, 0.0], true, false);
+            assert!(
+                s.fighters[1].armor < POWER_MAX,
+                "{set:?}: a blast left the power core untouched"
+            );
+        }
+
+        // (6) THE MECH ARMOUR MODEL, measured as ROUNDS TO KILL through
+        // the real damage path.
+        //
+        // NOT "the Royal takes less per round" - it does not, and finding
+        // that out is worth writing down rather than asserting past.
+        // `apply_armor` sends a live heavy chassis down the hull/ANGLE
+        // branch and returns before the per-set flats are ever consulted,
+        // so the Royal's larger `armor_spec` row is unreachable while it
+        // is piloted (so is the Big Mech's, and has been since the mech
+        // damage model landed). The tier's LIVE durability is its hull
+        // pool, so that is what this measures - and grinding it down
+        // through `apply_hit` also proves the plate-detach thresholds are
+        // counted against each chassis' OWN pool rather than a flat
+        // `MECH_HULL`, which is what would make a Royal shed its first
+        // plate 10% of a pool late.
+        let rounds_to_kill = |set: ArmorSet| -> u32 {
+            let mut s = range(0x5045);
+            plate_up(&mut s);
+            s.fighters[0].gun = GunKind::M4;
+            {
+                let f = &mut s.fighters[1];
+                f.armor_set = set;
+                f.hull = f.mech_hull_max();
+                f.protect_t = 0.0;
+                f.yaw = std::f32::consts::PI; // facing the shooter: FRONT arc
+            }
+            let mut n = 0u32;
+            while s.fighters[1].hull > 0.0 && n < 5000 {
+                let at_y = {
+                    let f = &s.fighters[1];
+                    f.pos[1] + f.height() * 0.5
+                };
+                s.apply_hit(0, 1, at_y, [0.0, at_y, 5.0]);
+                n += 1;
+            }
+            n
+        };
+        let big = rounds_to_kill(ArmorSet::RobotSuit);
+        let roy = rounds_to_kill(ArmorSet::RoyalMech);
+        assert!(
+            big > 4 && big < 5000,
+            "the fixture never actually ground the heavy down ({big} rounds) \
+             - the rest of this leg would be vacuous"
+        );
+        let tough = roy as f32 / big as f32;
+        assert!(
+            tough > 1.05 && tough < 1.15,
+            "the Royal took {roy} rounds to kill against the Big Mech's \
+             {big} - a durability ratio of {tough:.3}, not the spec's ~10%"
+        );
+
+        // (7) THE PLATE-DETACH STAGES, against each chassis' OWN pool.
+        //
+        // Leg (6) does not catch this on its own: a flat `MECH_HULL`
+        // denominator only shifts a Royal's stages by 10% of a pool, and
+        // the rounds-to-kill ratio absorbs that inside its band. Measured
+        // here directly, and at a hull fraction chosen so the two
+        // denominators DISAGREE - 0.68 of the Royal's 660 is 449, which
+        // is 0.75 of the flat 600 and so sheds nothing under the bug.
+        //
+        // The shot comes from BEHIND (victim yaw 0, attacker at -z), the
+        // one arc with no angle reduction, so the hull left is exactly
+        // the hull asked for rather than a number the arc chose.
+        let plate_mask = |set: ArmorSet, frac_left: f32| -> u8 {
+            let mut s = range(0x5047);
+            let full = {
+                let f = &mut s.fighters[1];
+                f.armor_set = set;
+                f.protect_t = 0.0;
+                f.yaw = 0.0;
+                let m = f.mech_hull_max();
+                f.hull = m;
+                f.mech_plates_dropped = 0;
+                m
+            };
+            s.apply_plain_damage(0, 1, full * (1.0 - frac_left), [0.0, 1.0, -5.0], false, false);
+            s.fighters[1].mech_plates_dropped
+        };
+        for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
+            let over = plate_mask(set, MECH_PLATE_70_PCT + 0.02);
+            let under = plate_mask(set, MECH_PLATE_70_PCT - 0.02);
+            assert_eq!(
+                over & 0b001,
+                0,
+                "{set:?} shed its first plate while still above \
+                 {MECH_PLATE_70_PCT} of its OWN hull pool"
+            );
+            assert_ne!(
+                under & 0b001,
+                0,
+                "{set:?} is under {MECH_PLATE_70_PCT} of its own hull pool \
+                 and has not shed a plate - the stages are being counted \
+                 against a flat MECH_HULL rather than `mech_hull_max()`"
+            );
+        }
+    }
+
+    /// §owner SPEC15 P1: "six mech variants registered - player
+    /// Agile/Big/Royal and opposition Agile/Big/Royal."
+    ///
+    /// Six is THREE TIERS on TWO TEAMS. The sim's half of that claim is
+    /// exactly two things: the three tiers exist and are distinct, and
+    /// nothing about how a chassis behaves reads `team`. The second is
+    /// the one worth a test - a faction is paint, and the moment a hull
+    /// pool or a walking pace starts depending on which side is wearing
+    /// it, "opposition mechs are not recolours" has become a balance bug.
+    #[test]
+    fn six_chassis_variants_are_registered_and_team_blind() {
+        assert_eq!(CHASSIS_TIERS.len(), 3, "three tiers on two teams is six");
+        for set in CHASSIS_TIERS {
+            assert!(set.is_mech(), "{set:?} is in the tier list and is not a mech");
+            assert!(
+                set.chassis_name().is_some(),
+                "{set:?} has no name for a lineup screen to print"
+            );
+        }
+        // distinct machines, not three labels on one
+        for a in 0..CHASSIS_TIERS.len() {
+            for b in a + 1..CHASSIS_TIERS.len() {
+                let (x, y) = (CHASSIS_TIERS[a], CHASSIS_TIERS[b]);
+                assert_ne!(x.chassis_name(), y.chassis_name());
+                assert_ne!(
+                    x.chassis_scale(),
+                    y.chassis_scale(),
+                    "{x:?} and {y:?} stand at the same size - a tier you \
+                     cannot tell apart in silhouette does not exist at range"
+                );
+            }
+        }
+
+        // TEAM-BLIND. The same chassis on either side, measured through
+        // every accessor a fight reads.
+        for set in CHASSIS_TIERS {
+            let mut s = range(0x5046);
+            assert_ne!(
+                s.fighters[0].team, s.fighters[1].team,
+                "the fixture must actually put the two on opposite sides"
+            );
+            let mut read = |i: usize| -> [f32; 4] {
+                let f = &mut s.fighters[i];
+                f.armor_set = set;
+                let hull = f.mech_hull_max();
+                f.hull = hull;
+                [f.height(), f.radius(), hull, armor_spec(set).move_mult]
+            };
+            let ally = read(0);
+            let foe = read(1);
+            assert_eq!(
+                ally, foe,
+                "{set:?} is a different machine depending on the team \
+                 flying it: ally {ally:?} vs opposition {foe:?}"
+            );
+        }
+    }
+
+    /// §owner SPEC15 P2/P1: the tier is REACHABLE. A chassis nothing
+    /// spawns is the Pyro suit again.
+    ///
+    /// Every map puts exactly one Royal pad down, the pad is not stacked
+    /// on another chassis pad, and walking a fighter onto it boards the
+    /// top tier through the real `step` - full hull off `mech_hull_max`
+    /// (not a literal), a sealing window, and cold mounts.
+    #[test]
+    fn a_royal_pad_exists_on_every_map_and_boards_the_top_tier() {
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(4, 1, Mode::Tdm, map));
+            let royal: Vec<[f32; 3]> = s
+                .pickups
+                .iter()
+                .filter(|p| p.kind == PickupKind::RoyalArmor)
+                .map(|p| p.pos)
+                .collect();
+            assert_eq!(royal.len(), 1, "{map:?}: exactly one royal pad");
+            for p in s
+                .pickups
+                .iter()
+                .filter(|p| p.kind == PickupKind::RobotArmor || p.kind == PickupKind::ScoutArmor)
+            {
+                let d = ((royal[0][0] - p.pos[0]).powi(2) + (royal[0][2] - p.pos[2]).powi(2))
+                    .sqrt();
+                assert!(
+                    d > 5.0,
+                    "{map:?}: the royal pad is {d:.1}m from a {:?} pad - two \
+                     chassis on one point is not a choice",
+                    p.kind
+                );
+            }
+        }
+
+        // and it BOARDS, through the real collection path
+        let mut s = TdmSim::new(cfg(4, 1, Mode::Tdm, MapKind::Arena));
+        let pad = s
+            .pickups
+            .iter()
+            .find(|p| p.kind == PickupKind::RoyalArmor)
+            .expect("the pad has to exist to be walked onto")
+            .pos;
+        {
+            let f = &mut s.fighters[0];
+            f.pos = pad;
+            f.armor_set = ArmorSet::None;
+            f.hull = 0.0;
+        }
+        s.step(PlayerCmd::default());
+        let f = &s.fighters[0];
+        assert_eq!(
+            f.armor_set,
+            ArmorSet::RoyalMech,
+            "the royal pad did not board the royal chassis"
+        );
+        assert!(
+            (f.hull - MECH_HULL * ROYAL_MULT).abs() < 1e-3,
+            "boarded with {} hull against the tier's {}",
+            f.hull,
+            MECH_HULL * ROYAL_MULT
+        );
+        assert!(
+            f.mech_transition_t > 0.0,
+            "the Royal boarded instantly - boarding is committed for every \
+             chassis, and a tier that skips the seal window skips the \
+             client's eight boarding stages with it"
+        );
+        assert_eq!(f.mech_weapon, MechWeapon::Gatling, "a FRESH chassis");
+        assert_eq!(f.gatling_heat, 0.0, "with cold mounts");
+        assert_eq!(f.mech_rounds, MECH_ROUNDS, "and a full belt");
     }
 
     /// §owner: does the scout chassis already get the airborne flip?
