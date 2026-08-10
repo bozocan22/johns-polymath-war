@@ -1412,3 +1412,73 @@ Tests 386 → 404. Seven added, every one mutation-proven from a file copy.
    commit titled "the turret kicks harder".
 
 — **FRIDAY22**
+
+---
+
+## 2026-08-10 — SPEC15 P1/P2/§4, sim half (Pyro out, Royal in, the recoil envelope)
+
+Four commits: `b11b7de`, `614bf03`, `107c8ef`, `879c95a`. `sim.rs` only.
+Sim tests 218 → 227; whole crate 404 → 417 once Friday33's client half landed.
+
+### 1. Pyro is gone, not retired
+`ArmorSet::Pyro`, `PickupKind::PyroArmor`, `Fighter::fuel`, the five `FLAME_*`
+constants, the 62-line flame ability arm, both per-map relocation tables that
+hand-placed a pad no base list spawned, and its three passive immunities
+(toxic, molotov `burn_t`, the blanket `fire` return in `apply_plain_damage`).
+Nothing in the game is fire-immune now, which is the true state of a game with
+no flame weapon in it.
+
+### 2. Royal is a third `ArmorSet`, not a bool
+Rejected `Fighter::royal: bool` (makes trap 2 impossible, but cannot carry a
+DATA ROW — `armor_spec`, `mech_hull_max`, `MechWeapon::for_set` and
+`PickupKind` are all keyed on `ArmorSet`) and rejected a `MechTier` enum
+beside `armor_set` (same problem, plus it admits `ScoutMech + Royal`).
+Trap 2 paid in the same commit: all 24 production `== ArmorSet::RobotSuit`
+comparisons are now `in_heavy_mech()` / `is_heavy_chassis()`.
+One constant, `ROYAL_MULT` 1.10, feeds `chassis_scale` (height/radius/step-up/
+jump apex), `mech_hull_max`, `mech_shield_max` and a DERIVED `armor_spec` row.
+It pays: `move_mult` is divided by the same constant, and a 10% bigger capsule
+is a 10% easier target.
+
+### 3. Controlled, then chaotic
+`turret_chaos(i)` (0 through the controlled window, ramping to 1) plus
+`turret_spray_entry(i)`, a fixed-seed pattern built the way `spray_entry`
+builds a rifle's. Boundaries derived: the controlled window is the midpoint of
+the owner's own "1-2 s"; full chaos is the midpoint between that and the
+mount's own `turret_rounds_to_vent()`. **No new sim state** — pure functions of
+`turret_burst_i`, and its own local `Pcg32`, so zero draws were added to,
+removed from or reordered in the sim's stream.
+
+### THE THINGS I AM LEAST SURE ABOUT
+
+1. **A bot mech's sustained output at 10 m fell about a third** (492 → 331
+   damage over 17 s on my own rig, which is cruder than the test's). The
+   envelope is on the shared path, so a player pays it too and can compensate;
+   a bot cannot. `a_bot_mech_never_runs_dry...` still passes with margin
+   (81–130 damage in its final 3 s against a `> 0` gate). This is the intended
+   direction — sustained fire is supposed to get worse — but a third is a real
+   balance change, not a rounding error.
+2. **That drop is insensitive to the pattern's AMPLITUDE, only to its
+   presence**, which I do not fully understand. Three different width/yaw
+   settings all measured 330.7 over 17 s. I chose the widest setting because
+   the read is strongest and the measured cost did not move; if the mechanism
+   turns out to be an artefact of my rig, the amplitude may be buyable back.
+3. **`armor_spec`'s flats are unreachable for a piloted HEAVY chassis.**
+   `apply_armor` takes the hull/angle branch and returns before them. True of
+   the Big Mech's row too, and long-standing. The Royal's live durability is
+   hull + barrier; the flats are kept scaled so the table stays consistent.
+   Worth someone deciding on deliberately.
+4. **Dropping the 0.55 mean-reversion carry from the turret pattern does not
+   fail the suite.** At a step of 0.80 against a hard ±1 clamp the clamp is
+   most of the containment. Genuine persistence (carry 0.97) IS caught. I said
+   so in the comment rather than writing a guard I could not make fail.
+5. **`mech_visor_eye_y(pos_y)`, the free function, still hard-codes
+   `MECH_SCALE`** and so is wrong for a Royal. `Fighter::visor_eye_y()` is
+   correct. Every client caller of the free function needs moving — that is
+   Friday33's, and I did not reach across.
+6. **The client's `PUNCH_DEG_S_PER_SPEC_KICK` bridge reads
+   `turret_kick_per_round()`, which is unchanged**, so the client's recoil
+   still models a single-axis mount. `mount_kick_axes` and `turret_chaos_of`
+   are published for the visual half; nothing reads them yet.
+
+— **FRIDAY22**
