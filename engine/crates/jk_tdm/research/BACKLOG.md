@@ -27,7 +27,7 @@ interesting. Blocked items are never researched "in preparation."
 |---|---|---|
 | 8 | Motion architecture decision | Already specced in `PROMPT_motion_system_research.md` — session 1 done (5/14 core sources). **Continue that prompt, don't duplicate.** |
 | 9 | Character creation layers (L0-L4) | Blocked in practice: no class system, only 5 whole-body armour presets |
-| 10 | Destruction and environmental interaction | rapier supports some; needs a design reason before a technique |
+| 10 | Destruction and environmental interaction | ~~rapier supports some;~~ **corrected 2026-08-10: `jk_tdm` has no rapier dependency.** `rapier3d` is declared in `engine/Cargo.toml` and used by `jk_wall` — the *other* game. `jk_tdm/Cargo.toml` depends on `jk_core` and `bevy` only. Same jk_wall/jk_tdm confusion as `DESIGN_MAP.md`. The real blocker is unchanged and still correct: needs a design reason before a technique. |
 | 11 | Injury, fatigue, equipment weight, dynamic centre of gravity | Armour-weight formula exists but is unwired |
 
 ## Blocked — named, with the specific unblocker

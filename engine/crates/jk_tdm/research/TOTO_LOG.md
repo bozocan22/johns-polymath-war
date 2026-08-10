@@ -683,3 +683,263 @@ already records, pointed upward.
    currently second-hand through VM-12. **Nobody here has read Lynch.**
 
 — TOTO33
+
+---
+
+## 2026-08-10 â€” Dispatch: write `MAP_METRICS.md`. SYNTHESIS, not search.
+
+**Deliverable written:** `research/maps/MAP_METRICS.md`. Closes
+`TRV-0149`; its Â§9 closes `TRV-0051` and `TRV-0180` explicitly.
+**Ledger updated:** `research/maps/SOURCES.md` (three corrections + a
+deliverable line).
+
+**The dispatch was explicit that this was NOT a research cycle** â€” Rule
+13, build over research. One external source was touched, and only to
+re-verify a ledger row. No new sources sought. Quota unchanged at 1/12
+and deliberately not padded; that is the correct outcome for a synthesis
+pass and it should not be read as a shortfall.
+
+### What made it worth doing beyond restating the sources
+
+The value was not in the literature. It was in **deriving the numbers
+this game's own constants already imply and nobody had computed.** Three
+findings that did not exist anywhere before this pass:
+
+1. **The ledge ceiling is `apex + STEP_UP`, not `apex`.** `support_top`
+   accepts any cover top with `c.max[1] <= y0 + step_up` (`sim.rs:1052`)
+   and the horizontal push-out skips that same set (`sim.rs:9285`) â€” so a
+   box stops blocking you and becomes your floor in the same tick, 0.55 m
+   before you have cleared it. Soldier ceiling is **2.26 m**, not 1.71 m.
+   Every ledge-band number in the project would have been 0.55 m wrong.
+2. **A shipped defect, quantified.** The shared infill draws "shoulder"
+   cover uniformly from 1.6â€“2.2 m and Battlefield clutter from 1.1â€“2.4 m.
+   Both ranges **straddle a traversal threshold**, so ~21% of shoulder
+   cover and ~11% of clutter differs in mountability from its identical-
+   looking neighbour, drawn by the same line of code. Four-line fix,
+   written up in `MAP_METRICS.md` Â§9.2.
+3. **`max_unobstructed_sightline` is flat-map-only.** It samples at an
+   ABSOLUTE `y = EYE_REL` (`sim.rs:9643`), so on any multi-band map every
+   position above y=0 is "buried" and dropped. Cliffhold's number
+   measures the ground band and nothing else. `terrain_top`
+   (`sim.rs:1065`) already exists and is the one-line fix.
+
+### The stale-number catch â€” and the method that caught it
+
+`maps/SOURCES.md` recorded sightline baselines of Arena 80.2 / Bailey
+93.4 / Gardens 92.0 / Battlefield 509.9 m. **The dispatch told me to
+verify against source rather than trust the table, and it was right.**
+Re-running the shipping test gave 102.9 / 120.2 / 115.0 / 637.4 /
+Cliffhold 577.1. Two of the four ratios are exactly **1.250** and two are
+1.283â€“1.287: the baselines predate the `MAP_SCALE = 1.25` map expansion.
+**Standing lesson: a recorded measurement in a ledger has a date and a
+build, and neither is usually written down.** Numbers taken from a
+running system go stale in a way numbers taken from a paper do not.
+
+`BODY_HEIGHT`, `EYE_REL` and `BODY_RADIUS` had **not** drifted.
+
+### On S-01, and why I re-fetched a source the ledger already marked READ
+
+My first extraction pass on the Level Design Book metrics page returned
+every dimension table but **not** the 30â€“35Â° stair slope or the "landings
+every 12â€“16 steps" figure â€” both of which `maps/SOURCES.md` attributes to
+it. Given this repo's fabrication incident (`aiming/SOURCES.md`), that
+gap had to be closed rather than assumed benign. A second targeted fetch
+**reproduced both verbatim**, with the source's own derivation
+`arctan(7/11) = 32 degrees`. I checked its arithmetic: 32.47Â°, and all
+four of its engine step-slopes (33.69, 30.96, 33.69, 32.47) fall inside
+its own 30â€“35Â° claim. **S-01 is clean and the ledger row was accurate.**
+
+Recording the near-miss anyway: a first pass that silently omits a figure
+looks identical to a first pass that never had it. The only defence is
+asking the second question.
+
+### A contradiction resolved by measurement rather than averaged
+
+`vertical-maps/SOURCES.md` CONTRADICTION-1 â€” S-01's 30â€“35Â° stairs vs
+VM-08's 28.65Â° illustrative navmesh slope limit. **Does not bite this
+game**, on two independent grounds: our stairs run 18.4â€“22.6Â° (derived
+from `STAIR_RISE_M = 0.5` over 1.2â€“1.5 m treads), and there is no voxel
+navmesh here for the limit to apply to. Logged as resolved, not blended.
+
+### The 40 m rule â€” I changed the ledger's conclusion
+
+`SOURCES.md` said the IX-A rule "binds NEW maps, not retrofits". **That
+is wrong and the reason is arithmetic.** It is a global maximum over all
+pairs, so any single open line anywhere sets it. The validator's own
+instrument check asserts an empty Arena reads its own ~117 m diagonal.
+**A 40 m global max is unsatisfiable on any map above ~15 m half-extent**
+and always was. Proposed retire-and-replace (a local objective-pair rule
++ a distributional median-in-25â€“35 m rule) is in `MAP_METRICS.md` Â§6.4
+and is **labelled a DESIGN PROPOSAL by me, not a finding.** It needs an
+owner decision.
+
+Independent corroboration of the rule's *order* came free: transferring
+TF2's ranges by ratio to the Source player height (256/72, 1024/72,
+2048/72 Ã— 1.78 m) puts "medium" at 25.3 m and "sniper" at 50.6 m, with
+40 between them. Transferring by ratio rather than guessing a
+units-to-metres constant is the honest route and I recommend it as
+standing practice.
+
+### What would I need to read next to close the gaps I just left?
+
+1. **Nothing, for band SPACING â€” because it does not exist.**
+   `vertical-maps` Â§Q2 already searched and found no practitioner text
+   giving a vertical spacing figure in metres. My 2.26 m is a
+   *traversal* bound (when two bands stop being one surface), not a
+   design bound (when two bands stop being interesting). **Reading more
+   will not produce that number. A playtest will.** Stop looking.
+2. **A bot-aperture experiment, not a source.** Â§3.2's 7.0 m floor is an
+   analogy to `BOT_CLIMB_LANE_M`, and the real answer is an afternoon:
+   wall with a gap, roam one team 60 s, count crossings, sweep 2â†’24 m.
+   This is the one gap where the repo can generate its own primary data.
+3. **VM-16 â€” Mononen, *Automatic Annotations in Killzone 3 and Beyond***
+   (slides said to be on `digestingduck.blogspot.com`). Still
+   `NO-TRANSCRIPT`, still the top unread target, and it is the primary on
+   deriving cover and firing points *from geometry* â€” which is exactly
+   what a map with no pathfinder would need. Unchanged from TOTO33's
+   list two days ago.
+4. **A capture, not a paper**, for the one derived claim I could not
+   observe: a heavy mech standing on 3.4 m hard cover (2.586 + 0.935 =
+   3.521 > 3.4). One screenshot settles it.
+
+### Method note for the next Toto
+
+**The two highest-value things I did were both re-checks, not searches.**
+Running a test that already existed, and fetching a source a ledger
+already marked READ. Both found errors. In a repo this far along, the
+research is usually done and the ledger is usually the weak link.
+
+— TOTO (maps synthesis pass, appended by the session that dispatched it)
+
+---
+
+## 2026-08-10 - Motion architecture: the DECISION, copied from motion-architecture/NOTES.md
+
+(That dispatch was scoped to its own directory and could not write here. Copied across 2026-08-10 by the dispatching session, as the note in NOTES.md asked.)
+
+# SESSION 2 â€” 2026-08-10 â€” the refusal above was overridden, and why that was right
+
+**`DECISION.md` now exists.** Read it, not this file, for the decision.
+This section is the working record: what was done, what was corrected,
+and where the honest gaps are.
+
+## The refusal was correct and its premise turned out to be wrong
+
+Session 1 (above) refused to write the decision because axis 5 â€”
+per-character CPU cost at crowd scale â€” had no evidence. That was the
+right call **given what it had read.** It had read papers and crate
+metadata. It had not read this repository.
+
+Reading the source first changes the shape of the problem entirely:
+
+1. **Families B and C are eliminated by the R5 licence/asset gate before
+   axis 5 is ever consulted.** We hold zero hours of licence-cleared
+   mocap and zero animation clips; LaFAN1 is CC BY-NC-ND 4.0. A
+   per-character cost of 0 ms would not make an unavailable architecture
+   available. **Axis 5 could only ever have decided between two
+   available options, and there is only one.**
+2. **The "crowd" in axis 5 is not animated.** `jk_wall` (the 250v250
+   sim) has no rig, no pose layer, and no bevy dependency at all. The
+   animated population is `jk_tdm`'s: 16 fighters (`per_team` clamped to
+   8) + 40 zombies (`ZOMBIE_CAP`) = **56**. The number session 1 was
+   blocked on was for a population that does not exist.
+3. **The number is measurable here.** `jk_spike/src/bin/bench.rs` already
+   walks a body-count ladder; `autoplay_report` already drives headless
+   matches. `DECISION.md` Â§9 specifies BM-1 and BM-2 precisely enough to
+   build. **Axis 5 stops being a research blocker and becomes a build
+   task**, and the resulting figure is for this game on this hardware,
+   which no talk could supply.
+
+So: the gap session 1 named is still open as a *literature* question and
+is marked as such in `DECISION.md` Â§2 (axis 5 declares **no winner**) and
+Â§10.4. It is no longer load-bearing.
+
+## The greps that did the work, recorded so nobody re-runs them blind
+
+Against `engine/crates`, commit `e2866a9`:
+
+- `AnimationPlayer|AnimationGraph|AnimationClip|AnimationNodeIndex|AnimationTransitions`
+  â†’ **4 hits, none in code** (two `Cargo.toml`, two research `.md`).
+  The `bevy_animation` cargo feature is enabled and entirely unused.
+- Glob `engine/crates/jk_tdm/assets/**` â†’ **no files.** No clips, no glTF,
+  no BVH. There is no motion content of any kind in this project.
+- `foot_ik|ground_ik` in `jk_tdm/src` â†’ **zero hits.** Legs are open-loop
+  gait sinusoids (`main.rs:17759-17812`). **This is the one genuinely
+  missing core-scope item** and `DECISION.md` Â§7 Step 2 closes it.
+- `solve_arm_ik` â†’ **8 call sites**, 6 on the fighter rig, 2 on the
+  viewmodel, 1 in a test. Two-bone IK is already load-bearing here.
+- Line counts, for whoever has to work in these files: `sim.rs` **27 737**
+  lines, `main.rs` **29 261**. `DECISION.md` Â§7 Step 1 (extract the pure
+  pose kernel into its own module) is partly motivated by that alone.
+
+## The single sharpest finding, and it is not in any paper
+
+`jk_tdm`'s sim classifies hits by **height fraction** (`HitZone`), and
+the render is clamped to respect it â€” `gait_pose`'s own doc comment
+(`main.rs:2300-2310`) records a real bug where a settle dip put the head
+base at ~0.79 of height, "outside the 0.82 band the test claims to
+guard, and classified as Arms by the sim while looking like a head."
+
+**A pose retrieved from a motion database, or emitted by a network, does
+not know about your hit bands.** It puts the head where the data put it.
+Every frame of disagreement is a frame where the player shoots what he
+sees and hits something else. Motion matching here would need a
+constraint layer on top whose entire job is to undo the data. That is a
+game-specific structural argument against family B that no amount of
+reading SIGGRAPH would have produced, and it took one doc comment.
+
+## Corrections to session 1
+
+Both are written up in full in `SOURCES.md` Â§"Corrections to session 1":
+
+1. **The `bevy_mod_inverse_kinematics` quick win is reversed.** Its
+   licence and version facts stand (MIT/Apache-2.0, 0.8.0 â†’ `bevy ^0.15`,
+   confirmed via the crates.io API). Its premise does not: session 1
+   wrote that the body's "grip poses and reach are hand-posed", and they
+   are not â€” `solve_arm_ik` is a full two-bone solver with a pole vector,
+   plus an elbow clamp and sprung targets the crate lacks. Rejected on
+   axis 9, duplicate capability, `DECISION.md` Â§5.4, with the condition
+   that would reopen it (chains longer than two bones â€” for which the
+   crate would not help either, being two-bone only).
+2. **This file's tier-V blocker paragraph is stale.** TOTO33 solved it on
+   2026-08-08 (`youtube-transcript-api`, and Internet Archive
+   `_djvu.txt` for Vault-gated decks). **It is nevertheless still 0 today
+   for an unrelated reason:** this session's shell has no `curl`, no
+   `wget`, no Python, no `git`, no coreutils â€” every probe exits 127.
+   Only `WebSearch`/`WebFetch` reach the network, and the Learned Motion
+   Matching PDF is over the 10 MiB fetch limit with no local-download
+   route. **Tier-V reachability varies by session. Probe the shell
+   before writing it off, and record which way it went.**
+
+## What I would need to read next to close the gaps I left
+
+1. **Nothing, to make this decision.** That is the point of Â§3 of
+   `DECISION.md`. The R5 gate is decisive and it is already closed by a
+   licence fact and an empty `assets/` directory. **Do not re-open this
+   as a literature question.**
+2. **BM-1, our own benchmark** (`DECISION.md` Â§9.2). This is the
+   highest-value next artefact on the topic and it is a *build* task, not
+   a read task. It closes axis 5 with a number that is better than any
+   citation because it describes this engine.
+3. **The Learned Motion Matching PDF** â€” only if risk (1) in
+   `DECISION.md` Â§8.3 fires, i.e. if someone licences commercial mocap
+   and family B comes back on the table. Needs a session with a shell
+   that can download a 10 MiB file. Until then it is the classic
+   over-valued unread source this log warned about after the Hatze pass.
+4. **`bevy_animation_graph`'s compatibility table, the 0.15 row
+   specifically** â€” the one unresolved factual question about a real,
+   permissively-licensed, genuinely useful crate. Its partial-ragdoll
+   feature (some bones simulated, some kinematic) is the most valuable
+   third-party capability found on this topic, and it becomes relevant
+   the day this project acquires a rigged character with clips.
+5. **A talk on motion-matching search cost, via TOTO33's transcript
+   route, from a session that has Python.** Explicitly *not* on the
+   critical path â€” it would be a cross-check on an order of magnitude for
+   a family we have rejected. Listed last on purpose.
+
+**Note on the log:** the canonical entry belongs in
+`research/TOTO_LOG.md`, but this dispatch restricted writes to
+`research/motion-architecture/`, so it is recorded here instead. Whoever
+lifts that restriction should copy this section across.
+
+â€” session 2

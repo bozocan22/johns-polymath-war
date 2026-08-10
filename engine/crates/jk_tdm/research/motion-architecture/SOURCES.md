@@ -53,3 +53,82 @@ Core: 5/14 counted (4 P, 0 V — **V tier is the hard gap**, needs GDC
 Vault or a fetchable talk transcript, same limitation hit on the other
 eight master-brief topics this session).
 Adjacent: 0/7.
+
+---
+
+# SESSION 2 — 2026-08-10 (owner override; `DECISION.md` written)
+
+Session 1 refused to write the decision. The owner overrode that. The
+refusal's substance is honoured in `DECISION.md` §9/§10 rather than by
+continuing to withhold the deliverable. **The quota was NOT met and was
+NOT pursued** — per the owner's instruction not to open a new research
+cycle. Two targeted fetches were made for one specific decisive number;
+one landed, one failed. Both recorded below.
+
+## New rows
+
+| ID | Tier | Artifact | URL | Accessed | Status | Licence (verbatim/class) | What it gave us |
+|---|---|---|---|---|---|---|---|
+| S-06 | P | O3DE engineering blog, "Motion Matching in O3DE, a Data-Driven Animation Technique" | https://docs.o3de.org/blog/posts/blog-motionmatching/ | 2026-08-10 | **READ** (fetched with an extraction prompt demanding verbatim quotes and "NOT PRESENT" for absent quantities; the one returned figure was then independently re-derived — see below) | **NOT VERIFIED.** O3DE is widely stated to be Apache-2.0 but I did **not** read its LICENSE file this session. **Cited for a number only; NOT recommended for shipping**, so R3/R6's gate is not triggered. Do not upgrade this cell without reading the file. | The database-scaling figure, verbatim: *"A motion capture database holding 1 hour of animation data together with a sample rate of 30 Hz to extract features will generate 108,000 frames. Using the default feature schema, comprising of 59 features, will result in a feature matrix holding ~6.4 million values and use ~24.3 MB of memory."* Also verbatim on feature composition: *"The root trajectory along with the left and right foot positions and velocities have been proven to be a good start here."* **Explicitly NOT PRESENT in the article** (asked for, answered as absent, not estimated): ms per character per frame; character count; hardware; the mocap data's source and licence. |
+| S-07 | P | Learned Motion Matching (Holden, Kanoun, Perepichka, Popa — SIGGRAPH 2020), the paper PDF | https://theorangeduck.com/media/uploads/other_stuff/Learned_Motion_Matching.pdf | 2026-08-10 | **UNREACHABLE-BY-TOOL** | n/a | Exact path obtained from the landing page [S-04]. Fetch failed: `maxContentLength size of 10485760 exceeded` — the PDF exceeds 10 MiB. This environment has **no `curl`, `wget`, or Python**, so there is no download-and-read-locally route (contrast the body-rig pass, where that route was the whole method). Same failure class as the Bournemouth parkour thesis in `traversal/SOURCES.md`. **Zero numbers carried.** |
+| S-08 | P | "GPU-based Motion Matching for Crowds in the Unreal Engine", SIGGRAPH Asia 2020 Posters, DOI 10.1145/3415264.3425474 | https://dl.acm.org/doi/fullHtml/10.1145/3415264.3425474 | 2026-08-10 | **UNREACHABLE — HTTP 403 Forbidden** | n/a | A search snippet offers *"decreased computation times up-to 95%"*. **SNIPPET-ONLY, relative, no absolute ms, NOT CARRIED.** It is a 2-page poster; expected yield was low even on success. |
+| S-09 | P (repo-primary) | This repository at commit `e2866a9` — `jk_tdm/src/{main,sim}.rs`, `jk_wall/src/*`, `jk_core/src/timestep.rs`, `jk_spike/src/bin/bench.rs`, all seven `Cargo.toml` | local | 2026-08-10 | **READ** (targeted: ~1 500 lines read in full, plus exhaustive greps whose exact patterns are recorded in `NOTES.md` §S2) | `MIT OR Apache-2.0` per `engine/Cargo.toml:8` — **PERMISSIVE**, it is ours | **The source that actually decided the topic.** Every factual claim in `DECISION.md` §1 traces to a file and line here. Headline findings: zero uses of Bevy's animation API anywhere in code; `assets/` empty; a complete closed-form procedural rig already exists including two-bone IK with pole vector and elbow clamp; legs have no IK; the SIM/COSMETIC boundary is compiler-enforced (`Res<Game>`) and crate-enforced (`jk_wall` has no bevy, `jk_tdm` has no rapier); the animated population ceiling is 56, not 250. |
+
+## The arithmetic check on S-06 — reproduced, not trusted
+
+Per this project's standing rule (a tool's summary is not the source),
+S-06's single figure was re-derived before being carried:
+
+```
+3600 s × 30 Hz            = 108 000 frames        ✓ matches "108,000"
+108 000 × 59 features     = 6 372 000 values      ✓ matches "~6.4 million"
+6 372 000 × 4 B (f32)     = 25 488 000 B
+25 488 000 / 1 048 576    = 24.31 MiB             ✓ matches "~24.3 MB"
+```
+
+All three chain correctly, which additionally pins the element type to
+`f32` and the unit to MiB — neither of which the article states. A
+fabricated triple would be very unlikely to close this way. **This is the
+consistency test the `aiming/SOURCES.md` incident teaches, applied
+prospectively.**
+
+**Precision ceiling [R8]:** the schema samples at **30 Hz ⇒ 33.3 ms**.
+Our sim runs at 120 Hz (8.33 ms). **Nothing at 120 Hz resolution may be
+built on this figure.**
+
+## Corrections to session 1's record
+
+1. **S-03 / the "quick win" is REVERSED.** Session 1 recommended trialling
+   `bevy_mod_inverse_kinematics` 0.8.0 on the stated basis that
+   "`jk_tdm`/`jk_wall` have no IK crate today; the 20-segment body's grip
+   poses and reach are hand-posed." The first clause is true; **the second
+   is false.** `solve_arm_ik` (`jk_tdm/src/main.rs:2579`) is a closed-form
+   two-bone solver with a pole vector — the crate's exact feature set —
+   plus a biomechanical elbow clamp (`clamp_elbow_flex`, `:2417`) and
+   per-side critically-damped sprung hand/pole targets (`:2488-2489`) that
+   the crate does not have. Session 1 searched crates.io for a capability
+   that was already in the codebase. **The licence and version facts in
+   S-03 stand and are unchanged; only the recommendation is reversed.**
+   Rejected in `DECISION.md` §5.4 on axis 9 (duplicate capability), with
+   the condition that would reopen it stated there.
+2. **`NOTES.md`'s tier-V blocker is STALE.** It reads "GDC Vault access
+   and most conference-talk video transcripts are not fetchable by the
+   tools available here." **`TOTO_LOG.md`'s 2026-08-08 entry (TOTO33)
+   disproved that** with two working routes: `youtube-transcript-api`
+   against the official GDC YouTube channel, and Internet Archive
+   `_djvu.txt` OCR of Vault-gated slide decks.
+3. **…and tier-V is nevertheless still 0 today, for a NEW reason.** Both
+   of TOTO33's routes need a shell. Probed directly this session: `curl`,
+   `wget`, `python`, `python3`, `py`, `node`, `cmd.exe`, `powershell.exe`,
+   `pwsh.exe` — **every one exits 127, command not found**; `ls`, `grep`,
+   `head`, `wc` and `git` are absent too. Only `WebSearch` and `WebFetch`
+   reach the network. **Tier-V availability is environment-dependent and
+   varies between sessions — check the shell before declaring a talk
+   unreachable, and record which way it went.**
+
+## Quota status after session 2 (honest, and it fails)
+
+Core: **6/14 counted** (6 P, **0 V**). Adjacent: **0/7**.
+The brief's `source_quota` test would **FAIL**. This is recorded, not
+worked around: the owner overrode the quota in favour of shipping the
+decision, and `DECISION.md` §10.6 says so in the deliverable itself.
