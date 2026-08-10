@@ -4807,7 +4807,13 @@ fn weapon_strip(
     game: Res<Game>,
     mut last_active: Local<usize>,
     mut idle_t: Local<f32>,
-    mut q: Query<(&WeaponStripCell, &mut Text, &mut TextColor)>,
+    mut q: Query<(
+        &WeaponStripCell,
+        &mut Text,
+        &mut TextColor,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     // §C.7 (Brief VIII): in a chassis the strip IS the two hull mounts -
@@ -4831,8 +4837,8 @@ fn weapon_strip(
         *idle_t += time.delta_secs();
     }
     let strip_fade = if *idle_t > 4.0 { 0.45 } else { 1.0 };
-    for (cell, mut t, mut tc) in &mut q {
-        let (name, active) = if in_mech {
+    for (cell, mut t, mut tc, mut bg, mut bd) in &mut q {
+        let (name, qty, active) = if in_mech {
             // §owner: the strip is built from the CHASSIS's own mount
             // list, not from a hardcoded heavy pair.
             //
@@ -4849,6 +4855,10 @@ fn weapon_strip(
                     // ammo where a mount HAS ammo, heat where it does
                     // not. A count of zero on a weapon that never counts
                     // is worse than no number at all.
+                    // §6: the mounts keep their single-string labels -
+                    // "TURRET 240  BURST" is not a name and a quantity,
+                    // it is a name and a MODE, and splitting it into the
+                    // infantry grammar would have cost the mode column.
                     let label = match w {
                         // §30: the turret's FIRE MODE, on the mount it
                         // belongs to. It reads from `turret_mode_of` -
@@ -4881,10 +4891,12 @@ fn weapon_strip(
                         }
                         sim::MechWeapon::Repair => "REPAIR BEAM".to_string(),
                     };
-                    (label, p.mech_weapon == *w)
+                    (label, String::new(), p.mech_weapon == *w)
                 }
                 None => {
                     **t = String::new();
+                    *bg = BackgroundColor(Color::NONE);
+                    *bd = BorderColor(Color::NONE);
                     continue;
                 }
             }
@@ -4892,7 +4904,17 @@ fn weapon_strip(
             // the shield is an ESSENTIAL slot: always listed, lit while
             // raised. MUST branch before the inventory index - the
             // carried array is only 3 wide.
-            ("SHIELD".to_string(), p.shield_up)
+            //
+            // §6 (owner spec, 2026-08-10): "Shield [4], an interactive
+            // slot showing quantity." Its quantity is ONE, and that is
+            // a fact rather than a layout filler: the plate is carried
+            // from spawn, is never consumed, and cannot be picked up a
+            // second time. The temptation here is to print a durability
+            // - the §18 note on `shield_readout` is about resisting
+            // exactly that, because the soldier's plate is a damage
+            // REDUCTION with no pool anywhere in the sim, and a
+            // fabricated `0 / 0` would be worse than no number.
+            ("SHIELD".to_string(), "x1".to_string(), p.shield_up)
         } else {
             let g = p.inventory[cell.0];
             let n = if g == GunKind::Fists {
@@ -4900,16 +4922,54 @@ fn weapon_strip(
             } else {
                 gun(g).name.to_string()
             };
-            (n, cell.0 == p.active && !p.shield_up)
+            // §6: the quantity, per slot, for real. The sim has carried
+            // `slot_ammo` per weapon slot all along - it is what a
+            // weapon switch saves into and restores from - and the strip
+            // showed none of it, so three of the four slots were a name
+            // and nothing else. The ACTIVE slot reads the live counters
+            // rather than the stashed pair, because `slot_ammo` is only
+            // written on the way out of a slot and would lag by a whole
+            // magazine.
+            let qty = if g == GunKind::Fists {
+                String::new()
+            } else if cell.0 == p.active {
+                format!("{}/{}", p.ammo, p.reserve)
+            } else {
+                let (mag, res) = p.slot_ammo[cell.0];
+                format!("{mag}/{res}")
+            };
+            (n, qty, cell.0 == p.active && !p.shield_up)
         };
-        **t = if active {
+        // §6: ONE slot grammar for all four rows - cursor, name,
+        // quantity, key. The columns are padded rather than laid out
+        // because the HUD font is monospaced, so a `{:<9}` IS a column
+        // and costs no extra nodes on a strip that redraws every frame.
+        **t = format!(
             // §0 (Brief VII): ASCII only - U+25B8 had no font glyph.
-            format!("> {}  [{}]", name, cell.0 + 1)
-        } else {
-            format!("  {}  [{}]", name, cell.0 + 1)
-        };
+            "{} {:<9} {:>7}  [{}]",
+            if active { ">" } else { " " },
+            name,
+            qty,
+            cell.0 + 1
+        );
         let a = if active { 1.0 } else { 0.40 } * strip_fade;
         *tc = TextColor(Color::srgba(0.92, 0.93, 0.95, a));
+        // The SLOT itself: a tile that is lit when the slot is live and
+        // sunk when it is not. Text alone was the whole complaint - four
+        // right-aligned strings do not read as an inventory, and the
+        // shield least of all, because it is the one row whose name is
+        // not a weapon anybody recognises.
+        let f = strip_fade;
+        *bg = BackgroundColor(if active {
+            Color::srgba(0.16, 0.15, 0.12, 0.72 * f)
+        } else {
+            Color::srgba(0.05, 0.05, 0.06, 0.42 * f)
+        });
+        *bd = BorderColor(if active {
+            Color::srgba(0.85, 0.72, 0.35, 0.95 * f)
+        } else {
+            Color::srgba(0.60, 0.62, 0.66, 0.28 * f)
+        });
     }
 }
 
@@ -5666,6 +5726,60 @@ const SHIELD_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(2.6) },
 ];
 
+/// §7 (owner spec, 2026-08-10): THE GRENADE IN THE HAND, photographed.
+///
+/// This script exists because nothing could see the feature. The bow
+/// went unposed in first person for months for exactly this reason -
+/// no capture ever entered first person, so the instrument gap hid the
+/// feature gap - and the throwables were in the same position: every
+/// existing script either stays in third person or never touches G.
+///
+/// It walks the whole grammar the spec names: equip, hold, aim, wind,
+/// release, and then a second type so the two SHAPES (canister and
+/// bottle) can be compared. `capture_quick_deploy` hands this script
+/// the ARSONIST budget, which is the only preset carrying both.
+///
+/// The last two frames are deliberately THIRD person: the held grenade
+/// is a first-person feature today, and a frame that shows what the
+/// other view does instead is the honest way to record that.
+const GRENADE_HOLD_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], look: Some((0.0, 0.05)), ..beat(0.5) },
+    // BEFORE, in the same run: the rifle that is about to be stowed.
+    CapBeat { snap: Some("01-fp-rifle-before-g"), ..beat(1.1) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyG)], ..beat(1.3) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyG)], ..beat(1.4) },
+    CapBeat { snap: Some("02-frag-in-hand-at-rest"), ..beat(2.0) },
+    // RMB is the aim (swap_mouse defaults off), LMB the wind. Both held:
+    // this is the "aiming state" the spec asks for, arc preview and all.
+    CapBeat {
+        press: &[CapKey::M(MouseButton::Right), CapKey::M(MouseButton::Left)],
+        ..beat(2.2)
+    },
+    CapBeat { snap: Some("03-winding-early"), ..beat(2.8) },
+    // THROW_CHARGE_MAX_S is 2.3 s, so this frame is at full wind and the
+    // pose must be at its clamp rather than still travelling.
+    CapBeat { snap: Some("04-wind-full"), ..beat(4.7) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left), CapKey::M(MouseButton::Right)],
+        ..beat(4.9)
+    },
+    // the hand is empty and the rifle is back - and the ammo cluster's
+    // "FRAG x1" has become "x0", which is the decrement half of the ask
+    CapBeat { snap: Some("05-thrown-hand-empty"), ..beat(5.5) },
+    // G again equips, G once more CYCLES - ARSONIST is frag then molotov
+    CapBeat { press: &[CapKey::K(KeyCode::KeyG)], ..beat(5.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyG)], ..beat(5.9) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyG)], ..beat(6.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyG)], ..beat(6.3) },
+    CapBeat { snap: Some("06-molotov-bottle-in-hand"), ..beat(7.0) },
+    // and what THIRD person shows for the same state
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(7.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(7.3) },
+    CapBeat { snap: Some("07-third-person-same-state"), ..beat(8.0) },
+    CapBeat { end: true, ..beat(8.5) },
+];
+
 // Task 5.7 (MISSION doc): the mech at its new scale/palette, held
 // stationary at a known-clear spot (Arena center, set in
 // capture_quick_deploy) with the camera aimed level and slightly down -
@@ -5985,6 +6099,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // §20: one beat table, two chassis - see COCKPIT_BEATS
         "cockpit" | "medic_cockpit" => COCKPIT_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
+        "grenade_hold" => GRENADE_HOLD_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
@@ -6022,7 +6137,9 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 30] = [
+const CAPTURE_SCRIPTS: [&str; 31] = [
+    // §7 (owner spec): the throwable in the hand, all six states.
+    "grenade_hold",
     "medic",
     // §gallery: the training range's exhibit - both chassis, both
     // liveries, and the royal paint, in one frame.
@@ -6179,6 +6296,10 @@ fn capture_quick_deploy(
         Some("class_skirmisher") => sel.class = sim::Class::Skirmisher,
         Some("class_warden") => sel.class = sim::Class::Warden,
         Some("class_marksman") => sel.class = sim::Class::Marksman,
+        // §7: ARSONIST is the only budget carrying both a canister and a
+        // molotov, and the whole point of the second half of that script
+        // is that the two throwables are different SHAPES in the hand.
+        Some("grenade_hold") => sel.grenade_preset = 1,
         Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
@@ -15334,6 +15455,17 @@ fn setup(
     ));
     // §9.1 (Brief IV): vertical weapon strip, right screen edge -
     // three guns plus the SHIELD essential on [4]
+    //
+    // §6 (owner spec, 2026-08-10): each row is a SLOT now, not a line of
+    // text. Fixed width, a border and a fill, so the four read as a
+    // column of containers with things in them - which is the whole of
+    // the ask against `Shield [4]`. The alternative (leave it as text
+    // and call the shield "in the inventory" because the word appears)
+    // is what the strip already did.
+    //
+    // One node per row, still: the tile IS the text node's own box, so
+    // this costs four `BackgroundColor`s and no extra entities on a
+    // widget that repaints every frame.
     for slot in 0..4usize {
         commands.spawn((
             Text::new(""),
@@ -15346,8 +15478,16 @@ fn setup(
                 position_type: PositionType::Absolute,
                 right: Val::Px(14.0),
                 top: Val::Percent(40.0 + slot as f32 * 4.6),
+                // wide enough for the longest row the grammar can
+                // produce - "> MECHANICAL 240/720  [1]" - so the four
+                // tiles are a column and not a ragged stack
+                width: Val::Px(258.0),
+                padding: UiRect::axes(Val::Px(9.0), Val::Px(3.0)),
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.05, 0.05, 0.06, 0.42)),
+            BorderColor(Color::srgba(0.60, 0.62, 0.66, 0.28)),
             WeaponStripCell(slot),
             HudRoot,
         ));

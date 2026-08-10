@@ -76,14 +76,21 @@ pub fn grenade_in_hand(nade_ready: bool, cook_t: f32, alive: bool) -> bool {
 ///
 /// Pure and tested: the placement of a thing you cannot see from a text
 /// editor is the one part of this module that arithmetic can check.
+/// FRAMED AGAINST A CAPTURE, twice. The first numbers put the grenade
+/// at (0.155, -0.215, -0.395) and cocked it to z -0.180, and the run
+/// showed both failures at once: at rest the object was cut in half by
+/// the bottom edge of the frame, and at full wind it was 18 cm from a
+/// 100-degree lens and filled the middle of the screen as an
+/// unreadable gold slab. Held items live further out than intuition
+/// says - the rifles sit at z -0.32 and are a metre long.
 pub fn hold_pose(wind: f32) -> (Vec3, f32) {
     let w = wind.clamp(0.0, 1.0);
     // ease-out, so the first tenth of the wind moves the arm visibly and
     // the last tenth barely does. A linear cock reads as a machine part.
     let e = 1.0 - (1.0 - w) * (1.0 - w);
-    let rest = Vec3::new(0.155, -0.215, -0.395);
-    let cocked = Vec3::new(0.255, 0.010, -0.180);
-    (rest + (cocked - rest) * e, -1.05 * e)
+    let rest = Vec3::new(0.150, -0.130, -0.480);
+    let cocked = Vec3::new(0.235, 0.075, -0.395);
+    (rest + (cocked - rest) * e, -0.95 * e)
 }
 
 /// Build the four models and the arm. Call from setup, BEFORE
@@ -171,68 +178,65 @@ pub fn spawn_held_grenade_vm(
     // the hand does not flicker when G cycles the type: only the object
     // in it changes.
     //
-    // Sits BEHIND the grenade in view space (+z is toward the camera
-    // here, the models look down -Z) with the fingers curling forward
-    // over it, which is what makes the palm read as gripping rather
-    // than the grenade read as resting on a glove.
+    // REBUILT AFTER THE FIRST CAPTURE. The first attempt was a palm
+    // slab, four finger bars and a thumb - eleven boxes of anatomy at a
+    // scale where the whole hand is 90 px tall - and it photographed as
+    // a stack of white plates under the grenade, which is worse than no
+    // hand at all. The rest of this game's viewmodels do not model
+    // hands either: they run a plain forearm cube from the frame edge
+    // to the grip and let the weapon carry the rest. This does that,
+    // plus ONE rounded mitt and three short fingers over the near face.
+    //
+    // The mitt is a SPHERE. A cube fist has corners, corners catch the
+    // light as flat facets, and a flat facet at this size is the exact
+    // thing that read as a plate.
     let fist = commands
         .spawn((
-            Transform::from_xyz(0.0, -0.035, 0.055),
+            Transform::from_xyz(0.005, -0.062, 0.040),
             Visibility::default(),
         ))
         .set_parent(root)
         .id();
-    // forearm, running back out of the bottom-right of the frame
+    // forearm, running back and down out of the frame
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
             Transform {
-                translation: Vec3::new(0.045, -0.085, 0.205),
-                rotation: Quat::from_rotation_x(-0.62) * Quat::from_rotation_z(-0.20),
-                scale: Vec3::new(0.072, 0.072, 0.310),
+                translation: Vec3::new(0.040, -0.075, 0.190),
+                rotation: Quat::from_rotation_x(-0.55) * Quat::from_rotation_z(-0.18),
+                scale: Vec3::new(0.062, 0.062, 0.300),
             },
         ))
         .set_parent(fist);
-    // palm
+    // the mitt itself, cradling the grenade from below and behind
     commands
         .spawn((
-            Mesh3d(kit.cube.clone()),
+            Mesh3d(kit.ball.clone()),
             MeshMaterial3d(kit.hand.clone()),
             Transform {
-                translation: Vec3::new(0.012, -0.012, 0.048),
-                rotation: Quat::from_rotation_x(-0.35),
-                scale: Vec3::new(0.086, 0.052, 0.090),
+                translation: Vec3::new(0.004, 0.002, 0.022),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.105, 0.090, 0.110),
             },
         ))
         .set_parent(fist);
-    // four fingers curling over the front face of the grenade, and a
-    // thumb across the near side
-    for i in 0..4 {
-        let y = -0.030 + i as f32 * 0.026;
+    // three fingers over the near face - enough to read as a grip, few
+    // enough not to become a grille
+    for i in 0..3 {
+        let y = 0.006 + i as f32 * 0.028;
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.hand.clone()),
                 Transform {
-                    translation: Vec3::new(-0.020, y, -0.026),
-                    rotation: Quat::from_rotation_y(0.30),
-                    scale: Vec3::new(0.088, 0.021, 0.030),
+                    translation: Vec3::new(-0.008, y, -0.032),
+                    rotation: Quat::from_rotation_y(0.22),
+                    scale: Vec3::new(0.070, 0.017, 0.026),
                 },
             ))
             .set_parent(fist);
     }
-    commands
-        .spawn((
-            Mesh3d(kit.cube.clone()),
-            MeshMaterial3d(kit.hand.clone()),
-            Transform {
-                translation: Vec3::new(0.048, 0.014, 0.006),
-                rotation: Quat::from_rotation_z(-0.55),
-                scale: Vec3::new(0.030, 0.075, 0.030),
-            },
-        ))
-        .set_parent(fist);
 
     HeldGrenadeVm { root, kinds }
 }
@@ -302,14 +306,19 @@ fn canister(
         ))
         .set_parent(root);
     if ring {
+        // Tucked AGAINST the fuse cap, and half the size it was on the
+        // first pass: at 0.034 across, hanging 4 cm out to the side, it
+        // photographed as a loose gold disc floating beside the grenade
+        // rather than a pin ring on it - and at full wind it was the
+        // only part of the whole assembly still on screen.
         commands
             .spawn((
                 Mesh3d(kit.cyl.clone()),
                 MeshMaterial3d(kit.gold.clone()),
                 Transform {
-                    translation: Vec3::new(0.040, 0.060, 0.0),
+                    translation: Vec3::new(0.026, 0.052, 0.0),
                     rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                    scale: Vec3::new(0.034, 0.006, 0.034),
+                    scale: Vec3::new(0.019, 0.005, 0.019),
                 },
             ))
             .set_parent(root);
@@ -427,7 +436,12 @@ mod tests {
         let (rest, rest_pitch) = hold_pose(0.0);
         let (full, full_pitch) = hold_pose(1.0);
         assert!(full.y > rest.y + 0.15, "the hand must rise: {rest:?} -> {full:?}");
-        assert!(full.z > rest.z + 0.15, "and come BACK toward the shoulder");
+        // Back toward the shoulder, but only a little: the capture that
+        // set these numbers showed that pulling the hand a long way
+        // toward the lens does not read as a wind-up, it reads as the
+        // object growing. The RISE carries the pose; the draw is 8 cm.
+        assert!(full.z > rest.z + 0.05, "and come BACK toward the shoulder");
+        assert!(full.z < -0.30, "but never into the near plane - it fills the frame there");
         assert!(full.x > rest.x, "and outboard, clearing the sight line");
         assert!(full_pitch < rest_pitch - 0.8, "the wrist cocks back");
         // monotone in y over the whole wind, so there is no point at
