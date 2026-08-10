@@ -3650,6 +3650,12 @@ struct ModelKit {
     /// handles at the top of `spawn_armor_rig` rather than a second copy
     /// of a 53-plate table - which is the only reason a third or fourth
     /// livery would ever be cheap enough to add.
+    /// §P3: the PLAYER's Royal - deep bronze-graphite with gold. See the
+    /// note at its construction for why it is not the spec's neon blue.
+    mech_royal_ally: Handle<StandardMaterial>,
+    mech_royal_ally_dk: Handle<StandardMaterial>,
+    mech_royal_ally_lt: Handle<StandardMaterial>,
+    /// The OPPOSITION Royal - dark red lacquer with a hot red highlight.
     mech_royal: Handle<StandardMaterial>,
     mech_royal_dk: Handle<StandardMaterial>,
     mech_royal_lt: Handle<StandardMaterial>,
@@ -11352,10 +11358,27 @@ struct MechLegArmor {
 /// have had khaki legs under an iron hull. A shared accessor is the only
 /// thing that keeps a second livery from being a second bug.
 ///
-/// `elite` wins over `ally`: three paints, not four. See `spawn_armor_rig`.
+/// §P3 (owner spec, 2026-08-10): FOUR paints, not three.
+///
+/// `elite` used to win over `ally` outright - one royal paint for
+/// everybody - and the note here said that was fine because there was
+/// no enemy royal. There is one now (`ArmorSet::RoyalMech` is a real
+/// tier on both sides), and the first seven-stand gallery capture
+/// showed the consequence in one frame: ROYAL/ALLY and ROYAL/ENEMY
+/// standing side by side in identical red lacquer, distinguishable
+/// only by a lamp. That is the spec's own "opposition Royal must not
+/// read as a recoloured player Royal", failed in the most literal way
+/// available.
+///
+/// Side ALWAYS decides the family; the tier decides how rich it is.
 fn mech_body_tones(kit: &ModelKit, ally: bool, elite: bool) -> [Handle<StandardMaterial>; 3] {
     match (elite, ally) {
-        (true, _) => [
+        (true, true) => [
+            kit.mech_royal_ally.clone(),
+            kit.mech_royal_ally_lt.clone(),
+            kit.mech_royal_ally_dk.clone(),
+        ],
+        (true, false) => [
             kit.mech_royal.clone(),
             kit.mech_royal_lt.clone(),
             kit.mech_royal_dk.clone(),
@@ -14262,6 +14285,44 @@ fn setup(
         // orange rather than pink - a bright RED reads as damage warning
         // in this game's own vocabulary, and the elite machine must not
         // look like it is on fire.
+        // §P3 (owner spec): THE PLAYER'S ROYAL, its own palette.
+        //
+        // The red lacquer below is the OPPOSITION Royal's now - the spec
+        // asks for "neon-red / dark-red primary" there and that is what
+        // it already was. What it must not be is BOTH royals, which is
+        // what shipped: `mech_body_tones` let `elite` override the side,
+        // so the moment an enemy Royal existed the two were the same
+        // machine in the same paint, told apart by their lamps alone.
+        // The gallery capture of the seven-stand row shows exactly that.
+        //
+        // DEVIATION FROM THE SPEC, stated rather than hidden: the spec
+        // asks for the player Royal to carry SUBTLE NEON-BLUE energy
+        // accents. Blue is this game's ENEMY lamp colour (`mech_lamp_foe`,
+        // `scout_hull_foe`, the whole navy enemy livery), and trap 4 in
+        // the spec's own list says the enemy's light blue is already
+        // brighter than the ally's brightest tone. Painting blue energy
+        // onto an ALLY machine attacks the one separation that works.
+        // So the player Royal is a deep bronze-graphite carrying GOLD -
+        // the ally lamp colour - and the owner should say whether they
+        // want the blue anyway.
+        mech_royal_ally: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.30, 0.26, 0.17),
+            metallic: 0.55,
+            perceptual_roughness: 0.36,
+            ..default()
+        }),
+        mech_royal_ally_dk: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.16, 0.14, 0.10),
+            metallic: 0.60,
+            perceptual_roughness: 0.40,
+            ..default()
+        }),
+        mech_royal_ally_lt: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.62, 0.50, 0.22),
+            metallic: 0.70,
+            perceptual_roughness: 0.28,
+            ..default()
+        }),
         mech_royal: materials.add(StandardMaterial {
             base_color: Color::srgb(0.52, 0.09, 0.09),
             metallic: 0.30,
