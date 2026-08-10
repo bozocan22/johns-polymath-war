@@ -9,6 +9,87 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0-SPEC15. THE MECH SYSTEM SPEC (owner, 2026-08-09) — SUPERSEDES THE QUEUE
+
+A 15-section spec landed. It is the current priority; 0-QUEUE below is
+still valid but ranks behind it. Owner's own priority order.
+
+### P1 — ARCHITECTURE (do first, everything else sits on it)
+- **Remove PYRO ARMOUR completely.** [S]+[C] Models, inventories,
+  training, UI, menus, spawn logic, equipment logic, references, dead
+  assets. Already known: no pad spawns it, yet TWO per-map relocation
+  tables still place a Pyro pad, and `BIND_REGISTRY` still sells its
+  flame ability. Grep the whole tree.
+- **Training Mode: ONE fixed scenario.** [C] No settings menu, no rules
+  config, no setup screen. Entering it starts the scenario. Hardcode the
+  ruleset rather than exposing it.
+- **Six mech variants registered**: player Agile/Big/Royal and
+  opposition Agile/Big/Royal. [S]
+- Inventory/equipment stability preserved.
+
+### P2 — GAMEPLAY
+- **Shield in inventory as `Shield [4]`**, an interactive slot showing
+  quantity. [C]
+- **Grenade on G reuses the BOW/SPEAR architecture**: inventory → equip
+  → HOLD IN HAND → aim → release → throwable physics → decrement stock.
+  A held item, not an instant projectile. Grenade-specific physics. [S]+[C]
+  (Note: the G/LMB fuse work already landed; this is the HELD-IN-HAND
+  and inventory-decrement half.)
+- **Big Mech recoil: controlled for 1-2 s, then progressively chaotic.**
+  Straight/heavy/absorbed first, then rising instability. Must read as
+  intentional, not random. [S] numbers + [C] visual.
+- **Royal tier ~10% larger and ~10% stronger** than Big. [S]
+- **Royal ARROW LAUNCHER: minigun + 3 crossbows.** Compact minigun
+  silhouette, rotating mechanism, three crossbow assemblies around a
+  central weapon, bolt ammunition, mechanical loading. [C]+[S]
+
+### P3 — VISUAL
+- **Agile Mech major upgrade** — the largest visual item. Must read
+  FASTER, LIGHTER, more advanced, more mechanically detailed, and
+  clearly distinct from Big and Royal *in silhouette*. Plates, joints,
+  legs, hydraulics, torso, shoulders, head/cockpit, weapon mounting,
+  small components, surfaces, energy details. [C]
+- **Rocket Launcher redesign** — chambers, mounting, reload mechanism,
+  barrel detail, materials, VFX, firing animation, recoil. [C]
+- **Royal Mech: its own body and silhouette, NOT a scaled Big Mech**,
+  with SUBTLE neon-blue energy accents (channels, seams, reactor) —
+  accent, not a coating. [C]
+- **Opposition mechs are NOT recolours.** Own armour design, body
+  structure, silhouette, mechanical detail, weapon styling — while
+  keeping the faction colour language: neon red, dark red, neon blue,
+  dark blue. Neon stays recognisable inside darker materials. [C]
+- **Opposition Royal**: unique body, neon-red/dark-red primary with
+  dark-blue complements. Must not read as a recoloured player Royal. [C]
+
+### P4 — POLISH
+Animations, VFX, weapon feedback, materials, lighting, UI consistency,
+performance.
+
+### CODE QUALITY (from the spec, and they match this project's rules)
+Shared systems over duplicated mech logic; faction visuals kept as
+DATA; training config isolated; no new settings; compile clean; fix
+warnings caused by the change; test every new interaction.
+
+### TRAPS THIS PROJECT ALREADY KNOWS — hand these to whoever builds
+1. **A third chassis tier is a DATA question.** The heavy already paints
+   from a three-tone table (`mech_body_tones`) and the medic has a
+   four-level trim table. Royal and the opposition variants belong in
+   those tables, not in forked spawn functions. The spec's own "do not
+   duplicate mech logic" says the same thing.
+2. **`armor_set` is an enum the sim branches on in many places.** Adding
+   tiers means auditing every `== ArmorSet::RobotSuit` — that exact
+   pattern already caused "the medic pilot failed every mech gate".
+   Prefer `in_mech()` / `in_heavy_mech()` predicates.
+3. **Silhouette beats paint.** A variant identifiable only by colour
+   does not exist at range; that is why the Royal got a crown. Each new
+   variant needs one silhouette element.
+4. **The luminance rule is unguarded.** Ally/enemy separation rests on
+   value, not hue, and the enemy's light blue is ALREADY brighter than
+   the ally's brightest tone — only part coverage saves it. Neon on
+   dark is safe; neon over large areas is not.
+5. **Capture everything.** Five defects this week were invisible to the
+   compiler and to 400 tests, and obvious in a screenshot.
+
 ## 0-QUEUE. SMALLEST TO BIGGEST (2026-08-09)
 
 The owner asked for the work split by SIZE. Everything below is real and
