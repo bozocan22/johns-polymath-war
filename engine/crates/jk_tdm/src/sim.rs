@@ -5525,6 +5525,230 @@ pub const TURRET_SINGLE_RECOVER_S: f32 = 0.18;
 /// same mount sprays. "High precision" as a number rather than a mood.
 pub const TURRET_SINGLE_SPREAD_MULT: f32 = 0.55;
 
+// ---- §owner SPEC15 §4: CONTROLLED, THEN CHAOTIC -------------------------
+//
+// "The first 1-2 s of sustained fire should be straight, heavy,
+// controlled and visibly absorbed; after that it becomes progressively
+// chaotic - more movement, more instability - and the transition must
+// read as INTENTIONAL, not random."
+//
+// WHAT ALREADY EXISTED AND WHY IT IS NOT THIS. `TurretMode::kick_mult`
+// grows the kick with the shot index and CAPS at `TURRET_AUTO_KICK_CAP`
+// on round 8 - 0.56 s in. That is the "heavy and controlled" plateau,
+// and it is the whole of the envelope today: from 0.56 s to a forced
+// vent seven seconds later the mount behaves identically, round after
+// round, in one axis. This block is the second half of the shape.
+//
+// "INTENTIONAL, NOT RANDOM" IS A FIXED PATTERN, and this file already
+// knows how to build one: `spray_entry` generates each rifle's recoil
+// from a per-weapon FIXED seed - "the same pattern for every player in
+// every match, learnable, and replay-exact". `turret_spray_entry` below
+// is that, for the hull mount. It draws from its own local `Pcg32`,
+// never from the sim's stream, so it adds, removes and reorders exactly
+// zero RNG draws and the bit-identical replay guarantee is untouched.
+//
+// AND IT COSTS NO STATE. The envelope is a pure function of
+// `turret_burst_i`, which the mount already keeps, already clears on a
+// fresh press, already clears on death and on dismount, and is already
+// in the bot-mech replay digest. Nothing new to reset, nothing new to
+// argue about in the fingerprint.
+
+/// How long a held hull turret stays STRAIGHT, in seconds.
+///
+/// The MIDPOINT of the owner's own window ("the first 1-2 s"). That
+/// sentence is the anchor - there is no measurement in this file that
+/// picks a number inside it, and inventing one would have been worse
+/// than taking the middle of the range the brief states.
+pub const TURRET_CONTROLLED_S: f32 = 1.5;
+
+/// THE FLOOR EVERY CHANNEL OF THIS ENVELOPE HAS TO CLEAR, in degrees
+/// per second of punch velocity.
+///
+/// `punch` sheds a flat `PUNCH_DECAY_LIN_DEG` on top of its exponential
+/// every tick, so an impulse under this is erased inside the tick it
+/// lands and moves the picture by EXACTLY ZERO. It is the measurement
+/// `TURRET_FELT_FLOOR` is built on, promoted to a function so a new
+/// channel cannot be added without meeting it.
+///
+/// The first cut of this envelope did not meet it. It ROTATED the
+/// mount's existing impulse into a yaw component of about 7 deg/s and
+/// measured `punch[1]` at 0.000 through the entire chaotic phase - a
+/// "sideways walk" that was arithmetic and nothing else. Written down
+/// because a dead value that only a measurement can find is the defect
+/// class this file keeps paying for.
+pub fn punch_visible_floor() -> f32 {
+    PUNCH_DECAY_LIN_DEG * (PUNCH_DECAY_EXP * DT).exp()
+}
+
+/// How hard the chaotic phase throws the mount SIDEWAYS, as a fraction
+/// of its own settled kick, at the far end of the pattern.
+///
+/// DERIVED from the floor above, not chosen. `punch_visible_floor()` is
+/// 19.24 and the turret's settled kick is `TURRET_FELT_FLOOR` 24.0, so
+/// any yaw share under 19.24 / 24.0 = 0.80 is a channel that writes a
+/// field and changes no picture. 1.0 is the first round number clear of
+/// it: at the edges of the pattern the mount throws as hard sideways as
+/// it does upward. `the_chaotic_phase_actually_moves_the_picture` fails
+/// if a retune of either constant puts it back under.
+///
+/// It is a SEPARATE channel rather than a rotation of the existing one
+/// for exactly that reason - rotating splits one budget and lands both
+/// halves under the floor.
+pub const TURRET_CHAOS_YAW: f32 = 1.0;
+
+/// The pitch magnitude band the chaotic phase draws per round, as a
+/// multiplier on the mount's settled kick.
+///
+/// THE MEAN IS 1.0 ON PURPOSE, and the reason is the wall the previous
+/// recoil pass already hit: a bot has no mouse, `punched_aim` hands it
+/// the full deflection, and this file's own measurement is that `punch`
+/// responds SUPERLINEARLY to impulse. The first cut of this change gave
+/// the chaotic phase a mean of 1.35; it measured 24% more DELIVERED
+/// pitch error and disarmed a bot mech outright -
+/// `a_bot_mech_never_runs_dry_the_way_the_gun_in_its_hands_does` caught
+/// it, exactly as `MECH_RECOIL_CONTROL`'s doc says it would.
+///
+/// So the chaotic phase does not climb harder on average than the
+/// controlled one. The WIDTH is the instability: consecutive rounds can
+/// differ by more than the whole settled kick, the low end sits UNDER
+/// `punch_visible_floor()` and the high end well over it, so some rounds
+/// shove the picture and some do nothing at all. That unevenness is what
+/// a pilot reads as the mount losing its grip, and on average it costs
+/// the aim nothing.
+pub const TURRET_CHAOS_MAG_LO: f32 = 0.45;
+pub const TURRET_CHAOS_MAG_HI: f32 = 1.55;
+
+/// Rounds in the pattern before it repeats. Deliberately longer than
+/// `turret_rounds_to_vent` (111), so a single trigger pull walks a
+/// pattern it never sees twice.
+pub const TURRET_PATTERN_N: u32 = 128;
+
+/// Rounds of held fire before the mount reaches its FORCED vent.
+///
+/// Not a tuning value - the existing heat model's own answer, read out
+/// of it so the envelope below cannot drift away from the window it has
+/// to fit inside. `gatling_heat` climbs `GATLING_HEAT_PER_SHOT` a round
+/// and cooks off at 100.
+pub fn turret_rounds_to_vent() -> f32 {
+    100.0 / GATLING_HEAT_PER_SHOT
+}
+
+/// Where the controlled window ends, in ROUNDS - the unit the mount
+/// actually counts. `turret_burst_i` is rounds since the press, and on a
+/// held AUTO trigger `gatling_cd` gates every one of them at
+/// `GATLING_FIRE_PERIOD`, so rounds and seconds are the same fact.
+pub fn turret_controlled_rounds() -> f32 {
+    TURRET_CONTROLLED_S / GATLING_FIRE_PERIOD
+}
+
+/// ...and where the chaos reaches full, in rounds.
+///
+/// DERIVED, not picked: the MIDPOINT between the end of the controlled
+/// window and the forced vent. That is the only choice that gives the
+/// pilot the same amount of trigger time climbing INTO the chaos as he
+/// gets sitting in it - a ramp that finished at the vent would never be
+/// seen at full, and one that finished immediately after the controlled
+/// window would be a step rather than "progressively chaotic".
+pub fn turret_chaos_full_rounds() -> f32 {
+    (turret_controlled_rounds() + turret_rounds_to_vent()) * 0.5
+}
+
+/// How far into the chaotic phase round `i` of a trigger pull is: 0
+/// through the whole controlled window, ramping linearly to 1.
+///
+/// **THE named accessor for the envelope**, and the number a client's
+/// visual half should drive off - see `TdmSim::turret_chaos_of`. Pure,
+/// shared by the fire path and any readout, on exactly the rule
+/// `TurretMode::kick_mult` was written under.
+pub fn turret_chaos(shot_i: u32) -> f32 {
+    let a = turret_controlled_rounds();
+    let b = turret_chaos_full_rounds();
+    ((shot_i as f32 - a) / (b - a)).clamp(0.0, 1.0)
+}
+
+/// The hull turret's own deterministic pattern - entry `i` as
+/// (yaw share, pitch magnitude), both multiples of the settled kick.
+///
+/// Built the way `spray_entry` builds a rifle's, and for the same
+/// reasons: a FIXED seed means the same pattern for every pilot in every
+/// match, learnable, replay-exact, and generated rather than hand-typed
+/// so it is a pattern and not a table someone has to maintain. It draws
+/// from its OWN local `Pcg32` and never from the sim's stream, so this
+/// whole envelope adds, removes and reorders exactly zero RNG draws.
+///
+/// TWO INDEPENDENT CHANNELS, not an angle. An angle splits one budget
+/// between pitch and yaw, and `punch_visible_floor()` says both halves
+/// then land under the floor and move nothing. Pitch keeps its own
+/// magnitude; yaw is added beside it.
+///
+/// The index WRAPS rather than clamping, and that is not a detail: a
+/// CLAMPED index becomes a CONSTANT deflection on a long hold - every
+/// round after the clamp leaves along the same offset, a permanently
+/// bent barrel rather than a chaotic one. Measured on the first cut, it
+/// disarmed a bot mech outright. `TURRET_PATTERN_N` is longer than
+/// `turret_rounds_to_vent`, so one trigger pull never sees it repeat.
+///
+/// The seed is deliberately NOT one of `spray_entry`'s eleven weapon
+/// slots: the hull mount is not a `GunKind` and must not start sharing a
+/// pattern with one, or a rebalance of the M4's slot would move the
+/// turret.
+pub fn turret_spray_entry(i: u32) -> (f32, f32) {
+    let mut rng = Pcg32::new(0xC5C0_7000, 0x5EED);
+    let i = i % TURRET_PATTERN_N;
+    let mut yaw = 0.0_f32;
+    let mut out = (0.0_f32, 1.0_f32);
+    for _ in 0..=i {
+        // MEAN-REVERTING, and that is the whole difference between a
+        // mount that SHAKES and a mount that is BENT.
+        //
+        // A free random walk - what `spray_entry` does for a rifle, on
+        // purpose, because a rifle's pattern is meant to DRIFT so a
+        // player can learn to pull against it - INTEGRATES. Hold the
+        // trigger and the yaw wanders to one side and stays there,
+        // `punch[1]` follows it, and every round leaves along a sustained
+        // lateral offset. That is about 0.7 m of sideways error at 10 m
+        // against a body half-width of `BODY_RADIUS`: a miss, every
+        // round, for a shooter with no mouse to correct with. Vertical
+        // error is forgiving (a man is 1.8 m tall and only `BODY_RADIUS`
+        // wide); this is the axis where the difference decides fights.
+        //
+        // HONEST ABOUT WHICH HALF IS DOING THE WORK. The measurement above
+        // was taken on this envelope's first cut, where the walk ran on an
+        // ANGLE with a wide clamp and genuinely did run away. At the
+        // numbers below - a step of up to 0.80 against a hard -1..1 clamp
+        // - the CLAMP is already most of the containment, and dropping the
+        // 0.55 carry to 1.0 does not measurably change the outcome (that
+        // mutation survives the suite, deliberately noted rather than
+        // papered over). What the carry still buys is SMOOTHNESS:
+        // consecutive rounds stay related, so the pattern reads as
+        // something a pilot follows rather than as television snow, and
+        // `the_turret_pattern_is_fixed_and_never_becomes_a_bent_barrel`
+        // holds it to that. A carry near 1.0 with small steps - genuine
+        // persistence - IS caught.
+        yaw = (yaw * 0.55 + rng.range(-0.80, 0.80)).clamp(-1.0, 1.0);
+        out = (yaw, rng.range(TURRET_CHAOS_MAG_LO, TURRET_CHAOS_MAG_HI));
+    }
+    out
+}
+
+/// The pattern with the envelope applied: (pitch share, yaw share) of
+/// the mount's settled kick for round `i` of this trigger pull.
+///
+/// At `turret_chaos == 0` this is EXACTLY `[1.0, 0.0]` - a literal early
+/// return, no arithmetic at all - so the whole controlled window is
+/// bit-identical to the mount as it shipped, and only the chaotic phase
+/// is new numbers.
+pub fn turret_kick_axes(shot_i: u32) -> [f32; 2] {
+    let c = turret_chaos(shot_i);
+    if c <= 0.0 {
+        return [1.0, 0.0];
+    }
+    let (yaw, mag) = turret_spray_entry(shot_i);
+    // LERP from perfectly straight - full kick up, nothing sideways -
+    // into the pattern, so the transition is progressive and not a step
+    [1.0 + (mag - 1.0) * c, yaw * TURRET_CHAOS_YAW * c]
+}
+
 /// §12 (owner): how the hull turret's trigger behaves.
 ///
 /// `Auto` is the default and is EXACTLY the mount's historical
@@ -9627,6 +9851,55 @@ impl TdmSim {
     /// the replay digest. It reads `mech_weapon`, `turret_mode`,
     /// `turret_burst_i` and `mech_brace`, all of which the sim already
     /// keeps and already resets.
+    /// §owner SPEC15 §4: **THE accessor for how far into the CHAOTIC
+    /// phase `i`'s hull turret is** - 0 through the whole controlled
+    /// window, ramping to 1, and 0 for anyone not holding a turret
+    /// trigger.
+    ///
+    /// This is the number a client's visual half drives off: camera
+    /// shake, barrel wobble, the hull settling harder, whatever says
+    /// "this machine has stopped absorbing it". It is the SAME function
+    /// the fire path blends the pattern in with, so the picture and the
+    /// rounds cannot end up describing two different weapons - the rule
+    /// `mount_kick_now` and `TurretMode::kick_mult` are both written
+    /// under.
+    ///
+    /// PURE: no new field, nothing to reset on respawn, nothing added to
+    /// the replay digest. It reads `mech_weapon` and `turret_burst_i`,
+    /// both of which the sim already keeps, already clears on a fresh
+    /// press, on death and on dismount, and already fingerprints.
+    pub fn turret_chaos_of(&self, i: usize) -> f32 {
+        let f = &self.fighters[i];
+        if !f.in_mech() || f.mech_weapon != MechWeapon::Gatling {
+            return 0.0;
+        }
+        turret_chaos(f.turret_burst_i)
+    }
+
+    /// §owner SPEC15 §4: the impulse the next round writes, as
+    /// **[pitch, yaw]** rather than a magnitude.
+    ///
+    /// The two-axis companion to `mount_kick_now`, and what the fire path
+    /// actually uses. Through the controlled window the yaw share is
+    /// exactly zero - straight, which is half of what the brief asks for
+    /// - and the pitch share is exactly `mount_kick_now`, so nothing
+    /// about a controlled burst changed by a single bit. Past it, the
+    /// mount starts walking sideways off its own fixed pattern.
+    ///
+    /// The autocannon has no pattern: it is one honest kick per shell on
+    /// a 1.35 s cycle, and the envelope is a SUSTAINED-fire idea. It
+    /// resolves to `[kick, 0.0]` here, bit-identical to its old self, for
+    /// the same reason `mount_aim_stabiliser` leaves it at 1.0.
+    pub fn mount_kick_axes(&self, i: usize) -> [f32; 2] {
+        let mag = self.mount_kick_now(i);
+        let f = &self.fighters[i];
+        if mag == 0.0 || f.mech_weapon != MechWeapon::Gatling {
+            return [mag, 0.0];
+        }
+        let ax = turret_kick_axes(f.turret_burst_i);
+        [mag * ax[0], mag * ax[1]]
+    }
+
     pub fn mount_kick_now(&self, i: usize) -> f32 {
         let f = &self.fighters[i];
         if !f.in_mech() {
@@ -10357,8 +10630,11 @@ impl TdmSim {
         // §owner: read the impulse through the SAME accessor the client
         // and the HUD read, before `turret_burst_i` advances. One
         // function, so "what the mount kicks" and "what the shot wrote"
-        // cannot become two different answers.
-        let kick = self.mount_kick_now(i);
+        // cannot become two different answers. §owner SPEC15 §4: it is
+        // now the TWO-AXIS accessor, which is `mount_kick_now` times the
+        // envelope's pattern - still one function, still read before the
+        // index moves.
+        let kick = self.mount_kick_axes(i);
         debug_assert_eq!(shot_i, self.fighters[i].turret_burst_i);
         let o = self.muzzle_origin(i);
         // the cone opens as the barrels cook, exactly as the minigun's
@@ -10384,7 +10660,13 @@ impl TdmSim {
             // second of pitch), same brace damp the autocannon takes,
             // and the per-mode growth comes off `TurretMode::kick_mult`
             // so the shot and any readout of it cannot disagree.
-            f.punch_vel[0] += kick;
+            // §owner SPEC15 §4: TWO axes now. Through the controlled
+            // window `kick[1]` is exactly 0.0 and `kick[0]` is exactly
+            // the scalar this line used to add, so the first ~21 rounds
+            // of every trigger pull are bit-identical to the mount as it
+            // shipped; past it the pattern opens up.
+            f.punch_vel[0] += kick[0];
+            f.punch_vel[1] += kick[1];
             f.turret_burst_i += 1;
             // §12: the settle. A completed burst is committed - you get
             // three and then the mount takes them back for half a
@@ -10411,6 +10693,15 @@ impl TdmSim {
             if f.gatling_heat >= 100.0 {
                 f.gatling_heat = 100.0;
                 f.gatling_vent_t = GATLING_VENT_FORCED_S;
+                // §owner SPEC15 §4: a forced vent ENDS the sustained
+                // fire, so it ends the envelope with it. Without this the
+                // index survives the 3.5 s cook-off (`gatling_trigger_t`
+                // is refreshed above every tick a held trigger is down,
+                // so the next round is not a fresh press) and a pilot who
+                // never lets go is permanently at full chaos with no way
+                // back short of dying. The mount stopped; the pattern
+                // starts again - the same bargain a fresh press strikes.
+                f.turret_burst_i = 0;
             }
         }
         let aim = self.mount_punched_aim(i, aim);
@@ -22646,6 +22937,334 @@ mod tests {
             measured > 0.2,
             "the mount is delivering essentially no recoil at all \
              ({measured:.2} deg) - over-stabilised into a laser"
+        );
+    }
+
+    /// §owner SPEC15 §4: "the first 1-2 s of sustained fire should be
+    /// straight, heavy, controlled and visibly absorbed; after that it
+    /// becomes progressively chaotic - more movement, more instability."
+    ///
+    /// Measured through the REAL fire path, as a comparison between two
+    /// one-second windows of the SAME held trigger: the second second
+    /// (inside the controlled window) against the seventh (deep in the
+    /// chaotic phase). Every claim is that window pair, so retuning the
+    /// kick, the mode growth or the decay constants moves both windows
+    /// together and the test keeps meaning what it says.
+    ///
+    /// The heat is pinned to zero each tick so the mount never cooks off:
+    /// a forced vent resets the burst index and therefore the envelope,
+    /// and the point here is the envelope, not the heat model.
+    #[test]
+    fn the_hull_turret_is_controlled_then_chaotic() {
+        // the envelope has to FIT the trigger pull it lives in, or the
+        // pilot never reaches the end of it
+        assert!(
+            turret_controlled_rounds() < turret_chaos_full_rounds()
+                && turret_chaos_full_rounds() < turret_rounds_to_vent(),
+            "the envelope does not fit inside a trigger pull: controlled \
+             ends at {:.1} rounds, chaos fills at {:.1}, the mount vents at \
+             {:.1}",
+            turret_controlled_rounds(),
+            turret_chaos_full_rounds(),
+            turret_rounds_to_vent()
+        );
+        // ...and the controlled window is the owner's, not a number
+        // invented next to it
+        assert!(
+            (1.0..=2.0).contains(&TURRET_CONTROLLED_S),
+            "the brief says the first 1-2 s are controlled; this mount \
+             says {TURRET_CONTROLLED_S}"
+        );
+
+        // one held trigger, sampled every tick, bucketed by second
+        let mut s = mech_range(0x7E60, MechWeapon::Gatling);
+        let secs = 8usize;
+        let mut path = vec![0.0_f32; secs]; // how far the picture travelled
+        let mut sum = vec![0.0_f64; secs]; // pitch mean...
+        let mut sq = vec![0.0_f64; secs]; // ...and its spread
+        let mut yawlive = vec![0u32; secs];
+        let mut n = vec![0u32; secs];
+        let mut prev = [0.0_f32; 2];
+        for k in 0..(secs as f32 / DT) as usize {
+            s.fighters[0].gatling_heat = 0.0; // isolate the envelope from the vent
+            s.step(PlayerCmd {
+                shoot: true,
+                aim: [0.0, 0.0, -1.0],
+                ..Default::default()
+            });
+            let p = s.fighters[0].punch;
+            let w = ((k as f32 * DT) as usize).min(secs - 1);
+            path[w] += ((p[0] - prev[0]).powi(2) + (p[1] - prev[1]).powi(2)).sqrt();
+            sum[w] += p[0] as f64;
+            sq[w] += (p[0] * p[0]) as f64;
+            if p[1] != 0.0 {
+                yawlive[w] += 1;
+            }
+            n[w] += 1;
+            prev = p;
+        }
+        let sd = |w: usize| -> f32 {
+            let m = sum[w] / n[w] as f64;
+            ((sq[w] / n[w] as f64 - m * m).max(0.0)).sqrt() as f32
+        };
+        let mean = |w: usize| -> f32 { (sum[w] / n[w] as f64) as f32 };
+        // window 1 is the second second: past the mount's own kick ramp
+        // (`TurretMode::kick_mult` caps on round 8, 0.56 s) and inside the
+        // controlled window. Window 6 is deep in the chaotic phase.
+        let (calm, wild) = (1usize, 6usize);
+        assert!(
+            turret_chaos((calm as f32 / GATLING_FIRE_PERIOD) as u32) == 0.0,
+            "the CALM window is not inside the controlled phase - the \
+             fixture proves nothing"
+        );
+        assert!(
+            turret_chaos((wild as f32 / GATLING_FIRE_PERIOD) as u32) >= 1.0,
+            "the WILD window has not reached full chaos - the fixture is \
+             measuring the ramp instead of the plateau"
+        );
+
+        // (1) STRAIGHT first. Not "mostly straight" - the controlled
+        // window writes an exact 0.0 yaw share, so the picture moves in
+        // one axis and one axis only.
+        assert_eq!(
+            yawlive[calm], 0,
+            "the mount was already walking sideways inside the controlled \
+             window - 'straight' is the first word of the brief"
+        );
+
+        // (2) ...and then it is NOT.
+        assert!(
+            yawlive[wild] > n[wild] / 3,
+            "only {} of {} ticks in the chaotic phase had any sideways \
+             movement at all - `punch_visible_floor` says a yaw impulse \
+             under {:.1} deg/s is erased in the tick it lands, so this is \
+             a channel that writes a field and changes no picture",
+            yawlive[wild],
+            n[wild],
+            punch_visible_floor()
+        );
+
+        // (3) MORE MOVEMENT: the picture travels further per second.
+        assert!(
+            path[wild] > path[calm] * 1.2,
+            "the picture travelled {:.1} deg in the chaotic second against \
+             {:.1} in the controlled one - 'more movement' is not happening",
+            path[wild],
+            path[calm]
+        );
+
+        // (4) MORE INSTABILITY: and it is less predictable while doing it.
+        assert!(
+            sd(wild) > sd(calm) * 2.0,
+            "the climb varies by {:.2} deg in the chaotic second against \
+             {:.2} in the controlled one - the mount is kicking to the \
+             same place every round, which is 'heavy', not 'chaotic'",
+            sd(wild),
+            sd(calm)
+        );
+
+        // (5) AND IT IS NOT SIMPLY BIGGER. The mean climb is held flat on
+        // purpose: a bot has no mouse and eats every degree of it (see
+        // `TURRET_CHAOS_MAG_LO`). Chaos is a shape, not a volume knob,
+        // and this is the leg that stops the next tuning pass from
+        // quietly turning it back into one.
+        let lift = mean(wild) / mean(calm);
+        assert!(
+            lift > 0.85 && lift < 1.15,
+            "the chaotic phase climbs {lift:.2}x as hard on average as the \
+             controlled one ({:.2} vs {:.2} deg). That is a straight recoil \
+             increase wearing the envelope's name, and it is paid for by \
+             every bot in a chassis",
+            mean(wild),
+            mean(calm)
+        );
+    }
+
+    /// §owner SPEC15 §4: the envelope is a PATTERN, not noise - and the
+    /// two properties that make it one.
+    ///
+    /// "Must read as INTENTIONAL, not random" is, in this file's
+    /// vocabulary, exactly what `spray_entry` already is: a fixed-seed
+    /// table, the same for every pilot in every match. These are the two
+    /// ways that claim can be false.
+    #[test]
+    fn the_turret_pattern_is_fixed_and_never_becomes_a_bent_barrel() {
+        // (1) FIXED. Same entry, every call, forever - it is a pure
+        // function of the index and of nothing else.
+        for i in [0u32, 3, 21, 40, 77, 126, 127] {
+            assert_eq!(
+                turret_spray_entry(i),
+                turret_spray_entry(i),
+                "entry {i} is not reproducible"
+            );
+        }
+        // and it is a PATTERN: consecutive entries are related, not
+        // independent draws. Half the mean step of a memoryless walk over
+        // the same range is the bar; a shuffled table cannot clear it.
+        let mut step = 0.0_f32;
+        for i in 0..64u32 {
+            step += (turret_spray_entry(i + 1).0 - turret_spray_entry(i).0).abs();
+        }
+        step /= 64.0;
+        assert!(
+            step > 0.0 && step < 0.8,
+            "consecutive rounds move the pattern {step:.3} on a -1..1 \
+             channel - that is television snow, not something a pilot can \
+             learn to follow"
+        );
+
+        // (2) NEVER A BENT BARREL. The index wraps rather than clamping;
+        // clamped, every round past the end of the table left along ONE
+        // fixed offset, which is a permanently crooked mount and which
+        // disarmed a bot mech outright when it shipped that way for an
+        // hour. The test: past the end of the table the pattern must
+        // still MOVE.
+        let far: Vec<f32> = (TURRET_PATTERN_N..TURRET_PATTERN_N + 24)
+            .map(|i| turret_spray_entry(i).0)
+            .collect();
+        let spread = far.iter().cloned().fold(f32::MIN, f32::max)
+            - far.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            spread > 0.2,
+            "24 rounds past the end of the table cover {spread:.3} of the \
+             yaw channel - the pattern has frozen into a constant \
+             deflection"
+        );
+
+        // (3) ...and the whole pattern is MEAN-REVERTING, which is what
+        // keeps it a shake about the aim line instead of a departure from
+        // it. A free walk fails this badly.
+        let bias: f32 = (0..TURRET_PATTERN_N)
+            .map(|i| turret_spray_entry(i).0)
+            .sum::<f32>()
+            / TURRET_PATTERN_N as f32;
+        assert!(
+            bias.abs() < 0.20,
+            "the pattern leans {bias:+.3} to one side over its whole \
+             period - a sustained lateral offset is a bent barrel, and it \
+             is the shooter with no mouse who pays for it"
+        );
+        // ...and MEAN-REVERTING is not the same claim as UNBIASED. A free
+        // walk against the -1..1 clamp is unbiased over a whole period and
+        // still spends that period in two long excursions, one to each
+        // side - a bent barrel that changes its mind once. What actually
+        // keeps the mount honest is how OFTEN it comes back through the
+        // aim line, so that is what is measured. (Written because the
+        // free-walk mutation survived the bias leg above.)
+        let crossings = (1..TURRET_PATTERN_N)
+            .filter(|&i| {
+                let (a, b) = (turret_spray_entry(i - 1).0, turret_spray_entry(i).0);
+                (a < 0.0) != (b < 0.0)
+            })
+            .count();
+        assert!(
+            crossings * 8 > TURRET_PATTERN_N as usize,
+            "the pattern crosses its own aim line only {crossings} times in \
+             {TURRET_PATTERN_N} rounds - it is drifting to one side and \
+             sitting there, which is the shape that disarmed a bot mech"
+        );
+    }
+
+    /// §owner SPEC15 §4: a FORCED VENT ends the sustained fire, so it
+    /// ends the envelope with it.
+    ///
+    /// This is not decoration. `gatling_trigger_t` is refreshed at the
+    /// top of `try_fire_gatling` on every tick a held trigger is down -
+    /// including the ticks of a cook-off - so a pilot who never lets go
+    /// gets no fresh press, and without this reset his burst index
+    /// survives the 3.5 s vent and he comes back out of it at full chaos
+    /// with no way back short of dying.
+    #[test]
+    fn a_forced_vent_starts_the_recoil_envelope_again() {
+        let mut s = mech_range(0x7E61, MechWeapon::Gatling);
+        s.fighters[0].mech_rounds = 100_000; // the BELT is not what is being tested
+        let mut peak_chaos = 0.0_f32;
+        let mut vented = false;
+        let mut chaos_after_vent: Option<f32> = None;
+        for _ in 0..(12.0 / DT) as usize {
+            s.step(PlayerCmd {
+                shoot: true,
+                aim: [0.0, 0.0, -1.0],
+                ..Default::default()
+            });
+            let c = s.turret_chaos_of(0);
+            peak_chaos = peak_chaos.max(c);
+            if s.fighters[0].gatling_vent_t > 0.0 {
+                vented = true;
+            } else if vented && chaos_after_vent.is_none() {
+                chaos_after_vent = Some(c);
+            }
+        }
+        assert!(
+            vented,
+            "the mount never cooked off in 12 s of held fire - the fixture \
+             cannot show what a vent does"
+        );
+        assert!(
+            peak_chaos >= 1.0,
+            "the trigger pull never reached full chaos ({peak_chaos:.2}) - \
+             the reset below would be proving nothing"
+        );
+        assert_eq!(
+            chaos_after_vent,
+            Some(0.0),
+            "the mount came out of a forced vent still at full chaos - the \
+             pilot has no way back to a controlled mount short of dying"
+        );
+    }
+
+    /// §owner SPEC15 §4: the CONTROLLED window is bit-identical to the
+    /// mount as it shipped, and the AUTOCANNON is untouched entirely.
+    ///
+    /// The envelope is new arithmetic in a fire path with a bit-exact
+    /// replay guarantee over it. The guarantee is kept the cheap way -
+    /// `turret_kick_axes` returns a literal `[1.0, 0.0]` while the chaos
+    /// is zero, so no float touches the round - and this pins that rather
+    /// than trusting it.
+    #[test]
+    fn the_controlled_window_is_the_mount_that_shipped() {
+        // through the whole controlled window: full kick up, nothing
+        // sideways, to the BIT
+        for i in 0..turret_controlled_rounds() as u32 {
+            assert_eq!(
+                turret_kick_axes(i),
+                [1.0, 0.0],
+                "round {i} of a trigger pull is inside the controlled \
+                 window and is no longer a clean vertical kick"
+            );
+        }
+        // and it reaches the fighter that way through the real path
+        let mut s = mech_range(0x7E62, MechWeapon::Gatling);
+        s.fighters[0].punch_vel = [0.0; 2];
+        // read BEFORE the shot: firing advances `turret_burst_i`, and
+        // `mount_kick_now` answers for the round about to leave, not the
+        // one that just did
+        let expect = s.mount_kick_now(0);
+        assert!(s.try_fire_gatling(0, [0.0, 0.0, -1.0]));
+        assert_eq!(
+            s.fighters[0].punch_vel[0], expect,
+            "the first round of a press must write exactly the scalar \
+             `mount_kick_now` reports"
+        );
+        assert_eq!(
+            s.fighters[0].punch_vel[1], 0.0,
+            "the first round of a press threw the hull sideways"
+        );
+
+        // the AUTOCANNON has no pattern and never gets one: one honest
+        // kick per shell on a 1.35 s cycle is not sustained fire, and the
+        // envelope is a sustained-fire idea.
+        let mut s = mech_range(0x7E63, MechWeapon::Autocannon);
+        s.fighters[0].turret_burst_i = 200; // deep in the envelope, if it had one
+        assert_eq!(
+            s.mount_kick_axes(0),
+            [s.mount_kick_now(0), 0.0],
+            "the autocannon has picked up the turret's chaos envelope"
+        );
+        assert_eq!(
+            s.turret_chaos_of(0),
+            0.0,
+            "the chaos readout answers for a mount that has no envelope"
         );
     }
 
