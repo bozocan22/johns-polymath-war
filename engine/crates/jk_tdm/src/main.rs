@@ -41,6 +41,12 @@ mod cockpit;
 /// §7 (owner spec): the grenade you are holding, and the fist holding
 /// it. Same two-line wiring as `branding` and `cockpit`.
 mod held_grenade;
+/// §owner FRONT END (2026-08-10): launch -> intro image -> two options ->
+/// a fixed introductory match -> a result -> the command interface. Its
+/// own module for the same reason `branding` is: it wires in with this
+/// line and one `add_plugins` below, so a restyle of the whole front end
+/// never touches a gameplay file.
+mod frontend;
 /// THE ART PASS, per map: sky, air, light, and what a stone box IS.
 ///
 /// Was `cliffhold`, and outlived it. The map the research was done for
@@ -69,11 +75,13 @@ use sim::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
 #[derive(Resource)]
-struct Game {
-    sim: TdmSim,
-    accum: f32,
-    rebuild: bool,
-    last_t: f32,
+pub(crate) struct Game {
+    // pub(crate) so `frontend.rs` can build a match and read a finished
+    // one. Everything else on this struct stays private to `main.rs`.
+    pub(crate) sim: TdmSim,
+    pub(crate) accum: f32,
+    pub(crate) rebuild: bool,
+    pub(crate) last_t: f32,
     /// Edge-triggered inputs latched until a sim step consumes them -
     /// above 120 fps some frames run zero steps, and a raw `just_pressed`
     /// would be lost on exactly those frames.
@@ -148,7 +156,7 @@ fn throw_input(
 }
 
 #[derive(Resource)]
-struct CamCtl {
+pub(crate) struct CamCtl {
     yaw: f32,
     pitch: f32,
     grabbed: bool,
@@ -5003,9 +5011,33 @@ struct DmgEdge(u8);
 
 // (§7 Brief III: the old OwnHpFill/OwnArmorFill bars are gone - numerals only.)
 
+/// §owner FRONT END (2026-08-10): four states were added at the FRONT of
+/// this enum and the default moved to `Title`.
+///
+/// That is the whole mechanism behind the owner's hardest constraint -
+/// "the normal menu bar must NOT appear after the intro". It is not
+/// enforced by hiding anything: the app now BOOTS into `Title`, and
+/// `Intro` (the loadout/setup screen, which is what the menu bar belongs
+/// to) is reachable only from `MainMenu`, which is reachable only from
+/// `MatchComplete` or from a pause. There is no code path from launch to
+/// a menu bar to break.
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
-enum GameState {
+pub(crate) enum GameState {
+    /// The two-option launch screen. Owned by `frontend.rs`.
     #[default]
+    Title,
+    /// "Learn about the game". Owned by `frontend.rs`.
+    Learn,
+    /// The five-entry command interface. Owned by `frontend.rs`.
+    MainMenu,
+    /// The post-match result screen. Owned by `frontend.rs`.
+    MatchComplete,
+    /// The battle setup / customization screen (three pages).
+    ///
+    /// Named `Intro` for its whole life because it USED to be the first
+    /// thing a player saw. It is not any more - it sits behind PLAY and
+    /// CUSTOMIZATION on the main menu - but renaming it would touch ~30
+    /// system names and every capture script, for no behaviour.
     Intro,
     Playing,
     Paused,
@@ -6143,7 +6175,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 31] = [
+const CAPTURE_SCRIPTS: [&str; 32] = [
+    // §owner FRONT END: title -> learn -> main menu -> result. The four
+    // screens the front-end spec is entirely about, and the only
+    // instrument that can see them.
+    "frontend",
     // §7 (owner spec): the throwable in the hand, all six states.
     "grenade_hold",
     "medic",
@@ -6267,7 +6303,7 @@ fn capture_quick_deploy(
     // silently dropped into a fight instead.
     if matches!(
         cap.script.as_deref(),
-        Some("menus") | Some(branding::CAPTURE_SPLASH_SCRIPT)
+        Some("menus") | Some("frontend") | Some(branding::CAPTURE_SPLASH_SCRIPT)
     ) {
         return;
     }
@@ -6727,11 +6763,17 @@ fn capture_menus(
                 )));
         }
     };
-    // walks all three intro pages, then Settings - the paged flow means
-    // one snap no longer shows the menu, it shows a THIRD of it
+    // walks the setup screen's pages, then Settings - the paged flow means
+    // one snap no longer shows the menu, it shows a THIRD of it.
+    //
+    // §owner FRONT END: stage 0 now has to LEAVE the title screen first.
+    // The app boots into `GameState::Title`, so a script that opened by
+    // snapping would have photographed the front end and called it the
+    // loadout page. That is precisely the "stale capture reported as
+    // current" failure the operating rules name.
     match *stage {
-        0 if *t > 1.2 => {
-            snap(&mut commands, "01-title-page");
+        0 if *t > 0.5 => {
+            next.set(GameState::Intro);
             *stage = 1;
         }
         1 if *t > 1.6 => {
@@ -6799,6 +6841,120 @@ fn capture_menus(
             *stage = 15;
         }
         15 if *t > 11.6 => std::process::exit(0),
+        _ => {}
+    }
+}
+
+/// §owner FRONT END: photograph the four new screens.
+///
+/// THE INSTRUMENT GAP THIS CLOSES. Before this existed, no capture script
+/// in the crate had ever entered `GameState::Title` deliberately - the
+/// only script that touched a menu (`menus`) walked the LOADOUT pages -
+/// so the entire launch flow was un-photographable. A spec that is
+/// entirely about what things look like, with no instrument that can see
+/// them, is the exact failure `bow_draw_fp` was written to fix for the
+/// first-person bow.
+///
+/// The result screen needs a FINISHED match, which a menu walk cannot
+/// produce and a real match cannot produce on a schedule. So it is staged
+/// by hand, in the same spirit as `capture_board_medic` parking a hurt
+/// machine in reach: writes here are CAPTURE-ONLY, land on a sim that is
+/// about to be thrown away, and never run in a real session.
+fn capture_frontend(
+    cap: Res<CaptureMode>,
+    time: Res<Time>,
+    mut commands: Commands,
+    mut t: Local<f32>,
+    mut stage: Local<usize>,
+    mut next: ResMut<NextState<GameState>>,
+    mut game: ResMut<Game>,
+    window: Query<Entity, With<PrimaryWindow>>,
+) {
+    if cap.script.as_deref() != Some("frontend") {
+        return;
+    }
+    *t += time.delta_secs();
+    let snap = |commands: &mut Commands, label: &str| {
+        let dir = capture_dir("frontend");
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(win) = window.get_single() {
+            commands
+                .spawn(Screenshot::window(win))
+                .observe(bevy::render::view::screenshot::save_to_disk(format!(
+                    "{dir}/{label}.png"
+                )));
+        }
+    };
+    // Beats are spaced past `frontend::FADE_S` so no frame lands inside
+    // the fade curtain - a screenshot of a half-faded screen proves
+    // nothing about the screen.
+    match *stage {
+        0 if *t > 1.0 => {
+            snap(&mut commands, "01-title");
+            *stage = 1;
+        }
+        1 if *t > 1.4 => {
+            next.set(GameState::Learn);
+            *stage = 2;
+        }
+        2 if *t > 2.2 => {
+            snap(&mut commands, "02-learn");
+            *stage = 3;
+        }
+        3 if *t > 2.6 => {
+            next.set(GameState::MainMenu);
+            *stage = 4;
+        }
+        4 if *t > 3.4 => {
+            snap(&mut commands, "03-main-menu");
+            *stage = 5;
+        }
+        5 if *t > 3.8 => {
+            // Stage a finished match the player WON, 25 to 19, so the
+            // result screen has something true-shaped to render. Capture
+            // only; see the doc above.
+            let p_team = game.sim.fighters[game.sim.player].team;
+            let me = TdmSim::team_idx(p_team);
+            game.sim.winner = Some(p_team);
+            game.sim.round_over_t = Some(game.sim.t);
+            game.sim.cfg.tdm_target = frontend::INTRO_TDM_TARGET;
+            game.sim.score[me] = frontend::INTRO_TDM_TARGET as f32;
+            game.sim.score[1 - me] = 19.0;
+            let p = game.sim.player;
+            game.sim.fighters[p].kills = 9;
+            game.sim.fighters[p].deaths = 4;
+            next.set(GameState::MatchComplete);
+            *stage = 6;
+        }
+        6 if *t > 4.6 => {
+            snap(&mut commands, "04-match-complete");
+            *stage = 7;
+        }
+        // And the loser's half of the same screen - the verdict word and
+        // its faction colour are the only things that differ, and a
+        // screen that has only ever been photographed winning has never
+        // had its other half looked at.
+        7 if *t > 5.0 => {
+            let p_team = game.sim.fighters[game.sim.player].team;
+            let me = TdmSim::team_idx(p_team);
+            game.sim.winner = Some(match p_team {
+                Team::Blue => Team::Red,
+                Team::Red => Team::Blue,
+            });
+            game.sim.score[me] = 17.0;
+            game.sim.score[1 - me] = frontend::INTRO_TDM_TARGET as f32;
+            next.set(GameState::MainMenu);
+            *stage = 8;
+        }
+        8 if *t > 5.4 => {
+            next.set(GameState::MatchComplete);
+            *stage = 9;
+        }
+        9 if *t > 6.2 => {
+            snap(&mut commands, "05-match-complete-defeat");
+            *stage = 10;
+        }
+        10 if *t > 7.0 => std::process::exit(0),
         _ => {}
     }
 }
@@ -6922,9 +7078,30 @@ struct TechReadout;
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct IntroPage(pub u8);
 
+/// Which page `open_intro` opens on.
+///
+/// §owner FRONT END: the setup screen has TWO doors now - PLAY wants the
+/// battle page, CUSTOMIZATION wants the soldier page - and `open_intro`
+/// used to hard-set the page it opened on. A resource rather than an
+/// argument because `OnEnter` systems take no arguments.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IntroEntryPage(pub u8);
+
+impl Default for IntroEntryPage {
+    fn default() -> Self {
+        IntroEntryPage(IntroPage::MATCH)
+    }
+}
+
 impl IntroPage {
-    pub const TITLE: u8 = 0;
-    pub const SOLDIER: u8 = 1;
+    /// §owner FRONT END: the old page 0 was a TITLE page carrying the
+    /// wordmark and one direct-entry TRAINING row. Both moved - the
+    /// wordmark to the real title screen, training to the main menu - and
+    /// a page with nothing on it is not a page. The three that remain are
+    /// renumbered, which is safe because every reader goes through these
+    /// constants and `intro_buttons` dispatches on variants, never on an
+    /// index.
+    pub const SOLDIER: u8 = 0;
     /// §C tier 2: the armoury - 24 plates, four rows, and the weight.
     ///
     /// Its OWN page rather than five more rows on SOLDIER, because
@@ -6934,9 +7111,9 @@ impl IntroPage {
     /// would have pushed the Forge buttons off the screen, and a save
     /// button you cannot reach is worse than an armour grid you have to
     /// click Next to see.
-    pub const ARMOURY: u8 = 2;
-    pub const MATCH: u8 = 3;
-    pub const LAST: u8 = 3;
+    pub const ARMOURY: u8 = 1;
+    pub const MATCH: u8 = 2;
+    pub const LAST: u8 = 2;
 
     /// Heading for each page - the question the page answers.
     pub fn heading(self) -> &'static str {
@@ -6956,7 +7133,6 @@ impl IntroPage {
             // a match - deploying requires clicking a mode. Removing the
             // false promise costs one string; adding a real keyboard
             // deploy would need a fourth selection concept.
-            Self::TITLE => "ENTER - set up a battle    -    or drop straight into the RANGE below",
             Self::MATCH => "the battlefield, the mode, and how hard it pushes back    -    CLICK A MODE TO DEPLOY",
             Self::SOLDIER => "the shield always rides in its own slot (4 raises it)",
             Self::ARMOURY => {
@@ -7062,8 +7238,11 @@ enum ModeButton {
     Koth,
     /// §8: co-op zombie extraction.
     Extraction,
-    /// §owner: the practice range.
-    Training,
+    // (§owner FRONT END: `Training` was a fourth variant here. The range
+    // is entered from the MAIN MENU now, which calls `begin_match` with
+    // `training_config()` directly and never touches `Selected` - so a
+    // button variant that only ever meant "ignore every setting" had
+    // nothing left to carry.)
 }
 
 #[derive(Component, Clone, Copy)]
@@ -7201,7 +7380,7 @@ enum MenuButton {
 const PAUSE_ROWS: [(MenuButton, &str, Option<&str>, menu_ui::RowKind); 7] = [
     (MenuButton::Resume, "RESUME", Some("ESC"), menu_ui::RowKind::Normal),
     (MenuButton::Restart, "RESTART MATCH", None, menu_ui::RowKind::Destructive),
-    (MenuButton::BackToLoadout, "CHANGE MODE / LOADOUT", None, menu_ui::RowKind::Normal),
+    (MenuButton::BackToLoadout, "MAIN MENU", None, menu_ui::RowKind::Normal),
     (MenuButton::Settings, "SETTINGS", None, menu_ui::RowKind::Normal),
     (MenuButton::Controls, "CONTROLS", None, menu_ui::RowKind::Normal),
     (MenuButton::Manual, "RULES & MANUAL", None, menu_ui::RowKind::Normal),
@@ -7365,9 +7544,13 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
+        // §owner FRONT END: the title / learn / main-menu / result
+        // screens. Two lines, exactly like `branding` above.
+        .add_plugins(frontend::FrontendPlugin)
         .add_plugins(mech_lineup::MechGalleryPlugin)
         .add_plugins(mech_recoil::MechRecoilPlugin)
         .init_resource::<IntroPage>()
+        .init_resource::<IntroEntryPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
         // the warm gold-and-sepia art on every menu screen.
         .insert_resource(ClearColor(branding::palette::DUST))
@@ -7383,9 +7566,17 @@ fn main() {
         .init_resource::<CaptureHome>()
         .init_resource::<PlasmaHitPool>()
         .add_systems(Startup, init_capture_mode)
-        .add_systems(Update, capture_quick_deploy.run_if(in_state(GameState::Intro)))
+        // §owner FRONT END: the app boots into `Title` now, not `Intro`,
+        // so a quick-deploy gated on `Intro` would never fire and EVERY
+        // gameplay capture script would hang on the title screen. It runs
+        // in both.
+        .add_systems(
+            Update,
+            capture_quick_deploy
+                .run_if(in_state(GameState::Title).or(in_state(GameState::Intro))),
+        )
         // menu capture runs in the MENU states, not Playing
-        .add_systems(Update, (capture_menus, capture_splash))
+        .add_systems(Update, (capture_menus, capture_splash, capture_frontend))
         // PreUpdate, not Update: a synthetic `.press()` only sets
         // just_pressed for one frame, same as real OS input — but real
         // input arrives in PreUpdate (guaranteed before every Update
@@ -22593,15 +22784,35 @@ fn esc_toggle(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
+    ret: Res<frontend::NavReturn>,
+    mut exit: EventWriter<AppExit>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         match state.get() {
             GameState::Playing => next.set(GameState::Paused),
             GameState::Paused => next.set(GameState::Playing),
+            // These three are reachable from BOTH the pause menu and the
+            // front end now, so "back" is a remembered value rather than
+            // a constant. Falling back to Paused would drop a player who
+            // opened Settings from the main menu into a pause screen over
+            // a match that is not running.
             GameState::Settings | GameState::Manual | GameState::Controls => {
-                next.set(GameState::Paused)
+                next.set(ret.0.clone())
             }
-            GameState::Intro => {}
+            // The setup screen's way back out is the main menu it was
+            // opened from. Escape did nothing here for the whole life of
+            // the old flow, because there was nothing behind it.
+            GameState::Intro => next.set(GameState::MainMenu),
+            GameState::Learn => next.set(ret.0.clone()),
+            // The title screen keeps exactly two BUTTONS, so quitting has
+            // to live somewhere that is not a third one: the quiet
+            // tertiary row, and this key.
+            GameState::Title => {
+                exit.send(AppExit::Success);
+            }
+            // A result you have to acknowledge. Escape must not be able
+            // to skip past the two choices the spec asks for.
+            GameState::MainMenu | GameState::MatchComplete => {}
         }
     }
 }
@@ -22941,6 +23152,7 @@ fn open_intro(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     brand: Option<Res<branding::BrandAssets>>,
     mut page: ResMut<IntroPage>,
+    entry: Res<IntroEntryPage>,
 ) {
     let aspect = windows
         .get_single()
@@ -22948,79 +23160,49 @@ fn open_intro(
         .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
     cam.ads = false;
-    // Always open on the title. Touching the resource also marks it
-    // CHANGED, which is what makes intro_paging run its first pass -
-    // without it every page would be visible at once on frame 1.
-    page.0 = IntroPage::TITLE;
+    // §owner FRONT END: PLAY and CUSTOMIZATION are two doors into the
+    // same screen, so which page opens is the caller's choice now.
+    // Writing the resource also marks it CHANGED, which is what makes
+    // `intro_paging` run its first pass - without that every page would
+    // be visible at once on frame 1.
+    page.0 = entry.0.min(IntroPage::LAST);
 
     let brand = brand.as_deref();
     let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
     commands.entity(root).insert(IntroRoot).with_children(|p| {
-        // THE WORDMARK IS THE TITLE. The old screen drew the key art at
-        // GlobalZIndex(-10) and then painted a 94%-opaque navy wash over
-        // it at implicit z 0 - at most 6% of the art could ever reach the
-        // eye, which is the real reason it never appeared. It also set a
-        // 40px gold text heading reading "JOHN KINGDOM - ARENA" directly
-        // beneath the wordmark PNG that says the same words.
-        if let Some(b) = brand {
-            p.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(24.0),
-                    // width only - the image's own measure derives the
-                    // height from its aspect. Setting both stretches.
-                    width: Val::Percent(52.0),
-                    top: Val::Percent(7.0),
-                    ..default()
-                },
-                ImageNode {
-                    image: b.wordmark.clone(),
-                    color: Color::srgba(1.0, 1.0, 1.0, 0.96),
-                    ..default()
-                },
-                ZIndex(menu_ui::ZL_MARK),
-                OnIntroPage(IntroPage::TITLE),
-            ));
-        }
+        // (The wordmark PNG used to hang here, above the plate, as the
+        // TITLE page's whole content. The game has a real title screen
+        // now - `frontend::open_title` - and this surface is a setup
+        // screen reached from a menu, so naming the game again on it is
+        // the same redundancy the wordmark itself was introduced to fix.)
 
         menu_ui::plate(p, menu_ui::PLATE_W_INTRO, |b| {
-            // heading + subtitle are PAGE-DRIVEN: the title page is named
-            // by the wordmark above, the other two by the question they
-            // answer. intro_paging rewrites both on every page change.
+            // heading + subtitle are PAGE-DRIVEN: every page is named by
+            // the question it answers. `intro_paging` rewrites both on
+            // every page change. (The heading used to spawn hidden,
+            // because page 0 was a title page that had no question. There
+            // is no such page any more, so it spawns visible.)
             b.spawn((
-                Text::new(""),
+                Text::new(IntroPage(IntroPage::SOLDIER).heading()),
                 TextFont { font_size: menu_ui::T_HEAD, ..default() },
                 TextColor(branding::palette::GOLD),
-                Node { display: Display::None, ..default() },
                 IntroHeading,
             ));
             menu_ui::rule_and_boss(b, true);
             b.spawn((
-                Text::new(IntroPage(IntroPage::TITLE).subtitle()),
+                Text::new(IntroPage(IntroPage::SOLDIER).subtitle()),
                 TextFont { font_size: menu_ui::T_MICRO, ..default() },
                 TextColor(branding::palette::PARCHMENT_DIM),
                 IntroSubtitle,
             ));
 
-            // ---- TITLE page: the one direct-entry door ------------------
-            // §2 (owner spec, 2026-08-10): TRAINING MODE IS ONE FIXED
-            // SCENARIO, entered immediately. So it cannot live behind the
-            // three-page setup flow: everything you would touch on the way
-            // there (map, difficulty, battle size, score target, class,
-            // loadout, plate) is a setting training does not have.
-            //
-            // One click from the first screen, straight into
-            // `training_config()`. The subtitle beneath it states the
-            // ruleset rather than offering it - the player is TOLD the
-            // rules, never asked.
-            menu_ui::menu_row(
-                b,
-                (ModeButton::Training, OnIntroPage(IntroPage::TITLE)),
-                menu_ui::RowKind::Normal,
-                "TRAINING RANGE",
-                Some("Arena - still targets, nothing shoots back, all six mechs on display"),
-                None,
-            );
+            // (§2's direct-entry TRAINING RANGE row used to sit here, on
+            // a page-0 title screen. §owner FRONT END moved it to the
+            // MAIN MENU, which is where the spec puts it: the first
+            // screen a player sees now has exactly two options on it, and
+            // training is one of the five main-menu entries. It still
+            // takes `training_config()` and still touches no setting -
+            // only the door moved, not the rule.)
 
             // ---- SOLDIER page ------------------------------------------
             let sold = OnIntroPage(IntroPage::SOLDIER);
@@ -23306,17 +23488,13 @@ fn intro_paging(
     if !page.is_changed() {
         return;
     }
-    // The title page is named by the WORDMARK PNG above the plate, so
-    // the text heading hides there entirely rather than repeating the
-    // same four words in a different typeface directly beneath it. The
-    // other two pages name the question they answer.
+    // Every remaining page names the question it answers, so the heading
+    // is unconditional now. (It used to hide on page 0, the title page,
+    // to avoid repeating the wordmark PNG that sat above it; both are
+    // gone - see `IntroPage`'s renumbering note.)
     for (mut t, mut node) in &mut heading {
-        if page.0 == IntroPage::TITLE {
-            node.display = Display::None;
-        } else {
-            node.display = Display::Flex;
-            **t = page.heading().to_string();
-        }
+        node.display = Display::Flex;
+        **t = page.heading().to_string();
     }
     for mut t in &mut subtitle {
         **t = page.subtitle().to_string();
@@ -23333,8 +23511,8 @@ fn intro_paging(
     }
     for (which, mut node) in &mut nav_vis {
         let hide = match which {
-            // nothing to go back to on the title page
-            IntroNav::Back => page.0 == IntroPage::TITLE,
+            // nothing to go back to on the first page
+            IntroNav::Back => page.0 == 0,
             // the deploy buttons ARE the forward action on the last
             // page; a NEXT that only clamps would lie about doing
             // something
@@ -23344,9 +23522,8 @@ fn intro_paging(
     }
 }
 
-/// Keyboard paging — the title page literally says "ENTER to begin",
-/// so Enter must do that. Right/Left arrows page too; everything is
-/// clamped the same way the buttons are (no wrapping - see the note on
+/// Keyboard paging. Right/Left arrows page; everything is clamped the
+/// same way the buttons are (no wrapping - see the note on
 /// `intro_nav_buttons`).
 fn intro_keyboard_paging(keys: Res<ButtonInput<KeyCode>>, mut page: ResMut<IntroPage>) {
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::ArrowRight) {
@@ -23395,7 +23572,7 @@ fn intro_nav_buttons(
 ///
 /// If a future session wants a second scenario, it belongs HERE as a
 /// second const - not as a row on a menu.
-const fn training_config() -> MatchConfig {
+pub(crate) const fn training_config() -> MatchConfig {
     MatchConfig {
         seed: 0x7EA9,
         // A range, not a battle. The bodies on it are the exhibit and
@@ -23447,14 +23624,27 @@ fn match_config(sel: &Selected, mode: Mode) -> MatchConfig {
     }
 }
 
-/// Shared by a real button click AND the capture harness's quick-deploy -
-/// one code path for "start a match from the current `Selected` choices".
-fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState<GameState>) {
-    game.sim = TdmSim::new(match_config(sel, mode));
+/// Build a sim from a config and enter it. THE one place a match starts.
+///
+/// Extracted so `frontend.rs` can start the fixed introductory match and
+/// the training range without either re-deriving these four field writes
+/// or being handed a `Selected` it must promise not to read.
+pub(crate) fn begin_match(
+    cfg: MatchConfig,
+    game: &mut Game,
+    next: &mut NextState<GameState>,
+) {
+    game.sim = TdmSim::new(cfg);
     game.accum = 0.0;
     game.last_t = 0.0;
     game.rebuild = true;
     next.set(GameState::Playing);
+}
+
+/// Shared by a real button click AND the capture harness's quick-deploy -
+/// one code path for "start a match from the current `Selected` choices".
+fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState<GameState>) {
+    begin_match(match_config(sel, mode), game, next);
 }
 
 fn intro_buttons(
@@ -23475,7 +23665,6 @@ fn intro_buttons(
                     ModeButton::Tdm => Mode::Tdm,
                     ModeButton::Koth => Mode::Koth,
                     ModeButton::Extraction => Mode::Extraction,
-                    ModeButton::Training => Mode::Training,
                 };
                 start_match(&sel, mode, &mut game, &mut next);
             }
@@ -23876,7 +24065,7 @@ fn grab_cursor(mut cam: ResMut<CamCtl>, mut windows: Query<&mut Window, With<Pri
     }
 }
 
-fn release_cursor(cam: &mut CamCtl, windows: &mut Query<&mut Window, With<PrimaryWindow>>) {
+pub(crate) fn release_cursor(cam: &mut CamCtl, windows: &mut Query<&mut Window, With<PrimaryWindow>>) {
     cam.grabbed = false;
     if let Ok(mut w) = windows.get_single_mut() {
         w.cursor_options.grab_mode = CursorGrabMode::None;
@@ -24136,6 +24325,7 @@ fn settings_buttons(
     mut settings: ResMut<GameSettings>,
     mut labels: Query<(&SettingsLabel, &mut Text)>,
     mut next: ResMut<NextState<GameState>>,
+    ret: Res<frontend::NavReturn>,
 ) {
     let mut dirty = false;
     for (interaction, which, row, kids, mut bg, mut border) in &mut q {
@@ -24241,7 +24431,8 @@ fn settings_buttons(
                     settings.cross_dynamic = !settings.cross_dynamic;
                     dirty = true;
                 }
-                SettingsButton::Back => next.set(GameState::Paused),
+                // Back to whoever opened it - Paused or the main menu.
+                SettingsButton::Back => next.set(ret.0.clone()),
             }
         }
     }
@@ -24448,6 +24639,7 @@ fn menu_buttons(
     >,
     mut game: ResMut<Game>,
     mut next: ResMut<NextState<GameState>>,
+    mut ret: ResMut<frontend::NavReturn>,
     mut exit: EventWriter<AppExit>,
 ) {
     for (interaction, which, row, kids, mut bg, mut border) in &mut q {
@@ -24475,10 +24667,28 @@ fn menu_buttons(
                     game.rebuild = true;
                     next.set(GameState::Playing);
                 }
-                MenuButton::BackToLoadout => next.set(GameState::Intro),
-                MenuButton::Settings => next.set(GameState::Settings),
-                MenuButton::Manual => next.set(GameState::Manual),
-                MenuButton::Controls => next.set(GameState::Controls),
+                // §owner FRONT END: the main menu is the hub now, so a
+                // pause exits to it rather than dropping the player
+                // straight onto the setup screen's pill rows.
+                MenuButton::BackToLoadout => next.set(GameState::MainMenu),
+                // Settings / Manual / Controls have TWO entrances now
+                // (here and the front end), so each one records where it
+                // was opened from rather than assuming Paused. Without
+                // this, opening Settings from the main menu and pressing
+                // Back landed the player on a pause screen over a match
+                // that was not running.
+                MenuButton::Settings => {
+                    ret.0 = GameState::Paused;
+                    next.set(GameState::Settings);
+                }
+                MenuButton::Manual => {
+                    ret.0 = GameState::Paused;
+                    next.set(GameState::Manual);
+                }
+                MenuButton::Controls => {
+                    ret.0 = GameState::Paused;
+                    next.set(GameState::Controls);
+                }
                 MenuButton::Quit => {
                     exit.send(AppExit::Success);
                 }
@@ -26037,12 +26247,12 @@ mod camera_v2_tests {
         // means the newest tables - exactly the ones most likely to have
         // a beat in the wrong order - were the ones going unchecked.
         //
-        // `menus` and the splash are the two deliberate exemptions: they
-        // are wall-clock driven UI walks with no beat table at all, and
-        // `init_capture_mode` still accepts them, so an empty script
-        // here is correct rather than a typo.
+        // `menus`, `frontend` and the splash are the deliberate
+        // exemptions: they are wall-clock driven UI walks with no beat
+        // table at all, and `init_capture_mode` still accepts them, so an
+        // empty script here is correct rather than a typo.
         for name in CAPTURE_SCRIPTS {
-            if matches!(name, "menus") || name == branding::CAPTURE_SPLASH_SCRIPT {
+            if matches!(name, "menus" | "frontend") || name == branding::CAPTURE_SPLASH_SCRIPT {
                 continue;
             }
             let script = capture_script(name);
