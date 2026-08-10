@@ -34,7 +34,10 @@ It reads the specification briefs from disk itself.
 1. `BRIEF_VIII_master.md` — the consolidated spec
 2. `BRIEF_VIII_B_addendum.md` — the corrections that supersede parts of it
 3. `BRIEF_IX_castle_grenade_customization.md` — maps, grenades, customization
-4. `../DESIGN_MAP.md` — what is actually built versus what is specified
+4. `../engine/crates/jk_tdm/research/TREVOR_TASKS.md` — what is actually built versus
+   what is specified, ranked and ready to pick up (`TREVOR_LEDGER.md` behind it for the
+   full record). **Corrected 2026-08-10:** was `../DESIGN_MAP.md`, which maps `jk_wall`,
+   a different game, and never mentions `jk_tdm`.
 
 `BRIEF_VII_optimized.md` is superseded by VIII for content, but is kept because it is where the
 operating contract originates.

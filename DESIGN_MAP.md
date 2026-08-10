@@ -1,5 +1,28 @@
 # DESIGN MAP — the battlefield-simulator architecture vs. what's built
 
+> ## ⚠️ THIS FILE IS ABOUT `jk_wall`, NOT `jk_tdm`. STOP AND READ THIS FIRST.
+>
+> **Corrected 2026-08-10.** This document maps the **battlefield /
+> shieldwall simulator** (`jk_wall`, `jk_core`) — the commander-in-the-line
+> game. It maps **`jk_tdm`, the game currently under active development,
+> NOWHERE.** Verified: `jk_wall` appears in this file; `jk_tdm` does not
+> appear once.
+>
+> That matters because `briefs/PROMPT_MASTER_research_build.md` and
+> `briefs/README.md` both tell every new session to read this file as
+> *"what is actually built versus what is specified."* Every session that
+> obeyed that instruction has been reading the design map of a different
+> game. This is the highest-traffic wrong document in the repository.
+>
+> **For `jk_tdm`'s built-vs-specified state, read instead:**
+> - `engine/crates/jk_tdm/research/TREVOR_TASKS.md` — what is open, ranked
+> - `engine/crates/jk_tdm/research/TREVOR_LEDGER.md` — all 266 asks, with
+>   status and evidence
+> - `engine/crates/jk_tdm/research/WHATS_MISSING.md` — the live plan
+>
+> This file is kept, not deleted: it is still the correct map for
+> `jk_wall`, and that work is real. It just is not this game.
+
 The owner's architecture spec (2026-07-17): an **original** third-person
 large-scale battlefield simulator inspired by *Shieldwall*'s gameplay —
 mechanics reverse-engineered from public gameplay/reviews, zero copied code

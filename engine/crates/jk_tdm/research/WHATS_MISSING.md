@@ -51,15 +51,27 @@ still valid but ranks behind it. Owner's own priority order.
   small components, surfaces, energy details. [C]
 - **Rocket Launcher redesign** — chambers, mounting, reload mechanism,
   barrel detail, materials, VFX, firing animation, recoil. [C]
-- **Royal Mech: its own body and silhouette, NOT a scaled Big Mech**,
-  with SUBTLE neon-blue energy accents (channels, seams, reactor) —
-  accent, not a coating. [C]
+- **Royal Mech: its own body and silhouette, NOT a scaled Big Mech.** [C]
+  ~~SUBTLE neon-blue energy accents~~ — **SUPERSEDED, owner 2026-08-10.**
+  The Royal shipped with GOLD accents instead of the neon-blue this line
+  asked for. Trevor raised it as Band-0 question Q4; the owner's answer
+  was *"keep the royal mech"*. **The gold stays. Do not rework it, do not
+  re-open it.** The body-and-silhouette half of this line is UNTOUCHED by
+  that ruling and is still open — it is Task 4, and `main.rs:11414` still
+  says "Same machine, same 53 plates".
 - **Opposition mechs are NOT recolours.** Own armour design, body
   structure, silhouette, mechanical detail, weapon styling — while
   keeping the faction colour language: neon red, dark red, neon blue,
   dark blue. Neon stays recognisable inside darker materials. [C]
-- **Opposition Royal**: unique body, neon-red/dark-red primary with
-  dark-blue complements. Must not read as a recoloured player Royal. [C]
+- **Opposition Royal**: unique body. **Palette set by owner 2026-08-10:
+  RED, YELLOW, and NEON-BLUE details.** [C] This supersedes the earlier
+  "neon-red/dark-red primary with dark-blue complements". Red remains the
+  primary; yellow and neon-blue are detail accents, not coatings.
+  **Must still not read as a recoloured player Royal** — and note that
+  ruling now has teeth, because the player Royal is gold and this one
+  carries yellow. The two must be told apart by BODY and SILHOUETTE, not
+  by colour. If a capture shows them reading alike at 30 m in black, the
+  fix is the chassis, not the palette.
 
 ### P4 — POLISH
 Animations, VFX, weapon feedback, materials, lighting, UI consistency,

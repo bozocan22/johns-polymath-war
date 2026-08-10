@@ -19,7 +19,11 @@ You are working in this repository. Before anything else:
    `BRIEF_IX_castle_grenade_customization.md`. These define the operating contract, the
    20-segment body, the elastic load model, the 26-piece segment-mapped armour, castle map
    tiers, and grenade blast tables. **Do not re-derive any of it. Extend it.**
-3. Read `projects/john_kingdom_game/DESIGN_MAP.md` to see what is actually built versus specified.
+3. Read `engine/crates/jk_tdm/research/TREVOR_TASKS.md` (what is open, ranked) and
+   `TREVOR_LEDGER.md` (all asks, with status and evidence) to see what is actually built
+   versus specified. **Corrected 2026-08-10:** this step used to point at
+   `DESIGN_MAP.md`, which maps `jk_wall` — a different game — and does not mention
+   `jk_tdm` once. Every session that followed the old instruction read the wrong map.
 
 Work on branch `claude/master-research` — create it from the current default branch if it does
 not exist.

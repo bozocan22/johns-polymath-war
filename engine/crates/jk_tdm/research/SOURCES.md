@@ -162,11 +162,16 @@ CS, so it is **not** being changed without a design decision.
 ## Not attempted
 
 - **Gun material stack** (layered base/coating/wear/grime, channel
-  packing, edge-wear masks, VRAM budget): this engine has **zero
+  packing, edge-wear masks, VRAM budget): ~~this engine has **zero
   image-texture pipeline** — no `asset_server.load` of any image
-  anywhere, confirmed by earlier audit. Every material is a procedural
-  `StandardMaterial` colour. A material-stack spec would have nothing to
-  attach to.
+  anywhere, confirmed by earlier audit.~~ **CORRECTED 2026-08-10.** That
+  audit is stale and its conclusion is false: `branding.rs:303-306` loads
+  four `.png` files through `asset_server.load`, and has since the
+  branding art landed 2026-08-03. Image loading exists. What remains true
+  is that every *gameplay* material is still a procedural
+  `StandardMaterial` colour — so the real gap is that nothing has been
+  built ON the image pipeline, which is a different and much smaller
+  problem than not having one. Do not cite this bullet as a blocker.
 - **In-game console with player image import**: not built. Worth noting
   the brief's own instinct is right — a file-import surface needs its
   refusals specified *before* its success path (format whitelist, size

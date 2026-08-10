@@ -34,7 +34,7 @@ interesting. Blocked items are never researched "in preparation."
 
 | # | System | Blocker |
 |---|---|---|
-| 12 | Weapon material stack, wear maps, decals, player image import, in-game console | Zero texture pipeline. All 21 `asset_server.load` calls are `.wav`. Unblocker: any image loading at all. |
+| 12 | Weapon material stack, wear maps, decals, player image import, in-game console | **NO LONGER BLOCKED — corrected 2026-08-10.** The old blocker read "Zero texture pipeline. All 21 `asset_server.load` calls are `.wav`." That has been false since the branding PNGs landed 2026-08-03. Verified count today: 21 `.wav` in `main.rs` **plus 4 `.png` in `branding.rs`** (`key_art`, `wordmark`, `emblem`, `emblem_small`, at `branding.rs:303-306`). Image loading exists and ships. The named unblocker — "any image loading at all" — is satisfied. Re-rank this row on its own merits; it is content and scope work now, not a blocked one. |
 | 13 | Advanced rendering (Nanite/Lumen-equivalents, GPU-driven pipelines, path tracing, upscalers) | Wrong engine and nothing to render into. Unblocker: #12, then a Bevy-native rendering decision. |
 | 14 | Networking — rollback, prediction, reconciliation, lag compensation | Zero networking dependencies; build is local-only. Reitich's prediction mechanisms already recorded in `research/grenade/SOURCES.md` for when this unblocks. |
 | 15 | Swimming, diving, rope traversal, ladders, muscle simulation, soft bodies, fluids | No water volumes, no ropes, no muscle layer. |

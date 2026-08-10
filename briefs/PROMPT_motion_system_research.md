@@ -35,7 +35,9 @@ Paste everything between the BEGIN and END markers into Claude Code.
    (load then release, release 2–3× faster than load, stored energy scales output), and the
    **kinetic chain utility** (proximal-to-distal sequencing). These already exist and are
    specified. You are not redesigning them.
-3. `projects/john_kingdom_game/DESIGN_MAP.md` — what is actually built.
+3. `engine/crates/jk_tdm/research/TREVOR_TASKS.md` + `TREVOR_LEDGER.md` — what is
+   actually built. **Corrected 2026-08-10:** was `DESIGN_MAP.md`, which maps
+   `jk_wall`, not this game.
 4. The engine crates: `jk_core` (fixed timestep, seeded RNG), `jk_wall`, `jk_bevy`, `jk_tdm`.
 
 Branch: `claude/motion-architecture`.
