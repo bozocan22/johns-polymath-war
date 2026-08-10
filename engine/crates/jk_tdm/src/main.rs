@@ -19299,7 +19299,13 @@ fn camera_system(
             game.sim.mech_jump_phase_of(game.sim.player),
             game.sim.mech_jump_compression_of(game.sim.player),
         );
-        (BODY_HEIGHT * MECH_SCALE - p.height()).max(0.0) * (1.0 - blend)
+        // §P1 SIX VARIANTS: the STANDING height of THIS chassis, not of
+        // the Big. `MECH_SCALE` stood here and a Royal is 10% taller, so
+        // its kneel unwind was short by ~0.19 m for the whole coil - the
+        // camera would have settled to a height the machine is not at.
+        // Same class as the free `mech_visor_eye_y` the eye below
+        // deliberately avoids: a client copy of a scale the sim varies.
+        (BODY_HEIGHT * p.armor_set.chassis_scale() - p.height()).max(0.0) * (1.0 - blend)
     } else {
         0.0
     };
@@ -19567,7 +19573,12 @@ fn camera_system(
         // chassis. 6.0 m was tuned at the old 1.15x scale and never
         // followed it to 1.7 - a machine half again as big should shake
         // the ground further. Derived, so the next scale change follows.
-        let felt = (6.0 / 1.15) * MECH_SCALE;
+        // §P1 SIX VARIANTS: and it scales with the chassis that is
+        // WALKING, not with the Big's constant. A Royal is a tenth
+        // larger and shakes the ground a tenth further; reading
+        // `chassis_scale()` also means the day a fourth tier lands this
+        // line is already right.
+        let felt = (6.0 / 1.15) * f2.armor_set.chassis_scale();
         if d < felt {
             // periodic thump matched to the walk cadence
             let pulse = (game.sim.t * std::f32::consts::TAU * 1.7).sin().max(0.0).powi(6);

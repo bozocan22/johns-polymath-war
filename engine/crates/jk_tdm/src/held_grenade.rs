@@ -88,8 +88,8 @@ pub fn hold_pose(wind: f32) -> (Vec3, f32) {
     // ease-out, so the first tenth of the wind moves the arm visibly and
     // the last tenth barely does. A linear cock reads as a machine part.
     let e = 1.0 - (1.0 - w) * (1.0 - w);
-    let rest = Vec3::new(0.150, -0.155, -0.480);
-    let cocked = Vec3::new(0.215, 0.020, -0.430);
+    let rest = Vec3::new(0.150, -0.175, -0.480);
+    let cocked = Vec3::new(0.205, -0.010, -0.430);
     // THE PITCH IS SMALL ON PURPOSE, and the second capture is why. At
     // -0.95 rad the root's rotation swung the FIST - which hangs 6 cm
     // below and 4 cm behind the pivot - up and out of the top-right
@@ -97,7 +97,7 @@ pub fn hold_pose(wind: f32) -> (Vec3, f32) {
     // grey sphere in the corner and nothing else. The rotation pivot is
     // the grenade, not the wrist, so every radian here is worth far
     // more travel at the hand than it looks.
-    (rest + (cocked - rest) * e, -0.40 * e)
+    (rest + (cocked - rest) * e, -0.25 * e)
 }
 
 /// Build the four models and the arm. Call from setup, BEFORE
@@ -217,18 +217,26 @@ pub fn spawn_held_grenade_vm(
         ))
         .set_parent(root)
         .id();
-    // forearm, running back and down out of the frame
-    commands
-        .spawn((
-            Mesh3d(kit.cube.clone()),
-            MeshMaterial3d(glove.clone()),
-            Transform {
-                translation: Vec3::new(0.040, -0.080, 0.185),
-                rotation: Quat::from_rotation_x(-0.55) * Quat::from_rotation_z(-0.18),
-                scale: Vec3::new(0.060, 0.060, 0.300),
-            },
-        ))
-        .set_parent(fist);
+    // THERE IS NO FOREARM, and that is a decision, not an omission.
+    //
+    // Three capture cycles went into one. First pass: `Rx(-0.55)`,
+    // copied from the viewmodel's own arm cubes without checking what
+    // it does to a box whose LENGTH is its local +Z - `Rx(theta)` sends
+    // +Z to `(0, -sin, cos)`, so a negative angle points the far end UP
+    // and toward the lens. At rest that hid behind the grenade; at full
+    // wind the root's pitch swung it across the camera as a black wedge
+    // over a third of the screen. Second pass, `Rx(+0.78)`: correct
+    // direction, same photograph. Third look at the geometry says why,
+    // and it is not a tuning problem. A 0.28 m arm cannot run 0.2 m
+    // toward a lens that the object it holds is only 0.43 m in front
+    // of; at 6 cm thick and 22 cm out it subtends a third of the frame
+    // whatever angle it leaves at, and the wind-up pose only makes it
+    // worse by rotating it into the middle.
+    //
+    // The mitt alone reads as a hand holding a thing - the rest frames
+    // say so plainly - and a missing arm reads as unfinished where a
+    // brown wedge across the screen reads as a bug. So: no arm, and a
+    // note saying it was measured rather than forgotten.
     // the mitt itself, cradling the grenade from below and behind -
     // smaller than the grenade now, so the OBJECT is the subject
     commands
@@ -464,7 +472,7 @@ mod tests {
         assert!(full.z > rest.z + 0.04, "and come BACK toward the shoulder");
         assert!(full.z < -0.30, "but never into the near plane - it fills the frame there");
         assert!(full.x > rest.x, "and outboard, clearing the sight line");
-        assert!(full_pitch < rest_pitch - 0.25, "the wrist cocks back");
+        assert!(full_pitch < rest_pitch - 0.20, "the wrist cocks back");
         assert!(
             full_pitch > -0.7,
             "a big pitch swings the FIST out of frame - the pivot is the \

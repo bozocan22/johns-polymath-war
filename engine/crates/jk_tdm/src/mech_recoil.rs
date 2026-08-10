@@ -94,6 +94,30 @@ const RETURN_PER_S: f32 = 14.0;
 const ROLL_RAD_PER_DEG_S: f32 = 0.00055;
 const ROLL_MAX_RAD: f32 = 0.075;
 
+/// §owner SPEC15 §4: the mount's SIDEWAYS travel, radians of yaw per
+/// degree of the sim's accumulated punch on its second axis.
+///
+/// This is the axis the module was missing. The whole of §4 is that a
+/// held trigger stops being one straight line: measured over one burst,
+/// the picture travels 12.1 -> 17.9 deg/s and the share of ticks with
+/// sideways movement goes 0% -> 62% while the mean climb stays flat. The
+/// sim writes that into `punch_vel[1]` and `punch[1]`; this file read
+/// index 0 only, so every one of those degrees reached the bullets and
+/// none of them reached the picture.
+///
+/// SIGNED and symmetric, unlike the climb: a swing that only ever walked
+/// one way would be a second, wrong pattern rather than the sim's.
+/// Tracks `punch[1]` for the same reason the climb tracks `punch[0]` -
+/// it is where the ROUNDS are going, and it has to persist through the
+/// burst rather than twitch once per shot.
+const SWING_RAD_PER_DEG: f32 = 0.030;
+
+/// Ceiling on the swing, radians (~6 degrees each way). Smaller than the
+/// climb's: a mount that yaws further than that is visibly no longer
+/// pointing where the crosshair is, and the crosshair is still the
+/// contract.
+const SWING_MAX_RAD: f32 = 0.105;
+
 /// Live recoil state for the hull mounts. One instance, local player only.
 #[derive(Resource, Default)]
 pub struct MountRecoil {
@@ -103,10 +127,20 @@ pub struct MountRecoil {
     climb: f32,
     /// radians of roll currently applied
     roll: f32,
-    /// last frame's `punch_vel[0]`, so a fresh impulse can be told from a
-    /// decaying one. The sim decays `punch_vel` exponentially every tick,
-    /// so any RISE in it is a round that just left the barrel — no shot
-    /// edge detection of our own, and no second cooldown to keep in step.
+    /// §4: radians of sideways yaw currently applied. Signed.
+    swing: f32,
+    /// last frame's punch-velocity MAGNITUDE across both axes, so a fresh
+    /// impulse can be told from a decaying one. The sim decays
+    /// `punch_vel` exponentially every tick, so any RISE in it is a round
+    /// that just left the barrel — no shot edge detection of our own, and
+    /// no second cooldown to keep in step.
+    ///
+    /// §4 made this the MAGNITUDE rather than `punch_vel[0]` alone. Deep
+    /// into the chaotic phase a round can be almost all yaw, and the old
+    /// reading would have seen its pitch component barely move and
+    /// concluded nothing had fired - so the shove and the roll would have
+    /// quietly faded out at exactly the point the mount is meant to be at
+    /// its most violent.
     prev_punch_vel: f32,
 }
 
@@ -130,8 +164,13 @@ impl Plugin for MechRecoilPlugin {
 ///
 /// `impulse` is the RISE in the sim's punch velocity this frame (0 if it
 /// is merely decaying), `punch` its accumulated angle, `dt` real seconds.
-fn step_recoil(state: (f32, f32, f32), impulse: f32, punch: f32, dt: f32) -> (f32, f32, f32) {
-    let (mut shove, mut climb, mut roll) = state;
+fn step_recoil(
+    state: (f32, f32, f32, f32),
+    impulse: f32,
+    punch: [f32; 2],
+    dt: f32,
+) -> (f32, f32, f32, f32) {
+    let (mut shove, mut climb, mut roll, mut swing) = state;
     // settle first, so an impulse landing this frame is not immediately
     // damped by its own arrival
     let keep = (-RETURN_PER_S * dt).exp();
@@ -145,9 +184,14 @@ fn step_recoil(state: (f32, f32, f32), impulse: f32, punch: f32, dt: f32) -> (f3
     // sim's own decay rather than on a second one of ours. `punch` is
     // signed (up is positive); a negative punch should not push the
     // barrels into the deck.
-    let want = (punch.max(0.0) * CLIMB_RAD_PER_DEG).min(CLIMB_MAX_RAD);
+    let want = (punch[0].max(0.0) * CLIMB_RAD_PER_DEG).min(CLIMB_MAX_RAD);
     climb += (want - climb) * (1.0 - keep);
-    (shove, climb, roll)
+    // §4 THE SWING, on the same tracking rule and the same clock. Signed
+    // both ways, so it follows the sim's pattern rather than inventing a
+    // preferred side.
+    let want_y = (punch[1] * SWING_RAD_PER_DEG).clamp(-SWING_MAX_RAD, SWING_MAX_RAD);
+    swing += (want_y - swing) * (1.0 - keep);
+    (shove, climb, roll, swing)
 }
 
 /// Drive both hull-mount viewmodels off the sim's published punch.
@@ -170,19 +214,21 @@ fn mount_recoil_sync(
     // rounds' worth of shove, and a mount whose kick the sim scaled (the
     // brace, the burst index, the single-shot mode) gets exactly the
     // scaled amount - none of which this file has to know about.
-    let pv = p.punch_vel[0];
+    let pv = (p.punch_vel[0] * p.punch_vel[0] + p.punch_vel[1] * p.punch_vel[1]).sqrt();
     let impulse = (pv - st.prev_punch_vel).max(0.0);
     st.prev_punch_vel = pv;
-    let (shove, climb, roll) = step_recoil(
-        (st.shove, st.climb, st.roll),
+    let live_now = p.in_mech() && p.alive();
+    let (shove, climb, roll, swing) = step_recoil(
+        (st.shove, st.climb, st.roll, st.swing),
         // out of a chassis, or dead, nothing is kicking this mount
-        if p.in_mech() && p.alive() { impulse } else { 0.0 },
-        if p.in_mech() && p.alive() { p.punch[0] } else { 0.0 },
+        if live_now { impulse } else { 0.0 },
+        if live_now { p.punch } else { [0.0, 0.0] },
         dt,
     );
     st.shove = shove;
     st.climb = climb;
     st.roll = roll;
+    st.swing = swing;
     // Third person shows the fighter's own rig, not the viewmodel; the
     // mounts are hidden and posing them would be work nobody sees.
     let live = cam_ctl.first_person;
@@ -195,12 +241,18 @@ fn mount_recoil_sync(
         // recoiling mount moves toward the eye. Getting this sign wrong
         // fires the gun forwards out of its own cradle.
         tf.translation = rest + Vec3::Z * if live { shove } else { 0.0 };
-        let (c, r) = if live { (climb, roll) } else { (0.0, 0.0) };
+        let (c, r, y) = if live { (climb, roll, swing) } else { (0.0, 0.0, 0.0) };
         // Climb is nose-UP about the camera's X. The mount is yawed by
         // MOUNT_VM_YAW, so the pitch has to be applied on the OUTSIDE of
         // that yaw - in camera space - or a 180-degree parent turns the
         // muzzle down into the ground instead of up into the sky.
-        tf.rotation = Quat::from_rotation_x(-c)
+        // §4 SWING is a yaw in CAMERA space, so it composes OUTSIDE
+        // everything - including the mount's own MOUNT_VM_YAW, which is a
+        // 180-degree parent turn. Composed on the inside it would simply
+        // add to that turn and the mount would swing the wrong way. The
+        // climb carries the identical note for the identical reason.
+        tf.rotation = Quat::from_rotation_y(y)
+            * Quat::from_rotation_x(-c)
             * Quat::from_rotation_z(r)
             * Quat::from_rotation_y(crate::MOUNT_VM_YAW);
         tf.scale = Vec3::splat(scale);
@@ -219,13 +271,14 @@ mod tests {
     /// from `setup` to teardown.
     #[test]
     fn a_round_shoves_the_mount_back_and_lifts_its_nose() {
-        let (shove, climb, roll) = step_recoil((0.0, 0.0, 0.0), 8.3, 0.0, 1.0 / 60.0);
+        let (shove, climb, roll, _) =
+            step_recoil((0.0, 0.0, 0.0, 0.0), 8.3, [0.0, 0.0], 1.0 / 60.0);
         assert!(shove > 0.001, "a round produced {shove} m of shove");
         assert!(roll > 0.0, "a round produced no roll at all");
         // climb tracks the standing punch, which is still zero on the
         // frame the first round lands
         assert!(climb.abs() < 1e-4, "climb ran ahead of the sim's punch");
-        let (_, climb, _) = step_recoil((0.0, 0.0, 0.0), 0.0, 4.0, 0.2);
+        let (_, climb, _, _) = step_recoil((0.0, 0.0, 0.0, 0.0), 0.0, [4.0, 0.0], 0.2);
         assert!(climb > 0.02, "4 degrees of sim punch lifted only {climb} rad");
     }
 
@@ -239,8 +292,10 @@ mod tests {
     #[test]
     fn the_visual_kick_follows_the_sims_numbers() {
         let dt = 1.0 / 60.0;
-        let turret = step_recoil((0.0, 0.0, 0.0), crate::sim::turret_kick_per_round(), 0.0, dt);
-        let cannon = step_recoil((0.0, 0.0, 0.0), crate::sim::autocannon_kick(), 0.0, dt);
+        let turret =
+            step_recoil((0.0, 0.0, 0.0, 0.0), crate::sim::turret_kick_per_round(), [0.0; 2], dt);
+        let cannon =
+            step_recoil((0.0, 0.0, 0.0, 0.0), crate::sim::autocannon_kick(), [0.0; 2], dt);
         assert!(
             cannon.0 > turret.0,
             "the autocannon ({:.4} m) does not shove harder than the gatling \
@@ -257,12 +312,12 @@ mod tests {
     /// walks off the screen over a 300-round belt.
     #[test]
     fn a_held_trigger_settles_instead_of_walking_away() {
-        let mut s = (0.0, 0.0, 0.0);
+        let mut s = (0.0, 0.0, 0.0, 0.0);
         // 300 rounds at the gatling's 70 ms cycle, stepped at 60 fps
         let kick = crate::sim::turret_kick_per_round();
         for frame in 0..1200 {
             let firing = frame % 4 == 0; // ~every 67 ms
-            s = step_recoil(s, if firing { kick } else { 0.0 }, 4.2, 1.0 / 60.0);
+            s = step_recoil(s, if firing { kick } else { 0.0 }, [4.2, -1.9], 1.0 / 60.0);
         }
         assert!(
             s.0 <= SHOVE_MAX_M + 1e-6 && s.1 <= CLIMB_MAX_RAD + 1e-6,
@@ -272,10 +327,10 @@ mod tests {
         );
         // ...and releasing brings it home
         for _ in 0..120 {
-            s = step_recoil(s, 0.0, 0.0, 1.0 / 60.0);
+            s = step_recoil(s, 0.0, [0.0, 0.0], 1.0 / 60.0);
         }
         assert!(
-            s.0 < 1e-3 && s.1 < 1e-3 && s.2 < 1e-3,
+            s.0 < 1e-3 && s.1 < 1e-3 && s.2 < 1e-3 && s.3.abs() < 1e-3,
             "two seconds after the last round the mount is still displaced: {s:?}"
         );
     }
@@ -285,7 +340,38 @@ mod tests {
     /// and a rifle's punch must not shove a hull mount.
     #[test]
     fn zero_in_means_zero_out() {
-        let s = step_recoil((0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 60.0);
-        assert_eq!(s, (0.0, 0.0, 0.0));
+        let s = step_recoil((0.0, 0.0, 0.0, 0.0), 0.0, [0.0, 0.0], 1.0 / 60.0);
+        assert_eq!(s, (0.0, 0.0, 0.0, 0.0));
+    }
+
+    /// §owner SPEC15 §4: THE SIDEWAYS AXIS.
+    ///
+    /// Fails on the pre-change code by construction - `step_recoil` took
+    /// one punch scalar and had nowhere to put a yaw. Stated as four
+    /// separate claims because each is a different way the axis could be
+    /// wired wrong and still look plausible in a screenshot: present but
+    /// unsigned, live during the controlled window, unclamped, or coupled
+    /// to the climb so a sideways pattern also lifts the barrels.
+    #[test]
+    fn the_mount_walks_sideways_with_the_sims_second_axis() {
+        let dt = 1.0 / 60.0;
+        let left = step_recoil((0.0, 0.0, 0.0, 0.0), 0.0, [0.0, 3.0], 0.2).3;
+        let right = step_recoil((0.0, 0.0, 0.0, 0.0), 0.0, [0.0, -3.0], 0.2).3;
+        assert!(left > 0.01, "3 degrees of sim yaw moved the mount {left} rad");
+        assert!(
+            (left + right).abs() < 1e-6,
+            "the swing is not symmetric: {left} vs {right} - a mount that \
+             prefers one side is a second pattern, not the sim's"
+        );
+        // The CONTROLLED window stays bit-identical to the shipped mount:
+        // the sim's envelope returns a pure pitch there, so nothing about
+        // the first second of a burst may move sideways.
+        let controlled = step_recoil((0.0, 0.0, 0.0, 0.0), 8.3, [4.0, 0.0], dt);
+        assert_eq!(controlled.3, 0.0, "a straight burst swung the mount");
+        // Clamped, and NOT at the climb's expense: a wild yaw must not
+        // drag the barrels up with it.
+        let wild = step_recoil((0.0, 0.0, 0.0, 0.0), 0.0, [0.0, 90.0], 2.0);
+        assert!(wild.3 <= SWING_MAX_RAD + 1e-6, "unclamped swing {}", wild.3);
+        assert!(wild.1.abs() < 1e-6, "yaw leaked into the climb: {}", wild.1);
     }
 }
