@@ -15535,14 +15535,34 @@ fn setup(
                 ..default()
             },
             TextColor(Color::srgba(0.92, 0.93, 0.95, 0.4)),
+            // A SLOT IS ONE LINE. Two captures went into learning that a
+            // fixed-width tile plus the default wrap is a trap: 258 px
+            // fitted every infantry row and folded "[1]" onto a second
+            // line inside a mech, because a hull mount's label carries a
+            // name, a count AND a fire mode ("TURRET 298  AUTO 2/3").
+            // Widening to 310 moved the fold and did not remove it,
+            // which is the tell that width was the wrong lever.
+            //
+            // ...and no fixed width either, which was the third attempt
+            // and the one the capture finally liked. With `no_wrap` and
+            // a fixed box the mech row stopped folding and started
+            // running off the RIGHT edge of the screen instead - the
+            // text is laid out inside the box and overruns forwards,
+            // and the box is pinned to the right margin.
+            //
+            // So the tile SIZES TO ITS CONTENT. Anchored right, it grows
+            // leftward into empty sky and nothing can ever be clipped or
+            // folded. The infantry rows still line up as a column
+            // because the row grammar pads its columns in a monospaced
+            // font - `{:<9}` and `{:>7}` make every rifle row the same
+            // number of characters, and therefore the same width - and
+            // only the two mech rows sit proud, which is honest: they
+            // are saying more.
+            TextLayout::new_with_no_wrap(),
             Node {
                 position_type: PositionType::Absolute,
                 right: Val::Px(14.0),
                 top: Val::Percent(40.0 + slot as f32 * 4.6),
-                // wide enough for the longest row the grammar can
-                // produce - "> MECHANICAL 240/720  [1]" - so the four
-                // tiles are a column and not a ragged stack
-                width: Val::Px(258.0),
                 padding: UiRect::axes(Val::Px(9.0), Val::Px(3.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
