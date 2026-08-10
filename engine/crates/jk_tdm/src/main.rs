@@ -4961,7 +4961,11 @@ const BIND_REGISTRY: &[Bind] = &[
     Bind { key: "LMB", action: "Fire", essential: false, group: BindGroup::Fight },
     Bind { key: "RMB", action: "HOLD: focus/aim - scope zoom cycle (heavy rifle), draw (bow, spear)", essential: false, group: BindGroup::Fight },
     Bind { key: "F", action: "Knife - tap: slash, hold: lunge (backstab kills)", essential: true, group: BindGroup::Fight },
-    Bind { key: "C (hold)", action: "Armor ability (brace / flame / repulsor)", essential: true, group: BindGroup::Fight },
+    // §P1 (owner spec, 2026-08-10): PYRO IS GONE. This row sold a
+    // "flame" ability for a set no pad has spawned on any map for
+    // weeks - the controls screen advertising equipment the game does
+    // not contain. Two abilities remain and both are reachable.
+    Bind { key: "C (hold)", action: "Armor ability (brace / repulsor)", essential: true, group: BindGroup::Fight },
     // §5 (owner): the grenade grammar changed this session and the
     // registry must say what the hands actually do now.
     Bind { key: "G", action: "Grenade to hand (again: cycle type) - RMB aims the arc, LMB throws", essential: true, group: BindGroup::Fight },
@@ -4992,7 +4996,8 @@ fn pickup_prompt(kind: PickupKind) -> &'static str {
         PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
         PickupKind::ScoutArmor => "MECHANICAL MEDIC - walk over to board  (plasma bow: no ammo, RMB charges a precision shot - 2: repair beam - fastest mech, thin, and spears hurt)",
         PickupKind::FolkArmor => "FOLK ARMOR - walk over to equip  (hold C: shieldwall brace)",
-        PickupKind::PyroArmor => "PYRO ARMOR - walk over to equip  (hold C: flame projector)",
+        // §P1 (owner spec, 2026-08-10): the PYRO prompt is deleted with
+        // its variant. It sold a flame projector on a pad no map spawned.
         PickupKind::ReconWeave => "RECON WEAVE - walk over to equip  (fast, quiet, self-healing)",
         PickupKind::Minigun => "M134 MINIGUN - walk over to heft it  (hold fire: spin-up - R: vent heat - lost on death)",
     }
@@ -5003,7 +5008,6 @@ fn equip_hint(set: ArmorSet) -> &'static str {
     match set {
         ArmorSet::None => "",
         ArmorSet::Folk => "FOLK ARMOR EQUIPPED - hold C to BRACE the shieldwall",
-        ArmorSet::Pyro => "PYRO ARMOR EQUIPPED - hold C: FLAME PROJECTOR - fireproof",
         ArmorSet::RobotSuit => "MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
         // §owner AGILE SUPPORT MECH: the hint names the two things a
@@ -6783,7 +6787,7 @@ impl IntroPage {
             // a match - deploying requires clicking a mode. Removing the
             // false promise costs one string; adding a real keyboard
             // deploy would need a fourth selection concept.
-            Self::TITLE => "ENTER - continue    -    ESC menu > RULES & MANUAL",
+            Self::TITLE => "ENTER - set up a battle    -    or drop straight into the RANGE below",
             Self::MATCH => "the battlefield, the mode, and how hard it pushes back    -    CLICK A MODE TO DEPLOY",
             Self::SOLDIER => "the shield always rides in its own slot (4 raises it)",
             Self::ARMOURY => {
@@ -12535,25 +12539,9 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
             }
             root
         }
-        PickupKind::PyroArmor => {
-            let root = commands
-                .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
-                .id();
-            for (mat, tr, sc) in [
-                (kit.grey_black.clone(), Vec3::ZERO, Vec3::new(0.42, 0.40, 0.24)),
-                (kit.core_glow.clone(), Vec3::new(0.0, 0.0, 0.13), Vec3::new(0.30, 0.04, 0.02)),
-                (kit.core_glow.clone(), Vec3::new(0.0, 0.14, 0.13), Vec3::new(0.20, 0.04, 0.02)),
-            ] {
-                commands
-                    .spawn((Mesh3d(kit.cube.clone()), MeshMaterial3d(mat), Transform {
-                        translation: tr,
-                        rotation: Quat::IDENTITY,
-                        scale: sc,
-                    }))
-                    .set_parent(root);
-            }
-            root
-        }
+        // §P1 (owner spec, 2026-08-10): the Pyro pad's model - a grey
+        // tank with two glowing igniter strips - is deleted with its
+        // variant. Nothing spawned it on any map.
         PickupKind::ReconWeave => {
             let root = commands
                 .spawn((Transform::from_xyz(0.0, 0.9, 0.0), Visibility::default()))
@@ -21329,7 +21317,6 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         format!("
 MECH  HULL {:.0}  PWR {:.0}{brace}{jump}{barrier}{stride}", p.hull, p.armor)
                     }
-                    ArmorSet::Pyro => format!("  PYRO - FUEL {:.1}s", p.fuel),
                     ArmorSet::Folk => {
                         if p.brace {
                             "  FOLK ARMOR [BRACED]".to_string()
@@ -22618,6 +22605,26 @@ fn open_intro(
                 IntroSubtitle,
             ));
 
+            // ---- TITLE page: the one direct-entry door ------------------
+            // §2 (owner spec, 2026-08-10): TRAINING MODE IS ONE FIXED
+            // SCENARIO, entered immediately. So it cannot live behind the
+            // three-page setup flow: everything you would touch on the way
+            // there (map, difficulty, battle size, score target, class,
+            // loadout, plate) is a setting training does not have.
+            //
+            // One click from the first screen, straight into
+            // `training_config()`. The subtitle beneath it states the
+            // ruleset rather than offering it - the player is TOLD the
+            // rules, never asked.
+            menu_ui::menu_row(
+                b,
+                (ModeButton::Training, OnIntroPage(IntroPage::TITLE)),
+                menu_ui::RowKind::Normal,
+                "TRAINING RANGE",
+                Some("Arena - still targets, nothing shoots back, all six mechs on display"),
+                None,
+            );
+
             // ---- SOLDIER page ------------------------------------------
             let sold = OnIntroPage(IntroPage::SOLDIER);
             // §owner: CLASS leads the page - it is the choice that
@@ -22812,18 +22819,16 @@ fn open_intro(
             // stay - but nothing user-facing offers it. Removing the ROW
             // is the whole change; the handler dispatches on the variant
             // and dead variants dispatch nothing.
+            // §2 (owner spec): TRAINING IS NOT ONE OF THESE ROWS ANY MORE.
+            // It used to sit here, on the third page of a setup flow,
+            // beneath BATTLEFIELD / DIFFICULTY / BATTLE SIZE / TDM SCORE
+            // pills that it then obediently obeyed - which is exactly the
+            // "map/rules configuration and setup screen" the spec says
+            // training must not have. It is now a direct-entry row on the
+            // TITLE page and takes `training_config()`.
             for (name, obj, which) in [
                 ("TEAM DEATHMATCH", "first to your chosen score", ModeButton::Tdm),
                 ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
-                (
-                    "TRAINING RANGE",
-                    // §gallery: the exhibit is the second reason to come
-                    // here now, and a feature nobody is told about is a
-                    // feature nobody finds - it stands in front of the
-                    // spawn, but only if you know to look.
-                    "still targets, nothing shoots back - and the mech gallery",
-                    ModeButton::Training,
-                ),
             ] {
                 menu_ui::menu_row(
                     b,
@@ -22978,9 +22983,51 @@ fn intro_nav_buttons(
     }
 }
 
-/// Shared by a real button click AND the capture harness's quick-deploy -
-/// one code path for "start a match from the current `Selected` choices".
-fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState<GameState>) {
+/// §2 (owner spec, 2026-08-10): THE TRAINING SCENARIO, HARDCODED.
+///
+/// The spec says it twice, so it is worth stating plainly: training has
+/// NO settings menu, no selectable rules, no map or rules configuration
+/// and no setup screen. Entering it starts one predefined scenario.
+///
+/// That is a statement about this function existing at all. Every other
+/// mode reads the player's `Selected` - map, difficulty, battle size,
+/// score target, class, loadout, plate, melee, grenade budget: nine
+/// configurable axes. Training reads NONE of them. Change a pill on the
+/// setup screen and the range is identical, which is the whole point:
+/// the range is a fixed reference, so what you learn on it transfers.
+///
+/// If a future session wants a second scenario, it belongs HERE as a
+/// second const - not as a row on a menu.
+const fn training_config() -> MatchConfig {
+    MatchConfig {
+        seed: 0x7EA9,
+        // A range, not a battle. The bodies on it are the exhibit and
+        // the still targets; a full 5v5 of live bots is a different
+        // exercise and has two modes of its own.
+        per_team: 5,
+        mode: Mode::Training,
+        // Arena: the open dusty range with the flattest, largest clear
+        // ground of the three PvP maps, which is what the mech gallery
+        // and the sentinel ring need to be seen from a standing start.
+        map: MapKind::Arena,
+        difficulty: Difficulty::Normal,
+        loadout: DEFAULT_LOADOUT,
+        tdm_target: sim::TDM_TARGET,
+        class: sim::Class::Line,
+        melee_axe: false,
+        grenade_preset: 0,
+        // `None` = the class default plate, the same one every bot gets.
+        armor_pieces: None,
+    }
+}
+
+/// The pure half of `start_match`: choices + mode -> the config the sim
+/// is built from. Extracted so the "training ignores every setting"
+/// property is testable without a Bevy world.
+fn match_config(sel: &Selected, mode: Mode) -> MatchConfig {
+    if mode == Mode::Training {
+        return training_config();
+    }
     // §12: extraction ALWAYS runs on the Battlefield - the adventure map;
     // PvP always runs on the tight maps
     let map = if mode == Mode::Extraction {
@@ -22988,7 +23035,7 @@ fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState
     } else {
         sel.map
     };
-    game.sim = TdmSim::new(MatchConfig {
+    MatchConfig {
         seed: 0x7EA9,
         per_team: sel.per_team,
         mode,
@@ -23000,7 +23047,13 @@ fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState
         melee_axe: sel.melee_axe,
         grenade_preset: sel.grenade_preset,
         armor_pieces: Some(sel.armor),
-    });
+    }
+}
+
+/// Shared by a real button click AND the capture harness's quick-deploy -
+/// one code path for "start a match from the current `Selected` choices".
+fn start_match(sel: &Selected, mode: Mode, game: &mut Game, next: &mut NextState<GameState>) {
+    game.sim = TdmSim::new(match_config(sel, mode));
     game.accum = 0.0;
     game.last_t = 0.0;
     game.rebuild = true;
@@ -28533,5 +28586,69 @@ mod elastic_load_tests {
             spear_followthrough_yaw(1.5).abs() < 0.001,
             "must settle to neutral, not hold the carry forever"
         );
+    }
+}
+
+#[cfg(test)]
+mod training_mode_tests {
+    use super::*;
+
+    /// §2 (owner spec, 2026-08-10): "No settings menu, no selectable
+    /// rules, no map/rules configuration, no setup screen."
+    ///
+    /// The property that statement reduces to, in code, is: the config
+    /// training runs on does NOT depend on `Selected`. This test drives
+    /// the same function with two maximally different setup screens and
+    /// demands one answer - and then checks the OTHER direction, that a
+    /// TDM still follows those choices, so a broken `match_config` that
+    /// ignored `Selected` for everything could not pass it.
+    #[test]
+    fn training_ignores_every_setup_choice() {
+        let plain = Selected::default();
+        let fiddled = Selected {
+            map: MapKind::Gardens,
+            difficulty: Difficulty::Hard,
+            tdm_target: 60,
+            class: sim::Class::Marksman,
+            loadout: [GunKind::Awm, GunKind::Deagle, GunKind::Bow],
+            melee_axe: true,
+            grenade_preset: 2,
+            ..Selected::default()
+        };
+        let a = match_config(&plain, Mode::Training);
+        let b = match_config(&fiddled, Mode::Training);
+        let fixed = training_config();
+        for (name, x, y, z) in [
+            ("map", a.map as u8, b.map as u8, fixed.map as u8),
+            (
+                "difficulty",
+                a.difficulty as u8,
+                b.difficulty as u8,
+                fixed.difficulty as u8,
+            ),
+            ("class", a.class as u8, b.class as u8, fixed.class as u8),
+            ("mode", a.mode as u8, b.mode as u8, fixed.mode as u8),
+        ] {
+            assert_eq!(x, y, "{name} moved with the setup screen");
+            assert_eq!(y, z, "{name} disagreed with the hardcoded scenario");
+        }
+        assert_eq!(b.tdm_target, fixed.tdm_target, "score target is not a training setting");
+        assert_eq!(b.per_team, fixed.per_team, "battle size is not a training setting");
+        assert_eq!(b.loadout, fixed.loadout, "the loadout is fixed on the range");
+        assert!(!b.melee_axe, "the melee pick is not a training setting");
+        assert_eq!(b.grenade_preset, 0, "the grenade budget is fixed");
+        assert!(
+            b.armor_pieces.is_none(),
+            "the range issues the class default plate, not the Forge build"
+        );
+
+        // The control: everything above must be a statement about
+        // TRAINING, not about `match_config` having stopped reading
+        // `Selected` at all.
+        let tdm = match_config(&fiddled, Mode::Tdm);
+        assert_eq!(tdm.map as u8, MapKind::Gardens as u8);
+        assert_eq!(tdm.tdm_target, 60);
+        assert!(tdm.melee_axe);
+        assert!(tdm.armor_pieces.is_some());
     }
 }
