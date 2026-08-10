@@ -3241,8 +3241,6 @@ pub struct Fighter {
     /// §11: the mech's hull pool (450, NEVER regenerates). >0 means the
     /// chassis is intact; at zero the pilot ejects on foot at 25 HP.
     pub hull: f32,
-    /// Pyro flame-projector fuel seconds.
-    pub fuel: f32,
     /// §6.2 (Brief VII v2): mounting AND dismounting the mech are
     /// COMMITTED, not instant - counts down from MECH_ENTER_S or
     /// MECH_EXIT_S; while >0 the chassis is sealing up or powering down
@@ -3768,8 +3766,8 @@ pub struct PlayerCmd {
     pub pod_aim: bool,
     /// §5: cycle the selected throwable (G). Edge-triggered.
     pub cycle_throw: bool,
-    /// §6: armor ability held (now C — §5 took F) — Folk brace / Pyro
-    /// flame / Robot repulsor.
+    /// §6: armor ability held (now C — §5 took F) — Folk brace / Robot
+    /// repulsor.
     pub ability: bool,
     /// §5: knife held (F). Tap = quick slash, hold = committed lunge.
     pub knife_hold: bool,
@@ -4062,8 +4060,6 @@ pub enum PickupKind {
     ScoutArmor,
     /// §6: equips Folk Armor (mail + plate, Shieldwall Brace).
     FolkArmor,
-    /// §6: equips Pyro Armor (fire immunity, Flame Projector).
-    PyroArmor,
     /// §6: equips Recon Weave (fast, quiet, self-healing).
     ReconWeave,
     /// §7 (Brief IV): the pad-only M134 — displaces your primary until
@@ -4727,16 +4723,14 @@ pub enum ArmorSet {
     None,
     /// Mail and plate; Shieldwall Brace (hold F).
     Folk,
-    /// RETIRED as a wearable set. §owner MECHANICAL MEDIC took its
-    /// slot on the pad rotation: the owner asked for the Pyro role to
-    /// be replaced by a support-focused mech, and a flamethrower and a
-    /// repair beam are the same slot answered two ways.
-    ///
-    /// The variant SURVIVES rather than being deleted, because it is
-    /// still what a fire pool and the flame projector check against,
-    /// and ripping it out would have meant rewriting the burn model to
-    /// close a cosmetic gap. Nothing spawns it any more.
-    Pyro,
+    // §owner SPEC15 P1: the PYRO set is GONE, not retired. It was kept as
+    // an unspawnable variant for one brief - "still what a fire pool and
+    // the flame projector check against" - and the cost of that was two
+    // per-map relocation tables placing a pad nothing spawned, a client
+    // hint selling an ability nobody could equip, and a `fuel` field
+    // written by seven sites and read by one. Fire immunity now belongs
+    // to nobody, which is the honest state of a game with no flame
+    // weapon in it.
     /// The grounded walker chassis; side-step (Q) + Repulsor Blast (C),
     /// running on a power core. (Flight was deleted in Brief VI §4.3 -
     /// this doc advertised thrusters for two briefs after they died.)
@@ -4799,13 +4793,6 @@ pub fn armor_spec(s: ArmorSet) -> ArmorSpec {
             flat_limb: 15.0,
             move_mult: 0.92,
             explosive_resist: 0.0,
-        },
-        ArmorSet::Pyro => ArmorSpec {
-            flat_head: 14.0,
-            flat_torso: 30.0,
-            flat_limb: 30.0,
-            move_mult: 0.96,
-            explosive_resist: 0.5,
         },
         ArmorSet::RobotSuit => ArmorSpec {
             flat_head: 16.0,
@@ -5437,12 +5424,9 @@ pub const REPULSOR_CD: f32 = 1.4;
 pub const REPULSOR_COST: f32 = 12.0;
 pub const EXPLOSIVE_POWER_DRAIN: f32 = 25.0;
 pub const ROBOT_DRAINED_MOVE: f32 = 0.88;
-/// Pyro flame projector: fuel seconds, dps, reach, cone, refill rate.
-pub const FLAME_FUEL_S: f32 = 6.0;
-pub const FLAME_DPS: f32 = 34.0;
-pub const FLAME_REACH: f32 = 7.5;
-pub const FLAME_ARC_COS: f32 = 0.906; // ±25°
-pub const FLAME_REFILL: f32 = FLAME_FUEL_S / 9.0;
+// §owner SPEC15 P1: the flame projector's five constants went with the
+// Pyro set. Nothing in the game emits a flame cone any more; `burn_t`
+// survives because FIRE POOLS (molotovs) still light people.
 /// Recon passive regen: hp/s after this long without taking damage.
 pub const RECON_REGEN: f32 = 4.0;
 pub const RECON_REGEN_DELAY: f32 = 5.0;
@@ -5810,7 +5794,7 @@ pub const MECH_EXPOSED_DMG_MULT: f32 = 1.25;
 pub const MECH_RED_FRONT: f32 = 0.475;
 pub const MECH_RED_SIDE: f32 = 0.30;
 /// §11.2 rule 2: explosives bypass HALF the reduction; fire bypasses ALL
-/// of it (it attacks cooling, not plating — Pyro's defined role).
+/// of it (it attacks cooling, not plating).
 /// §11: the mech TURNS to face a threat — a real, visible, punishable
 /// commitment. The pilot's view is free; the armor follows the body.
 // §4.3 (Brief VI): 180°/s — a soldier circling close feels the lag
@@ -6483,9 +6467,9 @@ impl TdmSim {
             (PickupKind::Ammo, 19.0, 14.0),
             // §6: the armor sets are LOOT — walk over a pad to suit up
             (PickupKind::FolkArmor, 0.0, 19.0),
-            // §owner MECHANICAL MEDIC replaces the Pyro on the pad
-            // rotation. Same slot in the map's economy, a support
-            // chassis instead of a flamethrower.
+            // §owner MECHANICAL MEDIC holds the fourth pad slot - the one
+            // the retired Pyro used to sit in. Same slot in the map's
+            // economy, a support chassis instead of a flamethrower.
             (PickupKind::ScoutArmor, 0.0, -19.0),
             (PickupKind::ReconWeave, -19.0, 0.0),
             // §7 (Brief IV): the M134 pad — the mirror of Recon's spot
@@ -6508,7 +6492,6 @@ impl TdmSim {
             for pk in &mut pickups {
                 pk.pos = match pk.kind {
                     PickupKind::FolkArmor => [-58.0, 0.0, 56.0], // settlement
-                    PickupKind::PyroArmor => [-100.0, 0.0, -95.0], // the forge
                     PickupKind::ReconWeave => [86.0, 0.0, 100.0], // cathedral
                     PickupKind::RobotArmor => {
                         let spots = [
@@ -6571,7 +6554,6 @@ impl TdmSim {
                     PickupKind::FolkArmor => [-90.0, 0.0, -58.0],
                     PickupKind::ReconWeave => [110.0, 0.0, 30.0], // head of the Great Stair
                     PickupKind::Minigun => [16.0, 0.0, 200.0],    // the castle courtyard
-                    PickupKind::PyroArmor => [-230.0, 0.0, 20.0],
                 };
             }
         }
@@ -6673,7 +6655,6 @@ impl TdmSim {
                     armor: 0.0,
                     armor_set: ArmorSet::None,
                     hull: 0.0,
-                    fuel: 0.0,
                     mech_transition_t: 0.0,
                     mech_exiting: false,
                     mech_plates_dropped: 0,
@@ -6960,7 +6941,6 @@ impl TdmSim {
                     f.armor_set = ArmorSet::None;
                     f.armor = 0.0;
                     f.hull = 0.0;
-                    f.fuel = 0.0;
                     f.mech_plates_dropped = 0;
                     // §21: the chassis takes its jump with it. Dismounting
                     // mid-`Recover` would otherwise hand the man on foot a
@@ -7211,16 +7191,11 @@ impl TdmSim {
             if f.alive() && t_now - f.last_dmg_at > REGEN_DELAY_S {
                 f.health = (f.health + REGEN_RATE_HPS * DT).min(MAX_HEALTH);
             }
-            // §6 per-set upkeep: power recharge, fuel refill, Recon regen
+            // §6 per-set upkeep: power recharge, Recon regen
             match f.armor_set {
                 ArmorSet::RobotSuit => {
                     if f.grounded && t_now - f.last_ability_at > POWER_REGEN_DELAY {
                         f.armor = (f.armor + POWER_REGEN * DT).min(POWER_MAX);
-                    }
-                }
-                ArmorSet::Pyro => {
-                    if t_now - f.last_ability_at > 1.0 {
-                        f.fuel = (f.fuel + FLAME_REFILL * DT).min(FLAME_FUEL_S);
                     }
                 }
                 ArmorSet::Recon => {
@@ -7271,7 +7246,6 @@ impl TdmSim {
                     f.armor = 0.0;
                     f.armor_set = ArmorSet::None; // §6: gear is lost on death
                     f.hull = 0.0;
-                    f.fuel = 0.0;
                     f.mech_transition_t = 0.0;
                     f.mech_exiting = false;
                     f.mech_plates_dropped = 0;
@@ -7474,7 +7448,6 @@ impl TdmSim {
                             f.armor = 0.0;
                             f.mech_rounds = 0;
                             f.pod_ammo = 0;
-                            f.fuel = 0.0;
                             f.mech_weapon = MechWeapon::Plasma;
                             f.gatling_heat = 0.0;
                             f.gatling_vent_t = 0.0;
@@ -7495,7 +7468,6 @@ impl TdmSim {
                             f.armor = POWER_MAX;
                             f.hull = MECH_HULL;
                             f.mech_rounds = MECH_ROUNDS;
-                            f.fuel = 0.0;
                             // §6.2 (Brief VII v2): boarding is committed,
                             // not instant - the chassis seals for 1.6s
                             // before it can fight (gated in try_fire and
@@ -7524,19 +7496,11 @@ impl TdmSim {
                             let f = &mut self.fighters[i];
                             f.armor_set = ArmorSet::Folk;
                             f.armor = 0.0;
-                            f.fuel = 0.0;
-                        }
-                        PickupKind::PyroArmor => {
-                            let f = &mut self.fighters[i];
-                            f.armor_set = ArmorSet::Pyro;
-                            f.armor = 0.0;
-                            f.fuel = FLAME_FUEL_S;
                         }
                         PickupKind::ReconWeave => {
                             let f = &mut self.fighters[i];
                             f.armor_set = ArmorSet::Recon;
                             f.armor = 0.0;
-                            f.fuel = 0.0;
                         }
                         PickupKind::Minigun => {
                             let f = &mut self.fighters[i];
@@ -8332,68 +8296,6 @@ impl TdmSim {
                     // heavy to enter, committal, devastating when timed
                     let f = &mut self.fighters[p];
                     f.brace = cmd.ability && f.grounded && !f.shield_up && f.roll_t <= 0.0;
-                }
-                ArmorSet::Pyro => {
-                    self.fighters[p].brace = false;
-                    if cmd.ability
-                        && self.fighters[p].fuel > 0.0
-                        && self.fighters[p].roll_t <= 0.0
-                        && self.fighters[p].alive()
-                    {
-                        self.fighters[p].fuel = (self.fighters[p].fuel - DT).max(0.0);
-                        self.fighters[p].last_ability_at = t_now;
-                        // Flame Projector: 34 dps cone, 7.5 m, ±25°
-                        let (ppos, pteam, pyaw) = {
-                            let f = &self.fighters[p];
-                            (f.pos, f.team, f.yaw)
-                        };
-                        let fwd = [pyaw.sin(), pyaw.cos()];
-                        for j in 0..self.fighters.len() {
-                            let g = &self.fighters[j];
-                            if j == p || g.team == pteam || !g.alive() || g.protect_t > 0.0 {
-                                continue;
-                            }
-                            let dx = g.pos[0] - ppos[0];
-                            let dz = g.pos[2] - ppos[2];
-                            let d = (dx * dx + dz * dz).sqrt().max(0.01);
-                            if d > FLAME_REACH
-                                || (fwd[0] * dx + fwd[1] * dz) / d < FLAME_ARC_COS
-                            {
-                                continue;
-                            }
-                            self.fighters[j].burn_t = 1.0;
-                            // the ATTACKER's position: this is the
-                            // direction the hit came FROM, which is what
-                            // the mech arc and the Folk brace arc are
-                            // measured against. Passing the victim's own
-                            // position makes the direction vector zero,
-                            // which silently reads as "side" for a mech
-                            // and never matches a brace at all.
-                            self.apply_plain_damage(p, j, FLAME_DPS * DT, ppos, false, true);
-                        }
-                        // §8: the flame CONE reaches the horde. In
-                        // Extraction there is only one team, so the team
-                        // filter above left this ability with zero
-                        // possible targets - the Pyro armour the map
-                        // hands out was completely inert in the only
-                        // mode with a horde.
-                        let mut zhits: Vec<u32> = Vec::new();
-                        for z in &self.zombies {
-                            let dx = z.pos[0] - ppos[0];
-                            let dz = z.pos[2] - ppos[2];
-                            let d = (dx * dx + dz * dz).sqrt().max(0.01);
-                            if d <= FLAME_REACH
-                                && (fwd[0] * dx + fwd[1] * dz) / d >= FLAME_ARC_COS
-                            {
-                                zhits.push(z.id);
-                            }
-                        }
-                        for zid in zhits {
-                            if let Some(zi) = self.zombies.iter().position(|z| z.id == zid) {
-                                self.damage_zombie(zi, FLAME_DPS * DT, false);
-                            }
-                        }
-                    }
                 }
                 ArmorSet::RobotSuit => {
                     self.fighters[p].brace = false;
@@ -10946,7 +10848,7 @@ impl TdmSim {
         // §C: the plate wears by what actually reached it. AFTER the
         // shield, because a round the plate stopped never touched the
         // harness behind it; BEFORE the set flats, because those are a
-        // different garment (a Folk brace, a Pyro suit) worn over the top
+        // different garment (a Folk brace, a Recon weave) worn over the top
         // and they do not spare the plate underneath.
         if let Some(p) = struck {
             self.wear_plate(j, p, dmg);
@@ -11733,8 +11635,8 @@ impl TdmSim {
             let tp = self.toxics[ti].pos;
             for j in 0..self.fighters.len() {
                 let f = &self.fighters[j];
-                if !f.alive() || f.armor_set == ArmorSet::Pyro {
-                    continue; // sealed plate: gas does nothing
+                if !f.alive() {
+                    continue;
                 }
                 let dx = f.pos[0] - tp[0];
                 let dz = f.pos[2] - tp[2];
@@ -12255,9 +12157,7 @@ impl TdmSim {
                 let dx = f.pos[0] - fpos[0];
                 let dz = f.pos[2] - fpos[2];
                 if dx * dx + dz * dz < r * r && (f.pos[1] - fpos[1]).abs() < 2.0 {
-                    if self.fighters[j].armor_set != ArmorSet::Pyro {
-                        self.fighters[j].burn_t = 1.0;
-                    }
+                    self.fighters[j].burn_t = 1.0;
                     self.apply_plain_damage(thrower, j, FIRE_DPS * 0.25, fpos, false, true);
                 }
             }
@@ -12519,8 +12419,13 @@ impl TdmSim {
 
     /// Zone-less damage (explosions, fire, abilities): §6 flats apply at
     /// torso rate, the shield does NOT block (blast wraps it), kills
-    /// credit the source. `explosive` engages Pyro's blast resistance and
-    /// drains a Robot Suit's power core; `fire` respects Pyro immunity.
+    /// credit the source. `explosive` engages the set's blast resistance
+    /// and drains a Robot Suit's power core.
+    ///
+    /// §owner SPEC15 P1: `fire` no longer buys anyone an exemption. The
+    /// Pyro set was the only fire-immune thing in the game and it is
+    /// gone, so the parameter now only marks the damage as burn damage
+    /// for the callers that pass it.
     fn apply_plain_damage(
         &mut self,
         src: usize,
@@ -12534,9 +12439,6 @@ impl TdmSim {
             return;
         }
         let vset = self.fighters[victim].armor_set;
-        if fire && vset == ArmorSet::Pyro {
-            return; // §6.2 full fire immunity — own and enemy flame alike
-        }
         let mut d = dmg;
         if explosive {
             d *= 1.0 - armor_spec(vset).explosive_resist;
@@ -22764,7 +22666,7 @@ mod tests {
     /// mechanic leaking onto foot soldiers).
     #[test]
     fn mech_weapons_refuse_to_fire_for_non_mech_fighters() {
-        for set in [ArmorSet::None, ArmorSet::Folk, ArmorSet::Pyro, ArmorSet::Recon] {
+        for set in [ArmorSet::None, ArmorSet::Folk, ArmorSet::Recon] {
             for w in [MechWeapon::Gatling, MechWeapon::Autocannon] {
                 let mut s = mech_range(0xC0E1, w);
                 {
@@ -24149,7 +24051,7 @@ mod tests {
     #[test]
     fn armor_sets_flats_floor_and_brace() {
         use ArmorSet::*;
-        for set in [None, Folk, Pyro, RobotSuit, Recon] {
+        for set in [None, Folk, RobotSuit, Recon] {
             let mut s = range(71);
             s.fighters[0].gun = GunKind::Awm;
             s.fighters[1].armor_set = set;
