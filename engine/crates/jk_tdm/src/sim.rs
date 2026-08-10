@@ -15805,6 +15805,51 @@ mod tests {
             s.apply_plain_damage(0, 1, full * (1.0 - frac_left), [0.0, 1.0, -5.0], false, false);
             s.fighters[1].mech_plates_dropped
         };
+        // (8) THE CHASSIS ABILITY ARM, driven through `step`.
+        //
+        // The `match armor_set` in the ability block is the one heavy
+        // gate that is a MATCH rather than a comparison, so the audit
+        // above cannot reach it - a Royal dropped from that arm falls
+        // through to `_`, loses its Repulsor Blast and its mech brace,
+        // and every other test here stays green. (It did: this leg was
+        // written because that mutation survived the first sweep.)
+        for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
+            let mut s = range(0x5048);
+            {
+                let f = &mut s.fighters[0];
+                f.armor_set = set;
+                f.hull = f.mech_hull_max();
+                f.armor = POWER_MAX;
+                f.ability_cd = 0.0;
+                f.mech_transition_t = 0.0;
+                f.protect_t = 0.0;
+            }
+            // the crouch key means "widen the stance" in a chassis
+            s.step(PlayerCmd {
+                crouch: true,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            assert!(
+                s.fighters[0].mech_brace,
+                "{set:?} would not plant its stance - it has fallen out of \
+                 the chassis ability arm"
+            );
+            // ...and C is the Repulsor Blast, which costs core
+            s.step(PlayerCmd {
+                ability: true,
+                aim: [0.0, 0.0, 1.0],
+                ..Default::default()
+            });
+            assert!(
+                s.fighters[0].armor < POWER_MAX && s.fighters[0].ability_cd > 0.0,
+                "{set:?} pressed C and nothing left the machine: core {} \
+                 of {POWER_MAX}, cd {}",
+                s.fighters[0].armor,
+                s.fighters[0].ability_cd
+            );
+        }
+
         for set in [ArmorSet::RobotSuit, ArmorSet::RoyalMech] {
             let over = plate_mask(set, MECH_PLATE_70_PCT + 0.02);
             let under = plate_mask(set, MECH_PLATE_70_PCT - 0.02);
