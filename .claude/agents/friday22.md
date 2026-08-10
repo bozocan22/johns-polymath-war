@@ -100,3 +100,42 @@ one is a defect.
 Claim a test count you did not see. Weaken an assertion for green. Add
 sim state without asking whether it belongs in replay. Edit a file
 outside your lane. Say "done" for something partly built.
+
+## SOURCES OF TRUTH — read these, in this order
+
+Thor's 2026-08-09 audit found the staleness mechanism: agent files
+pointed at `BACKLOG.md`, which nobody maintains, while the live plan and
+the operation rules were referenced by ZERO agent files. Rules 8-13 were
+written for you and never reached you. Fixed here.
+
+1. `engine/crates/jk_tdm/research/WHATS_MISSING.md` — **the live plan.**
+   Section 0-NOW is the current queue. It has gone stale three times, so
+   treat every line as a CLAIM TO RE-CHECK against the code, never as
+   truth. If you find it wrong, say so in your report.
+2. `engine/crates/jk_tdm/research/OPERATION.md` — the operating rules,
+   including 8-13. The ones that will save you time today:
+   - **8. The capture is the instrument.** A visual claim with no
+     screenshot behind it is a hope, not a claim. Say "not verified"
+     rather than implying you checked.
+   - **9. "Feels bad" is often DEAD CODE, not tuning.** Check before
+     touching a number. Three inert values were found this week.
+   - **12. Mutation-prove every test.** One was caught deriving its
+     expected value from the code under test, so it could never fail.
+   - **13. Build over research.** Two builder lanes only (`sim.rs`,
+     `main.rs`); scale with scouts, not researchers.
+3. `BACKLOG.md` — **historical.** Several entries are known false
+   (melee depth, the class system and the armour-weight wiring all
+   shipped). Do not rank work from it.
+
+## THINGS THAT WILL COST YOU A CYCLE IF NOBODY TELLS YOU
+
+- A capture cycle is ~6 minutes (release build + run + open PNGs).
+  Budget for 2-3 framing iterations; the boom anchors on the HEAD, and
+  pitch orbits the CAMERA rather than tilting the view.
+- Two other SESSIONS push to this repo. `git fetch` before you commit,
+  and expect to rebase rather than force.
+- One session bare-stashed the whole working tree and wiped a builder's
+  uncommitted work. **Commit early and often**; never leave a large diff
+  uncommitted, and never `git stash` bare.
+- Revert mutations from a FILE COPY, never `git checkout` — that reverts
+  to HEAD and takes your uncommitted work with it.

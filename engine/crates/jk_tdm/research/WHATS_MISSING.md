@@ -9,6 +9,97 @@ moves up when its blocker clears, not when it becomes interesting.
 Nothing. The three branding PNGs landed 2026-08-04 (key art, wordmark,
 emblem) and are wired through the splash, menus, and seal footers.
 
+## 0-QUEUE. SMALLEST TO BIGGEST (2026-08-09)
+
+The owner asked for the work split by SIZE. Everything below is real and
+still open. Sizes are honest estimates of one agent-session each unless
+marked. Lane in brackets: [S] = sim.rs, [C] = main.rs/client, [D] = docs.
+
+### TIER 0 — MINUTES. One line each, no design decisions.
+1. `ROBOT_SPEED_MULT` (1.12) is dead and states the OPPOSITE of the live
+   0.85 beside it. Delete it. [S]
+2. `MECH_SHIELD_ARC_COS` is named, documented, and unread — the barrier's
+   real arc test uses a bare `cos > 0.5` literal 40 lines away. Point one
+   at the other. [S]
+3. `TDM_TARGET_CHOICES` is unread; the menu hand-types `30`/`60`. [C]
+4. `pod_aim_held` is written every tick and read nowhere. Delete or wire. [S]
+5. `shot_handgun.wav` is generated and loaded by nothing. [D]
+6. `SCOUT_SCALE`'s doc says "slimmer and SHORTER" for a chassis that is
+   5% TALLER than a man. [S]
+7. `FORGE_SLOTS` is unread; both slot UIs hardcode the list. [C]
+8. Export a `pub const` for the `9000.0` spray scale — the client copies
+   it today and guards the copy with a test. [S]
+
+### TIER 1 — AN HOUR. One clear fix, one test.
+9.  **Every explosion is silent.** The sim publishes `Boom`; no sound
+    exists. Unblocker is `gen_sfx.py`, already in the repo. [C]
+10. **The Field Manual quotes the DEFAULT score target, not the one you
+    chose** — two screens on one pause menu disagree. [C]
+11. **Hull-climbing `U` is missing from the "full bind list."** [C]
+12. **The medic's mid-air jump and second flip are undocumented** —
+    two movement options a pilot will never discover. Put them on the
+    Controls screen, NOT the equip hint (that line already overflows). [C]
+13. `gait_pose` bakes the INFANTRY crouch ratio (0.646) against the
+    sim's `MECH_CROUCH_HEIGHT_FRAC` (0.72) — kneeling, the x2.0 visor
+    weak point lands on rendered neck and shoulder. [C]
+14. The barrier test is half vacuous: its alpha and span constants are
+    copied INTO the test body, so mutating the real material or the real
+    disc size leaves the suite green. [C]
+
+### TIER 2 — A SESSION. Real work, one system each.
+15. **Armour damage states are invisible.** Four stages ship and are
+    tested; `armor_stage_of` has ZERO client readers, so Fresh, Scuffed
+    and Cracked render identically. Only Severed shows, and only because
+    it removes the piece. [C]
+16. **Mech boarding: 8 tested sim stages, 7 render a `debug!` line no
+    player sees.** The largest built-but-invisible system in the game.
+    The strings already exist verbatim inside the debug calls. [C]
+17. **Pyro armour is unobtainable on every map** while the controls
+    screen still sells its flame ability — and TWO per-map relocation
+    tables still place a Pyro pad that never spawns. [S]
+18. **Delete Cliffhold.** Half-done and reverted. Salvage first: the
+    +25% scale trap, the flight-joint bug, and the reachability-test
+    shape are all reusable. [S] + [C], coordinate or the `match` breaks.
+19. **Make capture scripts DATA, not code** — Thor's highest-leverage
+    finding. Beats are compile-time constants in a 28k-line file, which
+    is WHY every framing tweak costs a 6-minute rebuild. ~40 s after. [C]
+
+### TIER 3 — MULTI-SESSION. Design decisions inside.
+20. **The three core maps: +10% larger, real elevation, high ground,
+    randomised structures.** The trap: "randomised" must be seeded at
+    map-BUILD time from the match seed. Drawing from the gameplay RNG
+    stream shifts every later number and breaks replay for every other
+    system. Also fix the two lying centrepieces (Bailey's keep is
+    argument-for-argument Dust Arena's tower; Gardens' gazebo is a solid
+    block). [S] + art [C]
+21. **Bot navigation, properly.** Waypoints are 2D with no height and no
+    reachability check. Bots cannot choose to climb. [S]
+22. **Soldier finger ANIMATION.** The hand poses from one `curl` that is
+    still a spawn-time argument. [C]
+23. **Weapon crafting station** — shares a front end with the Forge
+    per-piece grid. Build both or neither. [C]
+24. **Ragdoll + hit-reaction impulse.** The rig's mass/inertia data is
+    complete, tested, and read by nothing. [S] + [C]
+25. **Mech control scheme** — worth doing now that jump, crouch and the
+    cockpit exist to be controlled. [C]
+
+### TIER 4 — BLOCKED BY A NAMED THING, not by difficulty.
+26. **Your uploaded gun assets: `jk_tdm` HAS NO glTF LOADER.** Only
+    `jk_bevy` does. A GLB in `assets/characters/` changes nothing in the
+    shipping game. Writing that loader is the actual task.
+27. **Texture pipeline** — procedural textures exist now (Cliffhold rock,
+    metal, wood); no IMPORTED image is used as a world texture, and the
+    older maps' cover materials are still flat.
+28. Networking (zero deps), traversal (blocked on map metrics), full
+    character customisation.
+
+### A DECISION FOR THE OWNER, not a task
+29. **Mech first-person aim sits 1.10 m above the muzzle** — camera at
+    the visor (2.72 m), weapon fires from `EYE_REL` (1.62 m). A hull
+    turret genuinely IS a metre below the visor, so this may be correct
+    and merely unstated. Changing it moves every mech engagement, hit
+    test, cover line and tracer in the game.
+
 ## 0-NOW. THE LIST, REBUILT AFTER THE SIX-AGENT SESSION (2026-08-08)
 
 Everything below is what is ACTUALLY left. Sections 0a and 0-SCOUT
