@@ -38,6 +38,9 @@ mod branding;
 /// its vibration. Its own module for the reason `branding` is: it wires
 /// in with two lines here, so it costs this file nothing to own.
 mod cockpit;
+/// §7 (owner spec): the grenade you are holding, and the fist holding
+/// it. Same two-line wiring as `branding` and `cockpit`.
+mod held_grenade;
 /// THE ART PASS, per map: sky, air, light, and what a stone box IS.
 ///
 /// Was `cliffhold`, and outlived it. The map the research was done for
@@ -2174,6 +2177,23 @@ struct FighterRig {
     /// the always-carried shield, shown raised on the left arm
     shield: Entity,
     armor_rig: Entity,
+    /// §P1 SIX VARIANTS (owner spec, 2026-08-10): the ROYAL hull, a
+    /// third baked rig beside the Big and the Agile, swapped by
+    /// `armor_set` exactly as they are.
+    ///
+    /// It is a separate rig and not a repaint because the paint is baked
+    /// into 53 material handles at spawn, and a chassis is BOARDED at
+    /// runtime - a fighter who walks onto a Royal pad has to become one
+    /// mid-match. The alternative (walk the hierarchy and rewrite 53
+    /// handles on a boarding event) is the same amount of memory and a
+    /// great deal more that can go wrong.
+    ///
+    /// This is also what replaces the client's OWN invention: the royal
+    /// livery used to be `i % 4 == 1` on the spawn slot index, a paint
+    /// with no sim existence behind it. The sim has a real
+    /// `ArmorSet::RoyalMech` now, so the renderer reads it instead of
+    /// making one up - the split brain, closed.
+    royal_rig: Entity,
     /// §owner AGILE SUPPORT MECH: the light chassis, hung beside the
     /// heavy one and swapped by Visibility.
     scout_rig: Entity,
@@ -2181,14 +2201,28 @@ struct FighterRig {
     armor_plates: [Entity; sim::ARMOR_PIECES],
     /// D.1: mech leg armour roots, [left, right] x [thigh, shin, foot] -
     /// parented to the REAL leg bones so the plating walks with the gait.
-    mech_leg_armor: [[Entity; 3]; 2],
+    ///
+    /// FOUR entries now, not two: 0-1 are the Big's left and right,
+    /// 2-3 the Royal's (`MECH_LEGS_ROYAL` is where the second pair
+    /// starts). One shared set was not an option - `mech_body_tones`
+    /// exists precisely because a royal hull over side-toned legs is a
+    /// machine wearing two liveries, and that bug has already shipped.
+    mech_leg_armor: [[Entity; 3]; 4],
     /// D.6 detach stages, driven by the sim's `mech_plates_dropped` bits:
     /// 70% = hip skirts + LEFT thigh plate; 40% = LEFT shin plate + rear
     /// drum + whip antenna; 15% = a foot cleat row (the visible limp).
-    mech_detach_70: [Entity; 3],
-    mech_detach_40: [Entity; 3],
-    mech_detach_15: [Entity; 1],
+    ///
+    /// Doubled with the Royal: each stage now names the piece on BOTH
+    /// heavy hulls. Only one hull is ever visible, so hiding the twin
+    /// costs nothing and forgetting to would have left the Royal
+    /// shrugging off damage the Big visibly sheds.
+    mech_detach_70: [Entity; 6],
+    mech_detach_40: [Entity; 6],
+    mech_detach_15: [Entity; 2],
 }
+
+/// Where the ROYAL's leg-armour pair starts inside `mech_leg_armor`.
+const MECH_LEGS_ROYAL: usize = 2;
 
 /// §1.4: metres per full step. Phase advances by planar distance / stride
 /// - zero foot sliding at every speed falls out for free.
@@ -4993,7 +5027,11 @@ fn pickup_prompt(kind: PickupKind) -> &'static str {
     match kind {
         PickupKind::Health => "HEALTH PACK",
         PickupKind::Ammo => "AMMO CACHE",
-        PickupKind::RobotArmor => "MECH CHASSIS - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
+        PickupKind::RobotArmor => "BIG MECH - walk over to board  (Q: side-step, C: repulsor - armored front, soft rear)",
+        // §P1 SIX VARIANTS: the Royal pad. Same controls as the Big - it
+        // IS a heavy chassis - so the prompt names only what is
+        // different about walking onto this one instead of that one.
+        PickupKind::RoyalArmor => "ROYAL MECH - walk over to board  (a tenth larger, a tenth tougher, a tenth slower than the BIG)",
         PickupKind::ScoutArmor => "MECHANICAL MEDIC - walk over to board  (plasma bow: no ammo, RMB charges a precision shot - 2: repair beam - fastest mech, thin, and spears hurt)",
         PickupKind::FolkArmor => "FOLK ARMOR - walk over to equip  (hold C: shieldwall brace)",
         // §P1 (owner spec, 2026-08-10): the PYRO prompt is deleted with
@@ -5008,7 +5046,11 @@ fn equip_hint(set: ArmorSet) -> &'static str {
     match set {
         ArmorSet::None => "",
         ArmorSet::Folk => "FOLK ARMOR EQUIPPED - hold C to BRACE the shieldwall",
-        ArmorSet::RobotSuit => "MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
+        ArmorSet::RobotSuit => "BIG MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
+        // §P1 SIX VARIANTS. Same hint as the Big, because the controls
+        // ARE the same - the tier is a trade in the numbers, and the one
+        // sentence a pilot needs on boarding is which way not to turn.
+        ArmorSet::RoyalMech => "ROYAL MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
         // §owner AGILE SUPPORT MECH: the hint names the two things a
         // pilot has to know that the heavy's does not - the cannon has
@@ -7300,6 +7342,9 @@ fn main() {
                 zone_overlay,
                 tag_viewmodel_layer,
                 tag_forge_preview_layer,
+                // §7 (owner spec): what is in the throwing hand, and how
+                // far back it has cocked.
+                held_grenade::sync_held_grenade,
             ),
         )
         .init_resource::<DebugZones>()
@@ -12519,6 +12564,20 @@ fn spawn_pickup_model(commands: &mut Commands, kit: &ModelKit, kind: PickupKind)
             );
             e
         }
+        // §P1 SIX VARIANTS: the ROYAL pad. Same totem, the royal hull,
+        // and - the part that matters at pad distance - visibly LARGER
+        // by the sim's own `ROYAL_MULT`, so the two heavy pads are told
+        // apart by the one property the tier is defined by. Reading the
+        // multiplier from `sim` rather than typing 0.99 keeps the pad
+        // honest if the tier is ever retuned.
+        PickupKind::RoyalArmor => {
+            let (e, _) = spawn_armor_rig(commands, kit, true, true);
+            commands.entity(e).insert(
+                Transform::from_xyz(0.0, 0.75, 0.0)
+                    .with_scale(Vec3::splat(0.9 * sim::ROYAL_MULT)),
+            );
+            e
+        }
         // §6: the three new set pads - a readable silhouette each
         PickupKind::FolkArmor => {
             let root = commands
@@ -13626,35 +13685,65 @@ fn spawn_fighter_rigs(
         // model itself - see `spawn_weapon_model` - so it rides the draw
         // and the viewmodel gets one too.)
         // the mech hull kit + leg armour (Brief VIII-B D.1-D.6)
-        // §22: one royal machine per four, from the slot index - the
-        // same trick the helmets and the medic trims use, and for the
-        // same reason: a livery chosen at spawn from an index cannot
-        // reach replay state.
-        let elite = i % 4 == 1;
-        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit, ally, elite);
+        //
+        // §P1 SIX VARIANTS (owner spec, 2026-08-10): `let elite = i % 4
+        // == 1;` used to stand here - one machine in four wore the royal
+        // paint, chosen from its spawn slot, with NOTHING in the sim
+        // behind it. It was a reasonable invention when there were two
+        // chassis and a spare palette; it is a split brain now that
+        // `ArmorSet::RoyalMech` is a real tier with its own pad, its own
+        // hull pool, its own hitbox and its own 10% scale.
+        //
+        // So: two heavy hulls per fighter, Big and Royal, and the SIM
+        // says which one you can see.
+        let (armor_rig, hull_det) = spawn_armor_rig(commands, kit, ally, false);
+        let (royal_rig, royal_det) = spawn_armor_rig(commands, kit, ally, true);
         // §owner MECH BARRIER: on the LEFT forearm cradle, which is the
         // arm that is not holding the gatling - a shield on the gun arm
         // would be a shield you cannot use while shooting.
         let (barrier_root, barrier) = spawn_mech_barrier(commands, kit);
+        // §P1 SIX VARIANTS: the barrier hangs on the TORSO now, not on
+        // the Big hull. There are two heavy hulls per fighter and only
+        // one is visible, so a barrier parented to either would vanish
+        // whenever the pilot was in the other chassis - and the Royal is
+        // a heavy, so it has one.
+        //
+        // The world transform is UNCHANGED, not re-eyeballed: the hull's
+        // own transform is a pure uniform `MECH_HULL_SCALE`, so lifting
+        // one level costs exactly one more factor of it on both the
+        // offset and the scale. (Yes, that squares the scale - it always
+        // did; this only makes the second factor visible.)
         commands
             .entity(barrier_root)
             .insert(Transform {
-                translation: Vec3::new(-0.645, 0.145, 0.30) * MECH_HULL_SCALE,
+                translation: Vec3::new(-0.645, 0.145, 0.30)
+                    * MECH_HULL_SCALE
+                    * MECH_HULL_SCALE,
                 rotation: Quat::from_rotation_x(-0.10),
-                scale: Vec3::splat(MECH_HULL_SCALE),
+                scale: Vec3::splat(MECH_HULL_SCALE * MECH_HULL_SCALE),
             })
-            .set_parent(armor_rig);
-        let la_l =
-            spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0, ally, elite);
-        let la_r =
-            spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0, ally, elite);
-        commands
-            .entity(armor_rig)
-            .insert((
-                Transform::from_scale(Vec3::splat(MECH_HULL_SCALE)),
-                Visibility::Hidden,
-            ))
             .set_parent(torso);
+        let la_l =
+            spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0, ally, false);
+        let la_r =
+            spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0, ally, false);
+        // ...and the Royal's own pair, on the same bones. Both pairs ride
+        // the SOLDIER's leg bones (that is how heavy leg armour works -
+        // see `spawn_mech_leg_armor`), so they occupy the same space and
+        // exactly one is ever visible.
+        let ra_l =
+            spawn_mech_leg_armor(commands, kit, leg_l[0], leg_l[1], leg_l[2], -1.0, ally, true);
+        let ra_r =
+            spawn_mech_leg_armor(commands, kit, leg_r[0], leg_r[1], leg_r[2], 1.0, ally, true);
+        for e in [armor_rig, royal_rig] {
+            commands
+                .entity(e)
+                .insert((
+                    Transform::from_scale(Vec3::splat(MECH_HULL_SCALE)),
+                    Visibility::Hidden,
+                ))
+                .set_parent(torso);
+        }
         // §owner AGILE SUPPORT MECH: the second chassis, hung beside the
         // first and swapped by Visibility. Same trick as the helmets and
         // the class silhouettes - building one at boarding time would
@@ -13702,12 +13791,27 @@ fn spawn_fighter_rigs(
             weapons,
             shield,
             armor_rig,
+            royal_rig,
             scout_rig,
             armor_plates,
-            mech_leg_armor: [la_l.roots, la_r.roots],
-            mech_detach_70: [hull_det.skirt_l, hull_det.skirt_r, la_l.thigh_plate],
-            mech_detach_40: [la_l.shin_plate, hull_det.drum_r, hull_det.antenna],
-            mech_detach_15: [la_l.cleat_front],
+            mech_leg_armor: [la_l.roots, la_r.roots, ra_l.roots, ra_r.roots],
+            mech_detach_70: [
+                hull_det.skirt_l,
+                hull_det.skirt_r,
+                la_l.thigh_plate,
+                royal_det.skirt_l,
+                royal_det.skirt_r,
+                ra_l.thigh_plate,
+            ],
+            mech_detach_40: [
+                la_l.shin_plate,
+                hull_det.drum_r,
+                hull_det.antenna,
+                ra_l.shin_plate,
+                royal_det.drum_r,
+                royal_det.antenna,
+            ],
+            mech_detach_15: [la_l.cleat_front, ra_l.cleat_front],
         });
     }
 }
@@ -14984,6 +15088,15 @@ fn setup(
             Visibility::Hidden,
         ))
         .set_parent(vm_root);
+    // §7 (owner spec): the HELD GRENADE. Spawned here with the rest of
+    // the viewmodel for the reason the hull mounts document above -
+    // `tag_viewmodel_layer` latches after its first sweep of `vm_root`,
+    // so anything parented later never gets the viewmodel render layer
+    // and renders on the world layer instead: invisible in first person
+    // and a two-metre grenade floating in the map in third.
+    let held = held_grenade::spawn_held_grenade_vm(&mut commands, &kit, &mut materials);
+    commands.entity(held.root).set_parent(vm_root);
+    commands.insert_resource(held);
     commands.insert_resource(VmRig {
         root: vm_root,
         weapons: vm_weapons,
@@ -16582,7 +16695,20 @@ fn input_and_step(
         yaw: cam.yaw,
         aim: [aim.x, aim.y, aim.z],
         // §2.4 (Brief IV): T is INSPECT now - fire is the mouse alone
-        shoot: buttons.pressed(fire_btn),
+        //
+        // §7 (owner spec, 2026-08-10): ...unless there is a GRENADE in
+        // that hand. The trigger already meant two things at once here:
+        // `throw_hold` below and `shoot` on this line are both
+        // `pressed(fire_btn)`, and the sim's fire gate (`can_fire`)
+        // never consults `cook_t` - so winding a throw also emptied the
+        // rifle down the same sight line. That was survivable while the
+        // grenade was invisible; it is not survivable now that the
+        // rifle is stowed out of the frame to show the grenade, because
+        // then the player is firing a weapon that is not on screen.
+        //
+        // One decision, expressed once, in the input router that owns
+        // it: the pin is out, so the trigger belongs to the throw.
+        shoot: buttons.pressed(fire_btn) && !game.nade_ready,
         reload: game.pending_reload,
         ads: ads_settled,
         // §6: crouch is CTRL only - C now holds the armor ability
@@ -17091,14 +17217,21 @@ fn sync_fighters(
         // would silently give the scout the heavy's 1.7x again the next
         // time someone "simplifies" this - the two chassis need two
         // numbers on purpose.
-        tf.scale = Vec3::splat(if f.in_heavy_mech() {
-            MECH_SCALE
-        } else if f.in_scout_mech() {
-            sim::SCOUT_SCALE
-        } else {
-            1.0
-        },
-        );
+        // §P1 SIX VARIANTS: this used to be a two-arm `if` that restated
+        // `MECH_SCALE` and `SCOUT_SCALE` here, in the client. The moment
+        // a THIRD tier existed that was worth exactly one of those
+        // numbers times 1.10, the restatement broke in the quiet way -
+        // `in_heavy_mech()` is true for the Royal, so it would have
+        // rendered at the Big's size on top of a hitbox 10% larger, and
+        // nothing but a screenshot would ever have said so.
+        //
+        // `chassis_scale()` is the sim's own accessor and the same one
+        // `height()`, `radius()` and `step_up` read. A fourth tier is
+        // now a row in sim.rs and no edit at all here. (The old comment
+        // warned against collapsing this into one number for every mech
+        // - it still holds, and this is not that: `chassis_scale` is
+        // per-set, so the scout keeps its own.)
+        tf.scale = Vec3::splat(f.armor_set.chassis_scale());
         // spawn-protection shimmer: bob slightly
         if f.protect_t > 0.0 {
             tf.translation.y += (game.sim.t * 14.0).sin() * 0.02;
@@ -18077,13 +18210,22 @@ fn sync_fighters(
                 d.nocked = arrow_vis != Visibility::Hidden;
             }
         }
-        // §6: the powered shell shows while the Robot Suit is worn
-        if let Ok((_, mut v)) = parts.get_mut(rig.armor_rig) {
-            *v = if f.armor_set == ArmorSet::RobotSuit {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
+        // §6: the powered shell shows while the Robot Suit is worn.
+        // §P1 SIX VARIANTS: and the ROYAL hull while THAT is - each
+        // named explicitly rather than one `is_heavy_chassis()` branch,
+        // because exactly one of the two may ever be visible and a
+        // predicate that is true for both would show both.
+        for (e, want) in [
+            (rig.armor_rig, ArmorSet::RobotSuit),
+            (rig.royal_rig, ArmorSet::RoyalMech),
+        ] {
+            if let Ok((_, mut v)) = parts.get_mut(e) {
+                *v = if f.armor_set == want {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+            }
         }
         // §C tier 2: the harness. Each plate shows exactly when it is
         // equipped AND the soldier's own body is showing - a pilot
@@ -18139,10 +18281,19 @@ fn sync_fighters(
         // (is_mech), so the medic wore heavy shin plates over its own
         // legs. Invisible while both liveries were grey; the amber
         // redesign made it read instantly.
-        for legs in rig.mech_leg_armor {
+        // §P1 SIX VARIANTS: two pairs share these bones - the Big's and
+        // the Royal's - and each shows only for its own chassis. Both
+        // hidden for everyone else, which is what kept the medic out of
+        // heavy shin plates.
+        for (n, legs) in rig.mech_leg_armor.into_iter().enumerate() {
+            let want = if n >= MECH_LEGS_ROYAL {
+                ArmorSet::RoyalMech
+            } else {
+                ArmorSet::RobotSuit
+            };
             for e in legs {
                 if let Ok((_, mut v)) = parts.get_mut(e) {
-                    *v = if f.armor_set == ArmorSet::RobotSuit {
+                    *v = if f.armor_set == want {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
@@ -19786,7 +19937,13 @@ fn fp_viewmodel(
     }
     // §C: in a chassis the rifle is STOWED (same rule the body rig
     // applies) - the mount viewmodels below own the frame instead
-    let slot = if p.in_mech() { None } else { weapon_slot(p.gun) };
+    // §7 (owner spec): a grenade in the hand STOWS the rifle. Both hands
+    // are on the throw, the client no longer sends `shoot` while the pin
+    // is out (see the throw block in `player_input`), and a rifle drawn
+    // through a wind-up would be a rifle the player believes they can
+    // fire. `held_grenade` owns what appears in its place.
+    let nading = held_grenade::grenade_in_hand(game.nade_ready, p.cook_t, p.alive());
+    let slot = if p.in_mech() || nading { None } else { weapon_slot(p.gun) };
     let scoped = cam_ctl.ads && spec.scoped && !p.in_mech();
     for (wi, we) in vm.weapons.iter().enumerate() {
         if let Ok((_, mut v)) = q.get_mut(*we) {
@@ -21257,7 +21414,14 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                         };
                         format!("\nMEDIC  HULL {:.0}  HEAT {hot:.0}%{vent}", p.hull)
                     }
-                    ArmorSet::RobotSuit => {
+                    // §P1 SIX VARIANTS: the Royal is a HEAVY chassis, so
+                    // it has every field this branch prints - power core,
+                    // brace, stride, jump phase. Trap 2 in the spec is
+                    // exactly this: the alternative was a copied arm that
+                    // would drift the first time either changed. The name
+                    // comes from the sim's `chassis_name()`, the single
+                    // place those three strings exist.
+                    ArmorSet::RobotSuit | ArmorSet::RoyalMech => {
                         // §4.6: chassis VITALS only - the mounts own the
                         // bottom-right corner, the dismount bind lives on
                         // the equip hint. The old one-liner spanned the
@@ -21314,8 +21478,9 @@ GRIP [{bar}] {:.0}%", p.grip_pool)
                             "" => String::new(),
                             l => format!("  [{l}]"),
                         };
+                        let name = p.armor_set.chassis_name().unwrap_or("MECH");
                         format!("
-MECH  HULL {:.0}  PWR {:.0}{brace}{jump}{barrier}{stride}", p.hull, p.armor)
+{name}  HULL {:.0}  PWR {:.0}{brace}{jump}{barrier}{stride}", p.hull, p.armor)
                     }
                     ArmorSet::Folk => {
                         if p.brace {
