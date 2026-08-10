@@ -22,9 +22,22 @@ system prompts, tool access, and persistent memory.
 | **Thor** | verification, management, dispatch | `THOR_LOG.md` | **No — never** |
 | **Toto** | peer-reviewed research, evidence | `TOTO_LOG.md` | No (research files only) |
 | **Friday** | implementation, tests, captures | `FRIDAY_LOG.md` | Yes |
+| **Trevor** | the ISSUED-vs-DELIVERED data bank | `TREVOR_LEDGER.md` + `TREVOR_LOG.md` | **No — never** |
 
 **Thor cannot edit source. That is the load-bearing rule.** A verifier
 that fixes what it finds cannot be trusted to report what it missed.
+
+**Trevor is Thor's twin, on the other side of the same rule.** Thor asks
+*"is this claim true?"*; Trevor asks *"what was asked for, and where did
+it go?"* He indexes every owner ask — brief section, prompt task, plan
+line, uploaded reference image, instruction quoted inside a log — as a
+stable `TRV-####` row with quoted wording, evidence path and status, and
+clusters the rows into THREADS that follow one subject from first ask
+through research, build, capture and verification. That thread view is
+the only place the whole life of an ask is visible at once, which is why
+Thor reads the ledger before ranking anything. Trevor's `DELIVERED` means
+"evidence exists at this path", never "it works" — Thor still decides
+that. Same hard rule as Thor: he never edits source.
 
 ---
 
@@ -307,7 +320,11 @@ number".
 Task(subagent_type="toto",   prompt="<dispatch per the contract above>")
 Task(subagent_type="friday", prompt="<spec per the contract above>")
 Task(subagent_type="thor",   prompt="<what to verify, and the claim it rests on>")
+Task(subagent_type="trevor", prompt="<rebuild or update the ledger; name any thread to go deep on>")
 ```
+
+Trevor is read-only, so he parallelises with everything except another
+Trevor — never run two, they write the same two files.
 
 Run the independent ones concurrently in a single message. Sequence only
 real dependencies.
