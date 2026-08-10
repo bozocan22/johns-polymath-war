@@ -140,10 +140,25 @@ enum Chassis {
 /// first time either chassis was rebalanced, and drift in exactly the
 /// direction nobody checks - the display, not the fight.
 fn chassis_scale(c: Chassis) -> f32 {
-    match c {
-        Chassis::Heavy { .. } => crate::sim::MECH_SCALE,
-        Chassis::Scout => crate::sim::SCOUT_SCALE,
-        Chassis::Soldier => 1.0,
+    // §P1 SIX VARIANTS: read through the sim's `ArmorSet::chassis_scale`
+    // rather than naming `MECH_SCALE` and `SCOUT_SCALE` here. The Royal
+    // is `MECH_SCALE * ROYAL_MULT`, and the version of this function
+    // that restated the two constants would have stood it on its plinth
+    // at the Big's height - on the one screen in the game whose entire
+    // purpose is to show how big these things are next to each other.
+    crate::sim::ArmorSet::from(c).chassis_scale()
+}
+
+impl From<Chassis> for crate::sim::ArmorSet {
+    /// The exhibit's own enum, mapped onto the sim's. One direction
+    /// only: `Chassis` also names a bare soldier, which is not a set.
+    fn from(c: Chassis) -> Self {
+        match c {
+            Chassis::Heavy { elite: false } => crate::sim::ArmorSet::RobotSuit,
+            Chassis::Heavy { elite: true } => crate::sim::ArmorSet::RoyalMech,
+            Chassis::Scout => crate::sim::ArmorSet::ScoutMech,
+            Chassis::Soldier => crate::sim::ArmorSet::None,
+        }
     }
 }
 
@@ -195,15 +210,35 @@ fn label_height(c: Chassis) -> f32 {
 /// so the eye reads the row as a ladder — man, heavy, royal heavy, scout
 /// — and gets the two extremes of the ladder side by side at the first
 /// join.
-const STANDS: [(Chassis, bool, &str); 6] = [
+/// §P1 SIX VARIANTS (owner spec, 2026-08-10): "player Agile/Big/Royal
+/// and opposition Agile/Big/Royal, encounterable and testable."
+///
+/// The row was five machines and could not have been six: the Royal was
+/// a CLIENT-ONLY paint (`i % 4 == 1` on a spawn slot) with no sim tier
+/// behind it, so an "enemy royal" would have worn the identical red
+/// lacquer and differed by its lamps alone. The note that used to stand
+/// here said exactly that, and said it was therefore not a livery and
+/// did not get a stand. It was right at the time.
+///
+/// `ArmorSet::RoyalMech` is a real tier now - its own pad, its own hull
+/// pool, its own hitbox, `ROYAL_MULT` larger than the Big - so the
+/// enemy Royal is a real machine and stands on the row. Three tiers,
+/// two sides, six mechs, plus the man they are measured against.
+///
+/// The names come from the sim's own `chassis_name()` vocabulary
+/// (AGILE / BIG / ROYAL) rather than the client's old HEAVY / SCOUT, so
+/// the exhibit, the pad prompt and the pilot's own vitals line all call
+/// a machine the same thing.
+const STANDS: [(Chassis, bool, &str); 7] = [
     // ---- ALLY SECTION -------------------------------------------------
     (Chassis::Soldier, true, "SOLDIER 1.8 m"),
-    (Chassis::Heavy { elite: false }, true, "HEAVY/ALLY"),
-    (Chassis::Heavy { elite: true }, true, "HEAVY/ROYAL"),
-    (Chassis::Scout, true, "SCOUT/ALLY"),
+    (Chassis::Scout, true, "AGILE/ALLY"),
+    (Chassis::Heavy { elite: false }, true, "BIG/ALLY"),
+    (Chassis::Heavy { elite: true }, true, "ROYAL/ALLY"),
     // ---- ENEMY SECTION ------------------------------------------------
-    (Chassis::Heavy { elite: false }, false, "HEAVY/ENEMY"),
-    (Chassis::Scout, false, "SCOUT/ENEMY"),
+    (Chassis::Scout, false, "AGILE/ENEMY"),
+    (Chassis::Heavy { elite: false }, false, "BIG/ENEMY"),
+    (Chassis::Heavy { elite: true }, false, "ROYAL/ENEMY"),
 ];
 
 /// Extra metres inserted wherever the side changes along the row.
@@ -860,11 +895,20 @@ fn spawn_row(
 /// Training only, torn down with everything else carrying `GalleryVis`.
 /// No name plates — the row is the labelled chart, and four more captions
 /// floating over a map would read as enemy markers.
-const SENTINELS: [(Chassis, bool); 4] = [
-    (Chassis::Heavy { elite: false }, true),
+/// §P1 SIX VARIANTS: all six, one per sector, so a player who walks any
+/// direction out of the range MEETS one - "encounterable and testable"
+/// is the spec's wording and a plinth is neither.
+///
+/// Ordered so consecutive sectors alternate side: an ally and an enemy
+/// of the same tier are never adjacent, and the two you meet walking
+/// out and back are a comparison rather than a repeat.
+const SENTINELS: [(Chassis, bool); 6] = [
     (Chassis::Scout, true),
     (Chassis::Heavy { elite: false }, false),
+    (Chassis::Heavy { elite: true }, true),
     (Chassis::Scout, false),
+    (Chassis::Heavy { elite: false }, true),
+    (Chassis::Heavy { elite: true }, false),
 ];
 
 /// How far apart sentinels must stand, in metres.
@@ -921,23 +965,31 @@ fn site_sentinels(sim: &crate::TdmSim, spawn: Vec3, row: Vec3, row_right: Vec3) 
         stand_is_clear(sim, p) && !taken.iter().any(|q| q.distance(p) < SENTINEL_SEP_M)
     };
     let mut out: Vec<Vec3> = Vec::new();
-    // (+,+), (+,-), (-,-), (-,+) — walked in a ring so consecutive
-    // sentinels are never neighbours
-    for (sx, sz) in [(1.0_f32, 1.0_f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+    // ONE PER SECTOR, walked in a ring, with as many sectors as there
+    // are sentinels.
+    //
+    // §P1 SIX VARIANTS: this was four hard-coded QUADRANTS - the four
+    // sign pairs, swept at 22.5/45/67.5 degrees. Six machines do not
+    // divide into four quadrants, and the generalisation is the same
+    // rule stated once instead of enumerated: sector k spans
+    // `k*TAU/n .. (k+1)*TAU/n`, and the sweep takes three angles
+    // strictly INSIDE it.
+    //
+    // "Strictly inside" is load-bearing and always was. The endpoints
+    // look harmless and are not: `cos(FRAC_PI_2)` in f32 is -4.4e-8, so
+    // a machine "on the +x axis" lands at a minutely NEGATIVE x and
+    // belongs to the neighbouring sector - which is how the first
+    // version put two sentinels in one quadrant and none in another
+    // while every other rule here passed.
+    let n = SENTINELS.len();
+    let sector = std::f32::consts::TAU / n as f32;
+    for k in 0..n {
         let mut best: Option<(f32, Vec3)> = None;
         for a in 1..=3 {
+            let ang = k as f32 * sector + a as f32 * sector / 4.0;
             let mut r = 6.0_f32;
             while r <= lim {
-                // A sweep strictly INSIDE this quadrant: 22.5, 45 and
-                // 67.5 degrees, never 0 or 90. The endpoints look
-                // harmless and are not - `cos(FRAC_PI_2)` in f32 is
-                // -4.4e-8, so a machine "on the +x axis" lands at a
-                // minutely NEGATIVE x and belongs to the neighbouring
-                // quadrant, which is how the first version put two
-                // sentinels in one quadrant and none in another while
-                // every other rule here passed.
-                let ang = a as f32 * std::f32::consts::FRAC_PI_2 / 4.0;
-                let p = Vec3::new(sx * r * ang.cos(), 0.0, sz * r * ang.sin());
+                let p = Vec3::new(r * ang.cos(), 0.0, r * ang.sin());
                 let score = (r - want_r).abs();
                 if best.map_or(true, |(bs, _)| score < bs) && ok(p, &out) {
                     best = Some((score, p));
@@ -1312,8 +1364,14 @@ mod tests {
     fn every_machine_stands_at_the_height_it_fights_at() {
         use crate::sim::{BODY_HEIGHT, MECH_SCALE, SCOUT_SCALE};
         for (c, _, name) in STANDS {
+            // §P1 SIX VARIANTS: three tiers, and the Royal is the Big
+            // times ROYAL_MULT. Still stated from the sim's constants
+            // rather than from `chassis_scale` itself - a test that
+            // derives its expectation from the code under test is the
+            // vacuous kind this project has already caught twice.
             let want = match c {
-                Chassis::Heavy { .. } => MECH_SCALE,
+                Chassis::Heavy { elite: false } => MECH_SCALE,
+                Chassis::Heavy { elite: true } => MECH_SCALE * crate::sim::ROYAL_MULT,
                 Chassis::Scout => SCOUT_SCALE,
                 Chassis::Soldier => 1.0,
             };
@@ -1411,39 +1469,64 @@ mod tests {
         );
     }
 
-    /// The exhibit must actually answer the owner's question: both
-    /// chassis, and for each of them BOTH sides.
+    /// §P1 SIX VARIANTS: the exhibit must answer the owner's question in
+    /// full - "player Agile/Big/Royal and opposition Agile/Big/Royal".
+    ///
+    /// Driven off `sim::CHASSIS_TIERS`, so this is six assertions today
+    /// and seven the day a fourth tier lands, without an edit. The
+    /// version it replaces hand-listed "heavy" and "scout" and checked
+    /// the royal only for EXISTENCE, not for a side - which is how the
+    /// enemy royal stayed missing while the test stayed green.
     #[test]
-    fn every_chassis_appears_in_both_liveries() {
-        let has = |want_heavy: bool, want_ally: bool| {
-            STANDS.iter().any(|(c, ally, _)| {
-                matches!(c, Chassis::Heavy { elite: false }) == want_heavy && *ally == want_ally
-            })
-        };
-        assert!(has(true, true), "no ally heavy");
-        assert!(has(true, false), "no enemy heavy");
-        assert!(
+    fn every_tier_appears_in_both_liveries() {
+        for tier in crate::sim::CHASSIS_TIERS {
+            for want_ally in [true, false] {
+                assert!(
+                    STANDS.iter().any(|(c, ally, _)| {
+                        crate::sim::ArmorSet::from(*c) == tier && *ally == want_ally
+                    }),
+                    "no {} on the {} side of the exhibit",
+                    tier.chassis_name().unwrap_or("?"),
+                    if want_ally { "ally" } else { "enemy" }
+                );
+            }
+        }
+        // six machines, and the man they are measured against
+        assert_eq!(
             STANDS
                 .iter()
-                .any(|(c, a, _)| matches!(c, Chassis::Scout) && *a),
-            "no ally scout"
-        );
-        assert!(
-            STANDS
-                .iter()
-                .any(|(c, a, _)| matches!(c, Chassis::Scout) && !*a),
-            "no enemy scout"
-        );
-        assert!(
-            STANDS
-                .iter()
-                .any(|(c, _, _)| matches!(c, Chassis::Heavy { elite: true })),
-            "the royal paint is not on show"
+                .filter(|(c, _, _)| !matches!(c, Chassis::Soldier))
+                .count(),
+            crate::sim::CHASSIS_TIERS.len() * 2,
+            "the row is not every tier on both sides"
         );
         // and every stand says which it is
         for (_, _, name) in STANDS {
             assert!(!name.is_empty());
         }
+    }
+
+    /// The plinth scales come from the SIM, so the Royal stands
+    /// `ROYAL_MULT` taller than the Big on the one screen whose whole
+    /// purpose is showing how big these things are beside each other.
+    ///
+    /// Fails on the pre-change code: `chassis_scale` returned
+    /// `MECH_SCALE` for `Heavy { .. }` regardless of `elite`.
+    #[test]
+    fn the_royal_stands_taller_than_the_big() {
+        let big = chassis_scale(Chassis::Heavy { elite: false });
+        let royal = chassis_scale(Chassis::Heavy { elite: true });
+        assert!(
+            royal > big * 1.05,
+            "the royal ({royal}) is not visibly larger than the big ({big})"
+        );
+        assert!(
+            (royal - big * crate::sim::ROYAL_MULT).abs() < 1e-5,
+            "the exhibit disagrees with the sim's own ROYAL_MULT"
+        );
+        // ...and the label floats above the taller machine, not through it
+        assert!(label_height(Chassis::Heavy { elite: true })
+            > label_height(Chassis::Heavy { elite: false }));
     }
 
     /// The projection: centre of screen is centre of screen, the box is
@@ -1515,13 +1598,20 @@ mod tests {
         // a plain corner-to-corner grid scan put all four in the same
         // corner, which is deterministic, passes every other assertion
         // here, and photographs as an empty field from the exhibit.
-        let mut quad = [0usize; 4];
+        // §P1 SIX VARIANTS: one per SECTOR, with as many sectors as
+        // sentinels. Six machines do not divide into four quadrants, so
+        // the clause is stated against the real partition instead of
+        // against the four sign pairs it used to assume.
+        let n = SENTINELS.len();
+        let mut sect = vec![0usize; n];
         for p in &spots {
-            quad[usize::from(p.x < 0.0) * 2 + usize::from(p.z < 0.0)] += 1;
+            let a = p.z.atan2(p.x).rem_euclid(std::f32::consts::TAU);
+            let k = ((a / std::f32::consts::TAU) * n as f32) as usize;
+            sect[k.min(n - 1)] += 1;
         }
         assert!(
-            quad.iter().all(|&n| n == 1),
-            "the sentinels are not spread over the map: {quad:?} per quadrant"
+            sect.iter().all(|&c| c == 1),
+            "the sentinels are not spread over the map: {sect:?} per sector"
         );
         // ...and none of them inside the exhibit's own footprint
         let row_half = stand_offset(STANDS.len() - 1).abs() + STAND_CLEAR_R;
@@ -1537,18 +1627,23 @@ mod tests {
         }
     }
 
-    /// Both liveries and both chassis have to be out on the map, or the
-    /// walk-up view shows less than the plinth row does.
+    /// §P1 SIX VARIANTS: all three tiers, both sides, out on the map -
+    /// or the walk-up view shows less than the plinth row does.
+    ///
+    /// Iterates `sim::CHASSIS_TIERS` rather than a transcribed list, so
+    /// a fourth tier makes this test fail on the day it lands instead of
+    /// silently continuing to check three.
     #[test]
-    fn the_sentinels_show_both_chassis_in_both_liveries() {
-        for want_heavy in [true, false] {
+    fn the_sentinels_show_every_tier_in_both_liveries() {
+        for tier in crate::sim::CHASSIS_TIERS {
             for want_ally in [true, false] {
                 assert!(
-                    SENTINELS.iter().any(|(c, a)| matches!(c, Chassis::Heavy { .. })
-                        == want_heavy
-                        && *a == want_ally),
+                    SENTINELS
+                        .iter()
+                        .any(|(c, a)| crate::sim::ArmorSet::from(*c) == tier
+                            && *a == want_ally),
                     "no {} sentinel on the {} side",
-                    if want_heavy { "heavy" } else { "scout" },
+                    tier.chassis_name().unwrap_or("?"),
                     if want_ally { "ally" } else { "enemy" }
                 );
             }
