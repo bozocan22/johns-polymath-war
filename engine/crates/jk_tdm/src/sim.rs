@@ -3407,6 +3407,18 @@ pub struct Fighter {
     /// release, consumed by `try_fire`, reset after - bots never touch
     /// it and so keep throwing at exactly the old fixed power.
     pub spear_power: f32,
+    /// §11 (owner): the pending throw earned the 7 s MAXIMUM CHARGE
+    /// BONUS (+10% damage). Written with `spear_power` at the release
+    /// edge by `spear_charge`, carried THROUGH the windup - unlike
+    /// `spear_power`, which `try_fire` folds into `spear_v0` and clears
+    /// - and consumed where the spear actually spawns.
+    ///
+    /// Authoritative, not decoration: it moves how much damage lands.
+    /// It is cleared everywhere `spear_wind_t` is (respawn, and the
+    /// refused-release path), because its lifetime is exactly the
+    /// windup's; a flag that outlived the throw would hand the next one
+    /// a bonus it did not pay seven seconds for.
+    pub spear_max_charge: bool,
     pub spear_aim: [f32; 3],
     pub spear_v0: f32,
     /// §4.1 (Brief VII v2): the bow's draw clock - counts UP while the
@@ -6674,8 +6686,49 @@ impl AimPhase {
 /// a quick flick that still leaves the hand (never a dead trigger);
 /// past the full mark it stops gaining, so there is a right amount to
 /// hold rather than "always hold longest".
+///
+/// §9/§10/§11 (owner, BOW & SPEAR): the window is THREE SECONDS now,
+/// not 0.85. The spec asks for "a smooth progression with no visible
+/// steps" across 0-3 s, reading roughly as low power/range in the first
+/// second, medium in the second, high in the third, with "~3 s reaching
+/// the normal maximum" and holding longer buying no more power.
+///
+/// FROM 0.85 s TO 3.00 s. `SPEAR_CHARGE_MIN_S` (0.12) and the velocity
+/// band (0.90..1.30) are deliberately UNCHANGED - the spec asks for a
+/// longer, more legible TIME curve, not a new power band, and the
+/// flick floor is an existing mechanic §D says to preserve.
+///
+/// The curve stays LINEAR, which is a decision and not an oversight.
+/// Linear over [0.12, 3.00] already delivers the spec's three named
+/// bands in near-equal shares - 0.90 -> 1.0222 -> 1.1611 -> 1.30 at
+/// 0 s / 1 s / 2 s / 3 s, i.e. 30.6% / 34.7% / 34.7% of the band - and
+/// is by construction step-free. Any easing curve I put here instead
+/// would be a number nobody asked for; see
+/// `the_spear_charge_curve_is_smooth_and_finishes_at_three_seconds`
+/// for the arithmetic, held as measured shares rather than constants.
 pub const SPEAR_CHARGE_MIN_S: f32 = 0.12;
-pub const SPEAR_CHARGE_FULL_S: f32 = 0.85;
+pub const SPEAR_CHARGE_FULL_S: f32 = 3.00;
+
+/// §11 (owner): THE MAXIMUM CHARGE BONUS. Hold seven seconds and the
+/// throw lands +10% damage - "deliberate high-risk/high-reward, paid
+/// for in time and mobility", and it "must not stack past that".
+///
+/// Two readings of the spec have to hold at once and only one shape
+/// satisfies both. "~3 s reaches normal maximum / holding longer must
+/// not keep growing power" forbids a ramp from 3 s to 7 s; "7 s grants
+/// a bonus" requires something to happen at 7 s. So it is a THRESHOLD,
+/// on a different axis: VELOCITY stops at 3 s and never moves again,
+/// and the 7 s mark grants a flat damage multiplier. The player who
+/// holds 5 seconds has bought nothing over the one who held 3 - which
+/// is the risk the spec is pricing.
+///
+/// It cannot stack for two independent reasons: the multiplier is a
+/// constant, not an accumulator, and the wind clock itself is capped at
+/// `SPEAR_MAX_CHARGE_S` in `step_spear_charge` so there is no larger
+/// number to feed it.
+pub const SPEAR_MAX_CHARGE_S: f32 = 7.00;
+pub const SPEAR_MAX_CHARGE_DMG: f32 = 1.10;
+
 /// Velocity multiplier at the two ends of that window. A faster spear
 /// flies FLATTER, so this buys range and lead-time as much as speed -
 /// which is the "further" half of the ask.
@@ -6698,6 +6751,60 @@ pub fn spear_charge_mult(held_s: f32) -> f32 {
         / (SPEAR_CHARGE_FULL_S - SPEAR_CHARGE_MIN_S))
         .clamp(0.0, 1.0);
     SPEAR_CHARGE_V0_MIN + (SPEAR_CHARGE_V0_MAX - SPEAR_CHARGE_V0_MIN) * t
+}
+
+/// §11 (owner): did a hold of `held_s` earn the maximum-charge bonus?
+///
+/// A predicate rather than a curve, so "must not stack past that" is a
+/// property of the TYPE: a bool has nowhere to accumulate. Everything
+/// downstream reads this one answer, so the HUD cannot promise a bonus
+/// the throw will not deliver.
+pub fn spear_max_charged(held_s: f32) -> bool {
+    held_s >= SPEAR_MAX_CHARGE_S
+}
+
+/// Everything a hold of `held_s` buys, resolved in ONE place.
+///
+/// The velocity half and the damage half are read from the same
+/// argument at the same instant and returned together, because a spear
+/// charge that is written into two fields on two lines is a spear
+/// charge that will eventually be updated on one of them. This is the
+/// only thing that writes `spear_power` / `spear_max_charge`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpearCharge {
+    /// Multiplier on the weapon's base launch velocity.
+    pub v0_mult: f32,
+    /// Whether this throw earned the 7 s maximum-charge damage bonus.
+    pub max_charge: bool,
+}
+
+pub fn spear_charge(held_s: f32) -> SpearCharge {
+    SpearCharge {
+        v0_mult: spear_charge_mult(held_s),
+        max_charge: spear_max_charged(held_s),
+    }
+}
+
+/// §owner JAVELIN POSE: which half of the throw a spear is in.
+///
+/// The owner wants the charge to read as a real overhead javelin wind,
+/// and the wind and the plant are two different bodies - one raising
+/// and settling, one uncoiling. They are driven by two different clocks
+/// that count in opposite directions, so "which one is running" is a
+/// question worth answering once, here, rather than in every client
+/// system that poses an arm. See `TdmSim::spear_stance_of`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpearStance {
+    /// At rest, or not holding a spear at all.
+    Carried,
+    /// WINDING - the trigger is held and the charge is accruing. This
+    /// is the overhead raise: arm up, spear high and angled
+    /// forward-down, opposite arm out, weight into a wide stance.
+    Winding,
+    /// PLANTING - the charge is released and `SPEAR_WINDUP_S` of throw
+    /// is running. Plant, hips, whip. Committal, and deliberately
+    /// visible to enemies: this is the telegraph §D asks be preserved.
+    Planting,
 }
 
 // ---- §4 (Brief III): aerial flips ----------------------------------------
@@ -7216,6 +7323,7 @@ impl TdmSim {
                     spear_wind_t: 0.0,
                     spear_charge_t: 0.0,
                     spear_power: 1.0,
+                    spear_max_charge: false,
                     spear_aim: [0.0, 0.0, 1.0],
                     spear_v0: 0.0,
                     bow_draw_t: 0.0,
@@ -7851,6 +7959,11 @@ impl TdmSim {
                     f.bow_draw_t = 0.0;
                     f.spear_charge_t = 0.0;
                     f.spear_power = 1.0;
+                    // §11: and the seven-second bonus, on the same
+                    // argument. `spear_wind_t` is cleared two lines up,
+                    // so a windup interrupted by death never reaches
+                    // the release loop that would have spent the flag.
+                    f.spear_max_charge = false;
                     f.ability_cd = 0.0;
                     f.last_ability_at = -100.0;
                     f.last_dmg_at = -100.0;
@@ -7909,12 +8022,25 @@ impl TdmSim {
 
         // §3: launch the wound-up spears (release aim, release charge)
         for i in spear_releases {
+            // §11: the flag is spent whether or not the throw survives
+            // to leave the hand. Taking it before the `alive()` guard
+            // is the point - a thrower killed mid-windup must not wake
+            // up next life with a seven-second bonus still owed to him.
+            let max_charge = std::mem::take(&mut self.fighters[i].spear_max_charge);
             if !self.fighters[i].alive() {
                 continue;
             }
             let (aim, v0) = (self.fighters[i].spear_aim, self.fighters[i].spear_v0);
             let o = self.muzzle_origin(i);
-            let dmg = gun(GunKind::Spear).projectile.unwrap().1;
+            // §11 (owner): THE MAXIMUM CHARGE BONUS lands here, on
+            // damage, once. `SPEAR_MAX_CHARGE_DMG` is a multiplier
+            // applied to the weapon's own table value rather than a
+            // flat addition, so it stays +10% through any retune of the
+            // spear's damage - and it cannot compound, because there is
+            // exactly one place that reads the flag and it clears it in
+            // the same expression.
+            let dmg = gun(GunKind::Spear).projectile.unwrap().1
+                * if max_charge { SPEAR_MAX_CHARGE_DMG } else { 1.0 };
             self.spawn_missile(o, aim, v0, dmg, i, true); // always a spear
         }
 
@@ -9611,6 +9737,14 @@ impl TdmSim {
         f.bow_draw_t = 0.0;
         f.spear_charge_t = 0.0;
         f.spear_power = 1.0;
+        // §11: NOT `spear_max_charge`. A spear already in its windup
+        // keeps the bonus it paid for even if the thrower swaps weapons
+        // mid-plant, because that throw is already committed - the ammo
+        // is spent, `spear_v0` is baked, and the release loop will fire
+        // it regardless of what is in the hands by then. Clearing it
+        // here would silently downgrade a throw the player has already
+        // finished making. The charge CLOCKS above are the opposite
+        // case: nothing is committed yet, so they go.
     }
 
     fn try_reload(&mut self, i: usize) {
@@ -9927,6 +10061,90 @@ impl TdmSim {
         self.fighters[i].turret_burst_i
     }
 
+    // ---- §owner JAVELIN POSE: what the client needs to pose the wind --
+
+    /// **THE accessor for which spear phase a fighter is in.**
+    ///
+    /// The owner wants the charge to read as a real overhead javelin
+    /// wind - arm raised, spear held high and angled forward-down, the
+    /// opposite arm out for balance, weight into a wide stance - and
+    /// that is a POSE, which is presentation and therefore not mine.
+    /// What is mine is publishing the authoritative phase to pose
+    /// against, so the client is never guessing from a raw timer which
+    /// half of the throw it is drawing.
+    ///
+    /// Named on the same pattern as `turret_mode_of` and
+    /// `mech_jump_phase_of`, for the same reason: the client asking a
+    /// question about the sim should ask the sim, and the fields behind
+    /// it can then move without every readout moving with them.
+    pub fn spear_stance_of(&self, i: usize) -> SpearStance {
+        let f = &self.fighters[i];
+        if f.gun != GunKind::Spear || !f.alive() {
+            return SpearStance::Carried;
+        }
+        // the PLANT wins the tie. Once `spear_wind_t` is live the throw
+        // is committed - ammo spent, velocity baked - and a client that
+        // resolved the other way would keep drawing a raised arm over a
+        // spear that has already left it.
+        if f.spear_wind_t > 0.0 {
+            SpearStance::Planting
+        } else if f.spear_charge_t > 0.0 {
+            SpearStance::Winding
+        } else {
+            SpearStance::Carried
+        }
+    }
+
+    /// How far into the WIND, 0..1 - the raise, the hold, the settle.
+    /// 0 in every other stance.
+    ///
+    /// This is the number the arm angle and the stance width ride on.
+    /// It reaches 1.0 at `SPEAR_CHARGE_FULL_S` and STAYS there through
+    /// the extra four seconds a max-charge hold costs, because the
+    /// power stops there too - a pose that kept opening past full would
+    /// promise the player something the throw does not deliver. Ask
+    /// `spear_max_charged_of` for the seven-second tell instead.
+    pub fn spear_wind_frac_of(&self, i: usize) -> f32 {
+        if self.spear_stance_of(i) != SpearStance::Winding {
+            return 0.0;
+        }
+        (self.fighters[i].spear_charge_t / SPEAR_CHARGE_FULL_S).clamp(0.0, 1.0)
+    }
+
+    /// How far into the PLANT, 0..1 - 0 the instant the trigger is
+    /// released, 1 as the spear leaves the hand. 0 in every other
+    /// stance.
+    ///
+    /// `spear_wind_t` counts DOWN, which is why every client that has
+    /// wanted this number has written `1.0 - spear_wind_t /
+    /// SPEAR_WINDUP_S` by hand - currently in three separate places
+    /// over there, each of them a copy of a sim constant living on the
+    /// wrong side of the boundary. One accessor, one direction of
+    /// travel, and `SPEAR_WINDUP_S` stops being client arithmetic.
+    pub fn spear_plant_frac_of(&self, i: usize) -> f32 {
+        if self.spear_stance_of(i) != SpearStance::Planting {
+            return 0.0;
+        }
+        (1.0 - self.fighters[i].spear_wind_t / SPEAR_WINDUP_S).clamp(0.0, 1.0)
+    }
+
+    /// §11: is THIS throw a maximum-charge throw (+10% damage)?
+    ///
+    /// True from the seven-second mark while winding, and still true
+    /// through the plant of a throw that earned it - so the client can
+    /// tell the player they have it *and* keep telling them while the
+    /// spear is on its way out of the hand. One question, correct in
+    /// both phases, rather than a HUD that reads the clock in one and
+    /// the flag in the other and disagrees with itself on the boundary.
+    pub fn spear_max_charged_of(&self, i: usize) -> bool {
+        let f = &self.fighters[i];
+        match self.spear_stance_of(i) {
+            SpearStance::Winding => spear_max_charged(f.spear_charge_t),
+            SpearStance::Planting => f.spear_max_charge,
+            SpearStance::Carried => false,
+        }
+    }
+
     /// §owner (this pass): **THE accessor for how hard the hull mount
     /// under `i`'s trigger is about to kick** - degrees per second of
     /// punch velocity, mode growth and brace damp already in it, 0 for
@@ -10137,9 +10355,18 @@ impl TdmSim {
         if held {
             let f = &mut self.fighters[i];
             f.spear_charge_t += DT;
-            // cap the wind so the field cannot grow without bound on a
-            // held trigger; past full there is simply nothing more to win
-            f.spear_charge_t = f.spear_charge_t.min(SPEAR_CHARGE_FULL_S * 2.0);
+            // §11 (owner): cap the wind at the LAST instant that buys
+            // anything - the 7 s maximum-charge mark. Past it there is
+            // nothing left to win, so the clock has nowhere to grow and
+            // "must not stack past that" holds at the source rather
+            // than at each reader.
+            //
+            // Was `SPEAR_CHARGE_FULL_S * 2.0`, which is 6.0 s under the
+            // new 3 s window and would have made the 7 s bonus
+            // unreachable - the cap and the reward have to be sized
+            // against each other, which is why the cap now NAMES the
+            // reward instead of deriving a number from an unrelated one.
+            f.spear_charge_t = f.spear_charge_t.min(SPEAR_MAX_CHARGE_S);
             return;
         }
         // release edge
@@ -10148,8 +10375,16 @@ impl TdmSim {
         if held_s <= 0.0 {
             return; // was not winding
         }
-        // even a flick throws - a dead trigger would feel broken
-        self.fighters[i].spear_power = spear_charge_mult(held_s);
+        // even a flick throws - a dead trigger would feel broken.
+        // §11: velocity AND the maximum-charge flag come out of one
+        // resolution of one number, so they cannot describe two
+        // different throws.
+        let charge = spear_charge(held_s);
+        {
+            let f = &mut self.fighters[i];
+            f.spear_power = charge.v0_mult;
+            f.spear_max_charge = charge.max_charge;
+        }
         // §9 (owner): `false` here is now inert. It used to be the whole
         // hip/pre-aim story and it told a lie - the player's wound throw
         // ALWAYS arrived with ads=false, so the "settled throw flies at
@@ -10163,7 +10398,14 @@ impl TdmSim {
             // here and only cleared by a throw that actually starts, so
             // a swallowed release used to BANK the wind - the next
             // flick, minutes and a death later, left the hand at 1.30x.
-            self.fighters[i].spear_power = 1.0;
+            let f = &mut self.fighters[i];
+            f.spear_power = 1.0;
+            // ...and the seven-second bonus with it. This one would
+            // have been worse than the velocity bank: no later release
+            // rewrites it (`try_fire` only ever CLEARS it), so a
+            // refused max-charge release would have gifted the bonus to
+            // every subsequent throw for the rest of the life.
+            f.spear_max_charge = false;
         }
     }
 
@@ -10428,6 +10670,17 @@ impl TdmSim {
                 // §owner JAVELIN: the wind-up's own charge, set by the
                 // player's hold at release. Bots leave it at 1.0, so
                 // their throws are bit-identical to the old behaviour.
+                //
+                // §11: `spear_max_charge` deliberately does NOT get
+                // folded in here and cleared the way `spear_power` is.
+                // It is a DAMAGE fact and the damage is not decided
+                // until the spear actually leaves the hand, 0.4 s of
+                // windup later - so it rides through the wind beside
+                // `spear_aim` and `spear_v0`, and is consumed there.
+                // Neither this line nor that one asks who `i` is: the
+                // bonus is keyed on a field, not on `i == self.player`,
+                // which is the shape the last player/bot divergence in
+                // this very function had.
                 let v0 = v0 * self.fighters[i].spear_power;
                 // §3: the throw WINDS UP — plant, hips, whip. The spear
                 // leaves the hand SPEAR_WINDUP_S later, on the aim held
@@ -18568,9 +18821,21 @@ mod tests {
             "even an instant release throws; a dead trigger reads as broken"
         );
 
-        // and the real throw through the real path
+        // and the real throw through the real path.
+        //
+        // §10 (owner): the fixture was `range()` - a LIVE 1v1 - and it
+        // worked only because a full wind used to be 0.85 s, comfortably
+        // inside the 1.2 s of spawn protection. At the spec's 3 s window
+        // the thrower is exposed for 3.4 s and the bot simply killed him
+        // mid-plant ("DIAG: the thrower died mid-wind at 359 ticks"), so
+        // no javelin ever left the hand and the measurement below was
+        // never taken. Stale SETUP, not a stale assertion: what is being
+        // measured here is a curve, and a live enemy was never part of
+        // it. `empty_range` is the fixture that exists for exactly this.
+        // The liveness assertion stays in permanently so the next person
+        // who lengthens the wind gets a diagnosis instead of a mystery.
         let launch = |hold_ticks: usize| -> f32 {
-            let mut s = range(0x7A1E);
+            let mut s = empty_range(0x7A1E);
             s.fighters[0].gun = GunKind::Spear;
             s.fighters[0].inventory[2] = GunKind::Spear;
             s.fighters[0].active = 2;
@@ -18587,6 +18852,10 @@ mod tests {
             for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
                 s.step(PlayerCmd { aim: [0.0, 0.0, 1.0], ..Default::default() });
             }
+            assert!(
+                s.fighters[0].alive(),
+                "DIAG: the thrower died mid-wind at {hold_ticks} ticks"
+            );
             let m = s.missiles.first().expect("the javelin must leave the hand");
             (m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]).sqrt()
         };
@@ -21511,6 +21780,419 @@ mod tests {
             s.fighters[0].spear_charge_t, 0.0,
             "a staggered thrower kept winding through the stagger"
         );
+    }
+
+    /// §9/§10 (owner) — THE CHARGE CURVE: "a smooth progression with no
+    /// visible steps", 0-1 s low / 1-2 s medium / 2-3 s high, "~3 s
+    /// reaches normal maximum", and holding longer must not keep
+    /// growing power.
+    ///
+    /// **The arithmetic, so nobody has to trust the shape.** The curve
+    /// is linear on [`SPEAR_CHARGE_MIN_S`, `SPEAR_CHARGE_FULL_S`] =
+    /// [0.12, 3.00] over the velocity band 0.90..1.30:
+    ///
+    /// ```text
+    ///   t(h)    = (h - 0.12) / 2.88            clamped to 0..1
+    ///   mult(h) = 0.90 + 0.40 * t(h)
+    ///   mult(0) = 0.900   mult(1) = 1.0222
+    ///   mult(2) = 1.1611  mult(3) = 1.300
+    /// ```
+    ///
+    /// so the spec's three named seconds deliver 30.6% / 34.7% / 34.7%
+    /// of the whole band - near-equal thirds, which is what "low,
+    /// medium, high" asks for. Nothing below is written as those
+    /// figures: the shares are MEASURED off the live function and held
+    /// against each other, so a retune of the band or the window keeps
+    /// this test meaningful and a STEP in the curve breaks it.
+    ///
+    /// FAILS on the pre-change code, which finished at 0.85 s: the
+    /// second and third bands were flat.
+    #[test]
+    fn the_spear_charge_curve_is_smooth_and_finishes_at_three_seconds() {
+        let band = SPEAR_CHARGE_V0_MAX - SPEAR_CHARGE_V0_MIN;
+        assert!(band > 0.0, "the fixture assumes a band that opens upward");
+
+        // (1) ~3 s IS the maximum, and nothing past it grows.
+        assert!(
+            (SPEAR_CHARGE_FULL_S - 3.0).abs() < 0.25,
+            "the spec says the wind reaches its normal maximum at about \
+             three seconds; this window is {SPEAR_CHARGE_FULL_S}s"
+        );
+        let at_full = spear_charge_mult(SPEAR_CHARGE_FULL_S);
+        assert!(
+            (at_full - SPEAR_CHARGE_V0_MAX).abs() < 1e-6,
+            "the full mark must BE the maximum, got {at_full}"
+        );
+        for longer in [SPEAR_CHARGE_FULL_S + 0.5, SPEAR_MAX_CHARGE_S, 30.0] {
+            assert!(
+                (spear_charge_mult(longer) - at_full).abs() < 1e-6,
+                "holding to {longer}s kept growing the power: {} vs {at_full}",
+                spear_charge_mult(longer)
+            );
+        }
+
+        // (2) MONOTONE and STEP-FREE across the whole window, sampled
+        // every millisecond. "No visible steps" as a bound on the
+        // biggest jump any 50 ms of holding can deliver: a curve built
+        // out of three tiers would hand over a third of the band in one
+        // sample here, so the bound is set at a twentieth of it.
+        let step_ms = 0.001_f32;
+        let mut prev = spear_charge_mult(0.0);
+        let mut worst_50ms = 0.0_f32;
+        let mut h = 0.0_f32;
+        while h <= SPEAR_MAX_CHARGE_S {
+            let now = spear_charge_mult(h);
+            assert!(
+                now >= prev - 1e-7,
+                "the curve went DOWN at {h}s: {prev} -> {now}"
+            );
+            worst_50ms = worst_50ms.max(now - spear_charge_mult(h - 0.05));
+            prev = now;
+            h += step_ms;
+        }
+        assert!(
+            worst_50ms < band / 20.0,
+            "a 50 ms window handed over {worst_50ms} of a {band} band - that is \
+             a step, not a progression"
+        );
+
+        // (3) each of the spec's three seconds is a REAL band - none of
+        // them is dead time, and none of them is the whole curve.
+        let marks = [
+            spear_charge_mult(0.0),
+            spear_charge_mult(1.0),
+            spear_charge_mult(2.0),
+            spear_charge_mult(3.0),
+        ];
+        let shares: Vec<f32> = (0..3).map(|k| (marks[k + 1] - marks[k]) / band).collect();
+        for (k, sh) in shares.iter().enumerate() {
+            assert!(
+                *sh > 0.20,
+                "second {} of the wind delivers only {:.1}% of the band - the \
+                 spec asks for low, then medium, then high, not one live \
+                 second and two dead ones",
+                k + 1,
+                sh * 100.0
+            );
+        }
+        let total: f32 = shares.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 0.02,
+            "the three named seconds must be the WHOLE wind, got {:.1}%",
+            total * 100.0
+        );
+        // ...and low < medium < high in absolute terms
+        assert!(
+            marks[1] < marks[2] && marks[2] < marks[3],
+            "low/medium/high must be three different powers: {marks:?}"
+        );
+    }
+
+    /// §11 (owner) — THE MAXIMUM CHARGE BONUS: "~7 s grants a maximum
+    /// charge bonus of +10% damage... must not stack past that."
+    ///
+    /// Three separate claims, because the spec makes three: the bonus
+    /// exists at 7 s, it is +10% on DAMAGE and not on speed (velocity
+    /// stopped at 3 s and must stay stopped), and it does not stack.
+    ///
+    /// The damage figures are read off the missiles that actually
+    /// spawn, not off the constant, so a bonus that never reached the
+    /// spear would fail here.
+    ///
+    /// FAILS on the pre-change code: the wind clock was capped at
+    /// `SPEAR_CHARGE_FULL_S * 2.0`, so seven seconds was unreachable
+    /// and no bonus existed to find.
+    #[test]
+    fn seven_seconds_buys_ten_percent_damage_once_and_never_twice() {
+        // the pure predicate first, against hand-picked instants
+        assert!(!spear_max_charged(SPEAR_MAX_CHARGE_S - 0.01), "just short: no bonus");
+        assert!(spear_max_charged(SPEAR_MAX_CHARGE_S), "at the mark: bonus");
+        assert!(spear_max_charged(SPEAR_MAX_CHARGE_S + 100.0), "past it: still bonus");
+        assert!(
+            (SPEAR_MAX_CHARGE_DMG - 1.10).abs() < 1e-6,
+            "the spec says +10%, this is {SPEAR_MAX_CHARGE_DMG}"
+        );
+        assert!(
+            SPEAR_MAX_CHARGE_S > SPEAR_CHARGE_FULL_S,
+            "the bonus has to cost MORE than a normal maximum or it is free"
+        );
+
+        // and the spear that actually leaves the hand
+        let throw = |hold_s: f32| -> (f32, f32) {
+            let mut s = armed_with(0x4820, GunKind::Spear);
+            let aim = [0.0, 0.0, 1.0];
+            for _ in 0..(hold_s / DT) as usize {
+                s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+            }
+            for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
+                s.step(PlayerCmd { aim, ..Default::default() });
+            }
+            assert!(
+                s.fighters[0].alive(),
+                "the thrower must survive a {hold_s}s hold to be measured"
+            );
+            let m = s
+                .missiles
+                .first()
+                .unwrap_or_else(|| panic!("no javelin left the hand after {hold_s}s"));
+            let speed =
+                (m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]).sqrt();
+            (speed, m.damage)
+        };
+
+        // The reference is a hold a little PAST full, which is
+        // unambiguously at the ceiling. A hold of exactly
+        // `SPEAR_CHARGE_FULL_S` arrives one tick's worth short - 360
+        // additions of DT land on 2.9999995, not 3.0 - and lands at
+        // 53.577 m/s against the ceiling's 53.625, a gap of 0.089%.
+        // That is quantisation, not a rule, and pinning the reference
+        // to it would make this test a float-accumulation detector.
+        let (v_ceiling, d_ceiling) = throw(SPEAR_CHARGE_FULL_S + 0.5);
+        let (v_full, d_full) = throw(SPEAR_CHARGE_FULL_S);
+        let (v_mid, d_mid) = throw((SPEAR_CHARGE_FULL_S + SPEAR_MAX_CHARGE_S) * 0.5);
+        // ...and the same one-tick quantisation on the way in: holding
+        // for exactly `(SPEAR_MAX_CHARGE_S / DT) as usize` = 840 ticks
+        // leaves the clock at 6.9999995, a hair SHORT of the mark, and
+        // the bonus correctly does not fire. Where the boundary lands
+        // is proved by driving to the condition in
+        // `the_javelin_wind_publishes_a_stance_and_two_fractions`,
+        // which measures it at 7 s +/- 50 ms. This case is about what
+        // an unambiguously maximum throw carries.
+        let (v_max, d_max) = throw(SPEAR_MAX_CHARGE_S + 0.1);
+        let (v_over, d_over) = throw(SPEAR_MAX_CHARGE_S + 3.0);
+
+        // three seconds of real holding DOES reach the ceiling, to
+        // within that one tick of quantisation
+        assert!(
+            (v_full - v_ceiling).abs() < v_ceiling * 0.005,
+            "a three-second hold must arrive at the maximum: {v_full} vs {v_ceiling}"
+        );
+        // velocity: identical at every one of them. The spec's "holding
+        // longer must not keep growing power" is measured on the spear.
+        for (label, v) in [("mid", v_mid), ("max", v_max), ("over", v_over)] {
+            assert!(
+                (v - v_ceiling).abs() < 1e-3,
+                "{label}: holding past full changed the launch speed, \
+                 {v_ceiling} -> {v}"
+            );
+        }
+        assert!(
+            (d_ceiling - d_full).abs() < 1e-4,
+            "half a second past full is not seven seconds: {d_full} -> {d_ceiling}"
+        );
+        // damage: unchanged until the mark, then exactly +10%, then
+        // FLAT - three seconds more buys nothing further
+        assert!(
+            (d_mid - d_full).abs() < 1e-4,
+            "five seconds is not seven: {d_full} -> {d_mid}"
+        );
+        let ratio = d_max / d_full;
+        assert!(
+            (ratio - SPEAR_MAX_CHARGE_DMG).abs() < 1e-4,
+            "the maximum-charge throw landed x{ratio}, not x{SPEAR_MAX_CHARGE_DMG}"
+        );
+        assert!(
+            (d_over - d_max).abs() < 1e-4,
+            "the bonus STACKED past the mark: {d_max} -> {d_over}"
+        );
+    }
+
+    /// §11 (owner) — "release at any time after max is allowed", and the
+    /// wind clock itself refuses to grow past the last instant that
+    /// buys anything.
+    ///
+    /// FAILS on the pre-change code, where the cap was
+    /// `SPEAR_CHARGE_FULL_S * 2.0` - 1.7 s then, 6.0 s under the new
+    /// window, and either way not 7.
+    #[test]
+    fn the_wind_clock_stops_at_the_last_instant_that_buys_anything() {
+        let mut s = armed_with(0x4821, GunKind::Spear);
+        let aim = [0.0, 0.0, 1.0];
+        for _ in 0..(20.0 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        let held = s.fighters[0].spear_charge_t;
+        assert!(
+            (held - SPEAR_MAX_CHARGE_S).abs() < DT * 1.5,
+            "twenty seconds of trigger left the clock at {held}, not \
+             {SPEAR_MAX_CHARGE_S}"
+        );
+        assert!(
+            spear_max_charged(held),
+            "the cap must sit AT the reward, not below it - a clock that \
+             stopped short would make the bonus unreachable, which is exactly \
+             what the old `FULL * 2.0` cap did"
+        );
+        // and it still throws: release after max is allowed
+        for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        assert_eq!(s.missiles.len(), 1, "a released max-charge throw must fly");
+    }
+
+    /// §11 + the project's most repeated defect — the maximum-charge
+    /// bonus is keyed on a FIELD, never on `i == self.player`.
+    ///
+    /// The last divergence in this exact function was a spear speed
+    /// halving gated on the player index, so the player's spear and a
+    /// bot's spear were two different weapons wearing one name. This
+    /// drives a BOT and the PLAYER through `try_fire` with identical
+    /// charge state and demands identical spears out the far end.
+    ///
+    /// Bots do not currently wind (they fire through `try_fire`
+    /// directly, leaving `spear_power` at 1.0 and `spear_max_charge`
+    /// false) - which is a behaviour difference the spec's own
+    /// risk/reward framing requires, since a bot pays none of the seven
+    /// seconds. What must NOT differ is the rule: a bot handed a
+    /// charged throw has to get exactly the charged throw.
+    #[test]
+    fn the_charge_rules_do_not_know_who_is_holding_the_spear() {
+        let spear_for = |i: usize, charged: bool| -> (f32, f32) {
+            let mut s = empty_range(0x4822);
+            // BOTH fighters identically equipped, so the only variable
+            // is which index is throwing
+            for k in [0usize, 1] {
+                let f = &mut s.fighters[k];
+                f.pos = [0.0, 0.0, k as f32 * 4.0];
+                f.inventory[2] = GunKind::Spear;
+                f.active = 2;
+                f.gun = GunKind::Spear;
+                f.ammo = 1;
+                f.reserve = 5;
+                f.protect_t = 0.0;
+                f.spear_power = if charged { SPEAR_CHARGE_V0_MAX } else { 1.0 };
+                f.spear_max_charge = charged;
+            }
+            // straight UP, so neither thrower's spear can find a body
+            // on the way and change what there is to measure
+            let aim = [0.0, 1.0, 0.0];
+            assert!(s.try_fire(i, aim, false), "the throw must start");
+            // Run the plant out on THE SAME AIM the throw started on.
+            // `PlayerCmd::default()` carries `aim: [0,0,0]`, and the
+            // player - unlike a bot - re-tracks `spear_aim` from the
+            // live command every tick of the plant (sim.rs, "the
+            // thrower TRACKS the target through the plant"). So the
+            // default command normalised a zero vector into the
+            // player's throw and launched it at 0.18 m/s against the
+            // bot's 41. That was the FIXTURE feeding two different
+            // inputs, not the sim reading the fighter index.
+            for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
+                s.step(PlayerCmd { aim, ..Default::default() });
+            }
+            let m = s.missiles.first().expect("the javelin must leave the hand");
+            let speed =
+                (m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2]).sqrt();
+            (speed, m.damage)
+        };
+        for charged in [false, true] {
+            let (pv, pd) = spear_for(0, charged); // index 0 is the player
+            let (bv, bd) = spear_for(1, charged); // index 1 is a bot
+            assert!(
+                (pv - bv).abs() < 1e-3 && (pd - bd).abs() < 1e-4,
+                "charged={charged}: the player threw ({pv}, {pd}) and a bot threw \
+                 ({bv}, {bd}) - a rule in this path is reading the fighter index"
+            );
+        }
+        // ...and the charged throw really is different from the flat
+        // one, or the equality above is vacuous
+        let (fv, fd) = spear_for(0, false);
+        let (cv, cd) = spear_for(0, true);
+        assert!(
+            cv > fv * 1.2 && cd > fd * 1.05,
+            "the fixture must actually exercise a charge: flat ({fv}, {fd}) vs \
+             charged ({cv}, {cd})"
+        );
+    }
+
+    /// §owner JAVELIN POSE — the sim half of the overhead wind: the
+    /// stance and the two fractions the client poses against.
+    ///
+    /// A NEW accessor cannot fail on pre-change code (it did not
+    /// compile there), so this is a contract test, not a repro. What it
+    /// does guard is the property the pose depends on: the two phases
+    /// are mutually exclusive, both fractions run 0 -> 1 in the
+    /// direction a body moves, and neither leaks into a stance it does
+    /// not belong to.
+    #[test]
+    fn the_javelin_wind_publishes_a_stance_and_two_fractions() {
+        let mut s = armed_with(0x4823, GunKind::Spear);
+        let aim = [0.0, 0.0, 1.0];
+        assert_eq!(s.spear_stance_of(0), SpearStance::Carried, "at rest");
+        assert_eq!(s.spear_wind_frac_of(0), 0.0);
+        assert_eq!(s.spear_plant_frac_of(0), 0.0);
+        assert!(!s.spear_max_charged_of(0));
+
+        // WINDING: the fraction climbs, and reaches exactly 1 at full
+        let mut prev = 0.0_f32;
+        let mut saw_partial = false;
+        for k in 0..(SPEAR_CHARGE_FULL_S / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+            let w = s.spear_wind_frac_of(0);
+            assert_eq!(s.spear_stance_of(0), SpearStance::Winding, "tick {k}");
+            assert_eq!(s.spear_plant_frac_of(0), 0.0, "the plant must not run yet");
+            assert!(w >= prev - 1e-6 && w <= 1.0, "wind frac {prev} -> {w}");
+            if w > 0.2 && w < 0.8 {
+                saw_partial = true;
+            }
+            prev = w;
+        }
+        assert!(saw_partial, "the wind must pass THROUGH its middle, not jump");
+        assert!((prev - 1.0).abs() < 0.01, "full wind must read 1.0, got {prev}");
+        assert!(!s.spear_max_charged_of(0), "three seconds is not seven");
+
+        // ...and it holds at 1.0 through the extra four seconds rather
+        // than opening further, while the max-charge tell flips on.
+        // Driven to the CONDITION with a generous tick budget rather
+        // than to an arithmetic tick count: the budget is what makes a
+        // stalled clock a failure with a number attached instead of an
+        // off-by-a-tick argument.
+        let mut extra = 0usize;
+        while !s.spear_max_charged_of(0) && extra < (12.0 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+            assert!(
+                (s.spear_wind_frac_of(0) - 1.0).abs() < 1e-6,
+                "the pose must not keep opening past full (frac {})",
+                s.spear_wind_frac_of(0)
+            );
+            extra += 1;
+        }
+        assert!(
+            s.spear_max_charged_of(0),
+            "twelve seconds of trigger never reached the seven-second tell - \
+             the clock stalled at {}s",
+            s.fighters[0].spear_charge_t
+        );
+        let total = SPEAR_CHARGE_FULL_S + extra as f32 * DT;
+        assert!(
+            (total - SPEAR_MAX_CHARGE_S).abs() < 0.05,
+            "the tell must fire AT seven seconds of holding, fired at {total}s"
+        );
+
+        // PLANTING: release, and the two swap over cleanly
+        s.step(PlayerCmd { aim, ..Default::default() });
+        assert_eq!(s.spear_stance_of(0), SpearStance::Planting);
+        assert_eq!(s.spear_wind_frac_of(0), 0.0, "the wind is over");
+        assert!(s.spear_max_charged_of(0), "the earned bonus survives the plant");
+        let mut prev = s.spear_plant_frac_of(0);
+        let mut ticks = 0;
+        while s.spear_stance_of(0) == SpearStance::Planting {
+            s.step(PlayerCmd { aim, ..Default::default() });
+            let p = s.spear_plant_frac_of(0);
+            if s.spear_stance_of(0) == SpearStance::Planting {
+                assert!(p >= prev - 1e-6, "the plant must run forwards: {prev} -> {p}");
+                prev = p;
+            }
+            ticks += 1;
+            assert!(ticks < 200, "the plant never ended");
+        }
+        assert!(
+            (ticks as f32 * DT - SPEAR_WINDUP_S).abs() < 0.05,
+            "the plant must last SPEAR_WINDUP_S, measured {}s",
+            ticks as f32 * DT
+        );
+        assert!(prev > 0.8, "the plant fraction must reach the end, got {prev}");
+        assert_eq!(s.spear_stance_of(0), SpearStance::Carried, "and back to rest");
+        assert_eq!(s.missiles.len(), 1, "the spear left the hand");
     }
 
     /// §2 (Brief V): the spear THRUST connects for 70 frontal — and a
