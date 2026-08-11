@@ -74,6 +74,16 @@ const FLASH_CAP: usize = 48;
 /// How far the flare reaches down-range, as a multiple of its width.
 const FLASH_LENGTH_RATIO: f32 = 2.3;
 
+/// The first-person copy is drawn this much larger than the world one.
+///
+/// Not a fudge and not a second table: the viewmodel is a DIFFERENT
+/// camera with a fixed narrow FOV, and its gun is a 0.9-scale model
+/// carried 30 cm from the lens and heavily foreshortened. At true size
+/// the AK's flare came back about twelve pixels across in the capture -
+/// present, correct, and beneath notice. The world flare is untouched,
+/// so third person still measures the real thing.
+const FP_FLARE_SCALE: f32 = 1.7;
+
 /// One live flare. `life` is what `ttl` started at, so the decay curve
 /// does not have to know the constant.
 #[derive(Component)]
@@ -281,28 +291,36 @@ fn build_flare(
                 .id(),
         );
     }
-    // the disc ACROSS the bore - the head-on view, which is what the
-    // shooter's own first-person camera is looking at
+    // A small disc ACROSS the bore, to fill the middle of the star.
+    //
+    // It was `size * 1.7` on the first capture and that was the one
+    // thing wrong with the frame: from directly behind the gun - which
+    // is exactly where the shooter's own camera is - a square quad
+    // facing down-range presents its flat back face and the flash read
+    // as an orange CARD stuck to the barrel. Small enough to be a
+    // highlight inside the core rather than a shape of its own.
     kids.push(
         commands
             .spawn((
                 Mesh3d(fx.blade.clone()),
-                MeshMaterial3d(fx.halo.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.35)
-                    .with_scale(Vec3::new(size * 1.7, size * 1.7, 1.0)),
+                MeshMaterial3d(fx.hot.clone()),
+                Transform::from_xyz(0.0, 0.0, len * 0.15)
+                    .with_scale(Vec3::new(size * 0.9, size * 0.9, 1.0)),
             ))
             .id(),
     );
-    // the hot core at the bore itself
+    // the hot core at the bore itself - a round body has no silhouette
+    // to give away, which is what carries the effect from the one angle
+    // no flat quad survives
     kids.push(
         commands
             .spawn((
                 Mesh3d(fx.core.clone()),
                 MeshMaterial3d(fx.hot.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.18).with_scale(Vec3::new(
-                    size * 0.9,
-                    size * 0.9,
-                    len * 0.8,
+                Transform::from_xyz(0.0, 0.0, len * 0.22).with_scale(Vec3::new(
+                    size * 1.15,
+                    size * 1.15,
+                    len * 0.9,
                 )),
             ))
             .id(),
@@ -405,7 +423,7 @@ fn spawn_muzzle_flashes(
                         &fx,
                         vm.weapons[slot],
                         tip,
-                        size,
+                        size * FP_FLARE_SCALE,
                         roll + 1.0,
                         Some(VIEWMODEL_LAYER),
                         false,
