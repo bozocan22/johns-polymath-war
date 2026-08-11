@@ -62,6 +62,10 @@ mod frontend;
 mod map_look;
 /// §gallery: the training range's mech exhibit. Self-contained; wired in
 /// with this line and one `add_plugins` below.
+/// BRIEF XII's HUD. Same two-line wiring as `branding` and `mech_recoil`:
+/// this line, and one `add_plugins` below. It owns its own layer and
+/// reads the sim; it writes nothing back.
+mod hud;
 mod mech_lineup;
 mod mech_recoil;
 mod menu_ui;
@@ -2107,20 +2111,59 @@ const fn hpr(
 /// glowing tip is how you read a robot's facing at distance, and a helmet
 /// that dropped it would be strictly harder to fight against than the
 /// others. Cosmetic choices must not change how legible a target is.
+/// §owner HAT GRAPHICS: the mast used to leave its own tip behind.
+///
+/// The mast spanned y 1.155..1.285 and the glowing tip sat at 1.30, so on
+/// the two low-profile helmets there was clear air between a thin dark
+/// stalk and a bright cube - and what the turntable actually showed was a
+/// red block floating unattached beside the head. The tip now overlaps the
+/// mast, and the mast starts low enough (1.12) to emerge from inside the
+/// crown on every entry in the library rather than balancing on top of it.
 const HELMET_ANTENNA: [HelmetPiece; 2] = [
-    hp(Prim::Cyl, HelmetMat::Steel, (0.13, 1.22, 0.0), (0.015, 0.13, 0.015)),
-    hp(Prim::Cube, HelmetMat::Glow, (0.13, 1.30, 0.0), (0.035, 0.035, 0.035)),
+    hp(Prim::Cyl, HelmetMat::Steel, (0.14, 1.20, 0.0), (0.018, 0.16, 0.018)),
+    hp(Prim::Cube, HelmetMat::Glow, (0.14, 1.285, 0.0), (0.038, 0.045, 0.038)),
 ];
 
-/// FIELD CAP - the original. FROZEN: these three pieces carry the exact
-/// positions and scales the body had before the library existed, so index
-/// 0 is a byte-for-byte continuation of the old look and nobody's saved
-/// profile silently changes shape. `helmet_zero_is_the_frozen_field_cap`
-/// pins them.
-const HELM_CAP: [HelmetPiece; 3] = [
-    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.02, 0.0), (0.72, 0.028, 0.72)),
-    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.11, 0.0), (0.36, 0.18, 0.36)),
-    hp(Prim::Cyl, HelmetMat::Gunmetal, (0.0, 1.045, 0.0), (0.365, 0.04, 0.365)),
+/// FIELD CAP - the default, and the one in every capture of this game.
+///
+/// §owner HAT GRAPHICS: "better graphics for hats that it created". This
+/// entry was the reason for the complaint. It was a 0.72-wide flat disc
+/// sitting on a 0.40-wide head - a brim nearly twice the width of the
+/// skull under it, 28mm thick, perfectly circular, with a squat cylinder
+/// on top. The turntable frame in `menus/02-soldier-page.png` reads it as
+/// a lampshade or a sombrero. It was never a cap.
+///
+/// What makes a field cap a field cap is that the brim is NOT a brim: it
+/// is a PEAK, short at the sides and long at the front, and the crown is
+/// domed rather than cylindrical. So:
+///
+///   - the disc becomes an ELLIPSE, 0.52 across by 0.58 deep, pushed
+///     forward and pitched down. Narrower than the old brim on the axis
+///     the silhouette is read on, longer on the axis that says "peak".
+///   - the crown loses 15% of its width and gains a domed cap, which is
+///     what stops it reading as a tin.
+///   - a badge on the front, because the peak now gives it somewhere to
+///     be.
+///
+/// THE FREEZE IS DELIBERATELY BROKEN, and that is a real cost: this used
+/// to be pinned byte-for-byte so that a saved profile written before the
+/// helmet field existed (which loads as index 0) could not silently change
+/// shape. It now does change shape. That is the whole point - the owner
+/// asked for it to change - and the freeze was protecting a look nobody
+/// wanted against an argument nobody had made. `helmet_zero_is_the_frozen_
+/// field_cap` is updated to pin the NEW values, so the guarantee that
+/// index 0 cannot drift by accident survives; only this one deliberate
+/// move spends it.
+const HELM_CAP: [HelmetPiece; 5] = [
+    // the PEAK - elliptical, forward, angled down over the eyes
+    hpr(Prim::Cyl, HelmetMat::Tint, (0.0, 1.018, -0.09), (0.52, 0.030, 0.58), -0.10, 0.0),
+    // the BAND
+    hp(Prim::Cyl, HelmetMat::Gunmetal, (0.0, 1.045, 0.0), (0.385, 0.045, 0.385)),
+    // the CROWN, and the dome that rounds it off
+    hp(Prim::Cyl, HelmetMat::Tint, (0.0, 1.115, 0.0), (0.355, 0.16, 0.355)),
+    hp(Prim::Ball, HelmetMat::Tint, (0.0, 1.185, 0.0), (0.355, 0.12, 0.355)),
+    // the BADGE on the front of the band
+    hp(Prim::Cube, HelmetMat::Gunmetal, (0.0, 1.048, -0.175), (0.085, 0.050, 0.035)),
 ];
 
 /// VISOR - a closed combat helm. Round dome, a brow slab that overhangs
@@ -8481,6 +8524,7 @@ fn main() {
         // own meshes, materials and Startup, and `main.rs` is the most
         // contended file in this repo.
         .add_plugins(muzzle_flash::MuzzleFlashPlugin)
+        .add_plugins(hud::HudPlugin)
         .init_resource::<IntroPage>()
         .init_resource::<IntroEntryPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
@@ -29032,17 +29076,76 @@ mod forge_tests {
     fn helmet_zero_is_the_frozen_field_cap() {
         let (name, pieces) = HELMET_CHOICES[0];
         assert_eq!(name, "FIELD CAP");
-        assert_eq!(pieces.len(), 3, "brim, crown, band");
-        assert_eq!(pieces[0].pos, (0.0, 1.02, 0.0));
-        assert_eq!(pieces[0].scale, (0.72, 0.028, 0.72));
-        assert_eq!(pieces[1].pos, (0.0, 1.11, 0.0));
-        assert_eq!(pieces[1].scale, (0.36, 0.18, 0.36));
-        assert_eq!(pieces[2].pos, (0.0, 1.045, 0.0));
-        assert_eq!(pieces[2].scale, (0.365, 0.04, 0.365));
-        // the antenna is shared, and its two pieces are equally frozen
-        assert_eq!(HELMET_ANTENNA[0].pos, (0.13, 1.22, 0.0));
-        assert_eq!(HELMET_ANTENNA[1].pos, (0.13, 1.30, 0.0));
-        assert_eq!(HELMET_ANTENNA[1].scale, (0.035, 0.035, 0.035));
+        assert_eq!(pieces.len(), 5, "peak, band, crown, dome, badge");
+        // peak, band, crown, dome, badge - the §owner HAT GRAPHICS shapes
+        assert_eq!(pieces[0].pos, (0.0, 1.018, -0.09));
+        assert_eq!(pieces[0].scale, (0.52, 0.030, 0.58));
+        assert_eq!(pieces[1].pos, (0.0, 1.045, 0.0));
+        assert_eq!(pieces[1].scale, (0.385, 0.045, 0.385));
+        assert_eq!(pieces[2].pos, (0.0, 1.115, 0.0));
+        assert_eq!(pieces[2].scale, (0.355, 0.16, 0.355));
+        // the antenna is shared, and its two pieces are equally pinned
+        assert_eq!(HELMET_ANTENNA[0].pos, (0.14, 1.20, 0.0));
+        assert_eq!(HELMET_ANTENNA[1].pos, (0.14, 1.285, 0.0));
+        assert_eq!(HELMET_ANTENNA[1].scale, (0.038, 0.045, 0.038));
+    }
+
+    /// §owner HAT GRAPHICS: the two defects the old FIELD CAP had, stated
+    /// as properties rather than as a list of numbers - so they cannot
+    /// come back under different values.
+    ///
+    /// MUTATION-CHECKED: both assertions fail on the pre-change geometry.
+    /// The old brim was `(0.72, 0.028, 0.72)` - perfectly circular, so the
+    /// peak test fails on it; and 0.72 against a 0.44 head is 1.64x, so the
+    /// width test fails on it too.
+    #[test]
+    fn the_field_cap_wears_a_peak_and_not_a_sombrero() {
+        let (_, pieces) = HELMET_CHOICES[0];
+        let peak = pieces[0];
+        // 1. A PEAK, not a brim: longer front-to-back than side-to-side.
+        assert!(
+            peak.scale.2 > peak.scale.0 * 1.05,
+            "the field cap's peak is {:.2} wide by {:.2} deep - a circular \
+             disc on a head is a sombrero, not a cap",
+            peak.scale.0,
+            peak.scale.2
+        );
+        // 2. It must not dwarf the skull. The widest head shell in the
+        // library is VISOR's dome; a cap wider than about 1.25x that reads
+        // as headwear the soldier is standing under.
+        let head = HELM_VISOR[0].scale.0;
+        assert!(
+            peak.scale.0 <= head * 1.25,
+            "the cap is {:.2} across against a {:.2} head ({:.2}x)",
+            peak.scale.0,
+            head,
+            peak.scale.0 / head
+        );
+    }
+
+    /// §owner HAT GRAPHICS: the antenna's lit tip must TOUCH its mast.
+    ///
+    /// It did not. The mast topped out at y 1.285 and the tip's box ran
+    /// 1.2825..1.3175, which is a 2.5mm overlap on a 15mm-thin stalk -
+    /// close enough to pass a naive "do the numbers meet" reading and far
+    /// enough that the render showed a bright block floating free beside
+    /// the head. Asserting a real overlap, not a touch, is the difference.
+    ///
+    /// MUTATION-CHECKED: fails on the old (0.13, 1.30) tip over the old
+    /// (0.13, 1.22, 0.13-tall) mast.
+    #[test]
+    fn the_antenna_tip_sits_on_its_mast() {
+        let (mast, tip) = (HELMET_ANTENNA[0], HELMET_ANTENNA[1]);
+        let mast_top = mast.pos.1 + mast.scale.1 * 0.5;
+        let tip_bot = tip.pos.1 - tip.scale.1 * 0.5;
+        let overlap = mast_top - tip_bot;
+        assert!(
+            overlap >= 0.01,
+            "the antenna tip overlaps its mast by only {overlap:.4} - it \
+             reads as a lamp hanging in mid air"
+        );
+        // and they must share an axis, or the tip is beside the mast
+        assert_eq!((mast.pos.0, mast.pos.2), (tip.pos.0, tip.pos.2));
     }
 
     /// §8.1: the array type on `ForgePreview::helmets` is `N_HELMETS`, not

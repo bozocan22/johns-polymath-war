@@ -67,18 +67,63 @@ def cat(*tracks, gap=0.0):
 def scaled(t, k):
     return [s * k for s in t]
 
+def delay(t, sec, k):
+    """t, delayed by `sec` and scaled by `k` — one echo tap."""
+    return [0.0] * n_samples(sec) + scaled(t, k)
 
-# gunshots: noise crack + low thump, sized to the gun (v6: the full
-# roster gets ITS OWN voice — pitch, length, and punch per weapon)
-write("shot_handgun.wav", mix(noise_burst(0.10, 0.020, 0.45), scaled(sine(0.09, 400, 0.03), 0.5)))
-write("shot_glock.wav", mix(noise_burst(0.09, 0.018, 0.50), scaled(sine(0.08, 430, 0.025), 0.45)))
-write("shot_deagle.wav", mix(noise_burst(0.18, 0.038, 0.30), scaled(sine(0.16, 170, 0.06), 0.85)))
-write("shot_mp5.wav", mix(noise_burst(0.07, 0.014, 0.48), scaled(sine(0.06, 380, 0.02), 0.4)))
-write("shot_shotgun.wav", mix(noise_burst(0.24, 0.055, 0.22), scaled(sine(0.20, 140, 0.08), 0.9)))
-write("shot_ak.wav", mix(noise_burst(0.12, 0.026, 0.34), scaled(sine(0.10, 220, 0.045), 0.7)))
-write("shot_rifle.wav", mix(noise_burst(0.13, 0.028, 0.38), scaled(sine(0.11, 260, 0.04), 0.6)))
-write("shot_mg.wav", mix(noise_burst(0.08, 0.016, 0.42), scaled(sine(0.07, 300, 0.025), 0.5)))
-write("shot_sniper.wav", mix(noise_burst(0.38, 0.075, 0.20), scaled(sine(0.30, 110, 0.10), 0.9)))
+
+# gunshots, v7: every shot is now FOUR layers, not two, because a real
+# gunshot is not "noise over a thump" — it is a supersonic CRACK (the
+# transient that makes a gun sound dangerous rather than percussive),
+# a BODY (the muzzle blast, what v6 had as its noise_burst), a SUB
+# thump (the mechanical/pressure impulse, low sine, scaled to the
+# cartridge), and — for anything with real barrel length — a TAIL: the
+# blast bouncing back off the environment a beat later. Handguns stay
+# tight and dry (a pistol crack dies where it's born); rifles get one
+# slap-back; the sniper's magnum round gets two, spaced further out,
+# because that's the "boom...boom" a big rifle makes across open ground.
+def crack(sec, lp, tau=0.006):
+    """The supersonic transient: near-full-spectrum noise, gone almost
+    instantly. This is the layer v6 never had, and it's the difference
+    between a shot sounding dangerous and sounding like a cap gun."""
+    return noise_burst(sec, tau, lp)
+
+def gunshot(crack_lp, body_sec, body_tau, body_lp, sub_f, sub_tau, sub_gain,
+            tail=None):
+    layers = [
+        scaled(crack(0.03, crack_lp), 1.0),
+        noise_burst(body_sec, body_tau, body_lp),
+        scaled(sine(body_sec * 0.85, sub_f, sub_tau), sub_gain),
+    ]
+    if tail:
+        for gap, k, f in tail:
+            layers.append(delay(scaled(sine(0.22, f, 0.09), k), gap, 1.0))
+            layers.append(delay(scaled(noise_burst(0.10, 0.03, 0.30), k * 0.6), gap, 1.0))
+    return mix(*layers)
+
+# handguns: tight and dry — the crack is bright and short, the body is
+# small, no tail (a pistol round doesn't carry across a field). Bigger
+# calibre = lower sub thump + longer body, same dry ending.
+write("shot_handgun.wav", gunshot(0.85, 0.09, 0.017, 0.42, 380, 0.03, 0.55))
+write("shot_glock.wav", gunshot(0.90, 0.08, 0.015, 0.46, 420, 0.025, 0.5))
+write("shot_deagle.wav", gunshot(0.70, 0.16, 0.032, 0.28, 150, 0.075, 1.0))
+write("shot_mp5.wav", gunshot(0.95, 0.06, 0.012, 0.44, 360, 0.018, 0.45))
+write("shot_shotgun.wav", gunshot(0.55, 0.22, 0.050, 0.20, 130, 0.10, 1.05))
+# rifles: sharper crack than any handgun (supersonic round), a punchier
+# mid body, and one slap-back off the ground/terrain a beat later — the
+# thing that makes automatic rifle fire sound like it's happening
+# somewhere rather than in a booth. AK is dirtier/lower than the M4.
+write("shot_ak.wav", gunshot(0.65, 0.11, 0.024, 0.32, 200, 0.055, 0.85,
+                              tail=[(0.075, 0.18, 130)]))
+write("shot_rifle.wav", gunshot(0.75, 0.11, 0.022, 0.36, 250, 0.045, 0.7,
+                                 tail=[(0.070, 0.16, 160)]))
+write("shot_mg.wav", gunshot(0.80, 0.07, 0.014, 0.40, 290, 0.028, 0.55))
+# sniper: the sharpest crack of the roster (a magnum round breaking the
+# sound barrier close to the ear), the longest low body, and TWO
+# slap-backs spaced further apart than the rifles' — the "boom...boom"
+# of a big rifle report bouncing back across open ground.
+write("shot_sniper.wav", gunshot(0.60, 0.34, 0.070, 0.18, 100, 0.14, 1.15,
+                                  tail=[(0.11, 0.30, 90), (0.24, 0.14, 70)]))
 # dry fire: a tiny mechanical tick
 write("click.wav", cat(noise_burst(0.012, 0.003, 0.9), noise_burst(0.018, 0.004, 0.9), gap=0.03), gain=0.4)
 # a round slapping the shield plate: metallic clang with ring

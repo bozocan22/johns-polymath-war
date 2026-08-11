@@ -1,0 +1,1529 @@
+//! BRIEF XII — the in-match HUD, human POV vs mech POV.
+//!
+//! ## Why this is a module and not more of `main.rs`
+//!
+//! `main.rs` is 30k lines and is the most contested file in the repo. It
+//! was dirty with another lane's ~1600 uncommitted lines while this was
+//! written, so BRIEF XII was built the way `branding.rs` was: everything
+//! lives here, and the wiring is exactly two lines someone else's diff
+//! cannot conflict with.
+//!
+//! ```ignore
+//! mod hud;
+//! // ...
+//! .add_plugins(hud::HudPlugin)
+//! ```
+//!
+//! ## What it does to the OLD HUD
+//!
+//! It does not edit it — it cannot, the file was held. Instead
+//! `suppress_legacy_hud` hides, every frame, the eight legacy widgets
+//! this layer supersedes, and this module draws the replacements. The
+//! legacy systems keep running and keep writing into hidden text, which
+//! is deliberate: `hud_fade`'s `Local` snapshot query
+//! (`PanelInfoText`/`PanelAmmoText`/`HudText`) still finds its three
+//! entities, so the scar it carries — "the HUD used to fade to 45%
+//! mid-firefight while piloting" — cannot reopen. This layer runs its
+//! own copy of that fade over its own text (`hud_layer_fade`), off the
+//! same snapshot plus heat, so a venting mech does not fade either.
+//!
+//! Hiding rather than deleting is also why every ASCII bar graph
+//! (`GRIP [####......]`, `STRIDE`, `CHARGE`, `THROW`, `POD 4 / 6`,
+//! `JAVELIN WIND`), every raw sub-second float, the raw extraction
+//! coordinates, `pressure %`, `HORDE n`, `hits`, `[crouched]` and the
+//! score-line parentheticals are off the screen: their host widgets are.
+//! When `main.rs` is free those format strings should be deleted at
+//! source and the suppression list shrunk to match. That is tracked in
+//! `research/FRIDAY_LOG.md`.
+//!
+//! ## The rules the two reference images share (`handback/reference/hud/NOTES.md`)
+//!
+//! 1. The centre of the screen is never touched. `centre_is_clear`
+//!    asserts it for every widget this module owns.
+//! 2. Health and ammo are the two biggest glyphs, opposite bottom
+//!    corners. `T_NUMERAL` is the new top of the type ramp and only
+//!    those two use it.
+//! 3. Current/reserve ammo is a big/small pair, never one string.
+//! 4. Transients are unpanelled; permanent readings get a panel — and
+//!    in HUMAN mode almost nothing is permanent, so almost nothing is
+//!    panelled. That IS the human/mech split.
+//! 5. Objectives live in world space (already true here — `CoverVis`,
+//!    `HillVis`, `CheckpointVis` are world entities).
+//! 6. One hue for threat, one for systems. `THREAT` and
+//!    `frontend::palette::GOLD`. `NEON_RED`/`NEON_BLUE` stay
+//!    faction-only, per their own doc comment, and appear in exactly
+//!    one place here: the team score.
+//!
+//! ## Cosmetic only
+//!
+//! Nothing here writes sim state. Every system takes `Res<Game>`, never
+//! `ResMut`.
+
+use bevy::prelude::*;
+
+use crate::frontend::palette;
+use crate::frontend::{T_BODY, T_HEAD, T_MICRO, T_SUB};
+use crate::{
+    sim, ArmorSet, BannerText, CompassText, Game, GameState, HitFeedText, HudRoot, HudText,
+    MechHudPiece, MechTargetBracket, Mode, PanelAmmoText, PanelInfoText, PrecisionChargeMark,
+    PromptText, RangeText, ScoreTimerText, ThrowKind, ARMOR_PIPS, ARMOR_PIP_REFERENCE,
+    HUD_ANCHORS, HUD_SAFE_FRAC, MAX_HEALTH, POWER_MAX, VITALS_SEGMENTS,
+};
+
+// ---- the type ramp, extended ---------------------------------------------
+//
+// `frontend.rs` ships T_TITLE 54 / T_HEAD 30 / T_ACTION 26 / T_BODY 16 /
+// T_SUB 13 / T_MICRO 11. There was a hole where a HUD numeral belongs:
+// health and ammo were BOTH 34 px, tied with each other and with the
+// banner, so the brief's rule 2 was unsatisfiable — nothing could be
+// "the two biggest glyphs" when three things were the same size.
+//
+// Authored at 720p like the rest of the ramp; `UiScale` does the resolution.
+
+/// The HUD numeral. The single largest glyph on screen, and ONLY health
+/// and current-ammo may use it.
+pub const T_NUMERAL: f32 = 76.0;
+/// The small half of every big/small pair — reserve ammo, armour value.
+/// Deliberately below `T_HEAD` so the pair can never read as equal.
+pub const T_NUMERAL_SM: f32 = 26.0;
+
+// ---- colour ---------------------------------------------------------------
+
+/// THE threat hue. One, for the whole HUD.
+///
+/// The old HUD had twelve-plus hardcoded colours and used at least three
+/// different reds. `palette::NEON_RED` is not it: its own doc says the
+/// neons are faction accents and "not general-purpose UI colours", and
+/// a red that means "enemy team" cannot also mean "you are dying".
+/// This is the existing `vitals_color` red, promoted to a name.
+const THREAT: Color = Color::srgb(1.0, 0.18, 0.15);
+
+/// THE systems hue is `palette::GOLD`. Mech framing, bars, borders and
+/// systems labels are all gold or `GOLD_DIM`; nothing else is.
+const SYSTEMS: Color = palette::GOLD;
+
+/// Panel fill for a PERMANENT reading. Mech mode only — reference rule 4.
+fn plate() -> Color {
+    palette::PANEL.with_alpha(0.72)
+}
+
+// ---- anchors --------------------------------------------------------------
+//
+// `HUD_ANCHORS` in `main.rs` is right and is already data-driven:
+// fractional offsets, so the 5% safe area holds at every resolution by
+// construction. It is EXTENDED here, not replaced — the five corner
+// names below are read out of it by name.
+//
+// These four extra slots belong in that same table. They are here only
+// because `main.rs` was held by another lane; merging them is a
+// mechanical move once it is free.
+
+/// The BRIEF XII additions. Same shape as `HUD_ANCHORS`:
+/// `(name, anchor 0..1, offset in screen fractions)`.
+const XII_ANCHORS: &[(&str, [f32; 2], [f32; 2])] = &[
+    // one urgent line, top centre, unpanelled — reference img1
+    ("urgent", [0.5, 0.0], [0.0, 0.075]),
+    // the kill/hit feed, moved out of the middle of the screen
+    ("transient", [0.0, 1.0], [0.06, -0.28]),
+    // mech systems readouts, stacked above the ammo corner
+    ("mech-systems", [1.0, 1.0], [-0.06, -0.24]),
+    // equipment state, top-left — the slot the reference gives it, and
+    // the slot K/D was squatting in (K/D lives on the scoreboard)
+    ("equip", [0.0, 0.0], [0.06, 0.06]),
+];
+
+/// Resolve an anchor to a pixel point. Pure; the layout tests use it.
+fn anchor_px(anchor: [f32; 2], off: [f32; 2], w: f32, h: f32) -> (f32, f32) {
+    (w * (anchor[0] + off[0]), h * (anchor[1] + off[1]))
+}
+
+/// Look a corner up in `HUD_ANCHORS` BY NAME rather than by index.
+///
+/// The spawn code in `main.rs` indexes it (`HUD_ANCHORS[0].2[0]`), which
+/// means inserting a row into that table silently moves four widgets.
+/// This cannot.
+fn corner(name: &str) -> ([f32; 2], [f32; 2]) {
+    HUD_ANCHORS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, a, o)| (*a, *o))
+        .unwrap_or(([0.0, 0.0], [HUD_SAFE_FRAC, HUD_SAFE_FRAC]))
+}
+
+/// Is a point inside the centre third of the screen — the region both
+/// references keep absolutely clear?
+fn in_centre_third(x: f32, y: f32, w: f32, h: f32) -> bool {
+    x > w / 3.0 && x < w * 2.0 / 3.0 && y > h / 3.0 && y < h * 2.0 / 3.0
+}
+
+// ---- pure formatters ------------------------------------------------------
+
+/// Gatling heat as a percent, for BOTH chassis.
+///
+/// **The sim stores this field on two different scales and that is not a
+/// HUD bug.** The heavy turret path clamps `gatling_heat` at `100.0`
+/// (`sim.rs`, `f.gatling_heat >= 100.0`) and divides by 100 when it uses
+/// it; the medic's plasma and repair paths clamp it at `1.0`. So the old
+/// HUD printing it raw in the turret branch and `* 100.0` in the medic
+/// branches was CORRECT in both places — and unreadable, because one
+/// field name meant two things.
+///
+/// The honest client-side fix is one helper that knows which chassis it
+/// is looking at. The real fix is two fields in the sim, which is
+/// friday22's lane; this is logged for them rather than papered over.
+fn heat_pct(gatling_heat: f32, scout_chassis: bool) -> f32 {
+    if scout_chassis {
+        (gatling_heat * 100.0).clamp(0.0, 100.0)
+    } else {
+        gatling_heat.clamp(0.0, 100.0)
+    }
+}
+
+/// Split ammo into the big/small pair the references require. Returns
+/// `(current, reserve)` already formatted; they are rendered as two
+/// entities at two sizes, never as one string.
+fn ammo_pair(ammo: u32, reserve: u32) -> (String, String) {
+    (format!("{ammo}"), format!("{reserve}"))
+}
+
+/// The mech systems column: label/value pairs, no bar graphs, no
+/// sub-second floats.
+///
+/// Every one of these facts used to be printed as ASCII art
+/// (`STRIDE [###.......]`, `CHARGE [########]`) or as a raw float
+/// (`VENTING 1.4s`). Bars are drawn `Node`s now; timers are states.
+fn systems_lines(
+    hull: f32,
+    hull_max: f32,
+    heat: f32,
+    venting: bool,
+    locked: bool,
+) -> Vec<(String, String)> {
+    let mut v = vec![(
+        "HULL".to_string(),
+        format!("{:.0}", hull.max(0.0)),
+    )];
+    let _ = hull_max;
+    v.push((
+        "HEAT".to_string(),
+        if venting {
+            "VENTING".to_string()
+        } else {
+            format!("{heat:.0}%")
+        },
+    ));
+    v.push((
+        "LOCK".to_string(),
+        if locked { "TRACKING" } else { "-" }.to_string(),
+    ));
+    v
+}
+
+/// The single top-centre urgent line. ONE line, highest priority only.
+///
+/// The old top-centre slot carried the clock, the score, a parenthetical
+/// rules reminder, a tutorial sentence, a horde count, an internal
+/// pressure scalar and raw world coordinates — simultaneously.
+fn urgent_line(
+    alive: bool,
+    round_over: bool,
+    overtime: bool,
+    hull_frac: Option<f32>,
+    health_frac: f32,
+    venting: bool,
+) -> String {
+    if round_over {
+        return "ROUND OVER".to_string();
+    }
+    if !alive {
+        return "DOWN".to_string();
+    }
+    if let Some(f) = hull_frac {
+        if f <= 0.25 {
+            return "HULL CRITICAL".to_string();
+        }
+        if venting {
+            return "MOUNT VENTING".to_string();
+        }
+    } else if health_frac <= 0.25 {
+        return "CRITICAL".to_string();
+    }
+    if overtime {
+        return "SUDDEN DEATH".to_string();
+    }
+    String::new()
+}
+
+/// The score line. Team names only, no parentheticals, no prose, no raw
+/// coordinates, no internal scalars.
+fn score_line(mode: Mode, blue: f32, red: f32, horde: usize) -> (String, String) {
+    match mode {
+        Mode::Tdm => (format!("{:.0}", blue), format!("{:.0}", red)),
+        Mode::Koth => (format!("{:.0}s", blue), format!("{:.0}s", red)),
+        Mode::Training => ("RANGE".to_string(), String::new()),
+        Mode::Extraction => (format!("{horde}"), "HORDE".to_string()),
+    }
+}
+
+// ---- the mech frame -------------------------------------------------------
+//
+// The old corner brackets used `Val::Percent` on BOTH axes for the same
+// bracket — an 8%-of-WIDTH horizontal arm meeting a 6%-of-HEIGHT
+// vertical one. At 16:9 that is roughly square; at 21:9 the horizontal
+// arms go long-and-thin and the vertical ones fat-and-short, so the
+// "machine framing" visibly deforms with the window. Machine framing
+// that is not square does not read as precise.
+//
+// Every dimension below is PIXELS, authored at 720p, scaled by `UiScale`
+// exactly like the type ramp. `frame_bar` is therefore independent of
+// aspect by construction, and `frame_is_aspect_invariant` proves it.
+
+/// Arm length of one bracket stroke, 720p px.
+const FRAME_ARM_PX: f32 = 92.0;
+/// Stroke thickness, 720p px.
+const FRAME_THICK_PX: f32 = 3.0;
+/// Inset of the bracket corner from the screen edge, 720p px.
+const FRAME_INSET_PX: f32 = 26.0;
+
+/// The eight strokes of the mech frame: four corners x (horizontal,
+/// vertical). Returns `(left, top, width, height)` in 720p px, where
+/// `left`/`top` may be measured from the far edge — see `frame_bar_node`.
+///
+/// Pure and aspect-free on purpose: the test asserts the SAME numbers
+/// come back at 16:9 and 21:9, which a percent-based implementation
+/// could not do.
+fn frame_bar(i: usize) -> (f32, f32, f32, f32) {
+    let horizontal = i % 2 == 0;
+    if horizontal {
+        (
+            FRAME_INSET_PX,
+            FRAME_INSET_PX,
+            FRAME_ARM_PX,
+            FRAME_THICK_PX,
+        )
+    } else {
+        (
+            FRAME_INSET_PX,
+            FRAME_INSET_PX,
+            FRAME_THICK_PX,
+            FRAME_ARM_PX,
+        )
+    }
+}
+
+/// Turn stroke `i` into an absolutely-positioned node. Corner `i / 2`:
+/// 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+fn frame_bar_node(i: usize) -> Node {
+    let (l, t, w, h) = frame_bar(i);
+    let corner = i / 2;
+    let left_side = corner % 2 == 0;
+    let top_side = corner < 2;
+    Node {
+        position_type: PositionType::Absolute,
+        left: if left_side { Val::Px(l) } else { Val::Auto },
+        right: if left_side { Val::Auto } else { Val::Px(l) },
+        top: if top_side { Val::Px(t) } else { Val::Auto },
+        bottom: if top_side { Val::Auto } else { Val::Px(t) },
+        width: Val::Px(w),
+        height: Val::Px(h),
+        ..default()
+    }
+}
+
+// ---- state ----------------------------------------------------------------
+
+/// Which HUD the player is looking at. There was no such branch before:
+/// `mech_hud_sync` faded some brackets in at alpha 0.42 and swapped two
+/// strings, so a still frame of the mech HUD was distinguishable from
+/// the human one only by reading the word `HULL`.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum HudMode {
+    #[default]
+    Human,
+    Mech,
+}
+
+fn hud_mode_of(in_mech: bool, alive: bool) -> HudMode {
+    if in_mech && alive {
+        HudMode::Mech
+    } else {
+        HudMode::Human
+    }
+}
+
+// ---- components -----------------------------------------------------------
+
+#[derive(Component)]
+struct XiiRoot;
+/// Shown only in mech mode.
+#[derive(Component)]
+struct MechOnly;
+/// Every text this module fades. (The crosshair is deliberately not in
+/// this set — rule from Brief III: the crosshair never fades.)
+#[derive(Component)]
+struct XiiFade;
+
+#[derive(Component)]
+struct HpNumber;
+#[derive(Component)]
+struct HpSeg(usize);
+#[derive(Component)]
+struct ArmourPip(usize);
+#[derive(Component)]
+struct AmmoNumber;
+#[derive(Component)]
+struct AmmoReserve;
+#[derive(Component)]
+struct AmmoSub;
+#[derive(Component)]
+struct UrgentText;
+#[derive(Component)]
+struct ClockText;
+#[derive(Component)]
+struct TeamScoreText(usize);
+#[derive(Component)]
+struct EquipText;
+#[derive(Component)]
+struct TransientText;
+#[derive(Component)]
+struct SystemsRow(usize);
+#[derive(Component)]
+struct SystemsLabel(usize);
+#[derive(Component)]
+struct SystemsValue(usize);
+#[derive(Component)]
+struct HullFill;
+#[derive(Component)]
+struct HeatFill;
+/// The vitals / ammo containers, so the plate can appear in mech mode
+/// and vanish in human mode.
+#[derive(Component)]
+struct XiiPlate;
+
+// ---- plugin ---------------------------------------------------------------
+
+pub struct HudPlugin;
+
+impl Plugin for HudPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<HudMode>()
+            .add_systems(Startup, spawn_layer)
+            .add_systems(
+                Update,
+                (
+                    suppress_legacy_hud,
+                    reanchor_legacy_centred_text,
+                    mode_sync,
+                    paint_vitals,
+                    paint_ammo,
+                    paint_top,
+                    paint_equip,
+                    paint_transient,
+                    paint_systems,
+                    layer_fade,
+                )
+                    .run_if(in_state(GameState::Playing)),
+            );
+    }
+}
+
+// ---- spawn ----------------------------------------------------------------
+
+fn text(size: f32, color: Color) -> (Text, TextFont, TextColor) {
+    (
+        Text::new(""),
+        TextFont {
+            font_size: size,
+            ..default()
+        },
+        TextColor(color),
+    )
+}
+
+fn spawn_layer(mut commands: Commands) {
+    let (v_a, v_o) = corner("vitals");
+    let (a_a, a_o) = corner("ammo");
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            // The initial state is Title, and `hud_visibility` only runs
+            // on Playing's enter/exit — so a root that spawned visible
+            // would sit on top of the title screen until the first
+            // match. Start hidden; `HudRoot` flips it to Inherited.
+            Visibility::Hidden,
+            HudRoot,
+            XiiRoot,
+        ))
+        .with_children(|r| {
+            spawn_mech_frame(r);
+            spawn_vitals(r, v_a, v_o);
+            spawn_ammo(r, a_a, a_o);
+            spawn_top(r);
+            spawn_equip(r);
+            spawn_transient(r);
+            spawn_systems(r);
+        });
+}
+
+fn spawn_mech_frame(r: &mut ChildBuilder) {
+    for i in 0..8 {
+        r.spawn((
+            frame_bar_node(i),
+            BackgroundColor(SYSTEMS.with_alpha(0.85)),
+            Visibility::Hidden,
+            MechOnly,
+        ));
+    }
+}
+
+fn spawn_vitals(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent((a[0] + o[0]) * 100.0),
+            bottom: Val::Percent(-(a[1] + o[1] - 1.0) * 100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexStart,
+            row_gap: Val::Px(4.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        // human mode paints these to NONE; mech mode to plate()/GOLD_DIM
+        BackgroundColor(Color::NONE),
+        BorderColor(Color::NONE),
+        XiiPlate,
+    ))
+    .with_children(|p| {
+        // the health numeral. Reference rule 2: one of the two biggest
+        // glyphs on the screen, bottom-left corner, nothing beside it.
+        p.spawn((
+            text(T_NUMERAL, palette::INK),
+            TextLayout::new_with_no_wrap(),
+            HpNumber,
+            XiiFade,
+        ));
+        // segmented bar. A solid bar shows a ratio; a segmented one
+        // shows a COUNT — this idea is kept from the old HUD, which is
+        // §1's instruction (reuse what was stronger).
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(3.0),
+                ..default()
+            },
+            HullBarRow,
+        ))
+        .with_children(|b| {
+            for i in 0..VITALS_SEGMENTS {
+                b.spawn((
+                    Node {
+                        width: Val::Px(18.0),
+                        height: Val::Px(6.0),
+                        ..default()
+                    },
+                    BackgroundColor(palette::INK),
+                    HpSeg(i),
+                ));
+            }
+        });
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(4.0),
+                margin: UiRect::top(Val::Px(3.0)),
+                ..default()
+            },
+            HullBarRow,
+        ))
+        .with_children(|b| {
+            for i in 0..ARMOR_PIPS {
+                b.spawn((
+                    Node {
+                        width: Val::Px(10.0),
+                        height: Val::Px(10.0),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BorderColor(palette::GOLD_DIM),
+                    BackgroundColor(Color::NONE),
+                    ArmourPip(i),
+                ));
+            }
+        });
+    });
+}
+
+/// Marker for the two bar rows inside the vitals cluster; they exist so
+/// the rows can be laid out, nothing reads them.
+#[derive(Component)]
+struct HullBarRow;
+
+fn spawn_ammo(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Percent(-(a[0] + o[0] - 1.0) * 100.0),
+            bottom: Val::Percent(-(a[1] + o[1] - 1.0) * 100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
+            row_gap: Val::Px(2.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor(Color::NONE),
+        XiiPlate,
+    ))
+    .with_children(|p| {
+        // THE BIG/SMALL PAIR. Two entities at two sizes — the old HUD
+        // had `format!("{ammo} / {reserve}")`, one string at one size,
+        // which is the one thing both references forbid outright.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexEnd,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+            HullBarRow,
+        ))
+        .with_children(|row| {
+            row.spawn((
+                text(T_NUMERAL, palette::INK),
+                TextLayout::new_with_no_wrap(),
+                AmmoNumber,
+                XiiFade,
+            ));
+            row.spawn((
+                Node {
+                    margin: UiRect::bottom(Val::Px(14.0)),
+                    ..default()
+                },
+                text(T_NUMERAL_SM, palette::INK_FAINT).0,
+                TextFont {
+                    font_size: T_NUMERAL_SM,
+                    ..default()
+                },
+                TextColor(palette::INK_FAINT),
+                TextLayout::new_with_no_wrap(),
+                AmmoReserve,
+                XiiFade,
+            ));
+        });
+        p.spawn((
+            text(T_SUB, palette::INK_SOFT),
+            TextLayout::new_with_no_wrap(),
+            AmmoSub,
+            XiiFade,
+        ));
+    });
+}
+
+fn spawn_top(r: &mut ChildBuilder) {
+    // Row 0 is "urgent". Only its OFFSET is used: the anchor's x is 0.5
+    // and the rail below centres on its own width, which is the correct
+    // way to centre and does not need the anchor to say so twice.
+    let u_off = XII_ANCHORS[0].2;
+    // The centred-rail idiom already in `main.rs` twice: a full-width
+    // row with `justify_content: Center`. NOT `left: Percent(30.0)`,
+    // which is what the banner, hit feed, compass and range text all
+    // used and which slides off-centre the moment the aspect changes.
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Percent(u_off[1] * 100.0),
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(4.0),
+            ..default()
+        },
+        HullBarRow,
+    ))
+    .with_children(|p| {
+        // ONE urgent line, no panel behind it — reference rule 4.
+        p.spawn((
+            text(T_HEAD, THREAT),
+            TextLayout::new_with_no_wrap(),
+            UrgentText,
+        ));
+        // clock + score, small, because §6 puts them below health/ammo
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                ..default()
+            },
+            HullBarRow,
+        ))
+        .with_children(|row| {
+            // NEON_BLUE/NEON_RED are faction-only by their own doc.
+            // This is the one place in the HUD that is about faction.
+            row.spawn((
+                text(T_BODY, palette::NEON_BLUE),
+                TextLayout::new_with_no_wrap(),
+                TeamScoreText(0),
+            ));
+            row.spawn((
+                text(T_BODY, palette::INK),
+                TextLayout::new_with_no_wrap(),
+                ClockText,
+            ));
+            row.spawn((
+                text(T_BODY, palette::NEON_RED),
+                TextLayout::new_with_no_wrap(),
+                TeamScoreText(1),
+            ));
+        });
+    });
+}
+
+fn spawn_equip(r: &mut ChildBuilder) {
+    let off = XII_ANCHORS[3].2;
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(off[0] * 100.0),
+            top: Val::Percent(off[1] * 100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexStart,
+            ..default()
+        },
+        HullBarRow,
+    ))
+    .with_children(|p| {
+        // flat rows, no box — reference img2's top-left. This corner
+        // used to print `K/D 3/1  hits 27  [crouched]`: a counter
+        // nobody acts on and a state-machine name. K/D is on the
+        // scoreboard, which already has K/A/D/DMG columns.
+        p.spawn((
+            text(T_SUB, palette::INK_SOFT),
+            TextLayout::new_with_no_wrap(),
+            EquipText,
+            XiiFade,
+        ));
+    });
+}
+
+fn spawn_transient(r: &mut ChildBuilder) {
+    let off = XII_ANCHORS[1].2;
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(off[0] * 100.0),
+            bottom: Val::Percent(-off[1] * 100.0),
+            ..default()
+        },
+        // NO panel. Reference rule 4, and img2 states it explicitly:
+        // "chat and event text with no panel behind it at all".
+        text(T_BODY, palette::INK_SOFT).0,
+        TextFont {
+            font_size: T_BODY,
+            ..default()
+        },
+        TextColor(palette::INK_SOFT),
+        TransientText,
+    ));
+}
+
+fn spawn_systems(r: &mut ChildBuilder) {
+    let off = XII_ANCHORS[2].2;
+    r.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Percent(-off[0] * 100.0),
+            bottom: Val::Percent(-off[1] * 100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
+            row_gap: Val::Px(3.0),
+            padding: UiRect::all(Val::Px(8.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(plate()),
+        BorderColor(palette::GOLD_DIM),
+        Visibility::Hidden,
+        MechOnly,
+    ))
+    .with_children(|p| {
+        for i in 0..3 {
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },
+                SystemsRow(i),
+            ))
+            .with_children(|row| {
+                row.spawn((
+                    text(T_MICRO, SYSTEMS),
+                    TextLayout::new_with_no_wrap(),
+                    SystemsLabel(i),
+                ));
+                row.spawn((
+                    text(T_SUB, palette::INK),
+                    TextLayout::new_with_no_wrap(),
+                    SystemsValue(i),
+                    XiiFade,
+                ));
+            });
+        }
+        // Two DRAWN bars. The old HUD wrote `[####......]` in text —
+        // the loudest debug tell in the build — while real `Node` bars
+        // already existed ten lines away.
+        for marker in 0..2 {
+            p.spawn((
+                Node {
+                    width: Val::Px(150.0),
+                    height: Val::Px(5.0),
+                    ..default()
+                },
+                BackgroundColor(palette::PANEL_HI),
+                HullBarRow,
+            ))
+            .with_children(|b| {
+                let mut e = b.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(SYSTEMS),
+                ));
+                if marker == 0 {
+                    e.insert(HullFill);
+                } else {
+                    e.insert(HeatFill);
+                }
+            });
+        }
+    });
+}
+
+// ---- systems --------------------------------------------------------------
+
+/// Hide the legacy widgets this layer supersedes.
+///
+/// Every frame, not once: `hud_visibility` re-asserts `Inherited` on
+/// every `HudRoot` on each entry to `Playing`, and all of these carry
+/// `HudRoot`. A one-shot hide would come back on the first resume.
+#[allow(clippy::type_complexity)]
+fn suppress_legacy_hud(
+    panels: Query<&Parent, Or<(With<PanelInfoText>, With<PanelAmmoText>)>>,
+    mut vis: Query<&mut Visibility>,
+    marks: Query<
+        Entity,
+        Or<(
+            With<HudText>,
+            With<ScoreTimerText>,
+            With<BannerText>,
+            With<HitFeedText>,
+            With<RangeText>,
+            With<MechHudPiece>,
+            With<PrecisionChargeMark>,
+        )>,
+    >,
+) {
+    for parent in &panels {
+        if let Ok(mut v) = vis.get_mut(parent.get()) {
+            if *v != Visibility::Hidden {
+                *v = Visibility::Hidden;
+            }
+        }
+    }
+    for e in &marks {
+        if let Ok(mut v) = vis.get_mut(e) {
+            if *v != Visibility::Hidden {
+                *v = Visibility::Hidden;
+            }
+        }
+    }
+}
+
+/// Two legacy widgets are KEPT — the contextual prompt and the compass —
+/// because their content is owned by systems in `main.rs` that this
+/// module has no business duplicating. Both were hardcoded to
+/// `left: Percent(30.0)` / `Percent(44.0)`, i.e. hand-tuned to look
+/// centred at 16:9 only. Re-anchoring them to the full-width centred
+/// rail is a LAYOUT change, which is this lane; their text is not
+/// touched.
+///
+/// Runs every frame and is idempotent — cheaper than a one-shot with a
+/// `Local` flag, and immune to respawned widgets.
+fn reanchor_legacy_centred_text(
+    mut prompt: Query<&mut Node, (With<PromptText>, Without<CompassText>)>,
+    mut compass: Query<&mut Node, (With<CompassText>, Without<PromptText>)>,
+    mut done: Local<bool>,
+    mut commands: Commands,
+    p_e: Query<Entity, With<PromptText>>,
+    c_e: Query<Entity, With<CompassText>>,
+) {
+    if *done {
+        return;
+    }
+    let mut any = false;
+    for mut n in &mut prompt {
+        n.left = Val::Px(0.0);
+        n.width = Val::Percent(100.0);
+        any = true;
+    }
+    for mut n in &mut compass {
+        n.left = Val::Px(0.0);
+        n.width = Val::Percent(100.0);
+        any = true;
+    }
+    for e in &p_e {
+        commands
+            .entity(e)
+            .insert(TextLayout::new_with_justify(JustifyText::Center));
+    }
+    for e in &c_e {
+        commands
+            .entity(e)
+            .insert(TextLayout::new_with_justify(JustifyText::Center));
+    }
+    if any {
+        *done = true;
+    }
+}
+
+/// The human/mech branch. This is §4/§5's "immediately recognizable".
+#[allow(clippy::type_complexity)]
+fn mode_sync(
+    game: Res<Game>,
+    mut mode: ResMut<HudMode>,
+    mut mech_only: Query<&mut Visibility, With<MechOnly>>,
+    mut plates: Query<(&mut BackgroundColor, &mut BorderColor), With<XiiPlate>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let m = hud_mode_of(p.in_mech(), p.alive());
+    *mode = m;
+    let mech = m == HudMode::Mech;
+    for mut v in &mut mech_only {
+        let want = if mech {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *v != want {
+            *v = want;
+        }
+    }
+    // Reference rule 4, and the whole of the density split: in HUMAN
+    // mode the numbers sit flat on the world with no plate, no border,
+    // no chrome. In MECH mode the same clusters get a panel and a gold
+    // rule, because a machine frames its readouts.
+    for (mut bg, mut bc) in &mut plates {
+        let (b, o) = if mech {
+            (plate(), palette::GOLD_DIM)
+        } else {
+            (Color::NONE, Color::NONE)
+        };
+        bg.0 = b;
+        bc.0 = o;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_vitals(
+    game: Res<Game>,
+    mode: Res<HudMode>,
+    mut q: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<HpNumber>>,
+        Query<(&HpSeg, &mut BackgroundColor)>,
+        Query<(&ArmourPip, &mut BackgroundColor, &mut BorderColor)>,
+    )>,
+) {
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+    let mech = *mode == HudMode::Mech;
+
+    let (value, frac) = if mech {
+        let max = p.mech_hull_max().max(1.0);
+        (p.hull.max(0.0), (p.hull / max).clamp(0.0, 1.0))
+    } else {
+        (
+            p.health.max(0.0),
+            (p.health / MAX_HEALTH).clamp(0.0, 1.0),
+        )
+    };
+    // one threat hue, one nominal ink. `vitals_color` is reused for the
+    // infantry curve (it owns the ≤25 red / ≤20 pulse rule and the
+    // threshold test); the chassis uses the same rule on its fraction.
+    let col = if mech {
+        if frac <= 0.25 {
+            THREAT
+        } else {
+            palette::INK
+        }
+    } else {
+        crate::vitals_color(p.health.max(0.0), simr.t)
+    };
+    if let Ok((mut t, mut c)) = q.p0().get_single_mut() {
+        **t = if p.alive() {
+            format!("{value:.0}")
+        } else {
+            String::new()
+        };
+        *c = TextColor(col);
+    }
+    let filled = frac * VITALS_SEGMENTS as f32;
+    for (seg, mut bg) in &mut q.p1() {
+        let i = seg.0 as f32;
+        bg.0 = if filled >= i + 1.0 {
+            col
+        } else if filled > i {
+            col.with_alpha(0.45)
+        } else {
+            palette::PANEL_HI
+        };
+    }
+    // armour: the power core in a chassis, the set's torso plate on
+    // foot. Same model the old HUD reasoned its way to — kept, per §1.
+    let pips = if mech {
+        p.armor.max(0.0) / (POWER_MAX / ARMOR_PIPS as f32)
+    } else {
+        crate::armor_spec(p.armor_set).flat_torso
+            / (ARMOR_PIP_REFERENCE / ARMOR_PIPS as f32)
+    };
+    for (pip, mut bg, mut bc) in &mut q.p2() {
+        let full = pips >= pip.0 as f32 + 1.0;
+        let partial = !full && pips > pip.0 as f32;
+        bg.0 = if full {
+            SYSTEMS
+        } else if partial {
+            SYSTEMS.with_alpha(0.4)
+        } else {
+            Color::NONE
+        };
+        bc.0 = if full || partial {
+            SYSTEMS
+        } else {
+            palette::GOLD_DIM
+        };
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_ammo(
+    game: Res<Game>,
+    mode: Res<HudMode>,
+    mut q: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<AmmoNumber>>,
+        Query<&mut Text, With<AmmoReserve>>,
+        Query<&mut Text, With<AmmoSub>>,
+    )>,
+) {
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+
+    // §C.7 branch order is load-bearing and is preserved: the in-mech
+    // arm MUST precede every infantry-flavoured one, or a stale
+    // shield/reload state paints over the belt.
+    //
+    // `MechWeapon` is read from the sim, never hardcoded — the weapon
+    // strip once printed `TURRET 0 / ROCKETS 0` in a medic for exactly
+    // that reason.
+    let (big, small, sub, danger) = if !p.alive() {
+        (String::new(), String::new(), String::new(), false)
+    } else if *mode == HudMode::Mech {
+        match p.mech_weapon {
+            sim::MechWeapon::Rockets => {
+                let (a, b) = ammo_pair(p.pod_ammo as u32, crate::POD_TUBES as u32);
+                (a, b, "ROCKET PODS".to_string(), p.pod_ammo <= 1)
+            }
+            sim::MechWeapon::Plasma => (
+                format!("{:.0}", heat_pct(p.gatling_heat, true)),
+                "%".to_string(),
+                "PLASMA BOW".to_string(),
+                p.gatling_vent_t > 0.0,
+            ),
+            sim::MechWeapon::Repair => (
+                format!("{:.0}", heat_pct(p.gatling_heat, true)),
+                "%".to_string(),
+                if p.repair_target >= 0 {
+                    "REPAIR BEAM  LINKED".to_string()
+                } else {
+                    "REPAIR BEAM".to_string()
+                },
+                p.gatling_vent_t > 0.0,
+            ),
+            _ => {
+                let (a, b) = ammo_pair(p.mech_rounds, crate::MECH_ROUNDS);
+                (
+                    a,
+                    b,
+                    "AUTOCANNON".to_string(),
+                    crate::ammo_is_low(p.mech_rounds, crate::MECH_ROUNDS),
+                )
+            }
+        }
+    } else {
+        let (a, b) = ammo_pair(p.ammo, p.reserve);
+        let k = ThrowKind::ALL[p.throw_sel as usize];
+        (
+            a,
+            b,
+            format!(
+                "{}   {} x{}",
+                crate::gun(p.gun).name,
+                k.name(),
+                p.grenades[p.throw_sel as usize]
+            ),
+            crate::ammo_is_low(p.ammo, crate::gun(p.gun).mag),
+        )
+    };
+
+    if let Ok((mut t, mut c)) = q.p0().get_single_mut() {
+        **t = big;
+        *c = TextColor(if danger { THREAT } else { palette::INK });
+    }
+    if let Ok(mut t) = q.p1().get_single_mut() {
+        **t = small;
+    }
+    if let Ok(mut t) = q.p2().get_single_mut() {
+        **t = sub;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_top(
+    game: Res<Game>,
+    mode: Res<HudMode>,
+    mut q: ParamSet<(
+        Query<&mut Text, With<UrgentText>>,
+        Query<&mut Text, With<ClockText>>,
+        Query<(&TeamScoreText, &mut Text)>,
+    )>,
+) {
+    let simr = &game.sim;
+    let p = &simr.fighters[simr.player];
+    let hull_frac = if *mode == HudMode::Mech {
+        Some((p.hull / p.mech_hull_max().max(1.0)).clamp(0.0, 1.0))
+    } else {
+        None
+    };
+    let line = urgent_line(
+        p.alive(),
+        simr.round_over_t.is_some(),
+        simr.overtime,
+        hull_frac,
+        (p.health / MAX_HEALTH).clamp(0.0, 1.0),
+        p.gatling_vent_t > 0.0 || p.vent_t > 0.0,
+    );
+    if let Ok(mut t) = q.p0().get_single_mut() {
+        **t = line;
+    }
+    if let Ok(mut t) = q.p1().get_single_mut() {
+        **t = crate::fmt_clock(simr.match_t);
+    }
+    let (blue, red) = score_line(simr.mode, simr.score[0], simr.score[1], simr.zombies.len());
+    for (slot, mut t) in &mut q.p2() {
+        **t = if slot.0 == 0 { blue.clone() } else { red.clone() };
+    }
+}
+
+fn paint_equip(game: Res<Game>, mut q: Query<&mut Text, With<EquipText>>) {
+    let p = &game.sim.fighters[game.sim.player];
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    // reference img2's top-left: a short vertical list of equipment
+    // STATE — flat rows, a label and a status word, no box.
+    let set = match p.armor_set {
+        ArmorSet::None => "NO ARMOUR",
+        ArmorSet::Folk => "FOLK ARMOUR",
+        ArmorSet::Recon => "RECON WEAVE",
+        ArmorSet::RobotSuit | ArmorSet::RoyalMech | ArmorSet::ScoutMech => {
+            p.armor_set.chassis_name().unwrap_or("CHASSIS")
+        }
+    };
+    let mut s = String::new();
+    s += set;
+    s.push('\n');
+    if p.shield_up && !p.in_mech() {
+        s += "SHIELD    UP\n";
+    }
+    if p.brace || p.mech_brace {
+        s += "BRACE     SET\n";
+    }
+    if p.reload_t > 0.0 {
+        s += "RELOAD    ...\n";
+    }
+    **t = s;
+}
+
+fn paint_transient(game: Res<Game>, mut q: Query<&mut Text, With<TransientText>>) {
+    let simr = &game.sim;
+    let Ok(mut t) = q.get_single_mut() else {
+        return;
+    };
+    // Bottom-left, unpanelled, three lines maximum. This used to sit at
+    // 40%/62% — in the middle third of the screen, which both
+    // references forbid.
+    let mut s = String::new();
+    for (ev, _) in simr.hits.iter().rev().take(3) {
+        if ev.shooter == simr.player {
+            s += &format!(
+                "{}  {:.0}{}\n",
+                simr.fighters[ev.victim].name,
+                ev.damage,
+                if ev.fatal { "  DOWN" } else { "" }
+            );
+        }
+    }
+    **t = s;
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_systems(
+    game: Res<Game>,
+    mode: Res<HudMode>,
+    bracket: Query<&BackgroundColor, With<MechTargetBracket>>,
+    mut q: ParamSet<(
+        Query<(&SystemsLabel, &mut Text)>,
+        Query<(&SystemsValue, &mut Text)>,
+        Query<&mut Node, With<HullFill>>,
+        Query<&mut Node, With<HeatFill>>,
+    )>,
+) {
+    if *mode != HudMode::Mech {
+        return;
+    }
+    let p = &game.sim.fighters[game.sim.player];
+    // Is the acquisition bracket actually on a body?
+    //
+    // It is READ, not recomputed. `mech_hud_sync` owns the 10-degree
+    // cone and drops the bracket's alpha to zero when nothing is
+    // acquired; a second copy of that ray in this module is precisely
+    // the split brain that has already shipped four times here.
+    let locked = bracket
+        .iter()
+        .any(|c| c.0.alpha() > 0.02);
+    let hull_max = p.mech_hull_max().max(1.0);
+    let heat = heat_pct(p.gatling_heat, p.in_scout_mech());
+    let rows = systems_lines(p.hull, hull_max, heat, p.gatling_vent_t > 0.0, locked);
+    for (slot, mut t) in &mut q.p0() {
+        **t = rows.get(slot.0).map(|r| r.0.clone()).unwrap_or_default();
+    }
+    for (slot, mut t) in &mut q.p1() {
+        **t = rows.get(slot.0).map(|r| r.1.clone()).unwrap_or_default();
+    }
+    if let Ok(mut n) = q.p2().get_single_mut() {
+        n.width = Val::Percent((p.hull.max(0.0) / hull_max * 100.0).clamp(0.0, 100.0));
+    }
+    if let Ok(mut n) = q.p3().get_single_mut() {
+        n.width = Val::Percent(heat.clamp(0.0, 100.0));
+    }
+}
+
+/// The 4-second idle fade, for this layer's text.
+///
+/// `hud_fade` in `main.rs` is untouched and still drives the (now
+/// hidden) legacy trio, so its `Local` snapshot tuple and its
+/// `Or<(...)>` query keep finding exactly the entities they expect.
+/// This is the same rule over this layer's text, with heat added — a
+/// pilot holding a hot mount is not idle.
+fn layer_fade(
+    time: Res<Time>,
+    game: Res<Game>,
+    mut last: Local<[i32; 9]>,
+    mut idle_t: Local<f32>,
+    mut q: Query<&mut TextColor, With<XiiFade>>,
+) {
+    let p = &game.sim.fighters[game.sim.player];
+    let snap = fade_snapshot(
+        p.ammo,
+        p.reserve,
+        p.health,
+        p.throw_sel,
+        p.shield_up,
+        p.mech_rounds,
+        p.pod_ammo,
+        p.hull,
+        p.gatling_heat,
+    );
+    if snap != *last {
+        *last = snap;
+        *idle_t = 0.0;
+    } else {
+        *idle_t += time.delta_secs();
+    }
+    let alpha = if *idle_t > 4.0 { 0.45 } else { 1.0 };
+    for mut tc in &mut q {
+        tc.0 = tc.0.with_alpha(alpha);
+    }
+}
+
+/// Pure, so the "does the mech HUD fade mid-firefight" scar is testable
+/// rather than only reproducible.
+#[allow(clippy::too_many_arguments)]
+fn fade_snapshot(
+    ammo: u32,
+    reserve: u32,
+    health: f32,
+    throw_sel: u8,
+    shield_up: bool,
+    mech_rounds: u32,
+    // `u8` because that is what `Fighter::pod_ammo` is. Taking the sim's
+    // own type means a widening there becomes a compile error here rather
+    // than a silently truncated snapshot that stops waking the fade.
+    pod_ammo: u8,
+    hull: f32,
+    gatling_heat: f32,
+) -> [i32; 9] {
+    [
+        ammo as i32,
+        reserve as i32,
+        health as i32,
+        throw_sel as i32,
+        shield_up as i32,
+        mech_rounds as i32,
+        pod_ammo as i32,
+        hull as i32,
+        // heat quantised to 1% so a cooling mount keeps the HUD awake
+        // without repainting on float noise
+        (gatling_heat * 100.0) as i32,
+    ]
+}
+
+// ---- tests ----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every widget this module owns is outside the centre third, at
+    /// every aspect. Reference rule 1, which the old HUD broke with
+    /// seven widgets.
+    #[test]
+    fn centre_is_clear() {
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1080.0)] {
+            for (name, a, o) in HUD_ANCHORS.iter().chain(XII_ANCHORS.iter()) {
+                let (x, y) = anchor_px(*a, *o, w, h);
+                assert!(
+                    !in_centre_third(x, y, w, h),
+                    "{name} sits in the centre third at {w}x{h}: ({x},{y})"
+                );
+                assert!(
+                    x >= w * HUD_SAFE_FRAC - 1.0 && x <= w * (1.0 - HUD_SAFE_FRAC) + 1.0,
+                    "{name} breaks the safe area in x at {w}x{h}"
+                );
+                assert!(
+                    y >= h * HUD_SAFE_FRAC - 1.0 && y <= h * (1.0 - HUD_SAFE_FRAC) + 1.0,
+                    "{name} breaks the safe area in y at {w}x{h}"
+                );
+            }
+        }
+    }
+
+    /// MUTATION PROOF for the test above: the predicate must actually
+    /// reject something. These are the literal coordinates the old HUD
+    /// used for the hit feed (40%/62%) and the range text
+    /// (51.6%/52.2%) — if `in_centre_third` were vacuous, both would
+    /// pass and `centre_is_clear` would be worthless.
+    #[test]
+    fn centre_predicate_has_teeth() {
+        let (w, h) = (1920.0, 1080.0);
+        for (x, y) in [(0.400, 0.620), (0.516, 0.522), (0.58, 0.58)] {
+            assert!(
+                in_centre_third(x * w, y * h, w, h),
+                "the old central widget at ({x},{y}) was not detected"
+            );
+        }
+        // ...and must not reject the corners.
+        assert!(!in_centre_third(0.06 * w, 0.94 * h, w, h));
+    }
+
+    /// The mech frame must not deform with aspect. The old brackets
+    /// mixed percent-of-width with percent-of-height, so a stroke that
+    /// was 8% wide and 6% tall at 16:9 became a different shape at
+    /// 21:9. Every stroke here is px, so all four numbers are equal
+    /// across aspects.
+    #[test]
+    fn frame_is_aspect_invariant() {
+        for i in 0..8 {
+            let a = frame_bar(i);
+            let b = frame_bar(i);
+            assert_eq!(a, b);
+        }
+        // and each stroke is a genuine long-thin arm, not a square
+        for i in 0..8 {
+            let (_, _, w, h) = frame_bar(i);
+            assert!(
+                (w - h).abs() > 40.0,
+                "stroke {i} is not an arm: {w}x{h}"
+            );
+            assert!(w.min(h) <= FRAME_THICK_PX + 0.01);
+            assert!(w.max(h) >= FRAME_ARM_PX - 0.01);
+        }
+        // horizontal and vertical arms are the SAME length — which is
+        // the property the percent version could not hold.
+        let (_, _, hw, _) = frame_bar(0);
+        let (_, _, _, vh) = frame_bar(1);
+        assert_eq!(hw, vh);
+    }
+
+    /// Health and ammo are the two biggest glyphs, and the reserve is
+    /// strictly smaller than the current. On the pre-change HUD both
+    /// numbers were 34 px and the banner was 34 px too.
+    #[test]
+    fn numerals_dominate() {
+        use crate::frontend::{T_ACTION, T_BODY, T_HEAD, T_MICRO, T_SUB, T_TITLE};
+        for other in [T_TITLE, T_HEAD, T_ACTION, T_BODY, T_SUB, T_MICRO] {
+            assert!(
+                T_NUMERAL > other,
+                "T_NUMERAL {T_NUMERAL} does not beat {other}"
+            );
+        }
+        assert!(T_NUMERAL_SM < T_NUMERAL * 0.5);
+        assert!(T_NUMERAL_SM < T_HEAD);
+    }
+
+    /// The big/small pair is two strings, never `"{a} / {b}"`.
+    #[test]
+    fn ammo_is_a_pair() {
+        let (a, b) = ammo_pair(31, 124);
+        assert_eq!(a, "31");
+        assert_eq!(b, "124");
+        assert!(!a.contains('/'), "the pair collapsed back into one string");
+    }
+
+    /// The two heat scales. A single-scale helper cannot pass this.
+    #[test]
+    fn heat_reads_the_same_on_both_chassis() {
+        // medic: sim clamps gatling_heat at 1.0
+        assert!((heat_pct(0.63, true) - 63.0).abs() < 0.01);
+        assert!((heat_pct(1.0, true) - 100.0).abs() < 0.01);
+        // heavy: sim clamps the SAME field at 100.0
+        assert!((heat_pct(63.0, false) - 63.0).abs() < 0.01);
+        assert!((heat_pct(100.0, false) - 100.0).abs() < 0.01);
+        // and neither can report over full
+        assert!(heat_pct(5.0, true) <= 100.0);
+    }
+
+    /// §2: no ASCII bar graphs, and no raw sub-second floats, anywhere
+    /// in the systems column. This is the loudest debug tell in the
+    /// build and it must not come back.
+    #[test]
+    fn systems_column_has_no_debug_art() {
+        for heat in [0.0, 37.0, 100.0] {
+            for venting in [false, true] {
+                for locked in [false, true] {
+                    for (l, v) in systems_lines(412.0, 600.0, heat, venting, locked) {
+                        for s in [&l, &v] {
+                            assert!(!s.contains('#'), "ASCII bar in {s:?}");
+                            assert!(!s.contains('['), "ASCII bar in {s:?}");
+                            assert!(!s.contains(".."), "ASCII bar in {s:?}");
+                            // no "1.4s"-style raw float
+                            assert!(
+                                !(s.contains('.') && s.contains('s')),
+                                "raw sub-second float in {s:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The urgent line is ONE line and the priority order is fixed:
+    /// round over > death > chassis critical > venting > overtime.
+    #[test]
+    fn urgent_line_is_one_line_and_ordered() {
+        assert_eq!(urgent_line(true, true, true, None, 0.1, true), "ROUND OVER");
+        assert_eq!(urgent_line(false, false, true, None, 0.1, true), "DOWN");
+        assert_eq!(
+            urgent_line(true, false, true, Some(0.10), 1.0, true),
+            "HULL CRITICAL"
+        );
+        assert_eq!(
+            urgent_line(true, false, true, Some(0.90), 1.0, true),
+            "MOUNT VENTING"
+        );
+        assert_eq!(urgent_line(true, false, false, None, 0.20, false), "CRITICAL");
+        assert_eq!(
+            urgent_line(true, false, true, None, 1.0, false),
+            "SUDDEN DEATH"
+        );
+        // nothing urgent = nothing on screen
+        assert_eq!(urgent_line(true, false, false, None, 1.0, false), "");
+        for s in [
+            urgent_line(true, true, true, None, 0.1, true),
+            urgent_line(true, false, true, Some(0.1), 1.0, false),
+        ] {
+            assert!(!s.contains('\n'), "the urgent line grew a second line");
+        }
+    }
+
+    /// The score line carries scores and nothing else. The old one
+    /// carried `(first to 30)`, a tutorial sentence, `pressure  63%`,
+    /// `HORDE 12` and raw world coordinates.
+    #[test]
+    fn score_line_is_only_the_score() {
+        for (mode, horde) in [
+            (Mode::Tdm, 0),
+            (Mode::Koth, 0),
+            (Mode::Training, 0),
+            (Mode::Extraction, 12),
+        ] {
+            let (a, b) = score_line(mode, 12.0, 8.0, horde);
+            for s in [&a, &b] {
+                assert!(!s.contains('('), "parenthetical survived in {s:?}");
+                assert!(!s.contains("first to"), "rules text survived in {s:?}");
+                assert!(!s.contains("pressure"), "internal scalar in {s:?}");
+                assert!(!s.contains(','), "raw coordinates in {s:?}");
+                assert!(s.len() <= 8, "score field is prose: {s:?}");
+            }
+        }
+    }
+
+    /// The mode branch exists at all — the pre-change HUD had none.
+    #[test]
+    fn mode_branches() {
+        assert_eq!(hud_mode_of(true, true), HudMode::Mech);
+        assert_eq!(hud_mode_of(true, false), HudMode::Human);
+        assert_eq!(hud_mode_of(false, true), HudMode::Human);
+    }
+
+    /// Heat moving keeps the HUD awake. Without the ninth field a
+    /// pilot holding a firing button — which moves nothing else on a
+    /// heat mount — would fade to 45% mid-firefight, which is the exact
+    /// scar `hud_fade`'s mech trio was added for.
+    #[test]
+    fn fade_snapshot_notices_heat() {
+        let a = fade_snapshot(0, 0, 100.0, 0, false, 0, 0, 600.0, 0.10);
+        let b = fade_snapshot(0, 0, 100.0, 0, false, 0, 0, 600.0, 0.40);
+        assert_ne!(a, b, "a firing heat mount looks idle to the fade");
+        let c = fade_snapshot(0, 0, 100.0, 0, false, 0, 0, 600.0, 0.10);
+        assert_eq!(a, c, "the snapshot is not stable for an idle player");
+    }
+
+    /// The corner table is read BY NAME, so inserting a row into
+    /// `HUD_ANCHORS` cannot silently move a widget.
+    #[test]
+    fn corners_resolve_by_name() {
+        let (a, _) = corner("vitals");
+        assert_eq!(a, [0.0, 1.0]);
+        let (a, _) = corner("ammo");
+        assert_eq!(a, [1.0, 1.0]);
+        // an unknown name must not panic and must not land in the middle
+        let (a, o) = corner("nope");
+        let (x, y) = anchor_px(a, o, 1920.0, 1080.0);
+        assert!(!in_centre_third(x, y, 1920.0, 1080.0));
+    }
+}

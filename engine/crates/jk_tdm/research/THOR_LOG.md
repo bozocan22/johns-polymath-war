@@ -3000,3 +3000,253 @@ half-finished edit.
   `spawn_mech_turret_vm`, `spawn_mech_pod_vm`) and one team-neutral
   pickup pad. **FALSE ALARM, recorded as loudly as a defect so nobody
   re-spends the cycle.**
+
+---
+
+# 2026-08-11 — THOR RUN: the input split, the Agile captures, and the luminance number nobody had computed
+
+Read first: `OPERATION.md` 8-13, `ISSUED_VS_DELIVERED.md` (Trevor run 1),
+then `git fetch`. HEAD moved under me mid-run: `dd4fced` -> `5473d06` ->
+`11db5fe` (Trevor run 2, another session). `sim.rs` carried 684
+uncommitted insertions from the live spear-curve builder and `main.rs` +
+`frontend.rs` were also dirty, so **I mutation-tested nothing this
+session.** Every finding below is either (a) executed, or (b) proved by
+call-graph trace and labelled as such. I did not edit source.
+
+Suite I ran myself, working tree: `cargo test --release -p jk_tdm` ->
+**449 passed, 0 failed, 2 ignored**, exit 0.
+
+## 1. THE ONE THING THAT IS WRONG — the two Royals do not separate
+
+`TRV-0206` was closed as `DONE` in Trevor run 2 ("the luminance guard
+SPEC15's own trap 4 asked for"). **Contest it.** The guard that shipped
+(`agile_mech.rs:744 the_enemy_agile_never_out_luminates_the_ally`) reads
+six constants and all six belong to the AGILE. The Heavy and the Royal
+body tones are inline `Color::srgb(..)` literals inside a Bevy startup
+system (`main.rs:14488-14579`) — unreachable from any test. One chassis
+pair of three is guarded, and it is not the one that fails.
+
+CIE relative luminance (sRGB decode, the `agile_mech.rs:194` formula),
+primary body tone, ally vs foe:
+
+| tier | ally Y | foe Y | ratio |
+|---|---|---|---|
+| Agile | 0.2736 | 0.0158 | **17.3x** |
+| Heavy | 0.2390 | 0.0178 | **13.4x** |
+| Royal | **0.0567** | **0.0563** | **1.01x** |
+
+The guard's own bar is `>= 8.0`. The Royal pair misses it by a factor of
+eight. Cross-tier is worse than the table suggests: ally Royal vs foe
+Agile is 3.6x and ally Royal vs foe Heavy is 3.2x — both under the bar.
+Globally, the brightest foe body tone (`mech_navy_lt` 0.3396) is **19x**
+the dimmest ally body tone (`mech_royal_ally_dk` 0.0178) and **6x** the
+ally Royal's PRIMARY.
+
+Second, independent instrument — the shipped frame, not the constants.
+Measured on `handback/brief-vii/mech_gallery/01-gallery-wide-third.png`
+(1600x900), mean CIE Y over the hull box:
+`ROYAL_ALLY (694,368)-(744,396)` = **0.0626**;
+`ROYAL_ENEMY (1214,366)-(1256,394)` = **0.1004**.
+**The enemy Royal renders 1.6x BRIGHTER than the ally Royal.** The rule
+does not merely fail on this tier — it points the wrong way.
+
+Why it matters more than a colour note: both Royals are the SAME 53-plate
+table at the same `ROYAL_MULT` scale (`main.rs:11614`, `spawn_armor_rig`
+with `elite`), and the crown is `kit.gold` on BOTH sides
+(`main.rs:11695-11725`, no `ally` branch). By surface area over that
+table (cube 2(xy+yz+zx) from the scale vectors) the faction paint is
+body 48.3% + body_dk 18.6% + body_lt 4.9% = **71.8%**, and the LAMP —
+the only thing left that answers "whose is it" on the Royal tier — is
+**0.4%**. Same silhouette, same scale, same crown, same value, and 0.4%
+of the machine carrying the whole answer.
+
+`a0f67ae` ("The two Royals stop being the same machine") is therefore
+**OVERSTATED**. It fixed HUE — four paints, side decides family, all
+true and verified in `mech_body_tones` (`main.rs:11545`). It reasoned
+explicitly from trap 4 in its own body ("the enemy's light blue is
+already brighter than the ally's brightest tone") and then did not check
+its result against the metric it had just cited.
+
+Ranked action for `friday33`, ~40 min: extract the six heavy + six royal
+tones to named constants beside `agile_mech::ARMOR_ALLY`, then widen
+`the_enemy_agile_never_out_luminates_the_ally` to all three pairs. The
+test will go red on the Royal on the first run. That is the point.
+
+Related, small, and a real trap for whoever takes this: **the codebase
+uses "relative luminance" to mean two different things.**
+`agile_mech.rs:194` decodes gamma (navy -> 0.0178). The comment at
+`main.rs:14549-14552` quotes "~0.13 / ~0.16 / ~0.52", which is the CIE
+weighting applied in GAMMA space (khaki 0.5254). They differ 7.5x on
+navy. Anyone tuning the Royal from the main.rs numbers will pick wrong.
+
+## 2. THE INPUT SPLIT (`a95b48c`) — AGREE on the headline, and one transition the builder did not enumerate
+
+**The owner's rule holds for the player on foot.** Verified end to end:
+client `main.rs:17173-17196` sends `shoot: pressed(fire_btn)` and
+`ads: ads_settled`; `sim.rs:8865/8871` build `aim_phase(true, cmd.ads,
+cmd.shoot)`; `aim_phase` (`sim.rs:6654`) has no path from `pre_aim`
+alone to `Charging`. `AimPhase::charges()` is the only question the
+clocks ask. `swap_mouse` swaps both together via `mouse_map`, which is
+the user's own setting, not a leak.
+
+**Friday's honesty holds too.** I checked the diff: pre-change was
+`step_bow_draw(p, cmd.aim, cmd.shoot)` — already LMB. The commit says
+"this needed a GUARD, not a repair" and that is exactly true. The test
+`right_mouse_pre_aims_and_only_the_attack_button_charges` writes its
+truth table by hand and restates the rule as `ready && lmb`
+independently of the enum, then drives 3 s of pure `ads: true` through
+the real `step`. It is not self-referential and it would fail on a
+swapped call site. **Not vacuous.**
+
+**Bots: the fix is complete because bots have no charge to leak.** Only
+writers of `bow_draw_t`/`spear_charge_t`/`spear_power` are init, respawn,
+`switch_slot`, and the two step functions, and the step functions are
+reachable only from the `p = self.player` block (`sim.rs:8281`). Second
+source: `main.rs:354 bow_draw_visual` drives bot bows off `fire_cd`
+precisely because "their `bow_draw_t` is always 0". Agreed, and the
+"four charges" claim is real: I read all four fixes and all four tests.
+
+**THE FIFTH CHARGE — CONFIRMED BY TRACE, NOT EXECUTED.**
+The step functions are called from exactly one site, gated by
+`alive()` / `!in_mech()` / `gun ==`. The complete set of transitions
+that stops them being called is therefore: **death** (fixed, respawn
+`sim.rs:7851-7853` at HEAD), **weapon change** (fixed, `switch_slot`
+`sim.rs:9611-9613`), and **MECH ENTRY — not fixed.**
+
+Repro, tick by tick:
+1. Bow in hand, hold LMB -> `bow_draw_t` grows past `BOW_DRAW_MIN_S`.
+2. Walk onto a mech pad. Boarding is automatic in the pickup loop
+   (`sim.rs:7984` ScoutArmor, `sim.rs:8018` Robot/Royal at HEAD) and
+   neither site clears the clocks.
+3. `in_mech()` is now true, so `sim.rs:8825` takes the mech branch and
+   `step_bow_draw` is never called again. The clock FREEZES.
+4. Leave the chassis — dismount completing (`sim.rs:7456-7457`), scout
+   eject (`sim.rs:12949`) or heavy eject (`sim.rs:13045`). None sets
+   `switch_t`, none clears the clocks.
+5. Next tick `step_bow_draw` runs with `held == false`, sees
+   `held_s > 0`, and looses an arrow nobody asked for. Spear is the same
+   shape and worse: `spear_power` up to 1.30 plus the `spear_max_charge`
+   +10% flag the builder just finished protecting from death.
+
+Independent corroboration that this is the same defect class and was
+recognised one metre away: the scout eject clears `plasma_charge_t` with
+the comment *"the wind-up dies with the machine that was doing it -
+`step_plasma_precision` cannot clear this once `in_mech()` is false, so
+the eject path must"*. Same argument, opposite direction, not extended
+to the pilot's own charge.
+
+Not executed as a test because both source files had live builders.
+Label it `CONFIRMED BY TRACE / TEST NOT RUN` until Friday lands one.
+
+**The declared deferral is real and I verified it.**
+`step_plasma_precision` (`sim.rs:11229`) still charges on `cmd.ads`
+(`sim.rs:8859`), so the file does contain a live RMB charge. Friday
+flagged it in the commit rather than hiding it — correct behaviour. Note
+for whoever picks it up: its own comment calls it "PLASMA BOW mode 2",
+i.e. the one weapon name the owner's rule is about.
+
+**Client-side doc rot, uncorrected, misleading:** `main.rs:16986-16990`
+still tells the reader RIGHT is "a draw on projectile weapons (bow/spear,
+Brief II grammar)". Friday named it as friday33's to fix; it is still
+there. Second one found this run: `main.rs:11592` still says "Elite
+OVERRIDES the side tones... there are three paints, not four" — false
+since `a0f67ae`, which made four.
+
+## 3. THE AGILE CAPTURES — mostly real, one frame that is not what its name says
+
+* `dd4fced` "BRIEF XI: **finish** the Agile Mech - motion, limbs, hands,
+  guns" ships **one markdown file, 299 lines, zero code, zero captures.**
+  The body is honest about it; the subject line is not, and a subject
+  line is what `git log --oneline` shows. Trevor run 2 caught the same
+  trap independently. Agreed, and it is the second commit this week whose
+  subject would mark an unbuilt brief as done.
+* `agile_body/01-agile-front.png` — real, front, judgeable. **HOLDS.**
+* `agile_body/03-agile-profile.png` — **NOT a profile.** Rear-three-
+  quarter from behind and left, subject small, second machine in frame.
+  The reverse joint is partly readable; the "forward cant and swept fins,
+  none of which exists in a front view" claim is not carried by this
+  frame. This is the same failure the project already shipped once.
+* `agile_body/04-agile-rear-fins.png` — two machines at distance, subject
+  ~8% of frame height, and the lower ~40% of the frame is a solid HUD
+  panel. The fins are not evidenced at a size anyone can judge.
+* `agile_body/08-agile-legs-profile.png` — the frame named for the legs
+  has its legs behind the "+100 / MEDIC HULL 210" panel. The face is
+  excellent; the legs are not in it.
+* `agile_body/09-squint-derived.png` — **the best instrument in the set.**
+  Labelled POST-PROCESSED on its own face, states that a true matte was
+  not producible and why. Exactly rule 8 done right. Its greyscale row is
+  what corroborated section 1 above.
+* `agile_moves/09,10,11,12` (the flips) — **genuinely airborne, genuinely
+  inverted, genuinely landed.** These hold.
+* `agile_moves/06,07,08` (the jump trio) — **the labels do not match the
+  pixels.** Sky/wall boundary y at frame centre, measured:
+  `06-jump-first` = 385, `07-double-jump-kick` = 413,
+  `08-double-jump-apex` = **387**. The horizon in the frame captioned
+  *apex* is within 2 px of the pre-jump frame and 26 px BELOW the kick
+  frame. The subject's orange bbox is (730,420,904,698) in 06 and 07 and
+  (732,428,906,692) in 08 — identical, as expected for a head-anchored
+  boom, so the horizon IS the altitude signal. The commit's "the double
+  jump gains altitude - visible as the horizon dropping" is true only
+  06->07, and the frame that exists to show it does not.
+  Friday DID disclose "the Agile has no airborne POSE... recorded as a
+  weak pass" — that part is honest. The apex label is the error.
+
+## 4. `armor_stage_of` — CONFIRMED INVISIBLE, with one correction
+
+`ArmorStage` : 53 refs in `sim.rs`, **0 in `main.rs`** and 0 in all eight
+client modules. `armor_stage_of` : 15 refs in `sim.rs`, **every call site
+is above `#[cfg(test)] mod tests` at 14828 — i.e. tests only.** So the
+pub accessor written for the client has never had a client.
+
+The feature is LIVE in the sim: `sim.rs:11757`
+`dmg *= 1.0 - f.armor_cond.stage(p).resist()`.
+
+**Correction to "genuinely invisible":** the TERMINAL state is visible.
+`wear_plate` calls `armor_pieces.set(p, false)` on the hit after Severed
+(`sim.rs:11648`), and the client hides the plate off that same bit
+(`main.rs:18722`). So the player sees a plate vanish; what he never sees
+is Fresh / Scuffed / Cracked / Severed, which are four states rendered
+identically. Rank it as "three-quarters invisible, no warning before the
+plate goes", not as zero-signal.
+
+## 5. WHAT HELD — plainly
+
+* The whole input-split contract, player path, end to end. No RMB charge
+  reaches the bow or the spear.
+* All five new tests in `a95b48c` are non-vacuous by inspection; the
+  truth table is hand-written and the integration half drives real
+  `step` calls.
+* Bots cannot leak a charge because bots have no charge. Verified from
+  two independent sources.
+* The Agile pair's luminance separation is excellent (17.3x) and now
+  guarded by a test whose thresholds are NOT derived from the colours it
+  judges, with a gamma sanity anchor beside it. That test is a model for
+  the two that are missing.
+* `mech_body_tones` really is four paints with side deciding family.
+* The flip captures are real.
+* 449/0/2, run by me, exit 0.
+* **FALSE ALARM, recorded loudly:** Trevor's C5 ("the Agile Mech is
+  orange on BOTH sides") is WRONG — `ARMOR_FOE = [0.075,0.125,0.265]`,
+  dark blue. Trevor run 2 retracted it himself before I got there. C5's
+  other premise, "the opposition Royal is yellow", is also not the code:
+  `mech_royal` is lacquer red (0.52,0.09,0.09). The three-of-six-in-one-
+  hue-band panic was not real. **The luminance problem underneath it is
+  real and is not the one C5 described.**
+
+## Dispatches this run leaves behind
+
+1. `friday33` — extract the heavy + royal body tones to constants and
+   widen the luminance guard to all three pairs. Expect RED on the Royal.
+   Then decide with the owner: the Royal pair needs a VALUE split, and
+   the cheapest honest one is to darken `mech_royal`/`_lt`/`_dk` or lift
+   `mech_royal_ally`, not to add another lamp.
+2. `friday22` — clear `bow_draw_t` / `spear_charge_t` / `spear_power` /
+   `spear_max_charge` at mech BOARDING (both pad arms), with a test that
+   boards mid-draw and dismounts. Do not fix it at the exit: the entry is
+   where the state stops being simulated.
+3. `friday33` — re-shoot `03-agile-profile` at a true 90 deg and
+   `08-agile-legs-profile` with the legs clear of the HUD; re-shoot the
+   jump trio and pick the apex frame from the actual peak.
+4. Owner decision, unchanged and now numeric: is the opposition Agile
+   orange or blue-primary (C5), and do the two Royals separate by value
+   or do you accept a lamp-only read on 0.4% of the machine?
