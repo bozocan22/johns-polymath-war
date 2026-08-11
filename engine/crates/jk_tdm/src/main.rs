@@ -6031,13 +6031,19 @@ const HUD_CONTRAST_BEATS: &[CapBeat] = &[
     // below rather than for one of them
     CapBeat { press: &[CapKey::K(KeyCode::Digit4)], ..beat(0.7) },
     CapBeat { release: &[CapKey::K(KeyCode::Digit4)], ..beat(0.8) },
-    // UP: sky. The palest thing in the build.
-    CapBeat { look: Some((0.0, 0.45)), ..beat(1.0) },
-    CapBeat { snap: Some("01-pale-sky"), ..beat(1.7) },
-    // DOWN: the ground immediately under the chassis, which is in its
-    // own shadow and is the darkest surface reachable without moving.
+    // The pitch sign was learned from the first run rather than
+    // reasoned: POSITIVE pitches the view DOWN. A beat labelled
+    // "01-pale-sky" photographed the ground on that run, which is the
+    // second time this harness has produced a frame whose label
+    // disagreed with its pixels.
+    //
+    // DOWN, hard: the cockpit floor and the chassis's own shadow fill
+    // both bottom corners. This is the DARK backdrop.
+    CapBeat { look: Some((0.0, 1.05)), ..beat(1.0) },
+    CapBeat { snap: Some("01-dark-cockpit-floor"), ..beat(1.7) },
+    // UP: sky above the wall, the palest thing in the build.
     CapBeat { look: Some((0.0, -0.55)), ..beat(1.9) },
-    CapBeat { snap: Some("02-dark-ground"), ..beat(2.5) },
+    CapBeat { snap: Some("02-pale-sky"), ..beat(2.5) },
     // and the four compass looks at eye level, so the pair above is not
     // the only evidence and a middling scene is on record too
     CapBeat { look: Some((0.0, 0.0)), ..beat(2.7) },
@@ -7206,6 +7212,19 @@ fn capture_board_medic(
         if !*hull_granted {
             f.hull = f.mech_hull_max();
             *hull_granted = true;
+        }
+        // BRIEF XII-A: and a BELT for the contrast script.
+        //
+        // The first run photographed `0` in the empty-magazine red with
+        // `TURRET 0 / ROCKETS 0` beside it, because nothing in this hook
+        // ever granted the heavy's ammunition - which is the exact
+        // reading the medic bug produced, arrived at from the opposite
+        // direction, and a HUD frame that looks like a known bug is not
+        // usable evidence. Scoped to this script so no existing capture
+        // changes.
+        if name == "hud_contrast" {
+            f.mech_rounds = MECH_ROUNDS;
+            f.pod_ammo = POD_TUBES;
         }
         f.mech_transition_t = 0.0;
         f.health = MAX_HEALTH;

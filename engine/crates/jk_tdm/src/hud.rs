@@ -267,6 +267,22 @@ fn systems_lines(
 /// and a shield line.
 const SYSTEMS_ROWS: usize = 4;
 
+/// Where the legacy contextual prompt sits, in percent from the bottom.
+///
+/// It was 20%, which is inside the numeral band — see
+/// `reanchor_legacy_centred_text`. `prompt_clears_the_numerals` is the
+/// test, and it fails at 20.
+const PROMPT_BOTTOM_PCT: f32 = 32.0;
+
+/// The height of a bottom-corner numeral cluster, in percent of a 720p
+/// screen: the numeral itself plus the two bar rows and the padding.
+/// Used only to prove the prompt clears it.
+fn numeral_cluster_height_pct() -> f32 {
+    // T_NUMERAL glyph box + segment bar + armour pip row + row gaps +
+    // 10 px of padding top and bottom, over 720.
+    (T_NUMERAL + 6.0 + 10.0 + 4.0 + 3.0 + 20.0) / 720.0 * 100.0
+}
+
 /// The single top-centre urgent line. ONE line, highest priority only.
 ///
 /// The old top-centre slot carried the clock, the score, a parenthetical
@@ -906,6 +922,16 @@ fn reanchor_legacy_centred_text(
     for mut n in &mut prompt {
         n.left = Val::Px(0.0);
         n.width = Val::Percent(100.0);
+        // XII-A: and UP, out of the numeral band.
+        //
+        // The capture caught the boarding prompt — "BIG MECH BOARDED -
+        // 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR"
+        // — running the full width of the screen at bottom 20%, which is
+        // exactly the row the two big numerals occupy. It struck through
+        // the hull numeral on the left and the heat numeral on the
+        // right in every mech frame. That is the owner's "overlapping
+        // elements" in one line.
+        n.bottom = Val::Percent(PROMPT_BOTTOM_PCT);
         any = true;
     }
     for mut n in &mut compass {
@@ -1096,12 +1122,21 @@ fn paint_ammo(
                 },
                 p.gatling_vent_t > 0.0,
             ),
-            _ => {
+            // XII-A: name the mount from `mount_name`, the same function
+            // the systems column uses.
+            //
+            // The capture caught this arm labelling the GATLING turret
+            // "AUTOCANNON": `Gatling` falls into `_` here, so a frame
+            // read `> TURRET` in the systems column and `AUTOCANNON`
+            // under the numeral, four hundred pixels apart, for the same
+            // mount. Two spellings of one fact is precisely what this
+            // pass exists to remove.
+            other => {
                 let (a, b) = ammo_pair(p.mech_rounds, crate::MECH_ROUNDS);
                 (
                     a,
                     b,
-                    "AUTOCANNON".to_string(),
+                    mount_name(other).to_string(),
                     crate::ammo_is_low(p.mech_rounds, crate::MECH_ROUNDS),
                 )
             }
@@ -1551,6 +1586,27 @@ mod tests {
         assert!(busy.iter().any(|r| r.0 == "BARRIER"));
         // the column can never overflow the rows that were spawned
         assert!(busy.len() <= SYSTEMS_ROWS);
+    }
+
+    /// XII-A: the contextual prompt must sit ABOVE the numeral band.
+    ///
+    /// Caught by capture, not by reading: the boarding prompt is a long
+    /// full-width line and it struck straight through both big numerals
+    /// at bottom 20%. Mutation proof: this fails at 20.0, which is the
+    /// value the pre-change code shipped.
+    #[test]
+    fn prompt_clears_the_numerals() {
+        // where the vitals/ammo clusters START, from HUD_ANCHORS
+        let (_, o) = corner("vitals");
+        let cluster_bottom = -(o[1]) * 100.0;
+        let cluster_top = cluster_bottom + numeral_cluster_height_pct();
+        assert!(
+            PROMPT_BOTTOM_PCT > cluster_top,
+            "the prompt at {PROMPT_BOTTOM_PCT}% crosses a numeral cluster \
+             reaching {cluster_top}%"
+        );
+        // and it must not climb into the centre third either
+        assert!(PROMPT_BOTTOM_PCT < 100.0 / 3.0 + 1.0);
     }
 
     /// The human HUD is no longer bare text on the world. Mutation
