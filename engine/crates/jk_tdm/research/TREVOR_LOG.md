@@ -339,3 +339,131 @@ time.
 
 Nothing in the ledger is invalidated by it. Several line numbers in §B may
 now point at the wrong file, which is why every row also names its symbol.
+
+---
+
+# 2026-08-11 — run 3 (register run 2): two new owner specs, five rows moved, one thing I had backwards
+
+HEAD at sweep start and end: `5473d06`. `git fetch` first; `origin/main`
+== local `main`. Working tree: `sim.rs` (+279/−10) and `frontend.rs`
+(+20) modified by live builders. I wrote only
+`ISSUED_VS_DELIVERED.md` and this file.
+
+## Counts
+
+300 rows → **344**. `DONE` 137 → **142** · `PARTIAL` 42 → **48** ·
+`NOT STARTED` 65 → **87** · `BLOCKED` 16 → **22** · `SUPERSEDED` 12 →
+12 · `CONTRADICTED` 7 → **8** · `UNVERIFIABLE` 3 → **4** · `UNVERIFIED`
+18 → **21**. Sums to 344.
+
+Open work went **up 28** while five rows closed. That is two owner specs
+arriving in one day, not a regression.
+
+## IDs OPENED — 44
+
+- **`TRV-0301`..`TRV-0317`** — the BOW & SPEAR spec (19 sections + an
+  acceptance checklist), **not on disk**. Six sections recoverable
+  (§4/§8/§17, §9, §10, §11, plus checklist §B and §D); thirteen are
+  invisible and `TRV-0314` says so rather than guessing. Includes the two
+  rules the owner stated three times each — the RMB/LMB input split and
+  "the crosshair is sacred" — and the four reference images, none of
+  which are on disk.
+- **`TRV-0318`..`TRV-0341`** — BRIEF XI, all 19 sections plus §0's four
+  live constraints, §19's checklist and the proof standard.
+- **`TRV-0342`..`TRV-0344`** — the LEARN BACK button (owner-reported,
+  fixed `5473d06`), the App-level test that fix admits it still owes, and
+  `config/settings.txt` carrying `fov_idx = 4` against `FOV_DEFAULT_IDX = 3`.
+
+## IDs THAT MOVED — 5, each re-derived from code
+
+| Row | Was → Now | Why |
+|---|---|---|
+| `TRV-0289` | `NOT STARTED` → `DONE` | 12 `agile_moves` PNGs committed in `8de5e93`, re-run in `9b108b2`. Run 1's loudest "the script exists and has produced no PNGs" is answered. |
+| `TRV-0206` | `NOT STARTED` → `DONE` | `the_enemy_agile_never_out_luminates_the_ally` (`agile_mech.rs:744`), plus a gamma-decode anchor test so the guard cannot pass on a broken formula. SPEC15's own trap 4, guarded at last. |
+| `TRV-0292` | `DONE`(contested) → `PARTIAL` | `09-squint-derived.png` is honestly labelled a 3.33× downsample with hue removed, not a matte. Still no three-tier silhouette. |
+| `TRV-0291` | `UNVERIFIED` → `PARTIAL` | Part/mesh/material counts published; no draw-call measurement. |
+| `TRV-0296` | `CONTRADICTED` → `CONTRADICTED`, description **corrected** | See below. |
+
+## WHAT I GOT WRONG LAST RUN
+
+**`TRV-0296` / C5. I wrote that the Agile Mech is orange on BOTH sides.
+It is not.** `ARMOR_FOE = [0.075, 0.125, 0.265]`, commented "faction dark
+blue" (`agile_mech.rs:179`). The enemy Agile ships a **dark-blue primary**
+with the chassis's orange on its layered plates only.
+
+I read the `_foe` material **names** in the client and inferred what the
+values must be. I never opened the constants. That is precisely the
+failure I opened run 1 by naming in someone else's work — reading the
+first half of a thing and not checking the second — committed in the
+loudest row of the file, and in the more alarming of the two directions.
+
+The contradiction itself survives: BRIEF X §2 states orange is the
+Agile's identity and states no faction split; the build splits it. The
+builder honoured both instructions by role and said so in `FRIDAY_LOG.md`
+before I ever looked. **I could have read that log entry and did not.**
+
+Two smaller ones: run 1's §8 claimed "the 14 `UNVERIFIED` rows" while its
+own headline said 18 — after I had criticised the ledger for carrying
+three numbers for one set. And `TRV-0289` was true when written and false
+90 minutes later.
+
+## THE TRAP I ALMOST WALKED INTO TODAY
+
+`dd4fced`'s subject is **"BRIEF XI: finish the Agile Mech - motion,
+limbs, hands, guns"**. The dispatch that sent me here described it as "the
+Agile Mech finished". `git show --stat` says it adds **one file, 299
+lines, and changes no code.** It is the brief being written to disk before
+any build touches it — the good pattern, not a delivery.
+
+Had I filed those 24 rows off the subject line I would have marked an
+entire unbuilt brief as done. This is the same shape as run 1's headline
+finding and it is why the rule is: **derive from code, never from the
+commit message's claim about itself.**
+
+## WHAT I REFUSED TO BANK
+
+`sim.rs` is +279 uncommitted, and it is §9/§10/§11 of the bow/spear spec:
+the 3-second charge window, the 7-second maximum-charge bonus, the
+`SpearStance` accessors. It is good work and it is not committed.
+`TRV-0303`, `0304`, `0305` are `UNVERIFIED` with the reason stated. A
+commit that has not happened is not a delivery.
+
+One judgement call inside that work is worth the owner's attention and I
+flagged it rather than absorbing it: the spec says "~3 s reaches the
+normal maximum, holding longer must not keep growing power" **and** "7 s
+grants a bonus". Those cannot both sit on one ramp, so the builder split
+them onto two axes — velocity caps at 3 s, damage steps at 7 s. That is a
+reading of the owner's words, not a fact about them.
+
+## RE-DERIVED AND STILL TRUE (checked, not carried)
+
+Silent explosions (21 `asset_server.load`, all `.wav`, no boom) ·
+`armor_stage_of` 0 readers in `main.rs` against 66 in `sim.rs` ·
+`struct CapBeat` still a compile-time const array at `main.rs:5280` ·
+Royal arrow launcher zero in every weapon path · all four TIER 0 dead
+values (`TDM_TARGET_CHOICES`, `shot_handgun.wav`, `FORGE_SLOTS`, the
+`9000.0` literal + the client's copy) · `gait_pose` still infantry-derived
+· `arc_preview` still gated on `cam_ctl.ads` for exactly the two forbidden
+weapons.
+
+**New this run:** `aim_phase` is `pub` and has **zero readers in
+`main.rs`**; `main.rs:16987` still documents RMB as "a draw on projectile
+weapons (bow/spear, Brief II grammar)", which the sim killed 12 hours
+ago; `solve_arm_ik` has 10 call sites and all ten are arms; no capture in
+193 holds RMB with a bow or a spear.
+
+## WHAT THE NEXT TREVOR SHOULD DO FIRST
+
+1. **Re-derive `TRV-0303`/`0304`/`0305`** once the spear work commits.
+   Expect three rows to close in one commit.
+2. **`WHATS_MISSING.md` has not been touched in eleven commits** and is
+   now stale for the fourth time. It knows nothing of BRIEF X's handback,
+   BRIEF XI, the bow/spear spec, or the front end. It is still described
+   as "the live plan" in `OPERATION.md`. That gap is itself worth a row if
+   it survives another run.
+3. **Read `FRIDAY_LOG.md`'s newest entry BEFORE re-deriving any row it
+   touches.** Today it contained the correction to my own headline
+   finding, written eleven hours before I published the error.
+4. `briefs/README.md` does not list BRIEF XI.
+
+— **TREVOR**, run 3.

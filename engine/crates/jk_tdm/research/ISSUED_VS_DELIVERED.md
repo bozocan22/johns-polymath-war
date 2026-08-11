@@ -1,26 +1,27 @@
 # ISSUED vs DELIVERED — the owner-instruction register
 
-**Built 2026-08-10. Repo HEAD at sweep start and end: `4bde6b3`.**
-Working tree: one untracked capture directory
-(`handback/brief-vii/agile_body/`, 8 PNGs) and an in-progress
-`agile_mech` test in another session's lane. I wrote nothing outside
-`research/`.
+**Run 2. Rebuilt 2026-08-11. Repo HEAD at sweep start and end: `5473d06`.**
+`git fetch` run first; `origin/main` == local `main` == `5473d06`.
 
-**What this file is.** Thor verifies claims about CODE. Nothing has ever
-verified claims about the OWNER'S INSTRUCTIONS. This is that register:
-every instruction the owner issued, from every source, with a status
-that is backed by `file:line` or a commit — never by a commit message's
+**Working tree at sweep time — read this before trusting any line below.**
+Two files are modified and uncommitted:
+
+| File | Diff | Whose | How I treated it |
+|---|---|---|---|
+| `src/sim.rs` | +279 / −10 | a live builder, **§9/§10/§11 of the bow-and-spear spec** | Read, **not counted as delivered.** Its rows are `UNVERIFIED` and say why. |
+| `src/frontend.rs` | +20 | a live builder | Not read, not indexed. |
+
+A commit that has not happened is not a delivery, and the last thing this
+register should do is bank another lane's half-written work as done. Rows
+`TRV-0303`, `0304`, `0305` are the ones affected and each says so in its
+own line.
+
+**What this file is.** Thor verifies claims about CODE. This verifies
+claims about the OWNER'S INSTRUCTIONS: every ask, from every source, with
+a status backed by `file:line` or a commit — never by a commit message's
 claim about itself.
 
-**Relationship to `TREVOR_LEDGER.md`.** The ledger is the sibling record
-and it is good; I re-derived from the code rather than inheriting from
-it, and I share its ID space rather than inventing a second one. Rows
-`TRV-0001`..`TRV-0266` are the ledger's and keep their numbers.
-`TRV-0267`+ are opened here. Where I disagree with the ledger, §7 says
-so.
-
-**Status vocabulary** (the owner's, from the dispatch that commissioned
-this file):
+**Status vocabulary** (the owner's):
 
 | Status | Means |
 |---|---|
@@ -30,541 +31,450 @@ this file):
 | `BLOCKED` | A specific named blocker, not "needs art" |
 | `SUPERSEDED` | A later instruction replaced it; both are cited |
 | `CONTRADICTED` | The owner asked for two incompatible things. Both named. **The owner decides, not me** |
-| `UNVERIFIABLE` | Cannot be settled from code alone ("does this look cartoon enough") |
-| `UNVERIFIED` | I did not check, or the check did not complete. Honest, and there are 18 |
+| `UNVERIFIABLE` | Cannot be settled from code alone |
+| `UNVERIFIED` | I did not check, or the check did not complete |
 
-`DONE` here means "there is evidence at this path". It does not mean "it
+`DONE` means "there is evidence at this path". It does not mean "it
 works". I did not build and did not run the suite.
 
 ---
 
 ## §0 — HEADLINE
 
-| | count |
-|---|---|
-| Rows in this register | **300** — `TRV-0001` .. `TRV-0300`, no gaps |
-| ├─ carried from `TREVOR_LEDGER.md`, re-derived | 266 |
-| └─ **opened by this sweep** | **34** |
-| `DONE` | **137** |
-| `PARTIAL` | 42 |
-| `NOT STARTED` | 65 |
-| **Open (`PARTIAL` + `NOT STARTED`)** | **107** |
-| `BLOCKED` | 16 |
-| `SUPERSEDED` | 12 |
-| **`CONTRADICTED`** | **7** |
-| `UNVERIFIABLE` | 3 |
-| `UNVERIFIED` | 18 |
+| | run 1 (2026-08-10) | **run 2 (today)** |
+|---|---|---|
+| Rows | 300 | **344** — `TRV-0001`..`TRV-0344`, no gaps |
+| `DONE` | 137 | **142** |
+| `PARTIAL` | 42 | **48** |
+| `NOT STARTED` | 65 | **87** |
+| **Open (`PARTIAL`+`NOT STARTED`)** | 107 | **135** |
+| `BLOCKED` | 16 | **22** |
+| `SUPERSEDED` | 12 | 12 |
+| **`CONTRADICTED`** | 7 | **8** |
+| `UNVERIFIABLE` | 3 | **4** |
+| `UNVERIFIED` | 18 | **21** |
 
-Counts sum to 300 exactly. The arithmetic against the ledger's own
-headline is in §7: eleven rows changed status under re-derivation, and
-each change is named there rather than absorbed into a total.
+Counts sum to 344 exactly. **Open work went UP by 28 while five rows
+closed** — because two new owner specs arrived (44 new rows) and only six
+old rows moved. That is not a regression; it is the register catching up
+with two briefs issued in one day.
 
-Origin: 268 owner · 26 agent · 6 agent-found-then-adopted-by-owner.
+Origin: 310 owner · 28 agent · 6 agent-found-then-adopted-by-owner.
 
-**The single most surprising finding is §2.C1** — the game ships a red
-predicted-trajectory arc and a landing ring for the bow and the spear,
-which two separate briefs forbid in bold, twice each, calling the absence
-of that arc "the entire point". Nobody has ever noticed, because the code
-cites an *earlier* brief as its authority and both later briefs were
-filed as DELIVERED against asks whose second sentence was never checked.
+**The five rows that MOVED, each re-derived from code today:**
 
----
-
-## §1 — DONE THAT THE QUEUE STILL LISTS AS OPEN
-
-*This is the recurring failure the owner named. Every line below was
-re-derived against the code today.*
-
-| Row | The queue's claim | What the code says | Cite |
+| Row | Was | Now | Why |
 |---|---|---|---|
-| `TRV-0022` | `0-QUEUE` TIER 0 #1: "`ROBOT_SPEED_MULT` (1.12) is dead… Delete it." | **Deleted.** A `§owner (defect pass)` tombstone stands where it was. | `sim.rs:437` |
-| `TRV-0023` | TIER 0 #2: "`MECH_SHIELD_ARC_COS` … is unread." | **Wired.** `barrier_arc = cos > MECH_SHIELD_ARC_COS;` | `sim.rs:12841`, tombstone note `:12828` |
-| `TRV-0025` | TIER 0 #4: "`pod_aim_held` … read nowhere. Delete or wire." | **Deleted**, same tombstone pattern. | `sim.rs:3394` |
-| `TRV-0038` | TIER 2 #17: "**Pyro armour is unobtainable on every map** … TWO per-map relocation tables still place a Pyro pad" | **Gone.** 8 residual mentions tree-wide, all documentary comments. Zero `FLAME_*` constants. | `sim.rs:4775`; commits `b11b7de`, `5bf474a` |
-| `TRV-0058` | `0-NOW` §B.9: "`SCOUT_SCALE = 1.42` is read by nothing" | **Wired into `height()`** via `ArmorSet::chassis_scale`, with a test that names the regression. | `sim.rs:4893`, `:3710`, test `:15743` |
-| `TRV-0254` | `0-SCOUT` defect #5: "Third-person `crouch_drop` is double-counted for a kneeling mech." | **Fixed**, with the arithmetic in the comment: "a kneeling chassis paid the drop twice: 0.85 m of real hull sink, and 0.62 m more of camera". Now `chassis_kneeling() => 0.0`. | `main.rs:19601-19614` |
-| `TRV-0149` | `0-QUEUE` TIER 4 #28: "traversal (**blocked on map metrics**)" | **Unblocked.** `MAP_METRICS.md` was written 2026-08-10 (1,025 lines) and derives the three numbers the block rested on — including that every ledge number in the project was 0.55 m short, because the ceiling is apex + `STEP_UP`, not apex. | commit `632824a`; `research/maps/MAP_METRICS.md` |
-| `TRV-0188` | ledger THREAD 16: "`DECISION.md` — the entire deliverable — was never written. The largest orphaned research in the repo." | **Written**, 775 lines, with a verdict (keep procedural sim-driven posing, buy nothing) and a reversal of session 1's own crate recommendation. | commit `632824a` |
-| `TRV-0011` | `0-SPEC15` **P3**: "**Agile Mech major upgrade** — the largest visual item" | **Built.** `agile_mech.rs`, 650 lines, five silhouette elements outside the Big's vocabulary, four material roles, seven tests. Was `NOT STARTED` in the ledger 18 hours ago. | `agile_mech.rs`; commits `efe1428`, `4bde6b3` |
-| `TRV-0177` / `TRV-0178` / `TRV-0181` / `TRV-0183` | `BACKLOG.md` #4 "melee depth: not started", #5 "retreat is the remainder", #9 "blocked: no class system", #11 "armour-weight formula unwired" | **All four false.** Melee v2 `a99af96`; retreat `e5431a4`; four classes 2026-08-05; weight wired in the 24-plate pass. Carried from the ledger, spot-checked, unchanged. | see `TREVOR_LEDGER.md` §D |
-
-**Nine of these are still sitting in `WHATS_MISSING.md` today, written as
-open work.** Three of the eight TIER 0 "MINUTES" items are done and the
-list does not say so; the other five are §2.B.
+| `TRV-0289` | `NOT STARTED` | **`DONE`** | BRIEF X §8 motion captures: **12 `agile_moves` PNGs now committed** (`8de5e93`, re-run `9b108b2`) — roll early/inverted/recover, jump, double-jump kick + apex, air flip first/inverted/second, landed. This was the register's single loudest "the script exists and has produced no PNGs". It has produced twelve. |
+| `TRV-0206` | `NOT STARTED` | **`DONE`** | SPEC15 trap 4, the unguarded luminance rule: `the_enemy_agile_never_out_luminates_the_ally` (`agile_mech.rs:744`) pins hull separation ≥ 8× in **linear** light and the strict form — every enemy surface below every ally surface. Backed by a second test that pins the gamma decode itself (`relative_luminance_decodes_gamma`, `:770`), so the guard cannot pass on a broken formula. |
+| `TRV-0292` | `DONE` in code / `NOT PROVEN` | **`PARTIAL`** | BRIEF X §13's acceptance line now has *an* instrument — `agile_body/09-squint-derived.png` — but the builder states in `FRIDAY_LOG.md:1549` that it is **not a matte**: it is `mech_gallery/01` downsampled 3.33× and hue-stripped, because the harness has no stencil or depth output. Honest, filename says `derived`, and it is not the three-tier black silhouette the brief asks for. |
+| `TRV-0291` | `UNVERIFIED` | **`PARTIAL`** | BRIEF X §12 performance: part/mesh/material counts now published (~150 parts, 3 meshes, 7 materials, 4 shared with the heavy — `FRIDAY_LOG.md:1499`). Still **no draw-call measurement.** Counted, not profiled. |
+| `TRV-0296` | `CONTRADICTED` | **`CONTRADICTED` (my description was WRONG — see §7)** | I wrote that the enemy Agile is orange. **It is not.** `ARMOR_FOE = [0.075, 0.125, 0.265]` — "faction dark blue" (`agile_mech.rs:179`). The contradiction is real and still open, but it points the *other* way. |
 
 ---
 
-## §2 — THE FOUR ANSWERS
+## §1 — WHAT IS LEFT
 
-### 2.A — CONTRADICTIONS THE OWNER MUST RULE ON
+*The owner has asked this many times and every answer has been partly
+wrong. This is the whole answer, ranked, with a lane and the evidence
+behind each status. Lanes: **[S]** `sim.rs`/friday22 · **[C]**
+`main.rs`+client/friday33 · **[D]** docs · **[OWNER]** a decision only
+the owner can make.*
 
-*Seven. Each names both instructions and cites both. I did not pick a
+### 1.A — [OWNER] Decisions. Zero build cost. They unblock 21 rows.
+
+| # | The question | Rows | Why it is stuck |
+|---|---|---|---|
+| 1 | **Bow/spear trajectory arc: honour the ban, or retire it?** | `TRV-0294` | Two briefs forbid it in bold, twice each. The game ships it, gated on exactly the two weapons named. **§2 C1.** Now urgent: RMB was just formalised as PRE-AIM, and the arc is drawn on RMB. |
+| 2 | **"The crosshair is sacred." Does the landing ring count as obstruction?** | `TRV-0308` | New spec, stated three times. The FP viewmodel already obeys it and is tested. The arc's **landing ring sits on the impact point**, which on a flat shot is where the crosshair is. Never captured, so never seen. |
+| 3 | **Enemy Agile livery: orange or blue?** | `TRV-0296`, `TRV-0320` | BRIEF X §2 "orange becomes the Agile's identity", no faction split stated; SPEC15 says opposition mechs keep red/blue. Build ships **dark-blue primary + rust plates**. BRIEF XI §16 says "do not change the colour identity", which explicitly **does not resolve it** (§0.4). |
+| 4 | **Can the Agile Mech climb? Do you want mech climbing built?** | `TRV-0318`, `TRV-0326` | BRIEF X §0 asserts it can; `climb_target` is gated `!in_mech()` **at the climber** and needs a dropped plate on the target. BRIEF XI §0.1 gates §5 and its own §19 checkbox on a written verdict. **Nobody may build or skip it until you say.** |
+| 5 | **The ~⅓ bot mech output cut, and braced fire no longer perfectly accurate** | `TRV-0239`, `TRV-0240` | 492 → 331 damage over 17 s at 10 m; braced 0° → ~1.6°. The builder volunteered both and called one *"a nerf nobody asked for"*. **Still unruled after 5 days.** Wants a playtest, not an argument. |
+| 6 | **"No head, no cockpit glass, no visible pilot opening"** | `TRV-0295` | Said three times across two briefs and a prompt. The game ships a visor, a cockpit and a ×2 visor weak point that is load-bearing gameplay. Almost certainly superseded in your head; **nobody wrote it down**, and §D.7 still makes the concept-art comparison the mech section's completion criterion. |
+| 7 | **The missile pod: "absent by default" or ten tubes on `Y`?** | `TRV-0113` | Both instructions are yours. The ten-tube line carries a `§owner` marker, so it is probably the later one. One sentence closes it. |
+| 8 | **Retire addendum §D.2 (khaki/olive, "no glowing visor")?** | `TRV-0111` | Never retired, only overtaken. The next agent reading the briefs in order will rebuild a khaki mech. |
+| 9 | **Customization: preview the soldier, or make the mech editable?** | `TRV-0272` | The size half shipped and is measured. The subject is the soldier, stated openly in the commit. "The soldier is fine" is one line; the alternative is a multi-session feature nobody has scoped. |
+| 10 | **Do you want audio and graphics settings at all?** | `TRV-0273`, `TRV-0299` | The game has **no volume, no resolution, no quality, no vsync.** Discovered as a side-effect of the settings work and recorded only in a commit body. |
+| 11 | **Re-supply four bow/spear reference images + the mech + medic concept art** | `TRV-0309`..`0312`, `TRV-0260`, `TRV-0261` | Six owner-supplied images, none on disk. `handback/reference/` contains one file and it is `NOTES.md`. **Ten days on the mech art.** |
+| 12 | **Paste the bow-and-spear spec and the FRONT END spec into `briefs/`** | `TRV-0313`, `TRV-0281` | Two specs exist only in chat. `git ls-files briefs/` returns 12 files and neither is there. See §3. |
+| 13 | **The 40 m sightline rule was retired by an AGENT's arithmetic** | `TRV-0117` | The arithmetic is right (all four maps fail, 80–637 m; unsatisfiable above ~15 m half-extent). The authority is wrong. One sentence. |
+| 14 | Carried, still open: mech FP aim height 1.10 m (`TRV-0053`), `SCOUT_SCALE` 1.05 (`TRV-0059`, frozen in two briefs pending you), the scout's non-shrinking hitbox (`TRV-0248`), `armor_spec`'s unreachable flats (`TRV-0236`) | — | Each is a single number. |
+
+*Ruled and closed — do not re-open: the Royal's gold vs neon blue
+(`TRV-0013`), 2026-08-10: "keep the royal mech, and keep the opposition
+royal mech colour red yellow and neon blue details."*
+
+### 1.B — [C] friday33, `main.rs` + client modules. Ranked.
+
+| # | Task | Rows | Cost | Acceptance check |
+|---|---|---|---|---|
+| 1 | **The bow/spear CLIENT half of the input split.** `aim_phase` is `pub` and has **zero readers in `main.rs`** (grep: 0). The HUD still derives state from raw timers — 24 references to `bow_draw_t`/`spear_charge_t`/`spear_wind_t`. And `main.rs:16987` still tells the reader RMB is *"a draw on projectile weapons (bow/spear, Brief II grammar)"*, which the sim killed 12 hours ago. | `TRV-0302`, `TRV-0315` | 1 session | `main.rs` contains ≥1 `sim::aim_phase(` call and 0 hand-rolled charge-state derivations; the Brief II sentence is gone. |
+| 2 | **A capture that HOLDS RMB with a bow and with a spear.** This is the instrument that has never existed. It settles C1 (does the banned arc render?), C2 of the new spec (does anything cross the crosshair?), and photographs pre-aim for the first time. `BOW_DRAW_FP_BEATS` (`main.rs:5699`) presses **Mouse Left only** — correct under the new spec, and it means no frame in this repo shows pre-aim. | `TRV-0317`, `TRV-0294`, `TRV-0308` | ~1 capture cycle | Two new PNGs, one per weapon, with RMB held at the snap beat. |
+| 3 | **Capture scripts as DATA, not code.** `struct CapBeat` (`main.rs:5280`) — every script is still a compile-time const array in a 29k-line file. 6 min per framing tweak vs ~40 s. Thor's highest-leverage finding, and it pays for tasks 2, 6 and every BRIEF XI proof below. | `TRV-0040`, `TRV-0204`, `TRV-0251` | 1 session | A framing change to one beat requires no `cargo build`. |
+| 4 | **Armour damage states get a client half.** Re-derived today: `main.rs` contains **0** references to `armor_stage_of`, `armor_wear_of` or `ArmorStage`; `sim.rs` contains **66**. Fresh, Scuffed and Cracked render identically. `ArmorStage::tilts` is a published accessor for a brief requirement with no reader. | `TRV-0036`, `TRV-0137`, `TRV-0140` | 1 session | A capture at 100% / 50% / 15% plate shows three different surfaces. `CapBeat.hull` already stages it. |
+| 5 | **Explosion audio.** Re-derived: **21** `asset_server.load` calls, all `.wav`, and the list is bow · click · headshot · hit · hurt · jump · kill · pickup · reload · roll · shield · shot_ak · shot_deagle · shot_glock · shot_mg · shot_mp5 · shot_rifle · shot_shotgun · shot_sniper · spear · win. **No boom.** The sim publishes `Boom` and nothing plays. `gen_sfx.py` generates no explosion either — so this is 1 hour, including writing the generator line. | `TRV-0030` | 1 hour | An explosion is audible; `gen_sfx.py` writes `boom.wav`; the load list is 22. |
+| 6 | **The Agile's double jump has no airborne pose.** `try_mech_jump`'s compress/tuck is heavy-only, so the apex frame is indistinguishable from standing. The builder flagged it rather than sneaking it in. BRIEF XI §0.4 calls it *"the highest-value single fix in this brief: the Agile's signature mechanic is currently invisible"*. Captures `07-double-jump-kick.png` / `08-double-jump-apex.png` already exist and will show the fix. | `TRV-0321`, `TRV-0324` | ~half a session | Re-run `agile_moves`; frames 07/08 differ from 01-standing. |
+| 7 | **BRIEF XI §1 — generalise `solve_arm_ik` to the legs.** `solve_arm_ik` (`main.rs:2585`) has **10 call sites, all arms**; there is no `leg_ik`, no `foot_place`, no `solve_leg` anywhere in `src/`. `DECISION.md` item 3 already specifies this exactly and BRIEF XI §0.2 makes it binding — *do not write a second solver, do not add a crate.* This is the single highest-value BRIEF XI item and closes §1, most of §2, and the foot half of §19. | `TRV-0319`, `TRV-0322` | 1-2 sessions | Feet stay on a slope; consecutive-frame capture shows no sliding. |
+| 8 | **The six honesty fixes, one sitting.** Field Manual still prints `TDM_TARGET,` the constant (`main.rs:24643`) not the chosen target; `BIND_REGISTRY`'s only `U` row still says "Dismount the mech" (`main.rs:5154`) while the world prompt says "U - GRAB THE HULL" (`:23033`); the `Q` row (`:5137`) names roll and flip only — the Agile's **second flip charge and mid-air jump appear nowhere a player can find them**, and BRIEF X made them its mechanical identity; `gatling_heat` prints ×100 under a `%` at four sites and raw under the same `%` at `main.rs:21992`. | `TRV-0031`, `0032`, `0033`, `0024`, `0028`, `0055` | 1 session | Each string matches the value it claims to describe. |
+| 9 | **Royal ARROW LAUNCHER** — "minigun + 3 crossbows". Re-derived today: `crossbow`, `arrow_launcher`, `ArrowLauncher` return **zero hits in any weapon path**; `MechWeapon` = Gatling / Autocannon / Rockets / Plasma / Repair (`sim.rs:5173-5191`). Owner priority says P2 and P2 outranks everything above it — see the note below the table. | `TRV-0010` | 1-2 sessions + one toto number | A `MechWeapon::ArrowLauncher` variant fires bolts; a capture shows the silhouette. |
+| 10 | Mech boarding: 7 of 8 stages made visible (the strings already exist verbatim inside the `debug!` calls) · rocket launcher redesign · Royal body · opposition body | `TRV-0037`, `0174`, `0012`, `0013`, `0014`, `0015` | 1-2 sessions each | — |
+| 11 | The rest of BRIEF XI — §7-§14, the limb/hand/grip families and the gun art pass | `TRV-0328`..`0335` | multi-session | §19's own checklist, with consecutive-frame captures |
+
+**Where I would have re-ordered and did not.** I would put 3 and 5 above
+1, because they are cheap and buy evidence for everything else, and I
+would put 9 (the arrow launcher) after 7. The owner's stated order puts
+SPEC15 P2 first, so the arrow launcher keeps its P2 claim. Both readings
+are here; pick one.
+
+### 1.C — [S] friday22, `sim.rs`
+
+- `TRV-0055` — split `gatling_heat`'s two scales **at the source**; the client half is task 8 above.
+- `TRV-0029` — export the `9000.0` spray scale as a `pub const`. Re-derived: still a bare literal at `sim.rs:4515` and `:5481`, twice more in tests (`:23760`, `:23761`), and the client keeps its own copy at `main.rs:308 PUNCH_DEG_S_PER_SPEC_KICK = 9000.0`.
+- `TRV-0316` — `step_plasma_precision` (`sim.rs:8859`) still charges on `cmd.ads`. **It is the one remaining RMB-charge in the file**, its own comment calls it "PLASMA BOW mode 2", and the builder flagged rather than fixed it because moving it needs the client's mount router to move too. Cross-lane; needs both Fridays or an owner "leave it".
+- `TRV-0235` — plate wear fires only on the zoned hitscan path: grenades, melee, claws and gas neither wear plate nor are reduced by it.
+- `TRV-0241` — the player/bot asymmetry in `punched_aim_stabilised`, which the builder calls "the real root" and which applies to every recoiling weapon.
+- `TRV-0242` — a bot chassis now never raises its barrier at all.
+- `TRV-0039` — the Cliffhold sim half: **50 case-insensitive references in `sim.rs` against 3 in `main.rs`.** Coordinate or the `match` breaks.
+- `TRV-0043` — bot navigation, now that `MAP_METRICS.md` exists.
+
+### 1.D — [C]+[S] The bow/spear spec's own remainder
+
+`TRV-0303`/`0304`/`0305` (the 3-second charge window, the 7-second
+maximum-charge bonus, §B's damage bonus) are **being written right now**
+in the uncommitted `sim.rs`. Do not dispatch them. When they land, the
+client owes: a charge readout that reads `spear_wind_frac_of` /
+`spear_max_charged_of` instead of the raw clock, and the **overhead
+javelin wind pose** (`TRV-0306`) which is pure presentation and has no
+client code at all today.
+
+### 1.E — [D] Docs
+
+- `WHATS_MISSING.md` — **last touched `7719296`, two days and eleven commits ago.** Stale in both directions. It still lists as open: three TIER 0 items that are done, the Pyro relocation tables that are gone, traversal's map-metrics block that is lifted, `TRV-0011` the Agile Mech, and `TRV-0206` the luminance guard. It has now gone stale four times.
+- `BACKLOG.md` #4/#5/#9/#11 known false (melee depth, retreat, class system, armour-weight wiring all shipped); #10 cites rapier, which `jk_tdm` does not depend on.
+- `DECISIONS.md` — every ADR is about `jk_wall`/`jk_core`, not this game.
+- `GAME_STATUS_REPORT.md` (dated 2026-08-01) and `handback/brief-ix/REPORT.md` — both name shipped systems as unbuilt.
+- `README.md:223-225` still states the retired 8v8 cap.
+- `briefs/README.md` does not list BRIEF XI.
+
+---
+
+## §2 — CONTRADICTIONS THE OWNER MUST RULE ON
+
+*Eight. Each names both instructions and cites both. I did not pick a
 side on any of them.*
-
----
 
 #### C1 — `TRV-0294` · **The bow and spear ship a predicted trajectory arc and a landing ring, which two briefs forbid.**
 
-**Instruction A, twice, in bold:**
+> `BRIEF_VII_optimized.md:331` — "**No trajectory arc. No landing marker.** The arc is learned — that is the entire point of Reference A."
+> `BRIEF_VII_optimized.md:72` — "Brief V grenade trajectory arc | **Grenade-only.** Spear and bow get NO arc and NO landing marker — the learnable arc IS the skill."
+> `BRIEF_VIII_master.md:561` — "**No arc, no landing marker** — the arc is learned, and that is the skill."
 
-> `briefs/BRIEF_VII_optimized.md:331` — "**No trajectory arc. No landing
-> marker.** The arc is learned — that is the entire point of Reference A."
->
-> `briefs/BRIEF_VII_optimized.md:72` — "Brief V grenade trajectory arc |
-> **Grenade-only.** Spear and bow get NO arc and NO landing marker — the
-> learnable arc IS the skill."
->
-> `briefs/BRIEF_VIII_master.md:561` — "**No arc, no landing marker** — the
-> arc is learned, and that is the skill."
+against the code's own cited authority:
 
-**Instruction B**, cited by the code as its authority:
+> `main.rs:2661` — "The predicted-arc preview for **bow/spear** aiming (**§4.2 Brief II**)…"
+> `main.rs:20` — "Bow/spear aiming shows a red PREDICTED ARC with a landing marker".
 
-> `main.rs:2661` — "The predicted-arc preview for **bow/spear** aiming
-> (**§4.2 Brief II**): arc-length-spaced dots, a landing ring +
-> drop-line, and a ±spread cone of two fainter arcs."
->
-> `main.rs:20` (module header, the game's own summary of itself) —
-> "Bow/spear aiming shows a red PREDICTED ARC with a landing marker".
+**Re-derived today at `5473d06`.** `fn arc_preview` (`main.rs:20902`)
+still gates on:
 
-**What ships.** `fn arc_preview` (`main.rs:20879`) is registered in the
-app at `main.rs:7891` and gates on
-`cam_ctl.ads && p.alive() && spec.projectile.is_some()`. Exactly two guns
-declare `projectile: Some(..)` — the **Bow** (`sim.rs:686`) and the
-**Spear** (`sim.rs:708`). So the preview exists for precisely the two
-weapons the ban names, and for nothing else. Brief II is not in this
-repository; Briefs VII and VIII both post-date it and both override it.
+```rust
+let show = cam_ctl.ads && p.alive() && spec.projectile.is_some() && p.roll_t <= 0.0;
+```
 
-**Status: `CONTRADICTED`.** Not `NOT STARTED`, not a defect — the owner
-issued both instructions and the older one is what runs.
+Exactly two guns declare `projectile: Some(..)` — Bow (`sim.rs:686`) and
+Spear (`sim.rs:708`). The preview exists for precisely the two weapons
+the ban names and nothing else. Brief II is not in this repository;
+Briefs VII and VIII both post-date it.
 
-**Why nobody caught it:** `TRV-0071` and `TRV-0091` were both filed
-`DELIVERED` quoting asks whose *first* sentence (the throw) shipped. The
-sentence after it was never checked against the code.
+**What is NEW and makes this urgent.** `cam_ctl.ads` is RMB. The owner's
+new spec has just declared RMB to be **PRE-AIM** and said so three times.
+So the forbidden arc is now bound to the exact button the newest spec
+elevates. Whatever you rule, rule it before the client half of the input
+split is built on top of it.
 
-**Evidence gap, stated:** no capture holds focus with a bow or a spear,
-so no PNG proves or disproves the arc on screen. `bow_draw_fp/03` and
-`spear_flight/00` are both un-focused and show no arc. The code is
-conclusive; the instrument has never been pointed at it.
+**Evidence gap, unchanged:** no capture in this repository holds RMB with
+a bow or a spear. `bow_draw_fp/03` and `spear_flight/00` are un-focused
+and show no arc. The code is conclusive; **the instrument has never been
+pointed at it.** `BOW_DRAW_FP_BEATS` presses Mouse Left only.
 
-**Dispatch, if the owner rules for the briefs:** friday33, ~1 hour —
-gate `arc_preview` on `GunKind::Grenade`-class throws only, and take a
-`bow_draw_fp` beat that holds RMB so the absence is photographed.
-
----
+**Dispatch if the owner rules for the briefs:** friday33, ~1 hour — gate
+`arc_preview` on the grenade-class throw only, and take the RMB-held beat
+so the absence is photographed.
 
 #### C2 — `TRV-0295` · **"No head, no cockpit glass, no visible pilot opening" against a shipped head, visor and cockpit.**
 
-> `briefs/BRIEF_VIII_master.md:666` — "**No head.** An angular recessed
-> sensor visor slit across the hull front"
-> `briefs/BRIEF_VIII_B_addendum.md:249` — "…mounted low on the hull sides,
-> **no head, no cockpit glass, no visible pilot opening**"
-> `briefs/PROMPT_mech_rebuild.md:315` — same words again
+> `BRIEF_VIII_master.md:666` · `BRIEF_VIII_B_addendum.md:249` · `PROMPT_mech_rebuild.md:315` — the same words, three times.
 
-Against the 36-section spec's **§20 spacecraft cockpit** ("first-person
-mech frame, instrument panels, screen glow, vibration",
-`WHATS_MISSING.md:401-403`), which shipped as `cockpit.rs`, 16 cockpit
-captures, `MECH_VISOR_Y_FRAC`, and a **×2 visor weak point** that is now
-load-bearing gameplay (`sim.rs`, the mech-front damage balance at
-`sim.rs:5875`).
-
-**Status: `CONTRADICTED`.** Almost certainly superseded in the owner's
-head, but **nobody wrote it down**, and the concept-art briefs are still
-the stated completion criterion for the mech section. One sentence from
-the owner retires three brief lines permanently.
-
----
+Against the 15-section spec's §20 spacecraft cockpit, which shipped as
+`cockpit.rs`, 16 cockpit captures, `MECH_VISOR_Y_FRAC`, and a **×2 visor
+weak point that is now load-bearing gameplay**. Unchanged since run 1.
 
 #### C3 — `TRV-0113` · **The missile pod: "absent by default" vs bound to `Y` with ten tubes.**
 
-> `BRIEF_VIII_B_addendum.md:329` — "…the missile pod becomes an
-> **optional swappable hardpoint, absent by default**."
-> `PROMPT_mech_rebuild.md:369-370` — the same instruction, and the brief
-> demanded the reconciliation be **written down**.
+`BRIEF_VIII_B_addendum.md:329` and `PROMPT_mech_rebuild.md:369-370` both
+say optional and absent. Live: `sim.rs:4289` `§owner: "ten tubes per
+chassis (was 4), and ammo pads now resupply"`, on every chassis, bound to
+`Y`. The `§owner` marker on the ten-tube line means the later one is also
+yours — very likely a supersession nobody recorded.
 
-Live: `sim.rs:4274` `§owner: "ten tubes per chassis (was 4), and ammo
-pads now resupply"` — core, on every chassis, bound to `Y`
-(`main.rs:5078`). It is not optional and it is not absent.
+#### C4 — `TRV-0111` · **Olive drab / khaki, "minimal emissive", "the art has no glowing visor" — against the entire live faction palette.**
 
-**Status: `CONTRADICTED`.** Two owner instructions, opposite defaults.
-The `§owner` marker on the ten-tube line means the *later* one is also
-the owner's — so this is very likely a supersession nobody recorded. Say
-so once and it closes.
+`BRIEF_VIII_B_addendum.md` §D.2, headed "CORRECTION to Brief VIII §7.2".
+Against `§owner TEAM IDENTITY`, `§owner BLUE ENEMY MECHS`, SPEC15's neon
+red/blue, the Royal's gold, and now BRIEF X's orange. §D.2 was never
+retired, only overtaken — and §D.7 still makes it the mech section's
+completion criterion.
 
----
+#### C5 — `TRV-0296` / `TRV-0320` · **The enemy Agile's livery. I described this BACKWARDS last run.**
 
-#### C4 — `TRV-0111` · **Olive drab / khaki / field tan, minimal emissive, "the art has no glowing visor" — against the entire live faction palette.**
+**Correction first.** Run 1 said "the Agile Mech is orange on BOTH sides,
+and three of six chassis are now in one hue band." **That is false.**
+Re-derived from `agile_mech.rs:178-183`:
 
-> `BRIEF_VIII_B_addendum.md` §D.2, headed "**CORRECTION to Brief VIII
-> §7.2**": `hull_primary #8A8770`, `mechanism_dark #33352F`,
-> `barrel_metal #2B2C2B`; "Emissive: **minimal**. The art has no glowing
-> visor."
+```rust
+pub const ARMOR_ALLY: [f32; 3] = [0.90, 0.42, 0.11];   // industrial orange
+pub const ARMOR_FOE:  [f32; 3] = [0.075, 0.125, 0.265]; // faction dark blue
+pub const PLATE_ALLY: [f32; 3] = [0.56, 0.235, 0.075];  // burnt orange
+pub const PLATE_FOE:  [f32; 3] = [0.40, 0.165, 0.060];  // deep rust
+```
 
-Against `§owner TEAM IDENTITY` (`branding.rs:96`, `:107`, `:122`, `:150`),
-`§owner BLUE ENEMY MECHS` (`main.rs:3675`), SPEC15 P3's "neon red, dark
-red, neon blue, dark blue", the Royal's gold, the opposition Royal's
-yellow, and now BRIEF X's orange.
+The enemy Agile ships **dark-blue primary armour** and carries the
+chassis's orange on its **layered plates only**. I read the `_foe`
+material *names* and inferred the values instead of reading the values. A
+register that does that is doing the thing it exists to catch.
 
-The build has an emissive visor and a faction colour language. The
-addendum asked for neither. **§D.2 was never retired — it was overtaken.**
-It is still the document that §D.7 makes the mech section's completion
-criterion.
+**The contradiction survives, inverted.** BRIEF X §2 says "**Primary
+armour — orange.** This becomes the Agile Mech's recognizable visual
+identity" and states no faction split. The build gives the opposition a
+blue primary. The builder honoured both instructions **by role** and said
+so (`FRIDAY_LOG.md:1531-1537`): *"Two owner rulings from the same day
+pull opposite ways… If the owner wants the opposition Agile
+orange-primary, `scout_hull_foe` and `scout_plate_foe` are the whole
+change."* BRIEF XI §0.4 carries it forward unresolved and notes that
+§16's "do not change the established colour identity" **does not** settle
+it.
 
-**Status: `CONTRADICTED`.** Retire §D.2 explicitly or the next agent
-reading the briefs in order will rebuild a khaki mech.
-
----
-
-#### C5 — `TRV-0296` · **The Agile Mech is orange on BOTH sides, and three of six chassis are now in one hue band.**
-
-> BRIEF X §2 — "**Primary armour — orange.** Dominant… This becomes the
-> Agile Mech's recognizable visual identity." No faction split is stated.
->
-> `WHATS_MISSING.md:62-65` (SPEC15 P3) — "**Opposition mechs are NOT
-> recolours** … while keeping the faction colour language: **neon red,
-> dark red, neon blue, dark blue**."
-
-The build gives the enemy Agile `scout_hull_foe` / `scout_plate_foe` /
-`agile_blue_foe` and a `scout_line_foe` lamp (`agile_mech.rs:189-203`) —
-so both Agiles are orange machines and friend-or-foe rests on the lamp
-plus material value. BRIEF X's own §13 records the squeeze: the player
-Royal is **gold**, the opposition Royal is **yellow**, and "orange sits
-between them on the wheel".
-
-Meanwhile `TRV-0206` is still open: **the luminance rule that carries
-friend-or-foe is unguarded and nothing tests it** (Thor, and SPEC15's own
-trap 4).
-
-**Status: `CONTRADICTED` + `NOT PROVEN`.** Two questions for the owner:
-(1) should the opposition Agile be orange at all, or red? (2) BRIEF X's
-own acceptance line — "clearly different from Big and Royal" — has **no
-black-silhouette-at-30 m capture** behind it. `mech_lineup.rs` can
-already produce that frame in one beat.
-
----
+**What DID close:** SPEC15's trap 4 is now guarded — `TRV-0206` above.
+The luminance question is answered (17× separation in linear light); the
+livery question is not.
 
 #### C6 — `TRV-0272` · **FRONT END P5 asked for a "large MECH preview"; what shipped previews the SOLDIER.**
 
-The builder stated the deviation rather than hiding it, in the commit
-body of `7abed26` and at `main.rs:19937`:
-
-> "STILL NOT RIGHT, stated rather than hidden: this previews the SOLDIER,
-> because the soldier is what the screen customizes. **The spec's word was
-> 'mech'.** Nothing in the customization screen changes a machine today,
-> so pointing the camera at one would be a preview of something the player
-> cannot edit."
-
-The *size* half is delivered and measured: portrait 720×1040 render
-target (Bevy's `fov` is vertical, so portrait crops the sides for free),
-camera in from 3.00 m to 2.57 m, card 366×520 for ~2.6× the image area,
-rows moved out of its way at 72% width.
-
-**Status: `PARTIAL`, pending an owner ruling.** Either "the soldier is
-fine" (one line, closes it), or "make the mech customizable", which is a
-multi-session feature nobody has scoped.
-
----
+Stated openly by the builder at `main.rs:19937` and in `7abed26`'s body:
+*"STILL NOT RIGHT, stated rather than hidden… **The spec's word was
+'mech'.**"* The size half is delivered and measured (portrait 720×1040
+target, camera 3.00 → 2.57 m, card 366×520, rows at 72% width).
+`PARTIAL`, pending a ruling.
 
 #### C7 — `TRV-0273` · **FRONT END P6 named GAMEPLAY / CONTROLS / AUDIO / GRAPHICS. The build shipped CONTROLS / INTERFACE / CROSSHAIR.**
 
-Stated deviation, from `d91adb4`:
-
-> "THE DEVIATION, STATED. The spec named GAMEPLAY / CONTROLS / AUDIO /
-> GRAPHICS. **This game has no audio setting and no graphics setting** —
-> no volume, no resolution, no quality, no vsync. Empty tabs would
-> advertise controls that do not exist, and inventing settings to fill
-> them breaks the other half of the same brief, which says 'minimal'
-> twice."
-
-The *shape* the spec asked for — a small set of doors, one category at a
-time — is delivered and mutation-proven
+Stated deviation from `d91adb4`: *"**This game has no audio setting and
+no graphics setting** — no volume, no resolution, no quality, no vsync."*
+The shape the spec asked for is delivered and mutation-proven
 (`every_setting_is_still_reachable_behind_some_tab`, `main.rs:28615`).
+The unasked question the deviation exposes: **do you want them at all?**
 
-**Status: `PARTIAL`, pending an owner ruling.** The real question the
-deviation exposes and nobody has asked: **do you want a volume slider and
-a resolution/vsync setting at all?** The game currently has neither, and
-that is not recorded anywhere as a decision.
+#### C8 — `TRV-0318` / `TRV-0326` · **NEW. "Improve Agile Mech climbing animations" against a verb that may not exist for a mech.**
 
----
+> BRIEF X §0 asserts the Agile Mech can climb.
+> BRIEF XI §5 asks to *"improve Agile Mech climbing animations"* and §19 has a `Climbing` checkbox.
+> Friday33: `climb_target` is gated `!m.in_mech()` **at the climber** and requires a **dropped plate on the target** — hull-climbing is a verb for a pilot **on foot** against a stripped enemy hull. Something you do *to* a mech, not *in* one.
 
-**Resolved contradictions, kept so they are not re-opened:**
-
-- **The Royal's neon blue vs the shipped gold** — `TRV-0013`. Ruled by
-  the owner 2026-08-10: *"keep the royal mech, and keep the opposition
-  royal mech colour red yellow and neon blue details."* The gold stays;
-  `WHATS_MISSING.md:55-61` is struck through and marked. **Closed.**
-- **Mech scale 1.15× vs 1.7× vs the art's ~2.5×** — `TRV-0099`/`0101`.
-  `BRIEF_VIII` non-negotiable 8 says "1.15× … not 1.5×, not concept
-  scale"; `BRIEF_VIII_B` §A recommends 1.7× and its own precedence rule
-  says the addendum wins; live `MECH_SCALE = 1.7`. **Resolved by
-  document precedence**, but Brief VIII still reads as a non-negotiable
-  to anyone opening it first.
-- **"battles cap at 8v8"** (`README.md:223-225`, an owner rule) vs
-  `§owner: "8v8 withdrawn"` (`main.rs:23200`). Both owner; the later
-  wins. The README still states the retired rule. **Doc rot, not a live
-  contradiction.**
-- **"Recoil HALVED across the arsenal (owner request)"**
-  (`README.md:209`) vs `§owner "increase the recoil"` (the mech turret,
-  raised 2.9×). Different scopes — infantry arsenal vs hull turret — so
-  probably not a conflict, but nobody has said so in writing.
-  `TRV-0201` stays `UNVERIFIED`: I did not re-derive whether the
-  infantry halving is still in force.
+BRIEF XI §0.1 is unusually explicit about the failure mode and I am
+quoting it in full because it is the correct instruction for every agent
+here: *"do not quietly animate a verb that never fires, and do not
+quietly skip it either."* If the Agile cannot climb, §5 and the §19 box
+are **not buildable as written** and become a new feature and a `sim.rs`
+change — not a polish pass.
 
 ---
 
-### 2.B — ASKS NOBODY EVER PICKED UP
+## §3 — TWO SPECS THAT LIVE ONLY IN A CHAT WINDOW
 
-*The expensive ones. Every row here has **zero** trace of anyone starting
-— no commit, no partial code, no `§owner` marker, no research artefact.*
+**This is the failure this register exists to catch, and it has now
+happened twice more.**
 
-| Row | The instruction | Issued | Age | Why it is still zero | Lane |
+`efe1428` wrote BRIEF X to disk before building anything and said why: *"a
+spec that lives only in a chat window is the exact failure Trevor exists
+to catch."* `dd4fced` did the same for BRIEF XI — 299 lines, on disk
+before any build touched it. **That is the standard.** Two specs did not
+get it.
+
+### 3.A — THE BOW-AND-SPEAR SPEC (19 sections + an acceptance checklist)
+
+Issued today. **Not in `briefs/`.** `git ls-files briefs/` returns 12
+files; there is no bow/spear brief among them. Everything below was
+reconstructed from `§owner` markers in `sim.rs` and two commit bodies.
+**I can see six of nineteen sections. I cannot see the other thirteen and
+I have no way to tell whether they were built, refused, or never read.**
+
+**The two rules the owner stated THREE TIMES EACH. Flagged load-bearing.**
+
+> **1. "RIGHT MOUSE IS PRE-AIM ONLY — it never starts a charge. The
+> attack button charges. PRE_AIM and CHARGING are never combined."**
+> The spec states it three separate times and calls it *"extremely
+> important"* (quoted at `sim.rs:6620-6624`).
+>
+> **2. "The crosshair is sacred — nothing obstructs it."**
+> Stated three times. Restated independently in BRIEF XI §15.
+
+| Row | Section | Instruction (recovered) | Status | Evidence |
+|---|---|---|---|---|
+| `TRV-0301` | §4/§8/§17 | **RMB = pre-aim, LMB = charge, never combined** — the sim half | **`DONE`** | `enum AimPhase` + `pub fn aim_phase(ready, pre_aim, attack)` (`sim.rs:6634`, `:6654`). `if attack { Charging } else if pre_aim { PreAim } else { Equipped }` — **there is no input by which `pre_aim` alone reaches `Charging`.** Both step functions take an `AimPhase`, not a bool (`:10327`, `:10415`), so bow and spear cannot end up on different buttons. Test `right_mouse_pre_aims_and_only_the_attack_button_charges` (`:21543`) walks all seven input combinations and asserts three seconds of pure RMB winds no clock, launches nothing and spends no ammo. Commit `a95b48c`, 227 → 232 sim tests, all five mutation-proven from a file copy. |
+| `TRV-0302` | §4/§8/§17 | The same rule, **client half** | **`NOT STARTED`** | `grep -c "aim_phase\|AimPhase" main.rs` = **0**. The HUD derives its own state from raw timers (24 references to `bow_draw_t`/`spear_charge_t`/`spear_wind_t`). `main.rs:16987` still documents RMB as *"a draw on projectile weapons (bow/spear, Brief II grammar)"* — the sim builder named this line explicitly as the client's to correct. |
+| `TRV-0303` | §9/§10 | "a smooth progression with no visible steps" across **0-3 s**; low/medium/high power by second; **"~3 s reaching the normal maximum"**; holding longer buys no more power | **`UNVERIFIED`** | Being written **right now** in uncommitted `sim.rs`: `SPEAR_CHARGE_FULL_S` 0.85 → 3.00, curve deliberately kept linear with the shares argued in the comment (30.6% / 34.7% / 34.7%). **Not committed. Not counted as delivered.** |
+| `TRV-0304` | §11 | **7 s MAXIMUM CHARGE BONUS**, "deliberate high-risk/high-reward, paid for in time and mobility", and it **"must not stack past that"** | **`UNVERIFIED`** | Same uncommitted work: `SPEAR_MAX_CHARGE_S = 7.00`, `SPEAR_MAX_CHARGE_DMG = 1.10`, resolved as a **threshold on a different axis** (velocity stops at 3 s, damage steps at 7 s) because the two spec sentences cannot both hold on one ramp. That reading is a builder's judgement call on your words and **is worth a sentence from you either way.** |
+| `TRV-0305` | §B | The acceptance checklist hangs a **damage bonus off the charge** | **`UNVERIFIED`** | Named in `a95b48c`'s body as the reason defect 3 (the banked wind) mattered. Delivered by the same uncommitted work. |
+| `TRV-0306` | (§11 / pose) | The charge must read as a real **overhead javelin wind** — arm raised, spear high and angled forward-down, opposite arm out for balance, weight into a wide stance | **`NOT STARTED`** | The sim half (`SpearStance`, `spear_stance_of`, `spear_wind_frac_of`, `spear_plant_frac_of`) is in the uncommitted diff. **The client pose does not exist.** The builder notes three separate places in `main.rs` hand-roll `1.0 - spear_wind_t / SPEAR_WINDUP_S` — a sim constant living on the wrong side of the boundary. |
+| `TRV-0307` | §D | "existing player mechanics are preserved" — specifically the **parry / stagger** interactions | **`DONE`** | `a95b48c` defect 4: `try_fire` has always refused a staggered fighter, but **the bow spawns its arrow directly rather than through `try_fire`**, so a staggered archer loosed normally and a staggered thrower kept winding. Both paths now consult the parry. Test at `sim.rs:21475`. |
+| `TRV-0308` | (stated ×3) | **"The crosshair is sacred — nothing obstructs it."** | **`PARTIAL`** | The FP viewmodel half already obeys it and is tested: `ScreenProfile::BowDrawn` — *"the whole bow stays below the centre circle, so the crosshair is never covered"* (`main.rs:2825-2829`) — and `SpearRaised`, both enforced by `every_weapon_holds_its_own_screen_profile` (`main.rs:24995`) against the **real** part corners, eleven or twenty per weapon. **What is NOT covered:** (a) the arc preview's **landing ring and drop-line**, which on a flat shot land where the crosshair is — see C1; (b) `main.rs:15512` states plainly *"The mech intrusion sweep does not cover hull mounts"*; (c) no capture holds RMB, so nothing has ever been photographed. |
+| `TRV-0309` | follow-up task | Reference image — **bow layout** | **`BLOCKED` (owner)** | Not on disk. `git ls-files` finds no image under `handback/reference/` — the directory contains `NOTES.md` and nothing else. |
+| `TRV-0310` | follow-up task | Reference image — **bow design** | **`BLOCKED` (owner)** | ditto |
+| `TRV-0311` | follow-up task | Reference image — **spear design** | **`BLOCKED` (owner)** | ditto |
+| `TRV-0312` | follow-up task | Reference image — **spear charging pose** | **`BLOCKED` (owner)** | ditto. This one is the acceptance criterion for `TRV-0306`: **the pose cannot be built to a picture nobody has.** |
+| `TRV-0313` | — | **The spec itself is not committed anywhere.** | **`NOT STARTED`** | Archival defect, not a build defect. Paste it into `briefs/` once and this row closes forever — and thirteen sections stop being invisible. |
+| `TRV-0314` | §1-§3, §5-§7, §12-§16, §18-§19 + checklist §A/§C/§E+ | The thirteen sections and the rest of the acceptance checklist | **`UNVERIFIABLE`** | Only §4, §8, §9, §10, §11, §17 and checklist items §B and §D leave any trace in this repository. I cannot tell whether the rest were built, refused, or never read. **This row is not a guess and must not be turned into one.** |
+| `TRV-0315` | — | *(agent-origin)* **The `§N (owner)` marker convention has collided.** | **`NOT STARTED`** | `§8/§9 (owner)` at `sim.rs:357`, `:388`, `:6683`, `:21068` belong to the **30-section gameplay spec of 2026-08-07** (`6a46f61`). `§9/§10/§11 (owner, BOW & SPEAR)` in the uncommitted work belongs to **today's spec**. Same file, same marker, two different documents. The bow/spear work correctly appends `, BOW & SPEAR`; the older markers cannot be told apart. Cheap fix: every `§N (owner)` names its spec. |
+| `TRV-0316` | §4/§8/§17 remainder | `step_plasma_precision` **still charges on RMB** | **`NOT STARTED`** | `sim.rs:8859` — `self.step_plasma_precision(p, cmd.aim, cmd.ads)`. Its own comment calls it "PLASMA BOW mode 2". The builder flagged rather than fixed: moving it needs the client's mount router to move with it, so it is cross-lane. **The one surviving RMB-charge in the file.** |
+| `TRV-0317` | — | *(agent-origin)* **No capture in this repository holds RMB with a bow or a spear.** | **`NOT STARTED`** | `BOW_DRAW_FP_BEATS` (`main.rs:5699`) presses `MouseButton::Left` — which is *correct* under the new spec — and never presses Right. Five `bow_draw_fp` frames, five `bow_draw`, six `spear_flight`, six `arrow_flight`, and pre-aim appears in none of them. **This one capture settles C1, `TRV-0308` and half of BRIEF XI §15.** |
+
+### 3.B — THE FRONT END SPEC (15 sections claimed, 6 recoverable)
+
+Unchanged from run 1 and still not on disk. `TRV-0267`..`TRV-0281`,
+`TRV-0297`, `TRV-0299`, `TRV-0300`. Eleven `DONE`, two `PARTIAL` behind
+C6/C7, one `UNVERIFIABLE`, one `NOT STARTED` (the spec is not committed),
+one `UNVERIFIABLE` for sections beyond P6.
+
+**One row moved here today.** `TRV-0342`, new: the owner reported the
+LEARN screen's BACK button doing nothing. `5473d06` found it was worse —
+*"a trap door, not a dead button"*: one `NavReturn` slot served a
+two-level path, so after a trip to MANUAL the player could not leave LEARN
+**at all except by killing the process**. Fixed with a second slot
+(`LearnReturn`), written only by `FrontAction::Learn`. **`DONE`.** The
+test states its own limit honestly — it replays the writes rather than
+running `front_buttons`, so it catches the slots being collapsed back
+into one but would not catch `Back` being rewired to read `NavReturn`
+again. That limit is `TRV-0343`, `NOT STARTED`.
+
+---
+
+## §4 — BRIEF XI (the Agile Mech's second brief) — 24 rows, 1 done
+
+`briefs/BRIEF_XI_agile_mech_motion_limbs_guns.md`, 299 lines, committed
+`dd4fced` **2026-08-10 22:39**. On disk before any build touched it, with
+a §0 written by an agent recording three things the brief cannot know.
+Owner's framing, quoted in the file: *"Finish the Agile Mech rather than
+continually redesigning unrelated systems, while making the shared
+limb/hand/weapon system explicit."*
+
+**Nothing in this brief has been built. `dd4fced` adds one file and
+changes no code** — the commit subject "finish the Agile Mech" describes
+the brief's intent, not a delivery. That is exactly the misreading this
+register exists to prevent, and I nearly made it.
+
+| Row | Section | Status | Evidence / what is actually there |
+|---|---|---|---|
+| `TRV-0318` | §0.1 climbing is contested, **do not build blind** | **`BLOCKED` (owner)** | See C8. |
+| `TRV-0319` | §0.2 `DECISION.md` item 3 **is** §1 and is binding — generalise `solve_arm_ik`, no second solver, no crate | **`NOT STARTED`** | `solve_arm_ik` (`main.rs:2585`) has 10 call sites and every one is an arm (`:18459`, `:18488`, `:18536`, `:18567`, `:18651`, `:18663`, `:20184`, `:20187`, `:25936`). No `leg_ik`, `foot_place` or `solve_leg` anywhere in `src/`. |
+| `TRV-0320` | §0.4 enemy Agile livery | **`CONTRADICTED`** | duplicate-of `TRV-0296`. See C5. |
+| `TRV-0321` | §0.4 **double jump has no airborne pose** — "the highest-value single fix in this brief" | **`NOT STARTED`** | `try_mech_jump`'s compress/tuck is heavy-only. The apex frame is indistinguishable from standing; the captures now exist to prove it (`agile_moves/08-double-jump-apex.png`). |
+| `TRV-0322` | §1 foot & leg motion, no sliding, terrain adaptation | **`NOT STARTED`** | see `TRV-0319` |
+| `TRV-0323` | §2 walking / running / sprinting differentiated, "lighter and faster than the Big Mech" | **`UNVERIFIED`** | A gait system and a sprint exist. I did not measure whether the Agile's three gaits differ per the brief's terms, and I will not guess. |
+| `TRV-0324` | §3 jump prepares, land absorbs | **`PARTIAL`** | Compression exists **heavy-only**. Nothing for the Agile. |
+| `TRV-0325` | §4 crouch with the whole lower body, "do not simply lower the character vertically" | **`PARTIAL`** | This is `TRV-0034` restated by the owner. `gait_pose` (`main.rs:2336`) still computes the crouch from `CROUCH_HEIGHT` (= 1.15, i.e. 0.646 × `BODY_HEIGHT`, the **infantry** ratio) and the kneeling-mech path (`main.rs:17794-17803`) blends two infantry poses. `MECH_CROUCH_HEIGHT_FRAC` (`sim.rs:5919`) appears **nowhere** in `main.rs`. |
+| `TRV-0326` | §5 climbing — hands/feet to surface | **`BLOCKED` (owner)** | gated by §0.1 |
+| `TRV-0327` | §6 aiming must not freeze the lower body | **`NOT STARTED`** | — |
+| `TRV-0328` | §7 **two** limb families — DESIGN A player, DESIGN B mech; "do not create completely separate complicated systems for every character" | **`NOT STARTED`** | — |
+| `TRV-0329` | §8 the reusable component tree (Arm → Upper/Elbow/Forearm/Wrist/Hand → Palm/Fingers) | **`NOT STARTED`** | The 20-segment rig **deliberately omits fingers** and says why: *"Fingers are deliberately absent — they are a sub-rig on the hands (§2), and counting them would push this past fifty and miss the point of the list"* (`main.rs:852`). That is a documented decision, not a gap — but the sub-rig it defers to does not exist. |
+| `TRV-0330` | §9 mech arm design | **`NOT STARTED`** | — |
+| `TRV-0331` | §10 mech hand & fingers must not clip through **guns, bow, spear, grenade** | **`NOT STARTED`** | `held_grenade.rs:189` draws "four finger bars and a thumb" as **geometry**, not articulation. |
+| `TRV-0332` | §11 player hand design | **`NOT STARTED`** | — |
+| `TRV-0333` | §12 shared Weapon → Grip Point → Hand IK → Arm → Shoulder, "should remove the need to hand-tune hand positions per weapon" | **`NOT STARTED`** | No `grip_point`/`GripPoint` symbol exists. `main.rs:20184-20187` drives both wrists through `solve_arm_ik` from per-weapon offsets — the hand-tuning this section wants to retire. |
+| `TRV-0334` | §13 gun graphics pass — "guns are not placeholder geometry" | **`NOT STARTED`** | — |
+| `TRV-0335` | §14 gun sits correctly in the mech hand, first **and** third person | **`NOT STARTED`** | — |
+| `TRV-0336` | §15 FP weapon visuals — right side, **never covering the crosshair**, minimal sway | **`PARTIAL`** | Infantry weapons: enforced and tested (see `TRV-0308`). **Mech hull mounts: explicitly out of the sweep** — `main.rs:15512`, *"The mech intrusion sweep does not cover hull mounts"*. §15 says the rule applies to the Agile's guns. |
+| `TRV-0337` | §16 keep the established colour identity, **do not change it this pass** | **`DONE`** | Satisfied by construction — the palette is unchanged since `8de5e93` and is now `pub const` data with a test pinning it (`TRV-0206`). Recorded as done because it is a *constraint* and the constraint holds, not because work was performed. |
+| `TRV-0338` | §17 final integration checklist (20 named subsystems) | **`NOT STARTED`** | — |
+| `TRV-0339` | §18 **reuse** — "one good reusable system over many separate systems that do the same thing" | **`NOT STARTED`** | The brief names this the *main technical objective*. |
+| `TRV-0340` | §19 final quality check — 33 boxes across Movement / Combat / Character / Presentation / Technical | **`NOT STARTED`** | — |
+| `TRV-0341` | PROOF STANDARD — every §19 visual box needs a screenshot; **"capture consecutive frames, not one pose"** for sliding and clipping | **`NOT STARTED`** | The brief names the two claims most likely to be ticked without evidence. Cheaper if `TRV-0040` (capture scripts as data) lands first. |
+
+---
+
+## §5 — BRIEF X — now closed but for one row
+
+Run 1 said *"Immediate, cheap, and owed: commit the eight `agile_body`
+PNGs, run `agile_moves`, and take one three-tier silhouette frame."*
+**Two of the three happened, in `8de5e93` and `9b108b2`.**
+
+| Row | Section | Status | Change |
+|---|---|---|---|
+| `TRV-0282` | §0 the three abilities must not break | `DONE` | Capture owed → **capture delivered.** `agile_moves` 12 frames photograph roll, jump, double-jump kick and apex, air flip first/inverted/second, landing. Climb is not among them and now cannot be — see C8. |
+| `TRV-0289` | §8 animation & motion, no clipping | **`NOT STARTED` → `DONE`** | The re-timed script found a real defect the first table hid: *"the first table put the dodge roll AFTER the double jump and photographed a machine standing perfectly still twice."* Roll now runs off a walk, timed against `ROLL_LOAD_S + ROLL_S + ROLL_EASE_S`. |
+| `TRV-0291` | §12 performance | **`UNVERIFIED` → `PARTIAL`** | ~150 parts / 3 meshes / 7 materials published. No draw-call measurement. |
+| `TRV-0292` | §13 differentiate from Big and Royal | **`DONE`(contested) → `PARTIAL`** | `09-squint-derived.png` exists and is honestly labelled: not a matte, a 3.33× downsample with hue removed, because the harness has **no stencil or depth output** and a luminance threshold failed against a dark wall. Still no three-tier comparison. |
+| `TRV-0298` | the khaki tripod on every scout and infantryman | `DONE` | Unchanged. Still the clearest proof in this project that Rule 8 pays: 438 tests and a compiler never saw it; one screenshot did. |
+
+**What the roll capture found that nothing else could,** and why it
+belongs in a register rather than only a build log: *"the tumble is the
+ONLY camera angle in this game that looks at a chassis from underneath,
+and the pelvis had no floor."* The pilot's torso showed through the
+machine's crotch on every roll, and the pilot's **bright gold waist
+stripe** had been reading as two yellow tabs on the machine's hips *in
+every frame since the first build*. Four visual defects, all invisible to
+the test suite.
+
+---
+
+## §6 — ASKS NOBODY HAS EVER PICKED UP
+
+*Every row re-derived today at `5473d06`, not carried forward on faith.*
+
+| Row | The instruction | Issued | Age | Re-derived today | Lane |
 |---|---|---|---|---|---|
-| `TRV-0010` | "**Royal ARROW LAUNCHER: minigun + 3 crossbows.** Compact minigun silhouette, rotating mechanism, three crossbow assemblies around a central weapon, bolt ammunition, mechanical loading." | SPEC15 **P2** 2026-08-09 | 1 day | Grepped `crossbow`, `arrow_launcher`, `ArrowLauncher` across `src/`: **zero hits in any weapon path.** `MechWeapon` = Gatling/Rockets/Autocannon/Plasma/Repair. **The last open P2 row, and the only thing that would make a Royal not-a-bigger-Big.** | friday33 + one number from toto |
-| `TRV-0260` | "**Save everything into `handback/reference/` and commit it — reference that lives only in a chat log is lost work.**" (the mech concept art) | `PROMPT_mech_rebuild` Task 1, `aefd16f` 2026-07-31 | **10 days — the oldest untouched ask** | The session that got it had no image-download capability and said so (`handback/reference/NOTES.md`). `git log --diff-filter=D` across every image type: it was never committed and later deleted. **It never arrived.** Four rows in two briefs are permanently unsatisfiable without it (`TRV-0075`, `0100`, `0115`, `0172`), and §D.7 makes the concept-art side-by-side the mech section's *stated completion criterion*. | **owner** |
-| `TRV-0261` | The medic reference art — *"a squat utility robot, rounded masses, one big camera lens, worn amber over near-black."* | chat, quoted `WHATS_MISSING.md:513` | 3 days | The chassis was built to it and photographed; the image is not here, so nothing can be re-checked against it. | **owner** |
-| `TRV-0030` | "**Every explosion is silent.** The sim publishes `Boom`; no sound exists. **Unblocker is `gen_sfx.py`, already in the repo.**" | `0-NOW` 2026-08-08, restated `0-QUEUE` TIER 1 #9 | 2 days | Re-derived: the `Sfx` load list is 22 `.wav` and no boom; `gen_sfx.py` generates no explosion either. **There has never been an owner blocker and the unblocker was named on day one.** | friday33, 1 hour |
-| `TRV-0036` | "**Armour damage states are invisible.** `armor_stage_of` has ZERO client readers, so Fresh, Scuffed and Cracked render identically." | `0-NOW` §A.3 2026-08-08, restated TIER 2 #15 | 2 days | Re-derived today: `main.rs` contains **0** references to `armor_stage_of`, `armor_wear_of` or `ArmorStage`. `sim.rs` contains **66**. `ArmorStage::tilts` is a published accessor for a brief requirement with no reader. | friday33, 1 session |
-| `TRV-0040` | "**Make capture scripts DATA, not code** — Thor's highest-leverage finding." | TIER 2 #19 | 2 days | `struct CapBeat` at `main.rs:5280`; every script is still a compile-time const array in a 29k-line file. 6 min per framing tweak vs ~40 s. Your own words: *"several tasks needed 3+ iterations purely on camera framing."* | friday33, 1 session |
-| `TRV-0024` `TRV-0026` `TRV-0028` `TRV-0029` | Four of the eight TIER 0 "**MINUTES. One line each, no design decisions**" items | 2026-08-09 | 1 day | `TDM_TARGET_CHOICES` (`sim.rs:430`) unread — its only other mention is a doc comment calling it a known mistake. `shot_handgun.wav` written by `gen_sfx.py:73`, on disk, loaded by nothing. `FORGE_SLOTS` (`main.rs:1386`) unread. The `9000.0` spray scale is **still a bare literal at four sim sites** and the client keeps its own copy (`main.rs:308 PUNCH_DEG_S_PER_SPEC_KICK = 9000.0`). | friday33 + friday22, one sitting |
-| `TRV-0031` `TRV-0032` `TRV-0033` | The three TIER 1 honesty defects | 2026-08-09 | 1 day | Field Manual still prints the constant (`main.rs:24643 TDM_TARGET,`) not the chosen target. `BIND_REGISTRY`'s only `U` row is still "Dismount the mech" (`main.rs:5154`) while the world prompt says "U - GRAB THE HULL" (`:23033`). The `Q` row (`:5137`) still names roll and flip only — the scout's second flip charge and mid-air jump appear nowhere a player can find them, **and BRIEF X has just made them the Agile's mechanical identity.** | friday33, 1 sitting |
-| `TRV-0055` | "`gatling_heat` carries TWO scales in one sim field… Split it or document it." | `0-NOW` §A.6 | 2 days | Re-derived: `main.rs:4949`, `:21974`, `:21980`, `:21983` print `×100` under a `%`; **`main.rs:21992` prints the raw value under the same `%`.** Both branches live. | friday22 (source) + friday33 |
-| `TRV-0034` | "`gait_pose` bakes the INFANTRY crouch ratio (0.646) against the sim's `MECH_CROUCH_HEIGHT_FRAC` (0.72)" | `0-NOW` §A.2 | 2 days | **Re-derived and it survives.** The literal `0.646` is gone, but `gait_pose` (`main.rs:2336`) still computes the crouch pose from `CROUCH_HEIGHT` (= 1.15, i.e. 0.646 × `BODY_HEIGHT`), and the kneeling-mech path (`main.rs:17794-17803`) blends two *infantry* poses. `MECH_CROUCH_HEIGHT_FRAC` (`sim.rs:5919`) appears **nowhere** in `main.rs`. | friday33 |
-| `TRV-0206` | "the luminance rule is unguarded… **nothing tests it**" — SPEC15's own **trap 4** | Thor, adopted into SPEC15 2026-08-09 | 1 day | No test pins ally/enemy luminance separation. The owner's own spec hands this trap to every builder and no builder has taken it. **C5 makes it urgent.** | friday33, ~30 min |
-| `TRV-0150` | "**Powered armour** · RESEARCH ONLY, DO NOT BUILD… Produce the spec, stop there. End the file with a build-readiness checklist." | `PROMPT_MASTER` Task 8 | 7 days | The "do not build" half was obeyed. The "produce the spec" half was never started; `research/powered-armour/` does not exist. **You said you want this in the future — recording it so the want does not vanish.** | — |
-| `TRV-0136` `TRV-0139` | Tier 4 cosmetics (skin ×4, palette, weapon paint ×4, decals) and the **12 named preset loadouts** (Aggressive/Duelist/Fieldfare, Vanguard/Ghost/Archer, Tank/Reaper/Sentinel, Paladin/Surgeon/Bombardier) | BRIEF_IX-C | 11 days | Zero. The Forge saves hat colour, tunic colour, melee choice, grenade preset, helmet shape/tint and class — no paint, no decal, no skin, no named preset. | friday33 |
-| `TRV-0119` `TRV-0120` | The Castle Heart / Gatehouse Signal / **objective inversion at 5:00**; and vertical-movement audio callouts (stairs soft, climbing stone-shifting, vaults metallic ring, drops rubble crunch) | BRIEF_IX-A | 11 days | KOTH has one hill. There is no two-objective, tier-inverting mode and no surface-aware movement audio. | friday22 + friday33 |
-| `TRV-0187` | "**ROTATING CODEBASE REVIEW.** Each cycle, review four categories, rotating so each is examined roughly every five cycles." | `PROMPT_RND_CYCLE` §5 | 7 days | **Never run once.** The scouts do the equivalent ad hoc and find real things — arguably better — but the instruction itself has no execution record. | — |
-| `TRV-0157` | "Work on branch `claude/master-research`… Do not open a pull request unless asked." | `PROMPT_MASTER` preamble | 7 days | No such branch exists. All work landed on `main`. Recording the divergence, not litigating it. | — |
-| `TRV-0297` | "**Sections beyond P6 of the FRONT END spec.**" | chat, 2026-08-10 | today | See §3. Six priorities have `§owner FRONT END` markers in the code. **If the spec has 15 sections, nine of them have no trace anywhere in this repository.** | **owner — re-supply** |
-
-**One more that belongs here and is a different shape:** `TRV-0117`, the
-owner's **40 m unobstructed-sightline rule** (BRIEF_IX-A). It was
-measured — all four maps fail, 80–637 m — and then **retired by an agent
-document** (`632824a`: "the IX-A 40 m sightline rule is retired as a
-global maximum… unsatisfiable above ~15 m half-extent from the day it was
-written"). The replacement is honestly labelled "a design proposal
-needing an owner decision, not a finding". **An owner rule is currently
-retired on an agent's arithmetic.** That is the right arithmetic and the
-wrong authority. `BLOCKED` on one owner sentence.
+| `TRV-0260` | "**Save everything into `handback/reference/` and commit it — reference that lives only in a chat log is lost work.**" | `PROMPT_mech_rebuild` Task 1, `aefd16f` 2026-07-31 | **11 days — the oldest untouched ask** | `git ls-files` under `handback/reference/` returns **one file, `NOTES.md`**. The session that got the task had no image-download capability and said so. It never arrived. Four rows in two briefs are permanently unsatisfiable without it (`TRV-0075`, `0100`, `0115`, `0172`), and §D.7 makes the concept-art side-by-side the mech section's **stated completion criterion**. | **owner** |
+| `TRV-0309`-`0312` | The four bow/spear reference images | today | today | Same directory, same answer. **The same failure, eleven days later, with the same directory named in the original instruction.** | **owner** |
+| `TRV-0261` | The medic reference art — *"a squat utility robot, rounded masses, one big camera lens, worn amber over near-black"* | chat, quoted `WHATS_MISSING.md:513` | 4 days | Chassis built to it and photographed (9 `medic` frames). The image is not here, so nothing can be re-checked against it. | **owner** |
+| `TRV-0030` | "**Every explosion is silent.** The sim publishes `Boom`; no sound exists. **Unblocker is `gen_sfx.py`, already in the repo.**" | `0-NOW` 2026-08-08 | 3 days | **Still true.** 21 `asset_server.load` calls, all `.wav`, list enumerated in §1.B task 5. No boom. `gen_sfx.py` writes no explosion either. **There has never been an owner blocker and the unblocker was named on day one.** | friday33, 1 h |
+| `TRV-0036` | "**Armour damage states are invisible.** `armor_stage_of` has ZERO client readers." | `0-NOW` §A.3 | 3 days | **Still true.** `main.rs`: **0**. `sim.rs`: **66**. | friday33, 1 session |
+| `TRV-0040` | "**Make capture scripts DATA, not code** — Thor's highest-leverage finding." | TIER 2 #19 | 3 days | **Still true.** `struct CapBeat` at `main.rs:5280`; every script is a compile-time const array. Every BRIEF XI proof and every bow/spear capture pays the 6-minute build tax without it. | friday33, 1 session |
+| `TRV-0024` | `TDM_TARGET_CHOICES` unread | 2026-08-09 | 2 days | **Still true.** `sim.rs:430` defines it; the only other mentions are a doc comment at `sim.rs:4937` calling it a known mistake and a doc comment at `frontend.rs:321`. **No executable reader.** | friday33 |
+| `TRV-0026` | `shot_handgun.wav` written by nobody's loader | 2026-08-09 | 2 days | **Still true.** `gen_sfx.py:73` writes it; it is on disk; **it is not in the 21-entry load list.** | friday33 |
+| `TRV-0028` | `FORGE_SLOTS` unread | 2026-08-09 | 2 days | **Still true.** `main.rs:1386` defines it; the only other mention is `sim.rs:4937`'s doc comment. | friday33 |
+| `TRV-0029` | The `9000.0` spray scale is a bare literal | 2026-08-09 | 2 days | **Still true.** `sim.rs:4515`, `:5481` (plus `:23760`, `:23761` in tests) and the client keeps its own copy at `main.rs:308`. | friday22 + friday33 |
+| `TRV-0010` | "**Royal ARROW LAUNCHER: minigun + 3 crossbows.**" | SPEC15 **P2** 2026-08-09 | 2 days | **Still zero.** `crossbow` / `arrow_launcher` / `ArrowLauncher`: no hits in any weapon path. `MechWeapon` = Gatling / Autocannon / Rockets / Plasma / Repair (`sim.rs:5173`). **The last open P2 row and the only thing that would make a Royal not-a-bigger-Big.** | friday33 + one toto number |
+| `TRV-0034` | `gait_pose` bakes the INFANTRY crouch ratio | `0-NOW` §A.2 | 3 days | **Still true, and now restated by the owner** as BRIEF XI §4 — see `TRV-0325`. | friday33 |
+| `TRV-0150` | "**Powered armour** · RESEARCH ONLY, DO NOT BUILD… Produce the spec, stop there." | `PROMPT_MASTER` Task 8 | 8 days | The "do not build" half was obeyed. The "produce the spec" half was never started; `research/powered-armour/` does not exist. | — |
+| `TRV-0136` `TRV-0139` | Tier-4 cosmetics and the **12 named preset loadouts** | BRIEF_IX-C | 12 days | Zero. | friday33 |
+| `TRV-0119` `TRV-0120` | Castle Heart / Gatehouse Signal / objective inversion at 5:00; surface-aware movement audio | BRIEF_IX-A | 12 days | KOTH has one hill. Neither exists. | friday22 + friday33 |
+| `TRV-0187` | "**ROTATING CODEBASE REVIEW**, four categories, each examined every five cycles" | `PROMPT_RND_CYCLE` §5 | 8 days | **Never run once.** The scouts do the equivalent ad hoc and find real things — arguably better — but the instruction has no execution record. | — |
+| `TRV-0157` | "Work on branch `claude/master-research`…" | `PROMPT_MASTER` preamble | 8 days | No such branch exists; all work landed on `main`. Recording the divergence, not litigating it. | — |
+| `TRV-0344` | *(agent-origin, new)* `config/settings.txt` carries `fov_idx = 4` (100°) against `FOV_DEFAULT_IDX = 3` (`main.rs:1588`) | — | — | **Every capture in this repository was taken through it.** Comparisons within a pass are same-settings and valid; none is what a clean checkout produces. | friday33, minutes |
 
 ---
 
-### 2.C — SHIPPED THAT THE OWNER NEVER ASKED FOR
+## §7 — WHERE I DISAGREE WITH THE RECORD, AND WHERE I WAS WRONG
 
-| Row | What shipped | Against what |
+**What I got wrong last run** — first, and named:
+
+| Row | What I wrote | What is actually there |
 |---|---|---|
-| `TRV-0294` | **The bow/spear trajectory arc + landing ring + spread cone.** `main.rs:20879`. | Forbidden in bold, twice each, by BRIEF_VII and BRIEF_VIII. See C1. **This is the only item in this section that contradicts an explicit prohibition.** |
-| `TRV-0097` | **The whole bow.** Full draw, sway ramp, letdown, pierce table, quiver, third-person nock, viewmodel arrow, 10 captures. | `BRIEF_VIII` Appendix A: "**The bow** … is **not** in this brief's scope. It is parked, not cancelled." Built anyway across `c727fd0`, `a4d2070`, `4be8701`, `68d325b`, `054a283`. Good work, out of scope, never re-authorised. |
-| `TRV-0239` `TRV-0240` | **A ~⅓ cut to bot mech sustained output** (492 → 331 damage over 17 s at 10 m) and **braced turret fire is no longer perfectly accurate** (0° → ~1.6°). | Friday volunteered both and named them: *"a nerf nobody asked for"*, *"a third is a real balance change, not a rounding error."* The direction is what you asked for; the magnitude is not. **Wants a playtest, not an argument.** |
-| `TRV-0132` | **The class system is a different system in the same slot.** Shipped LINE / SKIRMISHER / WARDEN / MARKSMAN, hooked to health, movement, spread and swap speed. | BRIEF_IX-C Tier 1 named **Assault 6.2 m/s / 25 kg, Scout 6.8 / 20, Heavy 5.0 / 32, Support 5.8 / 24** — different names *and* different axes. Same intent, and it is tested (`sim.rs:15058`). **Nobody ever wrote down that the brief's four were superseded**, so the brief still reads as unbuilt. |
-| — | **The mech barrier's outer frame, six-node emitter ring and feed conduits.** | Bolted on unasked, on the argument that a field that size "needs a structure to project from". The owner asked for the original back; all of it was removed (`6442a2d`). *Listed as the exemplar of the pattern, already closed.* |
-| `TRV-0298` | **A khaki emitter housing with three steel petals hanging at the left hip of every scout and every infantryman.** | A parenting change in §P1 SIX VARIANTS moved the barrier module onto the soldier's thorax, which is visible for everyone, and nothing replaced the hiding the old parent gave for free. **Found by BRIEF X's first capture, and fixed in the same commit** (`main.rs:10350-10357`). Listed because it is the clearest proof this project has that Rule 8 pays: 435 tests and a compiler never saw it; one screenshot did. `DONE`. |
+| `TRV-0296` / C5 | "The Agile Mech is orange on BOTH sides, and three of six chassis are now in one hue band." | **False.** `ARMOR_FOE = [0.075, 0.125, 0.265]`, *"faction dark blue"* (`agile_mech.rs:179`). I read the `_foe` material **names** and inferred the values instead of reading the values. The contradiction is real; my description of it was backwards, and it was the more alarming of the two directions. |
+| `TRV-0289` | "the `agile_moves` capture script exists in code and has produced no PNGs" | True when written. **Twelve frames landed 90 minutes later** (`8de5e93`). |
+| §8 of run 1 | "the 14 `UNVERIFIED` rows are the honest total of the above" | The headline of the same file said **18**. I criticised the ledger for having three numbers for one set and then shipped two. Fixed: 21, and §8 no longer restates a count. |
 
-Everything else I checked in the "unasked" direction turned out to be
-asked for and marked: the sentinels ringing the map (`§owner ON THE MAP`),
-the `CARTOON` dial (*"make the cartoons ui little look like cartoon
-feeling as well"*), the zombie-extraction mode (`§8` of an earlier spec,
-withdrawn from the menu with a marker), and the three deliberate
-retentions the scouts already cleared.
-
----
-
-## §3 — THE FRONT END SPEC — the one that is not on disk
-
-**This is the live instance of the failure this file exists to catch.**
-
-Yesterday, `efe1428` wrote BRIEF X to disk before building anything, and
-said why: *"a spec that lives only in a chat window is the exact failure
-Trevor exists to catch."* The FRONT END spec, issued the same day and
-already largely built, **was not given the same treatment.** It exists
-only as `§owner FRONT END` doc comments and four commit bodies.
-
-I reconstructed what follows from those. It is the recoverable part. I
-cannot tell you what is missing from it, only that P1–P6 are the highest
-priorities that leave a trace and **nothing in the repository references
-a P7 or beyond.**
-
-| Row | Instruction (recovered from `§owner` markers and commit bodies) | Status | Evidence |
-|---|---|---|---|
-| `TRV-0267` | "LAUNCH → INTRO IMAGE → two options (START A GAME / LEARN ABOUT THE GAME)" | `DONE` | `frontend.rs:706 open_title`; `GameState::Title` is the app default (`main.rs:7839`); capture `frontend/01-title.png`, `02-learn.png` |
-| `TRV-0268` | "**The normal menu bar must NOT appear after the intro.**" | `DONE` — structurally, not by hiding | Four states added at the FRONT of `GameState` (`main.rs:5059-5078`); the loadout screen is reachable only from the main menu, which is reachable only from a result or a pause. "There is no code path from launch to a menu bar left to break." |
-| `TRV-0269` | "A fixed **4v4, first to 25** introductory match. No config screen." | `DONE` | `INTRO_PER_TEAM = 4`, `INTRO_TDM_TARGET = 25` (`frontend.rs:283-290`); `intro_match_config()` is a `const fn` that reads `Selected` **nowhere**; tests `intro_match_is_four_v_four_to_twenty_five`, `intro_match_ignores_every_player_setting`, `the_introductory_match_builds_and_steps` (`cd07a07` — 4v4 is a team size no shipping config had ever built, and the sim silently *clamps* `per_team`, so "it compiled" proved nothing) |
-| `TRV-0270` | "MATCH COMPLETE, with exactly two large buttons" — one of them "CONTINUE PLAYING" | `DONE` | `open_match_complete` (`frontend.rs:900`), `FrontAction::ContinueToMenu` (`:223`); captures `frontend/04-match-complete.png` **and** `05-match-complete-defeat.png` — both halves, because "a screen only ever photographed winning has never had its other half looked at" |
-| `TRV-0271` | "A **five-entry** MAIN MENU that reads as a command interface" | `DONE` | `open_main_menu` (`frontend.rs:1011`); test `main_menu_has_exactly_five_entries` (`:1380`) — "the spec says five and names them"; capture `frontend/03-main-menu.png` |
-| `TRV-0272` | **P5** — "large mech preview, clean, the machine is the visual focus" | **`PARTIAL` / see C6** | Size delivered and measured (`main.rs:2719`, `:7528`, `:19937`, `:23229`). Subject is the **soldier**, stated openly. |
-| `TRV-0273` | **P6** — settings by category navigation: GAMEPLAY / CONTROLS / AUDIO / GRAPHICS | **`PARTIAL` / see C7** | Shape delivered (`main.rs:7703`, `:24194`), tabs deviate to CONTROLS / INTERFACE / CROSSHAIR; test `every_setting_is_still_reachable_behind_some_tab` (`:28615`), mutation-proven from a file copy |
-| `TRV-0274` | "**very dark blue / black** ground, **bright white** primary type (asked twice), soft grey secondary, gold reserved for accent and selection" | `DONE` | `frontend::palette` (`:81-118`) with a measured contrast table computed in **linear** space (INK 19.4:1 on ground, GOLD 9.9:1) because sRGB-space figures run ~10% optimistic |
-| `TRV-0275` | "neon red and neon blue are **not** general-purpose UI colours" | `DONE` | `palette::NEON_BLUE` / `NEON_RED` (`:114-117`), doc: "**ONLY for faction.**" |
-| `TRV-0276` | "**BIG click targets**" — the thing the spec is loudest about | `DONE` | `HERO_H = 78.0`, `ENTRY_H = 62.0`, ≈2× the pause menu's `ROW_H` (`frontend.rs:176-187`) |
-| `TRV-0277` | "strong hover / selection feedback" | `DONE` | `weight_colors`, `ButtonPop`, `pop_target`; test `every_weight_reacts_to_hover_and_press` (`:1399`) |
-| `TRV-0278` | "**fades and small scale animations only**, polished rather than flashy" | `DONE` | `FADE_S = 0.24`, `hover_scale 1.030`, `press_scale 0.985`; tests `pop_is_a_nudge_not_a_zoom`, `cartoon_dial_is_restrained` |
-| `TRV-0279` | *"make the cartoons ui little look like cartoon feeling as well"* (verbatim, `frontend.rs:41`) — has to survive next to "dark futuristic" and "cinematic" | `DONE`, **and it is a dial you can turn** | `CARTOON` (`frontend.rs:153`): border 3 px, panel radius 14, button radius 20, shadow 6, hover 1.030, press 0.985. At 0 border/radius the whole front end reverts to the flat panel it was. **This is the one row in the file where you can change the answer yourself in six numbers.** |
-| `TRV-0280` | "dark futuristic" · "cinematic" · "**minimal**" (twice) | `UNVERIFIABLE` | Aesthetic judgement. The instruments exist: `frontend/01..05.png`, five frames. Nobody has told you they are right; only you can. |
-| `TRV-0281` | **The spec itself is not committed anywhere.** | **`NOT STARTED` — and it is the archival defect, not a build defect** | `git ls-files briefs/` returns 11 files. There is no `BRIEF_FRONTEND*`. Every trace is a comment inside `main.rs` and `frontend.rs`. **Ask: paste it once into `briefs/` and this row closes forever.** |
-| `TRV-0297` | Sections beyond P6 | `UNVERIFIABLE` | No `P7`+ marker exists anywhere in the tree. I cannot tell whether they were built, refused, or never read. |
-
-**Two adjacent facts the front-end work exposed and nobody has filed:**
-
-1. **The game has no audio settings and no graphics settings at all** —
-   no volume, no resolution, no quality, no vsync. Discovered as a
-   side-effect of P6 and recorded only in a commit body. `TRV-0299`,
-   `NOT STARTED`, needs an owner decision on whether it should.
-2. **`d91adb4` swept a partial working tree** and committed a `main.rs`
-   carrying `mod agile_mech;` while `agile_mech.rs` was still untracked.
-   **HEAD did not compile between `d91adb4` and `4bde6b3`.** Recorded in
-   `4bde6b3`'s own body. `TRV-0300`, `DONE` (self-corrected) — logged
-   because it is the second time this project has lost work to a
-   whole-tree operation, and the standing rule ("never `git stash` bare")
-   should probably grow "and never `git add -A` across lanes".
-
----
-
-## §4 — BRIEF X (the Agile Mech) — issued and built inside 24 hours
-
-`briefs/BRIEF_X_agile_mech.md`, committed `efe1428`, built `4bde6b3`.
-**This is the best-executed instruction in the register** and the
-counter-example to everything above: written to disk first, §0 added by
-an agent to record what already existed so the owner's closing line was
-not misread as a feature request, one lane, no sim change, seven tests.
-
-| Row | Section | Status | Evidence |
-|---|---|---|---|
-| `TRV-0282` | §0 — the three abilities that **must not break**: climb, double jump, ground dodge, air flip, second flip charge | `DONE` (sim untouched) + **capture owed** | `agile_mech.rs:48-53` "Presentation only. Nothing here is read by `sim.rs`… A replay is bit-identical with this model or the old one." |
-| `TRV-0283` | §1 cartoon-tech construction from boxes/cylinders/plates | `DONE` | `agile_mech.rs` whole module |
-| `TRV-0284` | §2 orange armour + metallic blue machinery + graphite + subtle bright blue | `DONE` | Four material roles; `agile_blue` is **new** — "the old palette painted armour and mechanism the same". `energy` is deliberately identical on both sides so it cannot eat the team lamp (`:163-166`) |
-| `TRV-0285` | §3 compact silhouette, "speed rather than strength" | `DONE` | Five elements, none in the Big's vocabulary: reverse-jointed legs, swept dorsal fins, wedge helmet 0.245 wide (vs the old egg's 0.50), shoulders ±0.40 (vs ±0.475), forward-canted torso |
-| `TRV-0286` | §4 mechanical head, **NO HAT** | `DONE` | Wedge helmet, faceplate, horizontal visor slit; the visor carries the team lamp at eye height (`:374`) |
-| `TRV-0287` | §5 modular armour by region | `DONE` | `agile_mech.rs:293-380` |
-| `TRV-0288` | §6/§7 reuse the existing controller, physics, animation, skeleton | `DONE` | One-lane by construction; `SCOUT_SCALE` untouched (owner Q5 still open) |
-| `TRV-0289` | §8 animation & motion — no clipping through idle/walk/run/jump/land/turn/strafe/aim/attack/swap/throw **+ climb, double jump, dodge, flip** | **`NOT STARTED` (the evidence)** | The `agile_moves` capture script **exists in code** (`main.rs:6277`, `:6340`) — walk, jump, double jump, dodge roll, air flip, second flip — and **has produced no PNGs.** Nothing in this harness had ever pressed Q or Space in the light chassis. `handback/brief-vii/agile_moves/` does not exist. |
-| `TRV-0290` | §10 detail by layering, §11 weapon integration | `DONE` | `GROUND_Y` / `MOUNT_X` / `MOUNT_Y` pinned by `agile_anchors_are_pinned` — the repair-beam origin and the plasma spawn were tuned against these and are computed from fighter position, not from the model |
-| `TRV-0291` | §12 performance — low/medium poly, reasonable draw calls | `UNVERIFIED` | No draw-call or material-count measurement exists. Asserted, not measured. |
-| `TRV-0292` | §13 differentiate from Big and Royal | `DONE` in code, **`NOT PROVEN`** | Eight `agile_body` captures exist **and are untracked** (four sides, head close, legs close). **None is a three-tier black-silhouette comparison at 30 m**, which is both the brief's acceptance line and the one `mech_lineup.rs` can already produce. See C5. |
-| `TRV-0293` | §9/§14 cartoon-technical style, final design target | `UNVERIFIABLE` | Aesthetic. The eight captures are the instrument; only the owner can read them. |
-
-**Immediate, cheap, and owed:** commit the eight `agile_body` PNGs, run
-`agile_moves`, and take one three-tier silhouette frame. That closes six
-of BRIEF X's own acceptance lines and answers C5's second half.
-
----
-
-## §5 — THE REGISTER, BY SOURCE
-
-Rows `TRV-0001`..`TRV-0266` are carried from `TREVOR_LEDGER.md` §B with
-their quoted asks and IDs intact. Rather than restate 266 rows I verified
-selectively and record here **only where my re-derivation differs from
-that file** (§7), plus the new rows opened above.
-
-Source blocks, for dispatch routing:
-
-| Block | Source | Rows | Open |
-|---|---|---|---|
-| A | `WHATS_MISSING.md` §0-SPEC15 (the owner's 15-section mech spec, P1-P4) | 0001-0021 | **1** (`TRV-0010`) at P1/P2; 3 at P3; P4 untouched |
-| B | §0-QUEUE Tiers 0-4 | 0022-0053 | 20 |
-| C | §0-NOW (post-six-agent list) | 0054-0065 | 8 |
-| D | `BRIEF_VII_optimized.md` | 0066-0077 | 3 + **C1** |
-| E | `BRIEF_VIII_master.md` | 0078-0100 | 7 + **C1, C2** |
-| F | `BRIEF_VIII_B_addendum.md` | 0101-0115 | 6 + **C3, C4** |
-| G | `BRIEF_IX` A/B/C | 0116-0141 | 17 |
-| H | `PROMPT_MASTER_research_build.md` (13 tasks, one row each) | 0142-0157 | 11, most superseded by OPERATION rule 13 |
-| I | `PROMPT_brief_X_research.md` (superseded, indexed) | 0158-0166 | 0 live |
-| J | `PROMPT_mech_rebuild.md` (superseded, indexed) | 0167-0173 | 2 |
-| K | `PROMPT_RND_CYCLE.md` + `BACKLOG.md` | 0174-0187 | 8 |
-| L | `PROMPT_motion_system_research.md` | 0188-0190 | **0 — closed 2026-08-10** |
-| M | **Chat asks recorded second-hand** (`§owner` comments, log quotes, commit messages, README lines) | 0191-0234 | 5 |
-| N | Agent-origin (Friday's deferrals, Thor's findings, the scouts') | 0235-0255 | 12 |
-| O | Images — uploaded, missing, generated | 0256-0266 | 3, all `BLOCKED` on the owner |
-| **P** | **FRONT END spec — chat only, not on disk** | **0267-0281** | **4** |
-| **Q** | **BRIEF X** | **0282-0293** | **3** |
-| **R** | **Contradictions and new findings opened by this sweep** | **0294-0300** | **3 new contradictions + 4** |
-
----
-
-## §6 — DISPATCH SHEET
-
-Ranked by the owner's own priority order (SPEC15 P1→P4, then 0-QUEUE
-Tier 0→4), then by what unblocks the most, then by cost. Where I would
-have ordered differently I say so and leave the owner's order standing.
-
-### Owner — decisions only, no work (unblocks 14 rows)
-
-1. **C1** — bow/spear arc: honour the ban, or retire it? (`TRV-0294`)
-2. **C5** — is the opposition Agile orange, or red? (`TRV-0296`)
-3. **C6** — does the customization screen preview a soldier or a mech? (`TRV-0272`)
-4. **C7** — do you want audio and graphics settings at all? (`TRV-0273`, `TRV-0299`)
-5. **C2 / C3 / C4** — three brief lines that are almost certainly retired and are not marked so (`TRV-0295`, `0113`, `0111`)
-6. **Re-supply the mech and medic concept art** (`TRV-0260`, `0261`) — 10 days, four unsatisfiable completion criteria
-7. **Paste the FRONT END spec into `briefs/`** (`TRV-0281`) — and tell us how many sections it has
-8. Carried from the ledger, still open: mech FP aim 1.10 m (`TRV-0053`), `SCOUT_SCALE` 1.05 (`TRV-0059`), the recoil balance cost (`TRV-0239`/`0240`), the scout's non-shrinking hitbox (`TRV-0248`), `armor_spec`'s unreachable flats (`TRV-0236`), the 40 m sightline rule's retirement (`TRV-0117`)
-
-### friday33 — `main.rs` + client modules
-
-| # | Task | Rows | Cost |
-|---|---|---|---|
-| 1 | **Royal ARROW LAUNCHER** — the last open P2 row | `TRV-0010` | 1-2 sessions |
-| 2 | **Commit the `agile_body` captures, run `agile_moves`, take the three-tier silhouette frame** | `TRV-0289`, `0292` | ~1 capture cycle |
-| 3 | **Capture scripts as data** — pays for every row below it | `TRV-0040`, `0204`, `0251` | 1 session |
-| 4 | **Armour damage states get a client half** | `TRV-0036`, `0137`, `0140` | 1 session |
-| 5 | **Explosion audio + the four placeholders + the eight boarding beats** | `TRV-0030`, `0026` | 1 hour |
-| 6 | **Mech boarding: 7 of 8 stages made visible** (the strings already exist verbatim inside the `debug!` calls) | `TRV-0037`, `0174` | 1 session |
-| 7 | **The six honesty fixes, one sitting** | `TRV-0031`, `0024`, `0032`, `0033`, `0028`, `0055` | 1 session |
-| 8 | **The luminance guard test** — do it inside task 2 | `TRV-0206` | 30 min |
-| 9 | Rocket launcher redesign; Royal body; opposition body | `TRV-0012`, `0013`, `0014`, `0015` | 1-2 sessions each |
-
-*Where I would have re-ordered and did not: I would put 3 and 5 above 1,
-because they are cheap and they buy evidence for everything else. The
-owner's order puts P2 first, so the arrow launcher stands at the top.
-Both readings are here; pick one.*
-
-### friday22 — `sim.rs`
-
-`TRV-0055` (split `gatling_heat` at the source) · `TRV-0029` (export the
-`9000.0` spray scale as a `pub const`; the client's copy is
-`main.rs:308`) · `TRV-0235` (plate wear fires only on the zoned hitscan
-path — grenades, melee, claws and gas neither wear plate nor are reduced
-by it) · `TRV-0241` (the player/bot asymmetry in
-`punched_aim_stabilised` — Friday calls it "the real root", and it
-applies to every recoiling weapon) · `TRV-0242` (a bot chassis now never
-raises its barrier at all) · `TRV-0039` (the Cliffhold sim half — **50
-case-insensitive references survive in `sim.rs` against 3 in `main.rs`**; coordinate or
-the `match` breaks) · `TRV-0043` (bot navigation, now that
-`MAP_METRICS.md` exists)
-
-### thor — claimed, evidence thin
-
-`TRV-0294` (**first**: does the arc actually render on screen with a bow
-under focus? No capture holds focus with either weapon) · `TRV-0008`
-(recoil envelope — biggest feel change in the game, zero captures) ·
-`TRV-0005` (the four-slot weapon strip — no frame shows it; the only
-strip captures on disk predate the change) · `TRV-0035` (the barrier
-test copies its own constants into the test body; if it is vacuous so is
-`TRV-0207`'s evidence) · `TRV-0057` (`visor_ready` inside a `Local`) ·
-`TRV-0252`, `TRV-0253` (turret spinners, world minigun spin) ·
-`TRV-0134` (mutation-prove `armor_weight_movement_penalty`)
-
-### toto — Rule 13: only a named unknown NUMBER
-
-- `TRV-0010` — the arrow launcher's rate of fire, bolt velocity, and
-  per-bolt damage against a mech hull. Nothing in the game fires a bolt
-  from a mount, so there is no neighbouring value to interpolate from.
-- `TRV-0126` — "how enclosed is this point": the **method** is the
-  unknown, not a coefficient. Ask for the method and its cost at 120 Hz.
-
----
-
-## §7 — WHERE I DISAGREE WITH THE RECORD
+**Where I disagree with other documents** — all re-checked today:
 
 | Document | Its claim | What I found |
 |---|---|---|
-| `TREVOR_LEDGER.md` `TRV-0071`, `TRV-0091` | Spear/bow: `DELIVERED` | **The second half of both asks is violated.** "No trajectory arc. No landing marker" ships as its opposite. The ledger quoted the sentence and did not check it. See C1. |
-| `TREVOR_LEDGER.md` §F | "The **34** `UNVERIFIED` rows…" | The headline of the same file says **21**, and `TREVOR_LOG.md` lists **22** IDs under a heading that says 21. Three numbers for one set. Cosmetic, but a register that cannot count itself invites doubt about the rest. |
-| `TREVOR_LEDGER.md` `TRV-0011` | Agile Mech: `NOT STARTED` | **Built** since, `agile_mech.rs`. Correct when written 18 hours ago. |
-| `TREVOR_LEDGER.md` `TRV-0027` | `SCOUT_SCALE` doc wording: `UNVERIFIED` | Re-derived: `sim.rs:5038` reads "Scale, **against the heavy's chassis**. Slimmer and shorter" — which is *true* against the heavy. **The queue item (#6) mis-states the defect.** What is false is the next clause: "so it reads as a different silhouette from across a map", at 1.05. `PARTIAL`. |
-| `TREVOR_LEDGER.md` `TRV-0029`, `0034`, `0254` | `UNVERIFIED` | Resolved. `9000.0` still bare at four sim sites plus a client copy (`NOT STARTED`); `gait_pose` still infantry-derived (`NOT STARTED`, literal moved not fixed); `crouch_drop` double-count **fixed** (`DONE`). |
-| `WHATS_MISSING.md` TIER 0 / TIER 2 #17 / TIER 4 #28 | Listed as open | Three TIER 0 items done, Pyro fully removed, traversal unblocked. **Stale for the fourth time**, in both directions. |
-| `BACKLOG.md` #10 | "rapier supports some of it" (destruction) | **`jk_tdm` has no rapier dependency.** `rapier3d` belongs to `jk_wall`. Same wrong-game confusion as `DESIGN_MAP.md`. Found by `632824a`, confirmed here. |
-| `DECISIONS.md` | Cited as a project decision record | **Every ADR is about `jk_wall`/`jk_core`**, the shieldwall sim — not `jk_tdm`. ADR-006 promises "Bevy at the art milestone: glTF loading, skeletal animation"; `jk_tdm` **is** Bevy and has no glTF loader (`TRV-0048`). ADR-002 promises Rapier; `jk_tdm` has none. Two of the five ADRs describe a pipeline this game does not have. Third wrong-game document, after `DESIGN_MAP.md` and `BACKLOG.md` #10. |
-| `GAME_STATUS_REPORT.md` | Lists Pyro; names the 20-segment rig, 26-piece armour and 4-class system as unbuilt | All four wrong. Dated 2026-08-01, reads as current. |
-| `handback/brief-ix/REPORT.md` | Class system, 26-piece armour, damage states "do not exist in any form" | All three shipped. Honest snapshot of 2026-07-30, misleading today. |
+| `WHATS_MISSING.md` | The live plan | **Last touched `7719296`, eleven commits ago. Stale for the fourth time, in both directions.** Lists as open: three TIER 0 items that are done, Pyro relocation tables that are gone, traversal's map-metrics block, `TRV-0011` the Agile Mech, `TRV-0206` the luminance guard. Knows nothing of BRIEF X's handback, BRIEF XI, the bow/spear spec, or the front end. |
+| `briefs/README.md` | What each brief covers | Does not list `BRIEF_XI_agile_mech_motion_limbs_guns.md`. |
+| `TREVOR_LEDGER.md` `TRV-0071`, `TRV-0091` | Spear/bow `DELIVERED` | The second half of both asks is violated — see C1. **This was run 1's headline finding and I applied its lesson to `dd4fced` today:** the commit subject is "BRIEF XI: finish the Agile Mech" and the commit **changes no code at all**. |
+| `BACKLOG.md` #4/#5/#9/#11 | melee depth / retreat / class system / armour weight unbuilt | All four false; all four shipped. #10 cites rapier, which `jk_tdm` does not depend on. |
+| `DECISIONS.md` | A project decision record | Every ADR is about `jk_wall`/`jk_core`. ADR-006 promises glTF + skeletal animation; `jk_tdm` has no glTF loader. ADR-002 promises Rapier; `jk_tdm` has none. |
+| `GAME_STATUS_REPORT.md` (2026-08-01) | Lists Pyro; names the 20-segment rig, 26-piece armour and 4-class system as unbuilt | All four wrong, reads as current. |
+| `handback/brief-ix/REPORT.md` | Class system, 26-piece armour, damage states "do not exist in any form" | All three shipped. Honest snapshot of 2026-07-30. |
+| `README.md:223-225` | "battles cap at 8v8" | Retired by `§owner: "8v8 withdrawn"` (`main.rs:23200`). Doc rot, not a live contradiction. |
 
 ---
 
@@ -573,49 +483,47 @@ test copies its own constants into the test body; if it is vacuous so is
 Stated as a section rather than buried, because implying a complete sweep
 is the failure this file exists to prevent.
 
-- **I did not build and did not run the suite.** Read-only; I never
-  invoked `cargo`. The dispatch reports 435 pass / 1 fail (another
-  session's in-progress `agile_mech` work). Every `DONE` means "there is
-  evidence at this path", never "it compiles" and never "it works".
-- **I opened exactly two of the 165 committed PNGs**
-  (`bow_draw_fp/03-fp-bow-full-draw.png`, `spear_flight/00-charging.png`),
-  both to test C1, and **neither settled it** — neither holds focus, so
-  neither can show or refute the arc. That non-result is recorded in C1
-  rather than rounded into a disposition. Rule 8 says the capture is the
-  instrument; I catalogued the instruments and read two.
-- **The FRONT END spec's true section count is unknown to me.** I
-  reconstructed 14 requirements from `§owner` markers and commit bodies.
-  The dispatch says 15 sections. If P7–P15 exist, **I have no way to see
-  them and no way to tell whether they were built.** `TRV-0297` says so
-  rather than guessing.
-- **Read whole:** `WHATS_MISSING.md`, `BRIEF_X_agile_mech.md`,
-  `DECISIONS.md`, `TREVOR_LEDGER.md`, `TREVOR_TASKS.md`, `TREVOR_LOG.md`,
-  `frontend.rs` §§1-330 and its test names, `agile_mech.rs` header and
-  constants, the last seven commit bodies in full.
-- **Sampled by targeted grep + region reads:** `main.rs` (~29k lines,
-  ~10 regions), `sim.rs` (~28k lines, ~6 regions), `briefs/*` (grep for
-  the contradiction candidates only), `FRIDAY_LOG.md` (headings only —
-  **it has no entry for the front-end work at all**), `THOR_LOG.md`
-  (not opened this run), `TOTO_LOG.md` (not opened this run).
-- **Not read at all:** `research/maps/MAP_METRICS.md` (1,025 lines) and
-  `research/motion-architecture/DECISION.md` (775 lines) — I verified
-  they exist, are committed, and what their commit body claims they
-  contain. I did not audit their content. `handback/ACCOMPLISHMENTS.md`,
-  `AUDIT.md`, `CHANGES.md`, `REPORT.md`, `brief-vii/HANDBACK.md`, the
-  eleven per-topic `SOURCES.md`, everything in `jk_wall` / `jk_bevy` /
-  `jk_client` / `jk_spike` / `jk_core`.
-- **The 14 `UNVERIFIED` rows are the honest total of the above.** None
-  carries a fabricated disposition. None was bucketed as a negative
-  result because a check did not finish — that is the failure mode this
-  project has hit twice (46 verify agents killed by a rate limit and
-  filed as "disputed"; three agents' research discarded by a missing
-  `await`).
-- **Concurrency.** Another session is writing `agile_mech.rs`,
-  `main.rs` and `sim.rs` right now. Line numbers in this file were true
-  at `4bde6b3`. Every row also names its symbol; re-anchor on the symbol,
-  `git fetch` first.
+- **I did not build and did not run the suite.** Read-only; I never invoked `cargo`. Every `DONE` means "there is evidence at this path", never "it compiles" and never "it works". The last reported figure is 443 pass / 1 fail, and the one red test (`a_wound_javelin_flies_harder_than_a_flicked_one`) is **the uncommitted spear-charge work in `sim.rs`** — another lane mid-write, not a regression.
+- **I read the uncommitted `sim.rs` diff and refused to bank it.** `TRV-0303`, `0304`, `0305` are `UNVERIFIED` on purpose. When that work commits, someone should re-derive them; three rows becoming `DONE` in one commit is the expected outcome and it is not my call to make early.
+- **I did not read the uncommitted `frontend.rs` diff at all.** +20 lines, another lane, moving target.
+- **Thirteen of the bow-and-spear spec's nineteen sections are invisible to me** (`TRV-0314`). So is its acceptance checklist beyond items §B and §D. I reconstructed six sections from `§owner` markers and two commit bodies. I have no way to see the rest and **no way to tell whether they were built, refused, or never read.** The same is true of FRONT END P7+ (`TRV-0297`).
+- **I opened no PNGs this run.** Run 1 opened two of 165 and neither settled C1. There are now ~193 committed captures and the number that hold RMB with a projectile weapon is still **zero** — which is `TRV-0317` and is the finding, not a gap in my sweep.
+- **Read whole:** `BRIEF_XI_agile_mech_motion_limbs_guns.md`, `ISSUED_VS_DELIVERED.md` (run 1), the five commit bodies since `889701a` in full, `FRIDAY_LOG.md` §FRIDAY33 BRIEF X, the uncommitted `sim.rs` diff in full, `agile_mech.rs` palette + luminance tests, `sim.rs` §6604-6690 (`AimPhase`), `main.rs` §2792-2970 (screen profiles + low-ready), `main.rs` §16975-17020, `config/settings.txt`.
+- **Sampled by targeted grep + region reads:** `main.rs` (~29k lines, ~9 regions), `sim.rs` (~28k lines, ~7 regions), `briefs/*` (grep only, except BRIEF XI), `frontend.rs` (grep only).
+- **Not read at all this run:** `THOR_LOG.md`, `TOTO_LOG.md`, `research/maps/MAP_METRICS.md`, `research/motion-architecture/DECISION.md` (I verified they exist and are committed and cited what BRIEF XI §0.2 quotes from the second; I did not audit either file's content), `handback/ACCOMPLISHMENTS.md`, `AUDIT.md`, `CHANGES.md`, the eleven per-topic `SOURCES.md`, everything in `jk_wall` / `jk_bevy` / `jk_client` / `jk_spike` / `jk_core`.
+- **The 21 `UNVERIFIED` rows are the honest total of the above.** None carries a fabricated disposition. None was bucketed as a negative result because a check did not finish — that is the failure mode this project has hit twice (46 verify agents killed by a rate limit and filed as "disputed"; three agents' research discarded by a missing `await`).
+- **Concurrency.** Two builders and a separate session are live. Line numbers here were true at `5473d06` with the working tree as described at the top. **Every row also names its symbol; re-anchor on the symbol, `git fetch` first.**
 
 ---
 
-*Written by TREVOR. I do not edit source, briefs, or another agent's log.
-Where a document is wrong I record the disagreement here and hand it over.*
+## §9 — THE REGISTER, BY SOURCE
+
+| Block | Source | Rows | Open |
+|---|---|---|---|
+| A | `WHATS_MISSING.md` §0-SPEC15 (P1-P4) | 0001-0021 | **1** (`TRV-0010`) at P1/P2; 2 at P3; P4 untouched |
+| B | §0-QUEUE Tiers 0-4 | 0022-0053 | 20 |
+| C | §0-NOW | 0054-0065 | 8 |
+| D | `BRIEF_VII_optimized.md` | 0066-0077 | 3 + **C1** |
+| E | `BRIEF_VIII_master.md` | 0078-0100 | 7 + **C1, C2** |
+| F | `BRIEF_VIII_B_addendum.md` | 0101-0115 | 6 + **C3, C4** |
+| G | `BRIEF_IX` A/B/C | 0116-0141 | 17 |
+| H | `PROMPT_MASTER_research_build.md` | 0142-0157 | 11, most superseded by OPERATION rule 13 |
+| I | `PROMPT_brief_X_research.md` (superseded, indexed) | 0158-0166 | 0 live |
+| J | `PROMPT_mech_rebuild.md` (superseded, indexed) | 0167-0173 | 2 |
+| K | `PROMPT_RND_CYCLE.md` + `BACKLOG.md` | 0174-0187 | 8 |
+| L | `PROMPT_motion_system_research.md` | 0188-0190 | 0 — closed 2026-08-10 |
+| M | Chat asks recorded second-hand | 0191-0234 | 5 |
+| N | Agent-origin | 0235-0255 | 12 |
+| O | Images — uploaded, missing, generated | 0256-0266 | 3, all `BLOCKED` on the owner |
+| P | FRONT END spec — chat only | 0267-0281 | 4 |
+| Q | BRIEF X | 0282-0293 | **2** (was 3) |
+| R | Contradictions and findings, run 1 | 0294-0300 | 3 contradictions + 4 |
+| **S** | **BOW & SPEAR spec — chat only, 19 §§ + checklist** | **0301-0317** | **13** |
+| **T** | **BRIEF XI** | **0318-0341** | **23** |
+| **U** | **Chat asks and findings, run 2** | **0342-0344** | **2** |
+
+---
+
+*Written by TREVOR, run 2. I do not edit source, briefs, or another
+agent's log. Where a document is wrong I record the disagreement here and
+hand it over. Where I was wrong, §7 says so first.*
