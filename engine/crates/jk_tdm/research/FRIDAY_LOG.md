@@ -1580,3 +1580,41 @@ shots, `agile_moves` 12, `mech_gallery` 11, `trims` 2, `medic` 9. Exit 0
 and zero panics on every run.
 
 - **FRIDAY33**
+
+---
+
+## 2026-08-11 — BRIEF XII-A, the HUD consolidation pass (FRIDAY33)
+
+`85e0667` and `d73a6d0`. Two files: `hud.rs`, `main.rs`. `sim.rs` untouched.
+
+**Deleted, by symbol.** `weapon_strip`, `WeaponStripCell`,
+`shield_readout`, `ShieldReadout` — functions, components, spawns and both
+`add_systems` registrations. Systems in the `Playing` HUD-writer set went
+from 10 to 8; nothing was added anywhere to replace them, because the
+mech systems column was already a per-frame widget and the folded content
+went into its existing `paint_systems` pass. `HullFill` and `HeatFill`
+went with the two drawn bars in that column.
+
+**The heat formatters at `main.rs:22858` and `:22992`-`:23010` were NOT
+deleted, and that is a stated deferral.** They are not dead: they are
+live branches of `hud_system` writing into `PanelInfoText` /
+`PanelAmmoText`, which `suppress_legacy_hud` hides every frame but which
+must keep existing or `hud_fade`'s `Local` snapshot query stops finding
+its three entities — the scar the module header documents. Removing them
+means rewriting a branch of the legacy `hud_system`, which is invisible
+work with a real regression surface, so it is left for whoever shrinks
+the suppression list at source.
+
+**What the captures actually showed, twice.** Two defects were found by
+looking at a frame and could not have been found by reading: the same
+mount named `TURRET` in one corner and `AUTOCANNON` in the other, and the
+boarding prompt striking through both big numerals. The instrument was
+new — `hud_contrast` is the first script in this repo that points a
+camera at a HUD against two different backdrops — and it paid for itself
+on its first run. The pitch sign also runs opposite to the obvious guess:
+POSITIVE pitches the view DOWN.
+
+**Least sure about:** the `scrim()` alpha, 0.30. It is the one number
+here chosen by eye rather than by constraint. It reads well over pale
+sand and over the dark cockpit in the frames taken, but it is a taste
+call and the owner may want it lower.
