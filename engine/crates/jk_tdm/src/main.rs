@@ -2710,7 +2710,35 @@ const COCKPIT_LAYER: usize = 2;
 /// the soldier page shows as a UI image. Layer isolation means the main
 /// camera never sees the stage and the stage camera never sees the world.
 const FORGE_PREVIEW_LAYER: usize = 6;
-const FORGE_PREVIEW_PX: u32 = 512;
+/// §owner FRONT END P5: the preview is PORTRAIT now, not square.
+///
+/// A standing figure in a square frame wastes half its pixels on air to
+/// either side, and the frame's aspect is the cheapest way to make a
+/// figure feel large without moving a camera. Bevy's
+/// `PerspectiveProjection.fov` is the VERTICAL angle, so narrowing the
+/// target crops the sides and leaves the height framing exactly where it
+/// was - a pure win, no re-framing needed for the aspect change alone.
+const FORGE_PREVIEW_W: u32 = 720;
+const FORGE_PREVIEW_H: u32 = 1040;
+/// Where the preview camera sits, as an offset from what it LOOKS AT.
+///
+/// Split out from the spawn call and stated as a distance because the
+/// framing is arithmetic, not taste: `fov` is 45 deg vertical, so the
+/// visible height at distance d is `2 * d * tan(22.5) = 0.828 * d`. The
+/// old offset measured 3.00 m, showing 2.49 m of world for a ~1.8 m
+/// figure - a third of the frame was air. 2.34 m shows 1.94 m, so the
+/// figure fills the frame with a hand's width of headroom.
+/// (1.10x the 2.34 m that arithmetic gave, after looking at it: at 2.34 m
+/// the AWM's barrel clipped the right edge of the frame on part of the
+/// turntable's rotation. 2.57 m shows 2.13 m of world and the longest
+/// weapon in the arsenal stays inside it all the way round.)
+const FORGE_CAM_OFFSET: Vec3 = Vec3::new(1.459, 0.532, 2.059);
+/// What it looks at: chest height on a standing man.
+const FORGE_CAM_AIM_Y: f32 = 1.00;
+/// The card the preview sits in, and the image inside it. Authored at
+/// 720p like everything else on these surfaces.
+const FORGE_CARD_W: f32 = 366.0;
+const FORGE_CARD_IMG_W: f32 = 338.0;
 /// The stage lives far under the map - irrelevant to rendering (layers
 /// isolate it) but keeps physics/audio/debug tooling from ever tripping
 /// over it.
@@ -7326,13 +7354,23 @@ struct ArmorPresetButton(sim::ArmorPreset);
 /// still answers to `zone()` for damage - and a test pins that every
 /// plate appears in exactly one row, so a piece cannot go missing from
 /// the UI while still counting toward weight.
-/// How much of the armoury plate the pill rows may use.
+/// How much of the setup plate the pill rows may use.
 ///
 /// The turntable card is absolutely positioned against the SCREEN, not
-/// the plate, and it overhangs the plate's right edge. Every other intro
-/// page gets away with full-width rows because none of them is long
-/// enough to reach under it; the armoury's six-pill rows are.
-const ARMOURY_ROW_W_PCT: f32 = 74.0;
+/// the plate, and it overhangs the plate's right edge, so anything wide
+/// enough to reach under it has to stop short.
+///
+/// §owner FRONT END P5 asks for a LARGE preview with the figure as the
+/// visual focus, so the card roughly doubled and this had to come down
+/// with it - and the SOLDIER page, which used to run full width, now
+/// obeys the same limit. It was only ever getting away with full width
+/// because its longest row happened to end before the old, much smaller
+/// card began; that is a coincidence, not a layout.
+// 62.0 was the first attempt and it was too tight: GRENADES, HELMET and
+// FORGE all wrapped their pill LABELS onto two lines, and the loadout
+// spec block broke mid-number. 72% clears the card's left edge by ~80 px
+// at 720p and leaves every row on one line.
+const ARMOURY_ROW_W_PCT: f32 = 72.0;
 
 const ARMOUR_ROWS: [(&str, &[sim::ArmorPiece]); 6] = {
     use sim::ArmorPiece::*;
@@ -14860,8 +14898,8 @@ fn setup(
             Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
         };
         let size = Extent3d {
-            width: FORGE_PREVIEW_PX,
-            height: FORGE_PREVIEW_PX,
+            width: FORGE_PREVIEW_W,
+            height: FORGE_PREVIEW_H,
             depth_or_array_layers: 1,
         };
         let mut target = Image {
@@ -14891,8 +14929,10 @@ fn setup(
                 clear_color: ClearColorConfig::Custom(Color::srgb(0.07, 0.055, 0.04)),
                 ..default()
             },
-            Transform::from_translation(FORGE_STAGE_POS + Vec3::new(1.7, 1.6, 2.4))
-                .looking_at(FORGE_STAGE_POS + Vec3::new(0.0, 0.98, 0.0), Vec3::Y),
+            Transform::from_translation(
+                FORGE_STAGE_POS + Vec3::new(0.0, FORGE_CAM_AIM_Y, 0.0) + FORGE_CAM_OFFSET,
+            )
+            .looking_at(FORGE_STAGE_POS + Vec3::new(0.0, FORGE_CAM_AIM_Y, 0.0), Vec3::Y),
             RenderLayers::layer(FORGE_PREVIEW_LAYER),
         ));
         commands.spawn((
@@ -19926,11 +19966,17 @@ fn attach_turntable_card(
     ] {
         commands.entity(root).with_children(|p| {
             p.spawn((
+                // §owner FRONT END P5: "large mech preview, clean, the
+                // machine is the visual focus". This card was 264 px wide
+                // holding a 236 px square, on a 1280 px screen - a thumb-
+                // nail beside the thing it was previewing. It is roughly
+                // 2.6x the image area now, portrait, and the pill rows
+                // moved out of its way rather than under it.
                 Node {
                     position_type: PositionType::Absolute,
-                    right: Val::Percent(2.5),
-                    top: Val::Percent(22.0),
-                    width: Val::Px(264.0),
+                    right: Val::Percent(2.0),
+                    top: Val::Percent(13.0),
+                    width: Val::Px(FORGE_CARD_W),
                     flex_direction: FlexDirection::Column,
                     border: UiRect::all(Val::Px(menu_ui::RULE_STAMP_PX)),
                     padding: UiRect::all(Val::Px(menu_ui::U3)),
@@ -19948,8 +19994,14 @@ fn attach_turntable_card(
                 menu_ui::eyebrow(card, "TURNTABLE");
                 card.spawn((
                     Node {
-                        width: Val::Px(236.0),
-                        height: Val::Px(236.0),
+                        width: Val::Px(FORGE_CARD_IMG_W),
+                        // Matches the render target's aspect exactly. A
+                        // portrait texture in a square node letterboxes
+                        // by STRETCHING in Bevy UI, which is the failure
+                        // `menu_ui::key_art_fit` documents at length.
+                        height: Val::Px(
+                            FORGE_CARD_IMG_W * FORGE_PREVIEW_H as f32 / FORGE_PREVIEW_W as f32,
+                        ),
                         border: UiRect::all(Val::Px(menu_ui::RULE_HAIR_PX)),
                         ..default()
                     },
@@ -23206,6 +23258,21 @@ fn open_intro(
 
             // ---- SOLDIER page ------------------------------------------
             let sold = OnIntroPage(IntroPage::SOLDIER);
+            // §owner FRONT END P5: the rows live in a COLUMN that stops
+            // short of the preview, exactly as the armoury's already do.
+            // They used to run the full width of the plate and pass under
+            // the card harmlessly - which only worked because the old
+            // card was small. Making the figure the visual focus makes
+            // that overlap real.
+            b.spawn((
+                Node {
+                    width: Val::Percent(ARMOURY_ROW_W_PCT),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                sold,
+            ))
+            .with_children(|b| {
             // §owner: CLASS leads the page - it is the choice that
             // frames every one below it, and the only one that changes
             // how the soldier plays rather than what he carries.
@@ -23299,6 +23366,7 @@ fn open_intro(
                     TechReadout,
                 ));
             });
+            }); // end of the SOLDIER page's width-limited column
 
             // ---- ARMOURY page ------------------------------------------
             // §C tier 2: four rows, one per body region, in the order a
@@ -23425,7 +23493,11 @@ fn open_intro(
             // would make it stop matching and the BACK/NEXT hide logic
             // would die silently, with no error.
             b.spawn(Node {
-                width: Val::Percent(100.0),
+                // Same limit as the rows: the nav used to run the full
+                // width of the plate and pass under the preview card,
+                // which was survivable while the card was a thumbnail and
+                // is not now - NEXT sat half-buried under it.
+                width: Val::Percent(ARMOURY_ROW_W_PCT),
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(menu_ui::U3),
                 margin: UiRect::top(Val::Px(menu_ui::U4)),
