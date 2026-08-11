@@ -3409,9 +3409,12 @@ pub struct Fighter {
     pub spear_power: f32,
     pub spear_aim: [f32; 3],
     pub spear_v0: f32,
-    /// §4.1 (Brief VII v2): the bow's draw clock - counts UP while aim
-    /// is held (unlike the spear's committal countdown), 0.15s to
-    /// 0.7s mapping 35%-100% power, held past 10s force-letdown.
+    /// §4.1 (Brief VII v2): the bow's draw clock - counts UP while the
+    /// ATTACK button is held (unlike the spear's committal countdown),
+    /// 0.15s to 0.7s mapping 35%-100% power, held past 10s force-letdown.
+    /// (This doc used to say "while AIM is held", a fossil of the Brief
+    /// II grammar in which RMB drew the bow. §4/§8/§17 killed that: RMB
+    /// pre-aims and only the attack button charges - see `aim_phase`.)
     /// `bow_aim` tracks the aim direction through the hold, same as the
     /// spear's `spear_aim`.
     pub bow_draw_t: f32,
@@ -6598,6 +6601,68 @@ pub const SHIELD_DIP_S: f32 = 0.62;
 // grammar, retuned.
 pub const SPEAR_WINDUP_S: f32 = 0.40;
 
+// ---- §4/§8/§17 (owner, BOW & SPEAR): the projectile input machine --------
+
+/// Which of the four input states a chargeable projectile weapon is in.
+///
+/// The owner's spec states the rule three separate times and calls it
+/// "extremely important": **RIGHT MOUSE IS PRE-AIM ONLY - it never
+/// starts a charge.** The charge lives on the ATTACK button, and the two
+/// states are never combined: a spear is either settling or winding,
+/// never both at once.
+///
+/// It is an enum with one pure constructor rather than a pair of `if`s
+/// at each call site because "which button charges" is exactly the sort
+/// of rule that gets re-decided differently in two places - and this
+/// file's single most repeated defect is a second copy of a rule quietly
+/// drifting from the first. The bow and the spear now literally cannot
+/// end up on different buttons: there is one function, and both step
+/// functions take its output instead of a raw bool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AimPhase {
+    /// Nothing chargeable in hand, or it cannot be used this instant.
+    Idle,
+    /// A projectile weapon is up and neither button is down.
+    Equipped,
+    /// PRE-AIM. Right mouse alone. Steadies the shot (`ADS_SPREAD_MULT`,
+    /// the drawn-walk pace) and charges NOTHING.
+    PreAim,
+    /// CHARGING. The attack button is down and the wind clock runs.
+    Charging,
+}
+
+/// Resolve this tick's projectile input. `ready` = a usable chargeable
+/// weapon in hand; `pre_aim` = `PlayerCmd::ads` (RMB); `attack` =
+/// `PlayerCmd::shoot` (LMB).
+///
+/// Note what is NOT here: any way for `pre_aim` alone to reach
+/// `Charging`. That is the whole point of routing both weapons through
+/// one function - the guarantee is structural, not a convention someone
+/// has to remember at the next call site.
+pub fn aim_phase(ready: bool, pre_aim: bool, attack: bool) -> AimPhase {
+    if !ready {
+        return AimPhase::Idle;
+    }
+    // ATTACK WINS, unconditionally. This is the line that makes "never
+    // combine PRE_AIM and CHARGING" true by construction: no input
+    // returns PreAim while the wind is running, and none returns
+    // Charging without the attack button held.
+    if attack {
+        AimPhase::Charging
+    } else if pre_aim {
+        AimPhase::PreAim
+    } else {
+        AimPhase::Equipped
+    }
+}
+
+impl AimPhase {
+    /// The one question the charge clocks ask of the input.
+    pub fn charges(self) -> bool {
+        matches!(self, AimPhase::Charging)
+    }
+}
+
 /// §owner JAVELIN: the throw is CHARGED now.
 ///
 /// It used to leave the hand at one fixed speed whether you flicked it
@@ -7774,6 +7839,18 @@ impl TdmSim {
                     f.scout_air_jump_used = false;
                     f.flip_recover_t = 0.0;
                     f.spear_wind_t = 0.0;
+                    // §4/§8/§17 (owner): and the CHARGE clocks with it.
+                    // The player block is wrapped in `alive()`, so
+                    // neither step function runs while a body is down -
+                    // a bow drawn at the moment of death kept its clock
+                    // through the whole respawn, and the first live tick
+                    // read that as a release edge and loosed an arrow.
+                    // `spear_power` is the same story one level up: it
+                    // is only cleared by a throw that actually starts,
+                    // so a wind that died with you was banked, not lost.
+                    f.bow_draw_t = 0.0;
+                    f.spear_charge_t = 0.0;
+                    f.spear_power = 1.0;
                     f.ability_cd = 0.0;
                     f.last_ability_at = -100.0;
                     f.last_dmg_at = -100.0;
@@ -8655,12 +8732,18 @@ impl TdmSim {
                 // mech's considered shot lives.
                 self.step_plasma_precision(p, cmd.aim, cmd.ads);
             } else if self.fighters[p].gun == GunKind::Bow {
-                self.step_bow_draw(p, cmd.aim, cmd.shoot);
+                // §4/§8/§17 (owner): ONE resolution of the projectile
+                // input, shared by both chargeable weapons. RMB
+                // (`cmd.ads`) arrives as PRE-AIM and can never come out
+                // the other side as a draw.
+                let phase = aim_phase(true, cmd.ads, cmd.shoot);
+                self.step_bow_draw(p, cmd.aim, phase);
             } else if self.fighters[p].gun == GunKind::Spear {
                 // §owner JAVELIN: like the bow, the spear needs the call
                 // EVERY tick (held or not) to see its release edge -
                 // `try_fire`'s "only while held" would never fire it.
-                self.step_spear_charge(p, cmd.aim, cmd.shoot);
+                let phase = aim_phase(true, cmd.ads, cmd.shoot);
+                self.step_spear_charge(p, cmd.aim, phase);
             } else if cmd.shoot {
                 self.try_fire(p, cmd.aim, cmd.ads);
             }
@@ -9513,6 +9596,21 @@ impl TdmSim {
         f.reload_t = 0.0;
         f.switch_t = SWITCH_S * class_spec(f.class).switch_mult;
         f.shield_up = false; // both hands on the new weapon
+        // §4/§8/§17 (owner): the charge belongs to the WEAPON IN YOUR
+        // HAND, and this line is where that hand empties.
+        //
+        // `step_bow_draw` / `step_spear_charge` self-clear only while
+        // their own weapon is selected - the moment `gun` changes, the
+        // whole branch stops being called and whatever the clocks held
+        // froze there. Draw the bow half way, tap 1, tap 3: the release
+        // edge on the re-select fired an arrow at the old draw power,
+        // with no button touched. Same shape as the mech-jump phase and
+        // the plasma charge that had to be cleared on respawn - state
+        // surviving a transition it should not is this file's named
+        // recurring defect.
+        f.bow_draw_t = 0.0;
+        f.spear_charge_t = 0.0;
+        f.spear_power = 1.0;
     }
 
     fn try_reload(&mut self, i: usize) {
@@ -10004,7 +10102,12 @@ impl TdmSim {
     /// The PLAYER path only. Bots still throw through `try_fire`
     /// directly at the old fixed power, so their behaviour - and every
     /// seeded test that depends on it - is unchanged.
-    fn step_spear_charge(&mut self, i: usize, aim: [f32; 3], held: bool) {
+    ///
+    /// §4/§8/§17 (owner): takes an `AimPhase`, not a bare bool. The
+    /// caller cannot hand it "RMB is down" by mistake because RMB does
+    /// not produce `Charging`.
+    fn step_spear_charge(&mut self, i: usize, aim: [f32; 3], phase: AimPhase) {
+        let held = phase.charges();
         let blocked = {
             let f = &self.fighters[i];
             !f.armed()
@@ -10015,6 +10118,16 @@ impl TdmSim {
                 || f.knife_phase > 0.0
                 || f.spear_wind_t > 0.0 // already committed to a throw
                 || f.reload_t > 0.0
+                // §D: the parry/stagger interaction, which `try_fire`
+                // has always enforced and this second fire path never
+                // did - a staggered thrower kept winding, and the wind
+                // is the one thing a parry is supposed to take away.
+                || f.stagger_t > 0.0
+                // ...and a weapon still coming up out of a swap cannot
+                // be wound, for the same reason `try_fire` refuses to
+                // fire one. Without this, a charge abandoned on slot 2
+                // came back live the instant you re-selected it.
+                || f.switch_t > 0.0
                 || f.ammo == 0
         };
         if blocked {
@@ -10043,10 +10156,22 @@ impl TdmSim {
         // full speed" rule the client's arc preview was drawing could
         // never fire on this path. Every player javelin was a half-speed
         // lob. `try_fire` no longer branches the release speed on it.
-        self.try_fire(i, aim, false);
+        if !self.try_fire(i, aim, false) {
+            // The release was REFUSED (a hot fire_cd, a mid-swap, a
+            // stagger that landed between the wind and the let-go). The
+            // charge has to go back with it: `spear_power` is written
+            // here and only cleared by a throw that actually starts, so
+            // a swallowed release used to BANK the wind - the next
+            // flick, minutes and a death later, left the hand at 1.30x.
+            self.fighters[i].spear_power = 1.0;
+        }
     }
 
-    fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], held: bool) {
+    /// §4/§8/§17 (owner): same contract as `step_spear_charge` - the
+    /// draw is on the ATTACK button, expressed as an `AimPhase` so the
+    /// two weapons cannot drift onto two different buttons.
+    fn step_bow_draw(&mut self, i: usize, aim: [f32; 3], phase: AimPhase) {
+        let held = phase.charges();
         let blocked = {
             let f = &self.fighters[i];
             !f.armed()
@@ -10058,6 +10183,17 @@ impl TdmSim {
                 || f.flip_t > 0.0
                 || f.flip_used
                 || f.reload_t > 0.0
+                // §D: the bow is the ONE fire path that never consulted
+                // the parry, because it spawns its arrow directly rather
+                // than through `try_fire`. A staggered archer loosed
+                // normally; the stagger is meant to be a disarm.
+                || f.stagger_t > 0.0
+                // ...and the same swap gate every other weapon has. This
+                // one is load-bearing beyond parity: without it, a draw
+                // abandoned by switching slots came back on re-select and
+                // the very first tick's release edge loosed an arrow the
+                // player never asked for.
+                || f.switch_t > 0.0
                 || f.sprint_gate_t > 0.0 // §3.4: the bow lowers at a sprint too
                 || f.ammo == 0
         };
@@ -21097,6 +21233,286 @@ mod tests {
         );
     }
 
+    /// A projectile weapon rigged onto slot 2 and selected, with the
+    /// PRIMARY left alone so a slot-switch test has somewhere to go.
+    /// Shared by the input-split cases below so they cannot disagree
+    /// about what "a bow in hand" means.
+    #[cfg(test)]
+    fn armed_with(seed: u64, g: GunKind) -> TdmSim {
+        let mut s = empty_range(seed);
+        let f = &mut s.fighters[0];
+        f.inventory[2] = g;
+        f.slot_ammo[2] = (gun(g).mag, gun(g).reserve);
+        f.active = 2;
+        f.gun = g;
+        f.ammo = gun(g).mag;
+        f.reserve = gun(g).reserve;
+        f.protect_t = 0.0;
+        s
+    }
+
+    /// §4/§8/§17 (owner) — THE INPUT SPLIT. The spec states it three
+    /// separate times and calls it "extremely important":
+    ///
+    ///   **RIGHT MOUSE IS PRE-AIM ONLY. IT NEVER STARTS A CHARGE.**
+    ///   The attack button charges, and PRE_AIM and CHARGING are never
+    ///   combined.
+    ///
+    /// **Honesty about what this test catches.** The integration half
+    /// PASSES on the pre-change code: the sim was already reading
+    /// `cmd.shoot`, and the RMB-draws-the-bow grammar this rule
+    /// abolishes survived only in comments and in one stale doc on
+    /// `bow_draw_t`. So this is a GUARD, not a repro. It was
+    /// mutation-proved instead - swapping the call sites to
+    /// `aim_phase(true, cmd.shoot, cmd.ads)` (RMB into the charge slot)
+    /// fails it on both weapons.
+    ///
+    /// The truth table is written out by hand rather than computed from
+    /// `aim_phase`, so it cannot agree with a broken implementation by
+    /// construction.
+    #[test]
+    fn right_mouse_pre_aims_and_only_the_attack_button_charges() {
+        // ready, pre_aim (RMB), attack (LMB) -> phase
+        let table = [
+            (false, false, false, AimPhase::Idle),
+            (false, true, false, AimPhase::Idle),
+            (false, true, true, AimPhase::Idle),
+            (true, false, false, AimPhase::Equipped),
+            (true, true, false, AimPhase::PreAim),
+            (true, false, true, AimPhase::Charging),
+            // both buttons down is CHARGING, never "pre-aim and charging"
+            (true, true, true, AimPhase::Charging),
+        ];
+        for (ready, rmb, lmb, want) in table {
+            let got = aim_phase(ready, rmb, lmb);
+            assert_eq!(got, want, "aim_phase(ready={ready}, rmb={rmb}, lmb={lmb})");
+            // the spec sentence, restated independently of the enum: a
+            // charge runs exactly when a usable weapon has the ATTACK
+            // button down. RMB is not in this expression at all.
+            assert_eq!(
+                got.charges(),
+                ready && lmb,
+                "only the attack button may charge (ready={ready}, rmb={rmb}, lmb={lmb})"
+            );
+            assert!(
+                !(got == AimPhase::PreAim && got.charges()),
+                "PRE_AIM and CHARGING must never be the same state"
+            );
+        }
+
+        // ...and through the real step, on both chargeable weapons.
+        for g in [GunKind::Bow, GunKind::Spear] {
+            let mut s = armed_with(0x4817, g);
+            // THREE SECONDS of pure pre-aim - past every charge window
+            // in the file, so a leak of any size shows up.
+            for _ in 0..(3.0 / DT) as usize {
+                s.step(PlayerCmd { ads: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+            }
+            let f = &s.fighters[0];
+            assert_eq!(
+                (f.bow_draw_t, f.spear_charge_t),
+                (0.0, 0.0),
+                "{g:?}: pre-aim wound a charge clock"
+            );
+            assert!(
+                s.missiles.is_empty() && f.spear_wind_t <= 0.0,
+                "{g:?}: pre-aim alone launched something"
+            );
+            assert_eq!(f.ammo, gun(g).mag, "{g:?}: pre-aim alone spent ammunition");
+
+            // now the attack button, same aim, and the clock runs
+            for _ in 0..(0.5 / DT) as usize {
+                s.step(PlayerCmd { shoot: true, aim: [0.0, 0.0, 1.0], ..Default::default() });
+            }
+            let f = &s.fighters[0];
+            let wound = if g == GunKind::Bow { f.bow_draw_t } else { f.spear_charge_t };
+            assert!(wound > 0.0, "{g:?}: the attack button must charge, got {wound}");
+        }
+    }
+
+    /// §4/§8/§17 (owner) — a charge belongs to the WEAPON IN YOUR HAND.
+    ///
+    /// The two step functions self-clear only while their own weapon is
+    /// selected. Change `gun` and the branch stops being called
+    /// entirely, so the clock froze at whatever it held - and the
+    /// release edge on the way back read that frozen value as a
+    /// let-go. Draw the bow half way, tap 1, tap 3, and an arrow left
+    /// the bow with no button pressed.
+    ///
+    /// FAILS on the pre-change code: the arrow is spawned.
+    #[test]
+    fn a_draw_abandoned_by_switching_weapons_never_looses_itself_later() {
+        let mut s = armed_with(0x4818, GunKind::Bow);
+        let aim = [0.0, 0.0, 1.0];
+        // half a second of draw - comfortably past BOW_DRAW_MIN_S, so
+        // this is a shot the bow WOULD take
+        for _ in 0..(0.5 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        assert!(
+            s.fighters[0].bow_draw_t >= BOW_DRAW_MIN_S,
+            "the fixture must really be mid-draw, got {}",
+            s.fighters[0].bow_draw_t
+        );
+        // tap 1 (the primary)
+        s.step(PlayerCmd { slot: Some(0), aim, ..Default::default() });
+        assert_ne!(s.fighters[0].gun, GunKind::Bow, "the switch must take");
+        assert_eq!(
+            s.fighters[0].bow_draw_t, 0.0,
+            "the draw clock must empty with the hand that held it"
+        );
+        // stand around, then tap 3 and wait out the swap
+        for _ in 0..(1.0 / DT) as usize {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        s.step(PlayerCmd { slot: Some(2), aim, ..Default::default() });
+        for _ in 0..(2.0 / DT) as usize {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        assert_eq!(s.fighters[0].gun, GunKind::Bow, "the bow must be back in hand");
+        assert!(
+            s.missiles.is_empty(),
+            "an arrow left a bow nobody drew - the abandoned draw fired itself \
+             on re-select ({} missiles)",
+            s.missiles.len()
+        );
+        assert_eq!(
+            s.fighters[0].ammo,
+            gun(GunKind::Bow).mag,
+            "...and it spent an arrow doing it"
+        );
+    }
+
+    /// §4/§8/§17 (owner) — and a charge does not survive DEATH either.
+    ///
+    /// The player command block is wrapped in `alive()`, so neither
+    /// step function runs while a body is down: nothing could clear
+    /// these clocks, and the respawn block - which already clears the
+    /// plasma charge and the mech jump phase for exactly this reason -
+    /// did not know about them. A bow drawn at the instant of death
+    /// came back drawn, and the first live tick loosed it.
+    ///
+    /// FAILS on the pre-change code, on both halves.
+    #[test]
+    fn a_charge_does_not_survive_a_respawn() {
+        // the bow goes in the PRIMARY slot, because that is what a
+        // respawn puts back in your hands (`f.gun = f.inventory[0]`) -
+        // the arrangement in which the ghost shot is reachable
+        let mut s = empty_range(0x4819);
+        {
+            let f = &mut s.fighters[0];
+            f.inventory[0] = GunKind::Bow;
+            f.slot_ammo = fresh_ammo(f.inventory);
+            f.active = 0;
+            f.gun = GunKind::Bow;
+            f.ammo = f.slot_ammo[0].0;
+            f.reserve = f.slot_ammo[0].1;
+            f.protect_t = 0.0;
+        }
+        let aim = [0.0, 0.0, 1.0];
+        for _ in 0..(0.5 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        assert!(s.fighters[0].bow_draw_t >= BOW_DRAW_MIN_S, "mid-draw");
+        // and bank a spear charge on the same body, so the second half
+        // of the reset is exercised by the same death
+        s.fighters[0].spear_charge_t = SPEAR_CHARGE_FULL_S;
+        s.fighters[0].spear_power = SPEAR_CHARGE_V0_MAX;
+        // die
+        s.fighters[0].health = 0.0;
+        s.fighters[0].respawn_t = RESPAWN_S;
+        for _ in 0..((RESPAWN_S / DT) as usize + 8) {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        let f = &s.fighters[0];
+        assert!(f.alive(), "the fixture must actually get up again");
+        assert_eq!(f.bow_draw_t, 0.0, "a draw survived the grave");
+        assert_eq!(f.spear_charge_t, 0.0, "a wind survived the grave");
+        assert_eq!(f.spear_power, 1.0, "a charged throw survived the grave");
+        assert!(
+            s.missiles.is_empty(),
+            "the fresh body loosed the dead one's arrow ({} missiles)",
+            s.missiles.len()
+        );
+    }
+
+    /// §4/§8/§17 + §D (owner) — a REFUSED release hands the charge back.
+    ///
+    /// `step_spear_charge` writes `spear_power` and then asks
+    /// `try_fire` to start the throw. `try_fire` can say no (a hot
+    /// `fire_cd`, a swap, a parry that landed between the wind and the
+    /// let-go) and the field was only ever cleared by a throw that
+    /// actually STARTED - so a swallowed release banked the wind.
+    ///
+    /// **Stated honestly:** this is state hygiene, not a live exploit
+    /// today. Every player release rewrites `spear_power` on its way
+    /// through, so the banked value is currently overwritten before it
+    /// can be spent. It matters because §B hangs a damage bonus off the
+    /// same charge, and because "state that survives a transition it
+    /// should not" is this file's named recurring defect whether or not
+    /// today's call graph happens to hide it.
+    ///
+    /// FAILS on the pre-change code: `spear_power` is left at 1.30.
+    #[test]
+    fn a_release_the_weapon_refuses_does_not_bank_the_charge() {
+        let mut s = armed_with(0x481A, GunKind::Spear);
+        let aim = [0.0, 0.0, 1.0];
+        for _ in 0..(SPEAR_CHARGE_FULL_S / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        assert!(s.fighters[0].spear_charge_t > 0.0, "the fixture must be wound");
+        // the weapon is not going to answer this tick
+        s.fighters[0].fire_cd = 1.0;
+        s.step(PlayerCmd { aim, ..Default::default() }); // release
+        let f = &s.fighters[0];
+        assert!(f.spear_wind_t <= 0.0, "the fixture must really have been refused");
+        assert_eq!(
+            f.spear_power, 1.0,
+            "a refused release banked the wind for a future throw"
+        );
+    }
+
+    /// §D (owner: "existing player mechanics are preserved") — the
+    /// parry/stagger interaction, which the two CHARGE paths never had.
+    ///
+    /// `try_fire` has always refused a staggered fighter, and the whole
+    /// point of a parry is to take the weapon away. But the bow spawns
+    /// its arrow directly rather than through `try_fire`, so a
+    /// staggered archer loosed normally - and a staggered thrower kept
+    /// winding through the stagger it was supposed to have lost.
+    ///
+    /// FAILS on the pre-change code: the arrow flies.
+    #[test]
+    fn a_parry_stagger_disarms_the_drawn_bow_and_the_wound_spear() {
+        // the bow: drawn, then parried, then released
+        let mut s = armed_with(0x481B, GunKind::Bow);
+        let aim = [0.0, 0.0, 1.0];
+        for _ in 0..(0.5 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        assert!(s.fighters[0].bow_draw_t >= BOW_DRAW_MIN_S, "mid-draw");
+        s.fighters[0].stagger_t = PARRY_STAGGER_S;
+        s.step(PlayerCmd { aim, ..Default::default() }); // let go, staggered
+        assert!(
+            s.missiles.is_empty(),
+            "a staggered archer loosed anyway - the parry is supposed to be a disarm"
+        );
+        assert_eq!(s.fighters[0].bow_draw_t, 0.0, "and the draw is gone with it");
+
+        // the spear: winding, then parried mid-wind
+        let mut s = armed_with(0x481C, GunKind::Spear);
+        for _ in 0..(0.4 / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        assert!(s.fighters[0].spear_charge_t > 0.0, "the fixture must be winding");
+        s.fighters[0].stagger_t = PARRY_STAGGER_S;
+        s.step(PlayerCmd { shoot: true, aim, ..Default::default() }); // still holding
+        assert_eq!(
+            s.fighters[0].spear_charge_t, 0.0,
+            "a staggered thrower kept winding through the stagger"
+        );
+    }
+
     /// §2 (Brief V): the spear THRUST connects for 70 frontal — and a
     /// WHIFF locks the weapon out visibly longer than a hit. A missed
     /// thrust is committed, not free.
@@ -26479,9 +26895,14 @@ mod tests {
                 s.fighters[0].gun = GunKind::Bow;
                 s.fighters[0].ammo = 1;
                 for _ in 0..held_ticks {
-                    s.step_bow_draw(0, [0.0, 0.0, 1.0], true);
+                    s.step_bow_draw(0, [0.0, 0.0, 1.0], AimPhase::Charging);
                 }
-                s.step_bow_draw(0, [0.0, 0.0, 1.0], false);
+                // release: the ATTACK button is up. PreAim rather than
+                // Equipped on purpose - a player who lets go of fire but
+                // keeps pre-aiming must still loose the arrow, and this
+                // is the case that would break if `charges()` ever grew
+                // a second true arm.
+                s.step_bow_draw(0, [0.0, 0.0, 1.0], AimPhase::PreAim);
                 if let Some(a) = s.missiles.last() {
                     let lateral = (a.vel[0] * a.vel[0] + a.vel[1] * a.vel[1]).sqrt();
                     total += lateral;
