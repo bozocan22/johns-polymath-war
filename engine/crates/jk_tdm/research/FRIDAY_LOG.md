@@ -1618,3 +1618,53 @@ POSITIVE pitches the view DOWN.
 here chosen by eye rather than by constraint. It reads well over pale
 sand and over the dark cockpit in the frames taken, but it is a taste
 call and the owner may want it lower.
+
+---
+
+## FRIDAY22 — the fifth charge: the mech was the last hole
+
+Four charges that outlived their weapon had already been closed (weapon
+switch, death, a refused release banking the wind, the parry gate). The
+fifth was the chassis, and it was the widest of them: `step_bow_draw`
+and `step_spear_charge` are both routed past the instant `in_mech()` is
+true, so the clock did not clear on boarding — it **froze**. Dismount,
+scout eject and heavy eject all hand back a fighter with `switch_t == 0`,
+so the very next infantry tick read that frozen clock as a release edge.
+
+Fixed at ENTRY, not at each exit: `Fighter::clear_war_charge`
+(sim.rs:4158) called from the ScoutArmor arm (sim.rs:8650) and the
+shared Robot/Royal arm (sim.rs:8688). A charge frozen for the whole
+time a man is inside a machine is state that should not exist, and
+clearing it on the way in means there is nothing left to leak however
+he leaves — which is a smaller surface than three exit paths that can
+each be forgotten independently. On `Fighter` rather than inline twice,
+because the pickup loop is one loop over every fighter and the player
+and the bots then cannot drift.
+
+`spear_wind_t` was the worse half and it is not what the brief pointed
+at. The windup ticks in the SHARED per-fighter loop, not the infantry
+branch, and its release only checks `alive()` — so a spear wound up on
+foot and then boarded **launched out of the mech**. That one was live
+today and nobody had seen it.
+
+Checked and clean, reported rather than changed: `cook_t` and
+`knife_phase` both run for a pilot too, but they ADVANCE inside the
+chassis instead of freezing, so neither can manufacture a release edge
+on the way out. `plasma_charge_t` is the mirror case and is already
+covered — it needs the Plasma mount, which is scout-only, and a scout
+cannot voluntarily dismount (`exit_mech` is gated on `in_heavy_mech`),
+so its only exits are the two that already clear it.
+
+Evidence: sim.rs built as a standalone lib crate in the scratchpad —
+the full crate's release test build OOMs LLVM at HEAD, unrelated to
+this change — `cargo test --release`, 246 → 248 passed, 0 failed, 2
+ignored. Mutation: both `clear_war_charge()` calls stripped from a FILE
+COPY, 2 failed, one of them reading "a javelin left the hand of a man
+who pressed nothing". Restored from the copy, never `git checkout`.
+
+**Least sure about:** throwing the wound-up spear away on boarding. It
+costs the pilot a javelin he had already paid the ammo for, and the
+alternative — launching it as he climbs in — is worse, but it is a
+judgement call about feel that a capture cannot settle.
+
+— FRIDAY22
