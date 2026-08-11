@@ -1341,6 +1341,28 @@ mod tests {
         assert_ne!(intro_match_config().per_team, MatchConfig::default().per_team);
     }
 
+    /// The introductory match must actually BUILD and RUN.
+    ///
+    /// This is here because the one thing about priority 2 a capture
+    /// could not check is the one thing most likely to be wrong: 4v4 is
+    /// a team size no shipping config used - the setup screen offers
+    /// only 5v5 - so every spawn pad, every squad-role assignment and
+    /// every bot index rank meets it for the first time here. `per_team`
+    /// is clamped to 1..=8 by the sim, which would SILENTLY accept a bad
+    /// number rather than fail, so "it compiled" proves nothing.
+    #[test]
+    fn the_introductory_match_builds_and_steps() {
+        let mut s = sim::TdmSim::new(intro_match_config());
+        assert_eq!(s.fighters.len(), INTRO_PER_TEAM * 2, "4 v 4 is eight bodies");
+        assert!(s.player < s.fighters.len(), "the player must be one of them");
+        assert_eq!(s.cfg.tdm_target, INTRO_TDM_TARGET);
+        // and it survives a few seconds of bots doing whatever bots do
+        for _ in 0..600 {
+            s.step(sim::PlayerCmd::default());
+        }
+        assert!(s.t > 0.0, "the clock must have moved");
+    }
+
     /// The result screen must appear BEFORE the sim's own 7 s rebuild
     /// would have fired, or the player never sees it.
     #[test]
