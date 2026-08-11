@@ -15164,22 +15164,26 @@ fn setup(
     // `agile_mech`, so a test can reach it. This is only the adapter into
     // Bevy's `Color`; the numbers themselves are not repeated here.
     let srgb3 = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
-    // §owner MECH WEAPON LOOK: built OUTSIDE the `ModelKit` literal below,
-    // deliberately, and this is not style.
+    // §owner MECH WEAPON LOOK: built OUTSIDE the `ModelKit` literal below.
     //
-    // That literal is a single expression with ~130 nested
-    // `materials.add(StandardMaterial { .. })` sub-expressions in it, and
-    // it sits inside the largest function of a 30k-line crate. It is
-    // already AT rustc's stack limit here: adding these two inline made
-    // the compiler die with STATUS_STACK_BUFFER_OVERRUN (0xc0000409) -
-    // not a type error, a crash - and the crate stopped building. The
-    // same fragility is on record twenty lines from `N_HELMETS`, where a
-    // const-generic argument taken from a table's own `.len()` crashed
-    // rustc in this same file.
+    // That literal is a single expression carrying ~130 nested
+    // `materials.add(StandardMaterial { .. })` sub-expressions, inside the
+    // largest function of a 30k-line crate, compiled with thin LTO and
+    // `codegen-units=1`. It is the most expensive thing in the build.
     //
-    // A free function moves the construction into its own stack frame and
-    // leaves one plain identifier at the use site. ANY new material added
-    // here should follow this pattern rather than growing the literal.
+    // HONEST HISTORY, because the wrong lesson is easy to draw here:
+    // adding these two inline DID coincide with rustc dying twice on
+    // STATUS_STACK_BUFFER_OVERRUN (0xc0000409), but a second session was
+    // running its own release build of this same crate at the time and
+    // the machine was down to 460 MB free of 7.6 GB. The IDENTICAL source
+    // compiled cleanly once that finished. So the crash was memory
+    // contention, NOT this literal - do not cite it as evidence of a
+    // rustc limit, and do not let it stop you adding a material.
+    //
+    // The extraction is kept anyway, on its own merits: a free function
+    // gives the two materials a documented home and leaves one plain
+    // identifier at the use site. (rustc IS genuinely fragile in this
+    // file - see the note by `N_HELMETS` - just not here.)
     let (repair_sheath, repair_bloom) = repair_beam_materials(&mut materials);
     let kit = ModelKit {
         cube: meshes.add(with_tangents(Cuboid::new(1.0, 1.0, 1.0).into())),
