@@ -3250,3 +3250,174 @@ plate goes", not as zero-signal.
 4. Owner decision, unchanged and now numeric: is the opposition Agile
    orange or blue-primary (C5), and do the two Royals separate by value
    or do you accept a lamp-only read on 0.4% of the machine?
+
+---
+
+# THOR — 2026-08-11 — BOW & SPEAR, the client half, verified against pixels
+
+Verified at HEAD `1713fe1` (working tree CLEAN — the builder's sections were
+already landed in `2575909` "BOW & SPEAR, the visual half"). Suite re-run by
+me, not taken on report: **478 passed, 0 failed, 2 ignored** in 1.17 s.
+
+## THE ONE THING WRONG: there is no first-person charge pose, and the doc comment that says otherwise is the dangerous part
+
+`main.rs:21536`
+
+```rust
+let raw_wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
+    1.0 - p.spear_wind_t / SPEAR_WINDUP_S
+```
+
+This is one of the exact three hand-written copies `TdmSim::spear_plant_frac_of`
+was published to retire (`sim.rs:10118-10123` names them, "currently in three
+separate places over there"). Two of the three survive: this one, and
+`torso_coil_yaw`'s at `main.rs:1403`. **`spear_wind_frac_of` has exactly ONE
+client reader in the whole binary — `main.rs:18705`, the third-person rig.**
+`spear_stance_of` and `spear_max_charged_of` still have ZERO.
+
+The consequence is not stylistic. `spear_wind_t` is the RELEASE clock and reads
+0 for the entire charge — the same defect the builder correctly diagnosed and
+fixed for the third-person body, and did not fix one function away in
+`fp_viewmodel`. So in first person the javelin does not move at all through a
+seven-second charge.
+
+**Proved from the shipped binary, not from the code.** In the builder's own new
+capture set:
+- `handback/brief-vii/spear_fp/02-fp-spear-preaim.png` — spear head at
+  approx (1045, 535).
+- `handback/brief-vii/spear_fp/04-fp-spear-full-charge.png` — spear head at
+  approx (1045, 535). **Pixel-identical carry**, while the HUD reads
+  `JAVELIN FULL [#########]`.
+- `05-fp-spear-plant.png` — NOW it moves. Which is the signature of a pose
+  keyed on the release clock, exactly as the code predicts.
+
+The commit message's claim "`javelin_wind_pose`/`javelin_plant_pose`, driven by
+the sim's own `spear_wind_frac_of` / `spear_plant_frac_of` — never a client
+timer" is **true for third person and false for first person**, and the false
+half is the view the owner's §6 is written about. Recording it as a wrong
+"verified" rather than as a gap, because the builder wrote it as done.
+
+## Findings by severity
+
+**1. The pre-aim frame puts a landing ring and a range number ON the crosshair,
+and the instrument cannot see it.** `arc_preview` gates on `show = cam_ctl.ads`
+(`main.rs:21904`) — i.e. it fires on RMB, which is now pre-aim-only, which is
+the pose the owner's rule 1 is about. `spear_fp/02-fp-spear-preaim.png` shows a
+red/green marker at the exact crosshair pixel and a red "m" range readout
+directly under it; `01-fp-spear-idle.png` at the same framing has a clean
+`[ + ]`. The screen-intrusion sweep measures `weapon_parts` geometry only
+(`weapon_bounded_corners`, `main.rs:3096`) — a world-space ring and a UI text
+node are outside its universe entirely. This is a judgement call for the owner,
+not a defect I can call alone: the ring may be the aiming aid he wants. But
+"nothing obstructs the crosshair" is currently enforced against the viewmodel
+and nothing else, and the only thing on the crosshair in the shipped pre-aim
+frame is not the viewmodel.
+
+**2. The flagship pose of the whole pass has never been photographed.**
+`SPEAR_WIND_BEATS` exists (`main.rs:6011`), is registered
+(`main.rs:6970 "spear_wind"`), and `handback/brief-vii/spear_wind/` **does not
+exist on disk**. The third-person overhead javelin wind — the one thing the
+owner asked to "read at a glance", the one the builder rebuilt from nothing —
+has zero visual evidence. The 8 named snaps, including `02-preaim-not-a-wind`
+which is the builder's own stated proof for half of input rule 2, were never
+taken. Not verified. Not disproven. **Never checked.**
+
+**3. Hands ARE modelled on the bow, in the shipped frame.**
+`weapon_hand_specs` (`main.rs:4853`) still returns a hand for both:
+`GunKind::Bow => vec![(Vec3::new(0.0, 0.0, 0.03), 0.0, 0.8, true)]` and
+`GunKind::Spear => vec![(Vec3::new(0.0, -0.02, 0.0), 0.0, 1.0, false)]`, and
+`spawn_weapon_model(.., with_hands=true)` at `main.rs:16306` is the viewmodel.
+`bow_draw_fp/03-fp-bow-full-draw.png` shows a fully-fingered white glove on the
+riser. This is **overstated as a defect against the builder** — his commit says
+"less the hands (owner is building those separately)", i.e. he did not ADD
+them, and that is true. But the acceptance statement "no hands were modelled"
+is false about the binary, and if the owner is building hands separately he is
+going to collide with this one. No named grip/nock ANCHOR exists either; what
+exists is `GRIP_WINDOW_M` (a test window, `main.rs:3026`) and `bow_nock_local()`
+(`main.rs:446`) — a function, not a socket. Whoever builds hands has no
+attachment point to build against.
+
+**4. The mech-entry charge leak is STILL LIVE. Unchanged since I found it.**
+`sim.rs:8103` (ScoutArmor) and `sim.rs:8136` (RobotArmor|RoyalArmor) clear
+`gatling_heat`, `gatling_vent_t`, `plasma_charge_t`, `mech_plates_dropped` —
+and never touch `bow_draw_t`, `spear_charge_t`, `spear_power`,
+`spear_max_charge`. The dismount teardown (`sim.rs:7563`) does not either,
+though it clears `mech_jump_phase` **for precisely this argument**, in a comment
+that says so. The whole bow/spear dispatch is in the `else` arm of the in-mech
+branch (`sim.rs:8859-8873`), so the clocks freeze on boarding and the first tick
+after dismount is read as a release edge. Board mid-draw, dismount, and an arrow
+leaves — or a javelin at 1.3x still carrying the +10% flag.
+`sim.rs`, nobody's lane this pass. Flagged, not fixed.
+
+**5. The Royal luminance failure is unchanged, and I re-measured it.**
+CIE relative luminance from the literals at `main.rs:15380` / `15398`:
+ally hull **0.0567**, foe hull **0.0563**, ratio **1.007x**. The Agile's guard
+(`agile_mech.rs:744`) demands **>= 8x**. The strict form is worse: brightest foe
+surface 0.1196 (`mech_royal_lt`) against dimmest ally surface 0.0178
+(`mech_royal_ally_dk`) — 6.7x the wrong way. There is **no guard test on the
+Royal palette at all**; the colours are inline `Color::srgb` literals inside a
+`materials.add` block, not consts, so they cannot be tested without being lifted
+out first. That lift is the actual prerequisite, not the recolour.
+
+**6. Both pre-aim tests hard-code the production shift instead of reading it.**
+`Vec3::new(0.050, 0.020, 0.050)` / `(0.020, 0.010, 0.060)` appear at
+`main.rs:21665-21668` (production `ads_shift`) and are re-typed at
+`main.rs:26278` and `main.rs:26346`. Change the production values and both tests
+still pass, having verified a vector the game no longer uses. Two literals want
+to be one const. Minor, but it is the shape of a test that stops being able to
+fail.
+
+## What held — plainly
+
+- **Rule 1, first person, spear: it holds.** Carry, pre-aim, full charge and
+  plant all photographed; the crosshair is clear in every one. The weapon is
+  bottom-RIGHT, couched, only head and a diagonal of shaft on screen — which is
+  §6 as written.
+- **Rule 1, first person, bow: it holds.** `bow_draw_fp/03` shows the bow right
+  of centre and visibly CANTED at full draw, crosshair clear. `vm_carry` really
+  did move from x -0.16 to +0.30, and the roll is a roll now, not a pitch.
+- **Pre-aim really moves them OUTWARD.** Verified twice, independently: the
+  `ads_shift` bow/spear branch (`main.rs:21645`) applies +x rather than the old
+  `-tr.x` cancel, and the pixels agree — the spear head moves right between
+  `01-fp-spear-idle` and `02-fp-spear-preaim`.
+- **The sweep covers what was asked.** `every_weapon_holds_its_own_screen_profile`
+  sweeps 4 shift levels x 80 bob phases x grounded/air x 4 kick/sprint pairs x
+  pull x cook, per weapon; `the_bow_and_the_spear_leave_the_centre_of_the_screen_empty`
+  adds the pre-aim shift and sprint explicitly. Pre-aim is NOT untested. The
+  camera-frame mirror and the roll term are both real and both load-bearing.
+- **Rule 2, client side: no path can start a charge from RMB.** `cam.ads` is set
+  from `aim_btn` alone (`main.rs:17922-17929`) and is consumed as `cmd.ads`; the
+  sim resolves through `aim_phase(true, cmd.ads, cmd.shoot)` at `sim.rs:8865`
+  and `8872`. There is no client site that writes a charge clock. It holds in
+  both persons.
+- **ONE SPEAR, everywhere: it holds for the three call sites that exist.**
+  `spear_profile()` (`main.rs:4683`) is read by `weapon_parts` (`main.rs:9905` —
+  held, and `spawn_weapon_model` builds BOTH viewmodel and world model from it)
+  and by `spawn_spear_model` (`main.rs:4735` — the thrown missile). There is no
+  separate pickup or gallery spear model to diverge; the commit's "any pickup"
+  is aspirational language for a thing that does not exist, not an unfulfilled
+  claim.
+- **`the_thrown_spear_is_the_spear_that_was_held` is a real test.** It compares
+  part counts, `cyl`, `tone` and z against the shared table; break the table on
+  one side and it fails. Not self-referential.
+
+## Handoffs
+
+1. `friday` (`main.rs`, client) — **the first-person charge pose.** Replace
+   `raw_wind` at `main.rs:21536` with `game.sim.spear_wind_frac_of(player)` for
+   the wind and `spear_plant_frac_of` for the release, keeping the
+   `SPEAR_WIND_RELEASE_S` tail on the release half only. Retire the copy at
+   `main.rs:1403` in the same pass. Test that must exist: the fp spear
+   translation at charge 0.0 and charge 1.0 must DIFFER — mutation-prove it by
+   pinning `spear_wind_frac_of` to 0.
+2. `friday` (`main.rs`, captures) — **run `spear_wind`**, and add an RMB hold to
+   `BOW_DRAW_FP_BEATS`; it is still LMB-only (`main.rs:6294`), so no bow pre-aim
+   frame exists in the project.
+3. Owner decision — does the landing ring + range readout count as obstructing
+   the sacred centre at pre-aim? If yes, the sweep needs a second instrument for
+   world/UI elements; it currently cannot see them.
+4. `friday` (`sim.rs`) — the boarding charge leak, item 4. Third time recorded.
+5. Lift the six Royal colour literals to consts before anyone tries to fix the
+   1.007x; it is untestable where it lives.
+
+— **THOR**
