@@ -1094,6 +1094,137 @@ struct MapLayout {
 /// sequence is untouched for all of them.
 type NoInfill = [f32; 4];
 
+// ------------------------------------------------- §owner BAILEY v7 (16v16)
+//
+// The castle courtyard, grown 30% and stopped being hand-placed.
+//
+// WHY BAILEY and not the Gardens: the brief asked for "a castle", and of
+// the two castle maps this is the one whose doc comment is castle
+// architecture — keep, drum towers, curtain walls. The Gardens' vocabulary
+// is hedges, a gazebo and fountain basins, which is the grounds OUTSIDE a
+// castle. Scaling that one up gets you a bigger park.
+
+/// Bailey's authored half-extent. **`40.0 × 1.30`** — the +30% the brief
+/// asked for, applied to the authored number so `MAP_SCALE` still lands it
+/// in FINAL metres the way every other map's does: 52 × 1.25 = **65 m
+/// final**, a 130 × 130 m playable square against the old 99 × 99.
+///
+/// WHY 30% IS THE RIGHT SIZE FOR 8v8–16v16, since `MAP_METRICS.md` has no
+/// player-count row and I had to pick (stated as a judgement, not a
+/// finding):
+///
+/// * 16v16 = 32 bodies in 16 770 m² → **524 m² each**, a mean spacing of
+///   ~23 m. That sits inside the 25–35 m engagement band `MAP_METRICS` §6.4
+///   names as the design target, at its crowded end — which is what a
+///   full-count match should feel like.
+/// * 8v8 = 16 bodies → **1 048 m² each**, ~32 m mean spacing: the same band
+///   at its open end. So the SAME map reads as busy at 32 and roomy at 16
+///   without either count falling out of the band. That is the whole reason
+///   for picking a single figure rather than two maps.
+/// * The old 99 × 99 m gives 8v8 a 24 m mean spacing — fine — but 16v16 a
+///   17 m one, well under the band and inside `MAP_METRICS` §6.3's 6.3–25 m
+///   "close range" transfer. That is the crampedness the brief is naming.
+pub const BAILEY_HALF: f32 = 52.0;
+
+/// The tallest anything on Bailey is allowed to be, and it is a
+/// RELATIONSHIP, not a taste: `BOT_TERRAIN_M` is the line above which
+/// `ground_reach` calls a blocker terrain and refuses to route through it,
+/// and Bailey publishes no `Climb` links for the planner to route around it
+/// WITH. One 4 m tower here and the bots on this map start walking into the
+/// side of it — which is the exact regression
+/// `bot_routing_leaves_the_older_maps_where_it_found_them` guards, and it
+/// would fail as a Bailey number rather than as an explanation.
+///
+/// 3.4 m is also the shipped "hard cover" ceiling (`MAP_METRICS` §3.3) and
+/// sits above every foot ceiling but the heavy mech's 3.52 m, so a wall of
+/// this height is soldier-proof and mech-passable — the 1.26 m design
+/// window §4.3 names. Two independent reasons for one number.
+const BAILEY_MAX_H: f32 = 3.4;
+
+/// The band at each z edge nothing may be authored into, in AUTHORED
+/// metres: `SPAWN_CLEAR_M` runs in FINAL metres and this is placed before
+/// the expansion, so it has to be divided on the way in. Getting this
+/// backwards buries a spawning fighter inside a curtain wall, which is the
+/// first thing the +25% expansion did to this map when it shipped.
+const BAILEY_SPAWN_KEEP: f32 = SPAWN_CLEAR_M / MAP_SCALE;
+
+/// A bot-usable gap, in AUTHORED metres. `MAP_METRICS` §3.2's floor is
+/// 7.0 m FINAL — itself an analogy to `BOT_CLIMB_LANE_M` and NOT a
+/// measurement, flagged there and flagged again here — and 5.6 authored is
+/// that number on its way through `MAP_SCALE`. Every gate, doorway and
+/// sally port below is drawn at or above it.
+const BAILEY_APERTURE: f32 = 7.0 / MAP_SCALE;
+
+/// The pickup pads every flat map shares, in FINAL metres, read off the
+/// lane table in `TdmSim::new`.
+///
+/// They are here because pads are SNAPPED to whatever they are standing on
+/// (`support_at`), so a randomiser that drops a 3 m building on a lane does
+/// not hide the pad — it puts the pad on the roof, out of reach, for the
+/// whole match. The Arena's crate loop has carried a hand-written version
+/// of this check since it was written; this is the same rule with the
+/// coordinates read off the actual table instead of two of them guessed.
+const BAILEY_PADS: [[f32; 2]; 12] = [
+    [0.0, 0.0],
+    [-14.0, -19.0],
+    [14.0, 19.0],
+    [14.0, -19.0],
+    [-19.0, 14.0],
+    [19.0, -14.0],
+    [-19.0, -14.0],
+    [19.0, 14.0],
+    [0.0, 19.0],
+    [0.0, -19.0],
+    [-19.0, 0.0],
+    [19.0, 0.0],
+];
+
+/// May a box of half-extents `(w, d)` be placed centred on `(x, z)`?
+/// AUTHORED metres, because everything in a `build_map` match arm is
+/// authored and the expansion happens later.
+///
+/// Four rejections, and each is a defect this codebase has shipped once:
+///
+/// 1. **The spawn band.** `spawn_point` puts both rows at
+///    `z = ±(half − 2.5)`; `SPAWN_CLEAR_M` is the band that stays empty.
+/// 2. **The pickup pads.** See `BAILEY_PADS`.
+/// 3. **The playfield edge.** Bodies are clamped to `±(half − 0.5)`, so a
+///    box hanging over the line is a box with a face nobody can walk to.
+/// 4. **Everything already placed**, plus `clear` metres of walking room —
+///    which is what stops a randomiser building a wall across a gate, and
+///    what makes the gaps between randomised set pieces bot-usable rather
+///    than lucky.
+///
+/// Rejection is the sampler: the caller re-draws. That costs `rng` draws
+/// but no determinism — the same seed makes the same rejections in the same
+/// order.
+fn bailey_clear(cover: &[Aabb], half: f32, x: f32, z: f32, w: f32, d: f32, clear: f32) -> bool {
+    if x.abs() + w > half - 2.0 {
+        return false;
+    }
+    if z.abs() + d > half - BAILEY_SPAWN_KEEP {
+        return false;
+    }
+    // pads are FINAL-space; extents are scale-invariant (§2.2), so the
+    // centre is converted and the half-extents are not
+    let (fx, fz) = (x * MAP_SCALE, z * MAP_SCALE);
+    for p in BAILEY_PADS {
+        if (fx - p[0]).abs() < w + PICKUP_RADIUS + 2.0
+            && (fz - p[1]).abs() < d + PICKUP_RADIUS + 2.0
+        {
+            return false;
+        }
+    }
+    for c in cover {
+        let (cx, cz) = ((c.min[0] + c.max[0]) * 0.5, (c.min[2] + c.max[2]) * 0.5);
+        let (cw, cd) = ((c.max[0] - c.min[0]) * 0.5, (c.max[2] - c.min[2]) * 0.5);
+        if (x - cx).abs() < w + cw + clear && (z - cz).abs() < d + cd + clear {
+            return false;
+        }
+    }
+    true
+}
+
 /// Build a map's cover set. The KOTH hill and the robot armor crown the
 /// center structure, whatever its height. Pickup lanes stay clear on
 /// every map. v6: castle maps grew (§10) — more room, more cover, and
@@ -1193,41 +1324,112 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
             }
         }
         MapKind::Bailey => {
-            half = 40.0;
-            checkpoints = [[20.0, 0.0], [-20.0, 0.0]];
+            // §owner BAILEY v7: +30% and randomised. See `BAILEY_HALF`
+            // for the size argument and `bailey_clear` for the rules
+            // every randomised placement below is filtered through.
+            //
+            // The map is built in two passes, and the order matters: the
+            // DESIGNED SPINE first (keep, curtain walls, towers,
+            // ramparts, causeway), then the randomised fill, which is
+            // checked against everything the spine already put down. A
+            // randomiser that ran first would be free to build across
+            // its own gate.
+            //
+            // Every randomised feature is placed as a 180°-ROTATED PAIR —
+            // `(x, z)` and `(−x, −z)`. Teams spawn at `z = ±(half − 2.5)`
+            // facing each other, so point symmetry about the origin is
+            // what makes a random layout FAIR; four-fold mirroring (what
+            // the old stables clutter did) is fair too but produces four
+            // copies of one idea, which is how a randomised map ends up
+            // reading more repetitive than a hand-placed one.
+            half = BAILEY_HALF;
+            checkpoints = [[26.0, 0.0], [-26.0, 0.0]]; // 20.0 × 1.30
             // the keep — taller than the arena tower, same stair grammar
             center(&mut cover, &mut kind, 3.0, 6);
             top = 3.0;
-            // corner drum towers: solid, unclimbable, fight around them
+
+            // ---- 1. THE CURTAIN WALLS, with a gate and a sally port ----
+            //
+            // Was: two fixed walls at |z| = 18 with one fixed 16 m gate.
+            // Now each wall picks its own stand-off, its own gate width
+            // and its own sally-port position, so the two halves of the
+            // map are not each other's tracing paper and neither is the
+            // next seed's.
+            //
+            // The heights sit in 2.8–3.3: above the 2.26 m absolute foot
+            // ceiling (`MAP_METRICS` §4.3), so a curtain wall is a wall
+            // to infantry, and under `BAILEY_MAX_H` so it is a step to a
+            // heavy mech and still invisible to the bot router.
+            let wall_end = half - 6.0;
+            for sz in [-1.0_f32, 1.0] {
+                let zw = sz * rng.range(22.0, 25.0);
+                let hw = rng.range(2.8, 3.3);
+                // the main gate, on the centre line both teams walk
+                let gate = rng.range(9.0, 13.0); // half-width, ≥ BAILEY_APERTURE
+                for sx in [-1.0_f32, 1.0] {
+                    let (x0, x1) = if sx < 0.0 {
+                        (-wall_end, -gate)
+                    } else {
+                        (gate, wall_end)
+                    };
+                    // one sally port per segment, never at either end —
+                    // a "gap" flush with the corner is not a flank
+                    // route, it is a shorter wall
+                    let span = x1 - x0;
+                    let port = rng.range(x0 + span * 0.25, x1 - span * 0.25);
+                    let ph = BAILEY_APERTURE * 0.5;
+                    for (a, b) in [(x0, port - ph), (port + ph, x1)] {
+                        if b - a < 2.0 {
+                            continue; // a stub is rubble, not a wall
+                        }
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [a, 0.0, zw - 0.7],
+                            max: [b, hw, zw + 0.7],
+                        }, CoverKind::Stone);
+                    }
+                    // a mural tower on the gate shoulder: the thing that
+                    // makes a gate a gatehouse rather than a hole
+                    let tr = rng.range(2.2, 3.0);
+                    let tx = sx * (gate + tr + 0.5);
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [tx - tr, 0.0, zw - tr],
+                        max: [tx + tr, BAILEY_MAX_H, zw + tr],
+                    }, CoverKind::Stone);
+                }
+            }
+
+            // ---- 2. CORNER DRUM TOWERS ----
+            // Solid, unclimbable, fight around them. Radius and stand-off
+            // both drawn, so the corners are no longer four copies.
             for sx in [-1.0_f32, 1.0] {
                 for sz in [-1.0_f32, 1.0] {
+                    let tr = rng.range(2.4, 3.4);
+                    let tx = sx * rng.range(36.0, 41.0);
+                    let tz = sz * rng.range(36.0, 41.0);
                     push(&mut cover, &mut kind, Aabb {
-                        min: [sx * 30.0 - 2.5, 0.0, sz * 30.0 - 2.5],
-                        max: [sx * 30.0 + 2.5, 3.4, sz * 30.0 + 2.5],
+                        min: [tx - tr, 0.0, tz - tr],
+                        max: [tx + tr, BAILEY_MAX_H, tz + tr],
                     }, CoverKind::Stone);
                 }
             }
-            // bailey cross-walls with a wide-open center gate
-            for sz in [-1.0_f32, 1.0] {
-                for (x0, x1) in [(-28.0_f32, -8.0), (8.0, 28.0)] {
-                    push(&mut cover, &mut kind, Aabb {
-                        min: [x0, 0.0, sz * 18.0 - 0.6],
-                        max: [x1, 2.6, sz * 18.0 + 0.6],
-                    }, CoverKind::Stone);
-                }
-            }
-            // RAMPARTS (v6 vertical layering): climbable wall-walks along
-            // both flanks with stairs at each end — high ground with two
-            // ways up and full exposure while you hold it
+
+            // ---- 3. RAMPARTS: the flank high ground ----
+            // Climbable wall-walks with stairs at both ends. The deck
+            // stays at 2.6 — it has to be REACHABLE, and 2.6 is inside
+            // nothing: you get onto it by the stairs, which is the point
+            // of putting stairs on it. Length and parapet placement are
+            // drawn; the stair grammar is not, because a riser is a
+            // physics contract (`STAIR_RISE_M`) and not a flavour.
             for sx in [-1.0_f32, 1.0] {
-                let px = sx * (half - 5.0);
+                let px = sx * (half - 6.5);
+                let deck = rng.range(15.0, 21.0); // half-length in z
                 push(&mut cover, &mut kind, Aabb {
-                    min: [px - 2.0, 0.0, -12.0],
-                    max: [px + 2.0, 2.6, 12.0],
+                    min: [px - 2.4, 0.0, -deck],
+                    max: [px + 2.4, 2.6, deck],
                 }, CoverKind::Stone);
                 for s in 0..5 {
                     let h = 0.52 * (5 - s) as f32;
-                    let zoff = 12.0 + s as f32 * 1.05;
+                    let zoff = deck + s as f32 * 1.05;
                     push(&mut cover, &mut kind, Aabb {
                         min: [px - 1.5, 0.0, zoff],
                         max: [px + 1.5, h, zoff + 1.05],
@@ -1237,40 +1439,252 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
                         max: [px + 1.5, h, -zoff],
                     }, CoverKind::Stone);
                 }
-                // parapet lip on the rampart's inner edge: hard cover up top
-                push(&mut cover, &mut kind, Aabb {
-                    min: [px - sx * 2.0 - 0.2, 0.0, -12.0],
-                    max: [px - sx * 2.0 + 0.2, 3.3, -8.0],
-                }, CoverKind::Stone);
-                push(&mut cover, &mut kind, Aabb {
-                    min: [px - sx * 2.0 - 0.2, 0.0, 8.0],
-                    max: [px - sx * 2.0 + 0.2, 3.3, 12.0],
-                }, CoverKind::Stone);
-            }
-            // stables clutter: crates + low walls in the yard, mirrored
-            for (x, z, w, h, d) in [
-                (6.0_f32, 10.0_f32, 1.2_f32, 1.3_f32, 1.2_f32),
-                (-17.0, 7.0, 1.5, 1.3, 1.0),
-                (22.0, 5.5, 1.0, 2.1, 1.0),
-                (13.0, 24.0, 1.4, 1.3, 1.1),
-                (-6.0, 26.0, 1.1, 2.1, 1.1),
-            ] {
-                for sz in [1.0_f32, -1.0] {
+                // parapet lips on the rampart's inner edge, broken in the
+                // middle so the wall-walk has somewhere to shoot FROM and
+                // somewhere to be shot from
+                let lip = px - sx * 2.2;
+                for szl in [-1.0_f32, 1.0] {
+                    let a = szl * rng.range(deck * 0.30, deck * 0.55);
+                    let b = szl * deck;
                     push(&mut cover, &mut kind, Aabb {
-                        min: [-x - w, 0.0, sz * z - d],
-                        max: [-x + w, h, sz * z + d],
-                    }, CoverKind::Crate);
-                    push(&mut cover, &mut kind, Aabb {
-                        min: [x - w, 0.0, -sz * z - d],
-                        max: [x + w, h, -sz * z + d],
-                    }, CoverKind::Crate);
+                        min: [lip - 0.25, 0.0, a.min(b)],
+                        max: [lip + 0.25, 3.3, a.max(b)],
+                    }, CoverKind::Stone);
                 }
             }
-            // low chapel ruins flanking the keep
+
+            // ---- 4. THE CAUSEWAY — the brief's "bridge" ----
+            //
+            // And it is a CAUSEWAY, not a span, because this engine
+            // cannot express a span: cover is an `Aabb` with a top and no
+            // underside (`MAP_METRICS` §8.2), so there is no walking
+            // under anything, ever. What is buildable — and what a castle
+            // actually has — is a raised road with a drop on both sides
+            // and a ramp at each end. It reads as a bridge from on top of
+            // it, which is where it is played from.
+            //
+            // It runs along z (the attack axis) on one randomly chosen
+            // flank, so one team does not own it: it is the high road
+            // from one end of the yard to the other, and which side of
+            // the map it is on is the biggest single thing that changes
+            // between two seeds.
+            let cw_side = if rng.next_u32() & 1 == 0 { 1.0_f32 } else { -1.0 };
+            let cw_x = cw_side * rng.range(22.0, 28.0);
+            let cw_z = rng.range(16.0, 20.0); // half-length
+            let cw_h = 1.7;
+            push(&mut cover, &mut kind, Aabb {
+                min: [cw_x - 3.2, 0.0, -cw_z],
+                max: [cw_x + 3.2, cw_h, cw_z],
+            }, CoverKind::Stone);
+            // ramps at both ends: 4 treads of 0.42, inside `STEP_UP` and
+            // well inside `BOT_PROBE_Y`, so a bot walking the flank walks
+            // UP it instead of veering off it
+            for szc in [-1.0_f32, 1.0] {
+                for s in 0..4 {
+                    let h = 0.42 * (4 - s) as f32;
+                    let z0 = cw_z + s as f32 * 1.3;
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [cw_x - 2.4, 0.0, (szc * z0).min(szc * (z0 + 1.3))],
+                        max: [cw_x + 2.4, h, (szc * z0).max(szc * (z0 + 1.3))],
+                    }, CoverKind::Stone);
+                }
+            }
+            // parapets: absolute 2.9 m, which is 1.2 m of chest cover to
+            // a man ON the deck and hard cover to one beside it. Two
+            // segments a side with the middle open, so the deck is a
+            // route with cover rather than a trench you cannot leave.
+            for sxp in [-1.0_f32, 1.0] {
+                for szp in [-1.0_f32, 1.0] {
+                    let a = szp * rng.range(cw_z * 0.35, cw_z * 0.60);
+                    let b = szp * cw_z;
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [cw_x + sxp * 3.2 - 0.25, 0.0, a.min(b)],
+                        max: [cw_x + sxp * 3.2 + 0.25, 2.9, a.max(b)],
+                    }, CoverKind::Stone);
+                }
+            }
+
+            // ---- 5. OUTBUILDINGS — and they are buildings you ENTER ----
+            //
+            // A RING OF WALLS AROUND AN OPEN COURT, with a doorway, not a
+            // solid block. That is deliberate and it is this file's own
+            // criticism of itself: `cliffholds_keep_is_a_building_you_
+            // walk_into_not_a_block` records that the Gardens' gazebo and
+            // this map's keep are both centrepieces you can only walk
+            // AROUND — "scenery with a name on it". A randomiser is
+            // exactly the wrong place to make that mistake eight more
+            // times, because it would make it identically every seed.
+            //
+            // The doorway is `BAILEY_APERTURE` wide, and the mirrored
+            // twin puts its doorway on the OPPOSITE side, so the pair is
+            // a real 180° rotation and not two buildings that happen to
+            // face the same way.
+            for _ in 0..4 {
+                let bw = rng.range(5.0, 8.0);
+                let bd = rng.range(5.0, 8.0);
+                let bh = rng.range(2.8, BAILEY_MAX_H);
+                let door = rng.next_u32() % 4;
+                for _try in 0..30 {
+                    let x = rng.range(-(half - 14.0), half - 14.0);
+                    let z = rng.range(7.0, half - 14.0);
+                    if !bailey_clear(&cover, half, x, z, bw, bd, BAILEY_APERTURE)
+                        || !bailey_clear(&cover, half, -x, -z, bw, bd, BAILEY_APERTURE)
+                    {
+                        continue;
+                    }
+                    for (sgn, dside) in [(1.0_f32, door), (-1.0, (door + 2) % 4)] {
+                        let (cx, cz) = (sgn * x, sgn * z);
+                        // side 0/1 = ±z faces, 2/3 = ±x faces
+                        for side in 0..4u32 {
+                            let along = if side < 2 { bw } else { bd };
+                            let (a0, a1) = if side == dside {
+                                (BAILEY_APERTURE * 0.5, along)
+                            } else {
+                                (-along, along)
+                            };
+                            // the doorway leaves ONE segment, not two —
+                            // an off-centre door is what stops every
+                            // building on the map having a firing line
+                            // straight through its middle
+                            let (mn, mx) = match side {
+                                0 => ([cx + a0, cz + bd - 0.35], [cx + a1, cz + bd + 0.35]),
+                                1 => ([cx - a1, cz - bd - 0.35], [cx - a0, cz - bd + 0.35]),
+                                2 => ([cx + bw - 0.35, cz + a0], [cx + bw + 0.35, cz + a1]),
+                                _ => ([cx - bw - 0.35, cz - a1], [cx - bw + 0.35, cz - a0]),
+                            };
+                            push(&mut cover, &mut kind, Aabb {
+                                min: [mn[0].min(mx[0]), 0.0, mn[1].min(mx[1])],
+                                max: [mn[0].max(mx[0]), bh, mn[1].max(mx[1])],
+                            }, CoverKind::Stone);
+                        }
+                    }
+                    break;
+                }
+            }
+
+            // ---- 6. BUILDING CORNERS — ruined L-shaped masonry ----
+            // Two arms meeting at a right angle, which is the single most
+            // useful shape in a shooter that has no interiors: it gives a
+            // corner to hold, a corner to peek, and a corner to be flanked
+            // round, out of two boxes.
+            for i in 0..5 {
+                let arm_a = rng.range(4.0, 9.0);
+                let arm_b = rng.range(4.0, 9.0);
+                // heights snapped to ONE SIDE of a traversal threshold —
+                // `MAP_METRICS` §9.2's defect: the shipped 1.6–2.2 band
+                // straddles the 2.071 m plain-jump ceiling, so two
+                // identical-looking blocks differ in whether you can get
+                // on top of one. These three do not straddle anything.
+                let h = match i % 3 {
+                    0 => rng.range(0.9, 1.3),  // jumpable
+                    1 => rng.range(1.6, 2.0),  // shoulder, all jumpable
+                    _ => rng.range(2.6, BAILEY_MAX_H), // none of it, on foot
+                };
+                let q = rng.next_u32() % 4;
+                let (qx, qz) = ([1.0_f32, -1.0, -1.0, 1.0][q as usize],
+                                [1.0_f32, 1.0, -1.0, -1.0][q as usize]);
+                for _try in 0..30 {
+                    let x = rng.range(-(half - 12.0), half - 12.0);
+                    let z = rng.range(6.0, half - 12.0);
+                    // the L's bounding box is smaller than this, so the
+                    // check is conservative on purpose
+                    if !bailey_clear(&cover, half, x, z, arm_a, arm_b, 4.0)
+                        || !bailey_clear(&cover, half, -x, -z, arm_a, arm_b, 4.0)
+                    {
+                        continue;
+                    }
+                    for sgn in [1.0_f32, -1.0] {
+                        let (cx, cz) = (sgn * x, sgn * z);
+                        let ax = cx + sgn * qx * arm_a;
+                        let az = cz + sgn * qz * arm_b;
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [cx.min(ax), 0.0, cz - 0.4],
+                            max: [cx.max(ax), h, cz + 0.4],
+                        }, CoverKind::Stone);
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [cx - 0.4, 0.0, cz.min(az)],
+                            max: [cx + 0.4, h, cz.max(az)],
+                        }, CoverKind::Stone);
+                    }
+                    break;
+                }
+            }
+
+            // ---- 7. BIG TREES ----
+            // The trunk is the collider and the client crowns it. Wider
+            // than the Gardens' 0.3 m saplings because the brief said
+            // big, and a 0.45–0.8 m trunk is the first piece of cover on
+            // this map that is round-ish rather than architectural.
+            // Height is `BAILEY_MAX_H`: not climbable on foot, and the
+            // client's crown is free to be much taller than the collider.
+            for _ in 0..6 {
+                let r = rng.range(0.45, 0.8);
+                for _try in 0..30 {
+                    let x = rng.range(-(half - 10.0), half - 10.0);
+                    let z = rng.range(5.0, half - 10.0);
+                    if !bailey_clear(&cover, half, x, z, r, r, 3.0)
+                        || !bailey_clear(&cover, half, -x, -z, r, r, 3.0)
+                    {
+                        continue;
+                    }
+                    for sgn in [1.0_f32, -1.0] {
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [sgn * x - r, 0.0, sgn * z - r],
+                            max: [sgn * x + r, BAILEY_MAX_H, sgn * z + r],
+                        }, CoverKind::Tree);
+                    }
+                    break;
+                }
+            }
+
+            // ---- 8. BARRIER DETAIL ----
+            // Short barricades and cart-wrecks: the small stuff that
+            // turns 130 m of yard into somewhere with beats on it. Low
+            // and shoulder tiers only — nothing here should be a wall,
+            // and nothing here straddles the jump ceiling either.
+            for i in 0..12 {
+                let long = rng.range(2.5, 5.5);
+                let h = if i % 2 == 0 {
+                    rng.range(0.9, 1.3)
+                } else {
+                    rng.range(1.6, 2.0)
+                };
+                let (w, d) = if rng.next_u32() & 1 == 0 { (long, 0.5) } else { (0.5, long) };
+                let ck = if i % 3 == 0 { CoverKind::Crate } else { CoverKind::Stone };
+                for _try in 0..30 {
+                    let x = rng.range(-(half - 8.0), half - 8.0);
+                    let z = rng.range(4.0, half - 8.0);
+                    if !bailey_clear(&cover, half, x, z, w, d, 3.0)
+                        || !bailey_clear(&cover, half, -x, -z, w, d, 3.0)
+                    {
+                        continue;
+                    }
+                    for sgn in [1.0_f32, -1.0] {
+                        push(&mut cover, &mut kind, Aabb {
+                            min: [sgn * x - w, 0.0, sgn * z - d],
+                            max: [sgn * x + w, h, sgn * z + d],
+                        }, ck);
+                    }
+                    break;
+                }
+            }
+
+            // ---- 9. the chapel ruins, kept and scaled ----
+            // Hand-placed on purpose: the keep needs two fixed pieces of
+            // cover beside it or the centre of the map is a randomised
+            // lottery, and the centre is the one place on a TDM map that
+            // must play the same way every match.
+            //
+            // x = ±13.0 and NOT the ±15.6 that 12.0 × 1.30 gives, because
+            // 15.6 authored is 19.5 FINAL and the Recon/Minigun pads are
+            // at ±19: scaling this pair with everything else parked a
+            // ruin on top of two pickups. Caught by
+            // `bailey_randomisation_respects_spawns_bots_and_pads`, which
+            // is the whole reason that assertion is in it.
             for sx in [-1.0_f32, 1.0] {
                 push(&mut cover, &mut kind, Aabb {
-                    min: [sx * 12.0 - 0.6, 0.0, -6.0],
-                    max: [sx * 12.0 + 0.6, 1.5, 6.0],
+                    min: [sx * 13.0 - 0.6, 0.0, -7.8],
+                    max: [sx * 13.0 + 0.6, 1.5, 7.8],
                 }, CoverKind::Stone);
             }
         }
@@ -28918,6 +29332,187 @@ mod tests {
                 "{map:?}: only {pct:.1}% of waypoints came back unchanged — this \
                  change has re-tuned a map it was not asked to touch"
             );
+        }
+    }
+
+    // ------------------------------------------- §owner BAILEY v7 (16v16)
+
+    /// Build the Bailey's raw layout for a seed, without the rest of
+    /// `TdmSim::new` in the way. The seed and stream are the same pair
+    /// `TdmSim::new` uses, so this IS the shipped map and not a lookalike.
+    fn bailey_layout(seed: u64) -> MapLayout {
+        let mut rng = Pcg32::new(seed, 0x7D7D);
+        build_map(MapKind::Bailey, &mut rng)
+    }
+
+    /// A raw-bit fingerprint of a layout: every coordinate as its `u32`
+    /// bit pattern, every `CoverKind`, in order.
+    ///
+    /// Bits, not `==`, and not a tolerance — determinism here means the
+    /// same float, and a comparison that accepts 1e-6 of drift is a
+    /// comparison that would pass on a map rebuilt from a clock.
+    fn bailey_digest(l: &MapLayout) -> Vec<u32> {
+        let mut d = Vec::new();
+        d.push(l.half.to_bits());
+        d.push(l.center_top.to_bits());
+        for c in &l.checkpoints {
+            d.push(c[0].to_bits());
+            d.push(c[1].to_bits());
+        }
+        for (a, k) in l.cover.iter().zip(l.kind.iter()) {
+            for i in 0..3 {
+                d.push(a.min[i].to_bits());
+                d.push(a.max[i].to_bits());
+            }
+            d.push(*k as u32);
+        }
+        d
+    }
+
+    /// §owner BAILEY v7: the map is RANDOMISED, and randomised is not
+    /// random. Same seed, same map, to the bit — and a different seed had
+    /// better be a different map, or "randomised" is a comment.
+    ///
+    /// The second half is the one that can fail for a real reason: a
+    /// determinism test on a layout that ignores its `rng` passes
+    /// perfectly and means nothing. Both halves are needed and neither is
+    /// sufficient.
+    #[test]
+    fn bailey_is_bit_identical_for_a_seed_and_different_for_another() {
+        for seed in [1u64, 7, 0xB417, 0xDEAD_BEEF, 12345] {
+            let a = bailey_digest(&bailey_layout(seed));
+            let b = bailey_digest(&bailey_layout(seed));
+            assert_eq!(a, b, "seed {seed:#x}: the Bailey is not reproducible");
+            assert!(!a.is_empty(), "seed {seed:#x}: empty layout");
+        }
+        // ...and the seeds are actually doing something. Pairwise, so a
+        // generator that varied on ONE feature and pinned the rest still
+        // has to differ on every pair.
+        let seeds = [1u64, 7, 0xB417, 0xDEAD_BEEF, 12345];
+        for i in 0..seeds.len() {
+            for j in (i + 1)..seeds.len() {
+                assert_ne!(
+                    bailey_digest(&bailey_layout(seeds[i])),
+                    bailey_digest(&bailey_layout(seeds[j])),
+                    "seeds {:#x} and {:#x} built the same Bailey — the layout \
+                     is not reading its rng",
+                    seeds[i],
+                    seeds[j]
+                );
+            }
+        }
+    }
+
+    /// §owner BAILEY v7: the map got 30% bigger, and the ARCHITECTURE
+    /// went with it rather than a bounding box being stretched round the
+    /// old one.
+    ///
+    /// The anchors are independent of the code under test:
+    ///
+    /// * **50.0 m** is the shipped v6 Bailey half, recorded in
+    ///   `research/maps/MAP_METRICS.md` §2.1 — a separate document, and
+    ///   measured by me off the pre-change binary before this commit
+    ///   (`half=50, 109–111 boxes, 0 beyond 50 m, max height 3.4`).
+    /// * **0** is that same measurement's count of cover whose CENTRE lay
+    ///   further out than the old half. It was zero because the old map's
+    ///   outermost thing was the infill ring at ~45 m ± 2.4. A test that
+    ///   only checked `half` would pass on a map with a bigger number and
+    ///   all its buildings still huddled in the middle; this is the half
+    ///   that says the walls and towers moved.
+    #[test]
+    fn bailey_grew_thirty_percent_and_took_its_walls_with_it() {
+        const OLD_HALF: f32 = 50.0; // MAP_METRICS §2.1, and measured
+        for seed in [1u64, 2, 3, 99, 0xB417] {
+            let l = bailey_layout(seed);
+            let grew = l.half / OLD_HALF;
+            assert!(
+                (grew - 1.30).abs() < 0.01,
+                "seed {seed:#x}: half is {} m, {grew:.3}× the old {OLD_HALF} m — \
+                 the brief asked for 1.30×",
+                l.half
+            );
+            // and the structures are out there, not just the boundary
+            let far = l
+                .cover
+                .iter()
+                .filter(|c| {
+                    let cx = (c.min[0] + c.max[0]) * 0.5;
+                    let cz = (c.min[2] + c.max[2]) * 0.5;
+                    cx.abs().max(cz.abs()) > OLD_HALF
+                })
+                .count();
+            assert!(
+                far >= 8,
+                "seed {seed:#x}: only {far} cover boxes sit beyond the OLD map's \
+                 edge (the pre-change map had 0) — the footprint grew but the \
+                 architecture did not move into it"
+            );
+            // a bigger map with the same amount of stuff in it is an
+            // emptier map, which is the failure the infill exists for
+            assert!(
+                l.cover.len() >= 140,
+                "seed {seed:#x}: {} cover boxes on a map 1.69× the area of one \
+                 that shipped with ~110 — this is 8v8 furniture in a 16v16 yard",
+                l.cover.len()
+            );
+        }
+    }
+
+    /// §owner BAILEY v7: the randomiser stays inside the map's three hard
+    /// contracts. This is the guard on the randomisation itself — the
+    /// scale test would pass on a map that also buried a spawn.
+    ///
+    /// Every assertion is a RELATIONSHIP against a constant that lives
+    /// somewhere else, so retuning any of them retunes the test with them.
+    #[test]
+    fn bailey_randomisation_respects_spawns_bots_and_pads() {
+        for seed in 0..24u64 {
+            let l = bailey_layout(seed * 7 + 3);
+            // 1. NOTHING is over the bot router's terrain line. Bailey
+            //    publishes no `Climb` links, so a blocker above
+            //    `BOT_TERRAIN_M` is one `ground_reach` refuses to route
+            //    through and cannot route around either.
+            for c in &l.cover {
+                assert!(
+                    c.max[1] < BOT_TERRAIN_M,
+                    "seed {seed}: a {:.2} m block is over BOT_TERRAIN_M on a map \
+                     with no published flights",
+                    c.max[1]
+                );
+            }
+            // 2. NOBODY SPAWNS INSIDE ANYTHING. Both teams, every slot
+            //    the shipped `spawn_point` lays out.
+            for team in [Team::Blue, Team::Red] {
+                for slot in 0..8 {
+                    let (p, _) = spawn_point(team, slot, l.half);
+                    for c in &l.cover {
+                        let inside = p[0] > c.min[0] - BODY_RADIUS
+                            && p[0] < c.max[0] + BODY_RADIUS
+                            && p[2] > c.min[2] - BODY_RADIUS
+                            && p[2] < c.max[2] + BODY_RADIUS;
+                        assert!(
+                            !inside,
+                            "seed {seed}: {team:?} slot {slot} spawns at \
+                             ({:.1}, {:.1}) inside {c:?}",
+                            p[0], p[2]
+                        );
+                    }
+                }
+            }
+            // 3. NO PAD IS ON A ROOF. `TdmSim::new` snaps a pickup onto
+            //    whatever is under it, so a building over a lane does not
+            //    move the pad — it lifts it out of reach for the match.
+            //    The ceiling is the soldier's absolute foot ceiling, and
+            //    the 0.55 m free step under it.
+            for p in BAILEY_PADS {
+                let t = terrain_top(&l.cover, p[0], p[1]);
+                assert!(
+                    t <= STEP_UP || (p == [0.0, 0.0] && t <= l.center_top),
+                    "seed {seed}: the pad at ({}, {}) sits {t:.2} m up",
+                    p[0],
+                    p[1]
+                );
+            }
         }
     }
 
