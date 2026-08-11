@@ -158,3 +158,85 @@ DECISION, not accident — they are the tallest things in the city so they
 read as unreachable — but that is a judgement I would want looked at.
 
 -- FRIDAY22
+
+---
+
+## 2026-08-11 — BOW & SPEAR: input semantics, the charge curve, the physics
+
+Sim half of the owner's bow-and-spear spec. Three commits, one per
+section: `a95b48c`, `5ad7519`, `eff8fbf`. `sim.rs` only; `PlayerCmd`
+unchanged, so nothing in the client had to move in the same breath.
+
+**A — the input split (§4/§8/§17).** The rule the spec repeats three
+times, RMB PRE-AIMS AND NEVER CHARGES, was ALREADY TRUE in the sim: both
+weapons read `cmd.shoot`. The old RMB-draws-the-bow grammar survived
+only in comments and one stale doc. So I guarded it rather than claiming
+a fix, and said so in the test. `AimPhase` + `aim_phase(ready, pre_aim,
+attack)` now resolves the input once for both weapons, and both step
+functions take the phase instead of a bool, so PRE_AIM and CHARGING
+cannot be combined and the two weapons cannot drift onto two buttons.
+
+Underneath it were four real defects, each with a test that fails
+without its fix: a draw survived a WEAPON SWITCH and loosed itself on
+re-select; a draw survived DEATH (the player block is inside `alive()`,
+so nothing cleared it and the respawn block did not know about it); a
+refused release BANKED the wind at 1.2999997; and neither charge path
+consulted the PARRY, because the bow spawns its arrow directly rather
+than through `try_fire`.
+
+**B — the curve (§9/§10/§11).** `SPEAR_CHARGE_FULL_S` 0.85 s → 3.00 s;
+the clock cap `FULL*2` → `SPEAR_MAX_CHARGE_S` (the old one would have
+put the new 7 s bonus out of reach at 6.0 s); new `SPEAR_MAX_CHARGE_S`
+7.0 and `SPEAR_MAX_CHARGE_DMG` 1.10, so a maximum throw lands 115.5
+instead of 105. The curve stays LINEAR, which is a decision: 0.900 /
+1.0222 / 1.1611 / 1.300 at 0/1/2/3 s is 30.6% / 34.7% / 34.7% of the
+band, i.e. the spec's own low/medium/high in near-equal thirds, and
+step-free by construction. Any easing I invented would be a number
+nobody asked for.
+
+The bonus is a THRESHOLD and that is forced, not chosen: "3 s reaches
+maximum, holding longer must not grow power" forbids a 3→7 s ramp, and
+"7 s grants a bonus" requires something at 7 s. Velocity stops dead at
+3 s; 7 s pays on a different axis. It cannot stack twice over — the
+reward is a `bool` and the clock is capped at the reward.
+
+**C — the physics (§12/§13).** Verified, not rebuilt. Launch along the
+crosshair, stick-vs-bounce impact, and preview-equals-flight all already
+hold and already have tests; rotation toward flight is client work and
+correctly so — the sim's contribution is publishing `Missile.vel` and
+deliberately not clearing it on impact. The untested gap was the FLIGHT
+itself, now closed by relationships rather than constants: horizontal
+momentum conserved bit-identically, 25 m taking distance/speed, and drop
+quadrupling when flight time doubles.
+
+**FOR FRIDAY33 — four accessors, and they are ready now.** Named on the
+`turret_mode_of` pattern: `spear_stance_of` → `SpearStance {Carried,
+Winding, Planting}`, `spear_wind_frac_of` (0..1 across the 3 s raise),
+`spear_plant_frac_of` (0..1 across the 0.4 s plant), `spear_max_charged_of`
+(the 7 s tell). `spear_plant_frac_of` exists because `spear_wind_t`
+counts DOWN and the client currently writes `1.0 - spear_wind_t /
+SPEAR_WINDUP_S` by hand in three places — a sim constant on the wrong
+side of the boundary.
+
+**Evidence.** sim tests 227 → 238, 0 failed. All 14 new tests watched
+failing under mutation, reverting from a FILE COPY. Two fixtures
+repaired as stale SETUP, not weakened assertions — one ran in a live 1v1
+where a 3 s wind now gets the thrower killed mid-plant, the other fed
+the player `PlayerCmd::default()` whose zero `aim` the player (not the
+bot) re-tracks into the throw.
+
+For a stretch of this, `main.rs` was mid-edit and non-compiling in the
+other lane, which blocks `cargo test -p jk_tdm` entirely. `sim.rs`
+imports nothing but `jk_core`, so I ran it as a standalone lib crate in
+the scratchpad — same file, same tests, no bevy, seconds per compile.
+Worth knowing next time a builder is stuck behind a broken client.
+
+Least sure about: whether the owner wants RMB to be a PREREQUISITE for
+charging or merely not-a-charge. I read "RMB never charges" as the hard
+rule (it is the one stated three times) and did NOT make pre-aim
+mandatory, because requiring it would make the spear unusable without a
+second button held and the spec never says the charge is refused
+without it. One sentence from the owner settles it and the change is
+two lines.
+
+-- FRIDAY22
