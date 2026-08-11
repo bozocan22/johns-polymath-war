@@ -3058,12 +3058,16 @@ fn weapon_bounded_corners(kind: GunKind) -> Vec<(f32, f32)> {
         .filter(|w| profile_bounds_part(prof, w))
         .flat_map(|w| {
             let h = w.half();
-            // model -> camera: x mirrors, then the cant rotates both.
-            let cx = -w.pos.x;
             [(-h.x, -h.y), (-h.x, h.y), (h.x, -h.y), (h.x, h.y)].map(|(dx, dy)| {
-                let (px, py) = (cx + dx, w.pos.y + dy);
-                // leftward reach is POSITIVE, matching the callers
-                (-(px * rc - py * rs), px * rs + py * rc)
+                let (mx, my) = (w.pos.x + dx, w.pos.y + dy);
+                // Model -> camera, in one place. Camera x is
+                // (-mx*cos + my*sin) after the 180 degree yaw and the
+                // cant; the callers want LEFTWARD reach, which is its
+                // negation. Camera y is (mx*sin + my*cos).
+                //
+                // Roll 0 collapses this to (mx, my) - the mirror fix
+                // alone - so every gun in the arsenal is unchanged.
+                (mx * rc - my * rs, mx * rs + my * rc)
             })
         })
         .collect()
@@ -26375,9 +26379,15 @@ mod band_tests {
         let parts = weapon_parts(GunKind::Bow);
         let wood = parts.iter().filter(|w| w.tone == Tone::Wood).count();
         assert!(wood >= 8, "only {wood} wooden parts - riser and both limbs?");
+        // AT THE CENTRE, and a WRAP rather than a stripe. `any(leather)`
+        // was the first version of this line and it could not fail: the
+        // arrow rest is leather too, so painting the grip grey again
+        // still left one leather part on the bow.
         assert!(
-            parts.iter().any(|w| w.tone == Tone::Leather),
-            "no leather grip at the centre"
+            parts.iter().any(|w| {
+                w.tone == Tone::Leather && w.pos.y.abs() < 0.02 && w.size.y > 0.05
+            }),
+            "no slim leather grip wrapped round the centre of the riser"
         );
         // "not ornate": no emissive anything on a weapon with no sights
         assert!(
@@ -26407,6 +26417,24 @@ mod band_tests {
             start.hand
         );
         assert!((end.pitch - start.pitch).abs() < 1e-5);
+        // ...and it is not continuous by being BOTH WRONG. Continuity
+        // alone is satisfied by any plant that derives from the wind,
+        // including one that derives the old pose - so pin the two
+        // absolutes the retired plant violated: it began at hand y 0.72
+        // (below the shoulder line, which is 0.62) with the shaft 1.35
+        // rad NOSE-UP.
+        assert!(
+            start.hand.y > 0.85,
+            "the throwing hand starts the plant at y {:.2} - that is not \
+             above the shoulder",
+            start.hand.y
+        );
+        assert!(
+            start.pitch > 0.0,
+            "the shaft starts the plant nose-UP ({:.2} rad) - a javelin is \
+             cocked pointing forward and down",
+            start.pitch
+        );
     }
 
     /// §7: it must READ as a wind-up - arm high, point angled DOWN,
