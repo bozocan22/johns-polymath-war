@@ -23,6 +23,7 @@ system prompts, tool access, and persistent memory.
 | **Toto** | peer-reviewed research, evidence | `TOTO_LOG.md` | No (research files only) |
 | **Friday** | implementation, tests, captures | `FRIDAY_LOG.md` | Yes |
 | **Trevor** | the ISSUED-vs-DELIVERED data bank | `TREVOR_LEDGER.md` + `TREVOR_LOG.md` | **No — never** |
+| **Balance** | the space BETWEEN lanes — ownership, contradictions, sequencing | `BALANCE_BOARD.md` + `BALANCE_LOG.md` | **No — never** |
 
 **Thor cannot edit source. That is the load-bearing rule.** A verifier
 that fixes what it finds cannot be trusted to report what it missed.
@@ -325,6 +326,28 @@ Task(subagent_type="trevor", prompt="<rebuild or update the ledger; name any thr
 
 Trevor is read-only, so he parallelises with everything except another
 Trevor — never run two, they write the same two files.
+
+**Run `balance` BEFORE any parallel dispatch.** It is the only agent whose
+subject is the space between the others: which file each lane holds right
+now (from `git status`, not from assumption), which briefs contradict each
+other, which ruling has not yet reached the documents that act on it, and
+what genuinely blocks what. It reads Trevor's ledger and Thor's log as its
+own memory rather than re-deriving either.
+
+It exists because the two most expensive failures here were both
+coordination failures, not build failures: a session bare-stashed the tree
+and wiped a builder's uncommitted work, and another swept a half-written
+`main.rs` into its own commit and left HEAD unable to compile for two
+commits. Neither was caught by a verifier, because neither was a wrong
+claim — both were two agents standing in the same place.
+
+```
+Task(subagent_type="balance", prompt="<who wants to start what; ask for the dispatch verdict>")
+```
+
+Balance is read-only and parallelises with everything except another
+Balance. It never resolves an owner decision — it detects one, quotes both
+sides, recommends, and escalates.
 
 Run the independent ones concurrently in a single message. Sequence only
 real dependencies.

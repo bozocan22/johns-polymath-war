@@ -30,13 +30,50 @@ should make them legible.
 | **Air flip (Q in air + direction)** | Same key, `flip_*` fields (`sim.rs:7158-7162`) | Exists — *"Ground: dodge roll — Air + direction: FLIP (no firing)"* |
 | **Second flip charge** | `scout_second_flip_used` (`sim.rs:7163`) | Exists — **scout-only** |
 | **Double jump** | `scout_air_jump_used` (`sim.rs:3447`, `sim.rs:8477`) | Exists — a single discrete air impulse, **scout-only**. Its doc comment is explicit that it is NOT the deleted heavy thruster system, which stays deleted. |
-| **Climb** | 190 references in `sim.rs` | Exists |
+| ~~**Climb**~~ | ~~190 references in `sim.rs`~~ | **FALSE — struck 2026-08-11. See below.** |
 
 **So "double Q dodge" is: Q on the ground is a dodge roll; Q again in the
 air is a flip; the scout is the only chassis with a second flip charge
 and an air jump on top.** That triple is the Agile Mech's mechanical
 identity, and this brief's job is to give it a *visual* identity that
 matches it.
+
+### THE CLIMB ROW WAS FALSE. STRUCK 2026-08-11.
+
+**The Agile Mech cannot climb. It never could.** The row above claimed it
+could, on the strength of nothing but a word count — 190 lines in `sim.rs`
+mention "climb", and **not one of them concerns this chassis.** A search
+for any line containing both "climb" and "scout" across every `.rs` file
+returns **zero**. The complete list of Agile-Mech ability state is
+`scout_air_jump_used` and `scout_second_flip_used`.
+
+Hull climbing is a verb for a **pilot on foot** against an enemy mech's
+**stripped** hull — something you do *to* a mech, not *in* one:
+
+- `climb_target` (`sim.rs:11488`) skips any candidate that is not a mech
+  (`!m.in_mech() → continue`) and any zone still plated
+  (`m.mech_plates_dropped & zone.bit() == 0 → continue`, commented
+  *"covered - climbing is the payoff"*).
+- The climber's on-foot requirement is at the **call site**,
+  `sim.rs:8732`: `&& !self.fighters[p].in_mech()`, repeated in the HUD
+  prompt at `main.rs:23959`.
+
+So the code does not merely lack mech climbing — it **forbids** it, in two
+places, deliberately.
+
+**Why this row mattered so much:** the owner's instruction was *"don't
+forget it can climb"*, and this table answered *"already there, don't
+worry."* It was not there. The brief is the document of record, so the
+false row propagated into `BRIEF_XI` §5, which asked a builder to *improve
+Agile Mech climbing animations* — a verb that never fires. Two independent
+verification passes caught it before any code was written.
+
+**What the owner actually has, and the open question:** the Agile Mech has
+a double jump, a dodge roll, an air flip and a second flip charge. It has
+no climb. Giving it one is a **new feature requiring `sim.rs` work**, not a
+polish pass — and therefore an owner decision, not a builder's. The §19
+`Climbing` checkbox in `BRIEF_XI` and the checklist line below are both
+**void** until that decision is made.
 
 **This is therefore a ONE-LANE task.** Presentation only — `main.rs` and
 client modules, `friday33`. No `sim.rs` change is required or wanted. If
@@ -233,7 +270,9 @@ mechanics.
 
 ### Added by §0 — the mechanics that must survive
 
-- [ ] **Climb** still works and reads correctly with the new armour.
+- [x] ~~**Climb** still works and reads correctly with the new armour.~~
+      **VOID — the Agile Mech cannot climb.** See the struck row in §0.
+      Not a failure to build; there was never anything here to build.
 - [ ] **Double jump** (`scout_air_jump_used`) still fires and is visible.
 - [ ] **Ground dodge roll (Q)** does not clip the new armour.
 - [ ] **Air flip (Q airborne + direction)**, including the scout's second
