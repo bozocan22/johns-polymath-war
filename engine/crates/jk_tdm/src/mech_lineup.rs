@@ -1101,7 +1101,11 @@ fn spawn_machine(
             }
         }
         Chassis::Scout => {
-            let rig = crate::spawn_scout_chassis(commands, kit, ally, GALLERY_TRIM);
+            // BRIEF X: the Agile Mech's own module. The exhibit is the
+            // one screen in the game whose entire job is "how do these
+            // three machines differ", so it is also the capture that
+            // proves the §13 silhouette claim.
+            let rig = crate::agile_mech::spawn_agile_chassis(commands, kit, ally, GALLERY_TRIM);
             commands
                 .entity(rig)
                 .insert(Transform::IDENTITY)

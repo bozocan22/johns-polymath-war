@@ -5488,6 +5488,113 @@ const HANDS_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(3.2) },
 ];
 
+/// BRIEF X: THE AGILE MECH'S PORTRAIT — four sides, then two close-ups.
+///
+/// The existing `medic` script boards the same chassis and orbits it, and
+/// it is still not this: it is a WEAPONS script (plasma, overheat,
+/// precision charge, repair beam) whose four body frames are all at the
+/// standing 2.2 m boom. §4 of the brief is entirely about a head the size
+/// of a grapefruit at that distance — "a mechanical faceplate, a small
+/// visor, blue technological lighting" — and §5 about knee joints and
+/// shin plates. Neither is checkable from any frame this harness could
+/// previously produce, which is precisely the instrument gap that hid the
+/// first-person bow for months.
+///
+/// The BOOM ANCHORS ON THE HEAD and PITCH ORBITS THE CAMERA (see
+/// `HANDS_BEATS`, which paid for that knowledge): positive pitch lifts
+/// the camera and aims down, negative drops it below the head and looks
+/// back up. So the head close-up is level and the leg close-up is
+/// negative — the opposite of the intuition.
+const AGILE_BODY_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.05)), ..beat(0.4) },
+    // the four cardinal views. FRONT first: it is the one the silhouette
+    // argument is made from, and the one the old build's own capture set
+    // led with, so the two are directly comparable.
+    CapBeat { orbit: Some(PI), ..beat(0.8) },
+    CapBeat { snap: Some("01-agile-front"), ..beat(1.6) },
+    CapBeat { orbit: Some(PI * 0.72), ..beat(1.8) },
+    CapBeat { snap: Some("02-agile-front-quarter"), ..beat(2.4) },
+    // PROFILE is the money shot for this redesign: the reverse-jointed
+    // leg, the forward cant and the swept fins are all Z-axis facts and
+    // none of them exists in a front view.
+    CapBeat { orbit: Some(FRAC_PI_2), ..beat(2.6) },
+    CapBeat { snap: Some("03-agile-profile"), ..beat(3.2) },
+    CapBeat { orbit: Some(0.0), ..beat(3.4) },
+    CapBeat { snap: Some("04-agile-rear-fins"), ..beat(4.0) },
+    // 05 THE HEAD, close. §4's checklist line is "no hat" and "a
+    // dedicated mechanical head/helmet exists", and both are claims about
+    // pixels this project has never had.
+    CapBeat { orbit: Some(PI), boom: Some(0.34), look: Some((0.0, 0.02)), ..beat(4.2) },
+    CapBeat { snap: Some("05-agile-head-close"), ..beat(5.0) },
+    CapBeat { orbit: Some(PI * 0.75), ..beat(5.2) },
+    CapBeat { snap: Some("06-agile-head-quarter"), ..beat(5.8) },
+    // 06 THE LEGS. Camera below the head anchor, looking back up.
+    CapBeat { orbit: Some(PI * 0.72), boom: Some(0.62), look: Some((0.0, -0.42)), ..beat(6.0) },
+    CapBeat { snap: Some("07-agile-legs-close"), ..beat(6.8) },
+    CapBeat { orbit: Some(FRAC_PI_2), ..beat(7.0) },
+    CapBeat { snap: Some("08-agile-legs-profile"), ..beat(7.6) },
+    CapBeat { end: true, ..beat(8.1) },
+];
+
+/// BRIEF X §0 + §8: THE FOUR THINGS THIS REDESIGN MUST NOT BREAK.
+///
+/// The owner's closing line was *"don't forget it can climb, double jump,
+/// and double q dodge"* and §0 records that all of it already exists. So
+/// this script is not a feature demo — it is a REGRESSION INSTRUMENT, and
+/// it did not exist before. `traversal` walks the same verbs on an
+/// UNARMOURED soldier; nothing in this harness had ever pressed Q or
+/// Space while wearing the light chassis, so "the armour does not clip
+/// during the dodge roll" was an unfalsifiable claim about the old model
+/// too.
+///
+/// What it CANNOT show, stated rather than implied: hull CLIMBING is a
+/// verb for a pilot on foot against an enemy mech's stripped plates
+/// (`climb_target` requires `!p.in_mech()` and a dropped plate bit), so
+/// no frame of an Agile Mech climbing exists to take. See the report.
+const AGILE_MOVES_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.10)), orbit: Some(PI * 0.72), ..beat(0.3) },
+    CapBeat { snap: Some("01-standing"), ..beat(1.0) },
+    // WALKING, so the gait is in the record next to the standing pose.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(1.2) },
+    CapBeat { snap: Some("02-walking"), ..beat(1.9) },
+    // GROUND JUMP, then the SECOND press in the air - the scout's own
+    // `scout_air_jump_used` charge. Two frames: the first ascent, and the
+    // kick that only this chassis has.
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(2.1) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(2.2) },
+    CapBeat { snap: Some("03-jump-first"), ..beat(2.45) },
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(2.55) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(2.65) },
+    CapBeat { snap: Some("04-double-jump"), ..beat(2.9) },
+    CapBeat { snap: Some("05-double-jump-apex"), ..beat(3.3) },
+    // GROUND DODGE ROLL. W is still held, so it launches forward rather
+    // than defaulting to the facing. The roll is a full tumble about a
+    // point 0.6 m up, so mid-roll is where a detached plate or a shin
+    // through the floor would show.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(4.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(4.5) },
+    CapBeat { snap: Some("06-roll-early"), ..beat(4.62) },
+    CapBeat { snap: Some("07-roll-inverted"), ..beat(4.80) },
+    CapBeat { snap: Some("08-roll-recover"), ..beat(5.05) },
+    // AIR FLIP, then the SECOND flip - `scout_second_flip_used`, the one
+    // charge no other chassis has. Jump, Q, Q again.
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(6.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(6.1) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.25) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.35) },
+    CapBeat { snap: Some("09-air-flip-first"), ..beat(6.50) },
+    CapBeat { snap: Some("10-air-flip-inverted"), ..beat(6.68) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.95) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(7.05) },
+    CapBeat { snap: Some("11-air-flip-second"), ..beat(7.20) },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyW)],
+        snap: Some("12-landed"),
+        ..beat(7.9)
+    },
+    CapBeat { end: true, ..beat(8.4) },
+];
+
 /// §owner THE FOUR ARMOUR TRIMS, in one frame.
 ///
 /// A variant system is only real if the variants are TELLABLE APART,
@@ -6166,6 +6273,8 @@ const MECH_GALLERY_BEATS: &[CapBeat] = &[
 
 fn capture_script(name: &str) -> &'static [CapBeat] {
     match name {
+        "agile_body" => AGILE_BODY_BEATS,
+        "agile_moves" => AGILE_MOVES_BEATS,
         "mech_gallery" => MECH_GALLERY_BEATS,
         "baseline" => BASELINE_BEATS,
         "idle_life" => IDLE_LIFE_BEATS,
@@ -6220,7 +6329,15 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 32] = [
+const CAPTURE_SCRIPTS: [&str; 34] = [
+    // BRIEF X: the AGILE MECH's own two instruments - the portrait, and
+    // the four abilities §0 says this redesign must not break. `medic`
+    // photographs the same chassis but it is a WEAPONS script (plasma,
+    // overheat, repair beam) and it never leaves the standing pose, so
+    // neither the head detail nor a single frame of the roll, the flip or
+    // the double jump has ever been captured on this machine.
+    "agile_body",
+    "agile_moves",
     // §owner FRONT END: title -> learn -> main menu -> result. The four
     // screens the front-end spec is entirely about, and the only
     // instrument that can see them.
@@ -6510,7 +6627,8 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 3] = ["minigun_check", "traversal", "map_lap"];
+const CAPTURE_KEEP_ALIVE: [&str; 4] =
+    ["minigun_check", "traversal", "map_lap", "agile_moves"];
 
 fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     let Some(name) = cap.script.as_deref() else { return };
@@ -6557,7 +6675,16 @@ fn capture_board_medic(
     // which chassis this script needs. `barrier` photographs the HEAVY's
     // arm module, so it must not be handed the light one.
     let set = match name {
-        n if n.starts_with("medic") | matches!(n, "trims") => sim::ArmorSet::ScoutMech,
+        // BRIEF X's two scripts join the light-chassis list explicitly
+        // rather than by being named "medic*". The prefix match is a trap
+        // for a reader - a script called `agile_body` that silently got
+        // the wrong chassis would photograph a Big Mech and the frames
+        // would look perfectly plausible.
+        n if n.starts_with("medic")
+            | matches!(n, "trims" | "agile_body" | "agile_moves") =>
+        {
+            sim::ArmorSet::ScoutMech
+        }
         "barrier" => sim::ArmorSet::RobotSuit,
         _ => return,
     };
