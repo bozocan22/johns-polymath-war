@@ -1519,16 +1519,34 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
             // twin puts its doorway on the OPPOSITE side, so the pair is
             // a real 180° rotation and not two buildings that happen to
             // face the same way.
+            //
+            // The SIZE and the CLEARANCE here were both wrong on the
+            // first pass, and a mutation test is what said so: an
+            // unseeded value planted in this loop failed to move the
+            // layout digest at all, which can only mean nothing in the
+            // loop was reaching the map. All four buildings were being
+            // rejected on all thirty attempts, every seed — the feature
+            // was dead code that compiled.
+            //
+            // Two causes, both fixed here. A 5–8 m half-extent is a
+            // 10–16 m building, and the curtain walls cut the yard into
+            // bands too narrow to hold one. And `BAILEY_APERTURE` was
+            // the wrong clearance to ask for: the aperture floor governs
+            // a gap you have to WALK THROUGH, which for a building is
+            // its DOORWAY — still `BAILEY_APERTURE` below — and not the
+            // alley round its outside. 2.5 authored (3.1 m final) is a
+            // gap, not a route, and that is the correct thing for it to
+            // be.
             for _ in 0..4 {
-                let bw = rng.range(5.0, 8.0);
-                let bd = rng.range(5.0, 8.0);
+                let bw = rng.range(3.5, 5.5);
+                let bd = rng.range(3.5, 5.5);
                 let bh = rng.range(2.8, BAILEY_MAX_H);
                 let door = rng.next_u32() % 4;
                 for _try in 0..30 {
-                    let x = rng.range(-(half - 14.0), half - 14.0);
-                    let z = rng.range(7.0, half - 14.0);
-                    if !bailey_clear(&cover, half, x, z, bw, bd, BAILEY_APERTURE)
-                        || !bailey_clear(&cover, half, -x, -z, bw, bd, BAILEY_APERTURE)
+                    let x = rng.range(-(half - 12.0), half - 12.0);
+                    let z = rng.range(7.0, half - 12.0);
+                    if !bailey_clear(&cover, half, x, z, bw, bd, 2.5)
+                        || !bailey_clear(&cover, half, -x, -z, bw, bd, 2.5)
                     {
                         continue;
                     }
@@ -1538,14 +1556,34 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
                         for side in 0..4u32 {
                             let along = if side < 2 { bw } else { bd };
                             let (a0, a1) = if side == dside {
-                                (BAILEY_APERTURE * 0.5, along)
+                                (along - 2.0, along)
                             } else {
                                 (-along, along)
                             };
-                            // the doorway leaves ONE segment, not two —
-                            // an off-centre door is what stops every
-                            // building on the map having a firing line
-                            // straight through its middle
+                            // ...and the open face keeps a 2 m RETURN
+                            // STUB rather than a door jamb, because the
+                            // arithmetic does not allow a door here and
+                            // pretending otherwise would be the lie.
+                            //
+                            // A bot-usable aperture is 7 m FINAL, and
+                            // these buildings are 7–11 m across: a
+                            // doorway that wide in a wall that short is
+                            // not a doorway, it is a missing wall with a
+                            // stub at each end. So this is a THREE-SIDED
+                            // WALLED COURT, open on one face — a lean-to
+                            // range against a bailey wall, which is a
+                            // real castle building and, more to the
+                            // point, one whose entrance a bot with no
+                            // pathfinder cannot miss.
+                            //
+                            // The alternative was a 3–4 m door, which
+                            // would put every outbuilding on the map
+                            // under the aperture floor. `MAP_METRICS`
+                            // §10.2 is explicit that that floor is an
+                            // ANALOGY to `BOT_CLIMB_LANE_M` and has never
+                            // been measured — but "unmeasured" is a
+                            // reason to run the experiment, not a licence
+                            // to build under it four times a seed.
                             let (mn, mx) = match side {
                                 0 => ([cx + a0, cz + bd - 0.35], [cx + a1, cz + bd + 0.35]),
                                 1 => ([cx - a1, cz - bd - 0.35], [cx - a0, cz - bd + 0.35]),
@@ -29401,6 +29439,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// How many of the four axis directions from `(x, z)` run into
+    /// masonry at least `min_h` tall within `reach` metres — with 0
+    /// returned for a point that is inside the masonry itself, which is
+    /// rock and not a room.
+    ///
+    /// Deliberately built out of nothing but the cover set: it knows
+    /// nothing about outbuildings, their count, their sizes or the loop
+    /// that makes them. It answers "is there somewhere walled-in here",
+    /// which is a property of the map and not a restatement of the
+    /// generator.
+    fn bailey_walled_sides(cover: &[Aabb], x: f32, z: f32, reach: f32, min_h: f32) -> usize {
+        let solid = |sx: f32, sz: f32, h: f32| {
+            cover.iter().any(|c| {
+                sx > c.min[0] && sx < c.max[0] && sz > c.min[2] && sz < c.max[2] && c.max[1] >= h
+            })
+        };
+        if solid(x, z, 0.5) {
+            return 0; // inside the masonry is not inside the room
+        }
+        let mut sides = 0;
+        for (dx, dz) in [(1.0_f32, 0.0_f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            let mut d = 0.5;
+            while d < reach {
+                if solid(x + dx * d, z + dz * d, min_h) {
+                    sides += 1;
+                    break;
+                }
+                d += 0.25;
+            }
+        }
+        sides
+    }
+
+    /// §owner BAILEY v7: the outbuildings are places you stand INSIDE —
+    /// and, the half that actually caught something, they are BUILT AT
+    /// ALL.
+    ///
+    /// This test exists because the first version of that loop placed
+    /// nothing, on every seed, and still compiled and still passed three
+    /// other tests. A mutation found it: an unseeded value planted inside
+    /// the loop failed to move the layout digest, which is only possible
+    /// if the loop's output never reaches the map. The buildings were
+    /// 10–16 m across and the curtain walls leave no band that wide.
+    ///
+    /// So the guard is on the OUTCOME rather than on a count of
+    /// anything: sweep the yard on a 1 m grid and measure the standable
+    /// ground that has masonry over 2.5 m on THREE of its four sides
+    /// within 9 m. Three, not four, because an outbuilding here is a
+    /// walled court open on one face and the code says so in as many
+    /// words. 2.5 m is the discriminator that makes this specific: no
+    /// barricade, tree, stepping stone or rampart deck in this map's
+    /// vocabulary is that tall, so only walls can answer.
+    #[test]
+    fn bailey_outbuildings_are_places_you_stand_inside() {
+        let mut worst = usize::MAX;
+        let mut worst_seed = 0;
+        for seed in 0..12u64 {
+            let l = bailey_layout(seed * 31 + 5);
+            let mut inside = 0;
+            let mut gx = -l.half;
+            while gx < l.half {
+                let mut gz = -l.half;
+                while gz < l.half {
+                    if bailey_walled_sides(&l.cover, gx, gz, 9.0, 2.5) >= 3 {
+                        inside += 1;
+                    }
+                    gz += 1.0;
+                }
+                gx += 1.0;
+            }
+            println!("BAILEY seed {seed}: {inside} sheltered m², {} boxes", l.cover.len());
+            if inside < worst {
+                worst = inside;
+                worst_seed = seed;
+            }
+        }
+        // FLOOR: one 7 m court has ~25 m² of three-sided interior and the
+        // map builds four of them as mirrored pairs, so the expected
+        // figure is in the hundreds. 40 is a deliberately slack floor —
+        // it is here to catch the feature DYING, which took it to single
+        // digits, not to pin a layout that is supposed to vary.
+        assert!(
+            worst >= 40,
+            "worst seed ({worst_seed}) has only {worst} m² of three-sided \
+             shelter on a 130 x 130 m map — the outbuildings are not being built"
+        );
     }
 
     /// §owner BAILEY v7: the map got 30% bigger, and the ARCHITECTURE
