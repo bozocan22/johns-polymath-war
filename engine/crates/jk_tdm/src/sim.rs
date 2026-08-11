@@ -42,6 +42,31 @@ pub const MAP_SCALE: f32 = 1.25;
 /// to sidestep out of is barely better than one you start inside.
 pub const SPAWN_CLEAR_M: f32 = 9.0;
 
+/// The widest team `spawn_point` can lay out, and therefore the cap
+/// `TdmSim::new` clamps `MatchConfig::per_team` to.
+///
+/// v6 shipped one hand-authored 8-wide line and a formula that simply
+/// kept walking along it, so slot 15 landed at x = +31.5 — a man on his
+/// own in a corner, 21 m from the nearest team-mate and, after the
+/// Bailey expansion, standing in a curtain wall. Sixteen is two rows of
+/// `SPAWN_ROW`, which is the largest count the empty band below still
+/// covers.
+pub const MAX_PER_TEAM: usize = 16;
+
+/// Fighters per spawn ROW, and the gap between two men in it.
+const SPAWN_ROW: usize = 8;
+const SPAWN_PITCH: f32 = 3.0;
+
+/// How far INWARD (toward the arena) each row past the first is set.
+///
+/// This is what has to stay honest: the front row sits 2.5 m off the
+/// edge, so the deepest row sits `2.5 + (rows−1) * SPAWN_ROW_GAP` in,
+/// and that plus a body radius must still be inside `SPAWN_CLEAR_M`'s
+/// empty band or the back rank spawns inside authored cover. At 16 per
+/// team that is 5.5 + 0.34 = 5.84 against 9.0. `spawn_rows_fit_inside_
+/// the_cleared_band` is the guard, not this comment.
+const SPAWN_ROW_GAP: f32 = 3.0;
+
 pub const ARENA_HALF: f32 = 34.0;
 pub const EYE_REL: f32 = 1.62;
 pub const BODY_RADIUS: f32 = 0.34;
@@ -3492,7 +3517,7 @@ pub const DEFAULT_LOADOUT: Loadout = [GunKind::M4, GunKind::Glock, GunKind::Awm]
 #[derive(Clone, Copy, Debug)]
 pub struct MatchConfig {
     pub seed: u64,
-    pub per_team: usize, // 5..=8 (owner's cap: 8v8)
+    pub per_team: usize, // clamped to 1..=MAX_PER_TEAM by `TdmSim::new`
     pub mode: Mode,
     pub map: MapKind,
     pub difficulty: Difficulty,
@@ -4130,6 +4155,39 @@ impl Fighter {
     /// the original guard was added to the player path only, leaving every
     /// bot-piloted mech still able to crouch. Both callers still go
     /// through here and so get every rule above for free.
+    /// §owner: the pilot's OWN charge does not board the chassis.
+    ///
+    /// The fifth charge that outlived its weapon. `step_bow_draw` and
+    /// `step_spear_charge` are both routed past the moment `in_mech()`
+    /// is true (the dispatch takes the mech branch), so neither clock
+    /// can self-clear while someone is piloting - it FREEZES. Every way
+    /// back out (dismount, scout eject, heavy eject) hands back a
+    /// fighter with `switch_t == 0`, so the next infantry tick reads a
+    /// release edge on a draw that started minutes ago and looses an
+    /// arrow, or throws a 1.30x javelin still carrying the +10% flag.
+    ///
+    /// Cleared on ENTRY rather than on each exit on purpose: a charge
+    /// frozen for the whole time a man is in a machine is state that
+    /// should not exist, and clearing it here means there is nothing
+    /// left to leak however he leaves. `try_fire` already refuses on
+    /// `in_mech()`, so nothing can re-arm these while inside.
+    ///
+    /// `spear_wind_t` goes too, and it is the worst of the group: the
+    /// windup ticks in the SHARED per-fighter loop, not the infantry
+    /// branch, and the release only checks `alive()` - so a spear wound
+    /// up on foot and then boarded actually launched OUT OF THE MECH.
+    /// Losing the throw is the honest price of climbing in mid-wind.
+    ///
+    /// On `Fighter` so the player and the bots cannot drift: the pickup
+    /// loop is one loop over every fighter, so both get this by
+    /// construction rather than by a second copy that will rot.
+    pub fn clear_war_charge(&mut self) {
+        self.bow_draw_t = 0.0;
+        self.spear_charge_t = 0.0;
+        self.spear_wind_t = 0.0;
+        self.spear_power = 1.0;
+        self.spear_max_charge = false;
+    }
     pub fn set_crouch(&mut self, want: bool) {
         if self.in_heavy_mech() {
             self.crouch = want && self.grounded;
@@ -7481,7 +7539,7 @@ fn fresh_ammo(inv: Loadout) -> [(u32, u32); 3] {
 
 impl TdmSim {
     pub fn new(cfg: MatchConfig) -> Self {
-        let per_team = cfg.per_team.clamp(1, 8);
+        let per_team = cfg.per_team.clamp(1, MAX_PER_TEAM);
         let mut rng = Pcg32::new(cfg.seed, 0x7D7D);
         let layout = build_map(cfg.map, &mut rng);
         let (cover, cover_kind, center_top, half, climbs) = (
@@ -8305,7 +8363,12 @@ impl TdmSim {
             if f.respawn_t > 0.0 {
                 f.respawn_t -= DT;
                 if f.respawn_t <= 0.0 {
-                    let slot = i % self.cfg.per_team.max(1);
+                    // the SAME clamp `TdmSim::new` laid the roster out
+                    // with. `cfg` is stored raw, so a bare `.max(1)`
+                    // here indexed a slot the roster never used the
+                    // moment anyone asked for more than the cap — the
+                    // corpse respawned in a rank that does not exist.
+                    let slot = i % self.cfg.per_team.clamp(1, MAX_PER_TEAM);
                     let (mut pos, mut yaw) = spawn_point(f.team, slot, self.half);
                     // "check back": an owned checkpoint pulls the respawn
                     // forward — you rejoin the fight where your team holds
@@ -8576,6 +8639,8 @@ impl TdmSim {
                             // guard the sim never simulates and a client
                             // would happily draw.
                             f.shield_up = false;
+                            // ...and so does the charge in his hands.
+                            f.clear_war_charge();
                         }
                         // §owner SPEC15 P2: ONE arm for both heavy tiers.
                         // The pad decides WHICH chassis; everything after
@@ -8623,6 +8688,9 @@ impl TdmSim {
                             // being scrapped for a refill.
                             f.pod_ammo = POD_TUBES;
                             f.mech_rounds = MECH_ROUNDS;
+                            // ...and the pilot's own bow/spear charge, on
+                            // the same argument as `plasma_charge_t` above.
+                            f.clear_war_charge();
                         }
                         PickupKind::FolkArmor => {
                             let f = &mut self.fighters[i];
@@ -15183,17 +15251,29 @@ impl TdmSim {
     }
 }
 
+/// Where slot `slot` of `team` starts, and which way it faces.
+///
+/// Read by EVERY map, not just Bailey, so the first row is the v6 line
+/// to the bit: `row == 0` adds an exact `0.0` to the old z and `col ==
+/// slot` reproduces the old x. An 8v8 on any map lays out byte for byte
+/// as it did before rows existed.
+///
+/// Slots past the first row fold back into a SECOND rank set INWARD,
+/// rather than continuing along the same line as v6's formula did. The
+/// old behaviour was not merely ugly at 16 — `-10.5 + 15 * 3.0` is
+/// x = +31.5, which on the expanded Bailey is outside the playfield
+/// clamp entirely.
 fn spawn_point(team: Team, slot: usize, half: f32) -> ([f32; 3], f32) {
-    let z = match team {
-        Team::Blue => -half + 2.5,
-        Team::Red => half - 2.5,
+    let row = slot / SPAWN_ROW;
+    let col = slot % SPAWN_ROW;
+    // `inward` is +z for Blue, who sit at −half, and −z for Red.
+    let (edge_z, inward, yaw) = match team {
+        Team::Blue => (-half + 2.5, 1.0, 0.0),
+        Team::Red => (half - 2.5, -1.0, std::f32::consts::PI),
     };
-    let yaw = match team {
-        Team::Blue => 0.0,
-        Team::Red => std::f32::consts::PI,
-    };
-    // room for up to 8 per team (v6 cap)
-    let x = -10.5 + (slot as f32) * 3.0;
+    let z = edge_z + inward * (row as f32) * SPAWN_ROW_GAP;
+    // the row is centred: 8 men at 3.0 m span −10.5 ..= +10.5.
+    let x = -(SPAWN_ROW as f32 - 1.0) * 0.5 * SPAWN_PITCH + (col as f32) * SPAWN_PITCH;
     ([x, 0.0, z], yaw)
 }
 
@@ -19743,6 +19823,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// §owner THE FIFTH CHARGE: a drawn bow and a wound spear do not
+    /// board the chassis with the pilot.
+    ///
+    /// `step_bow_draw` / `step_spear_charge` are routed past the moment
+    /// `in_mech()` is true, so on the pre-change code these clocks FROZE
+    /// rather than clearing - and every way back out (dismount, scout
+    /// eject, heavy eject) hands back a fighter with `switch_t == 0`,
+    /// whose very next infantry tick reads a release edge.
+    ///
+    /// Every pad and BOTH indices: the pickup loop runs over every
+    /// fighter, and a fix that lived on the player path only is this
+    /// project's most repeated defect.
+    #[test]
+    fn boarding_a_chassis_leaves_the_pilots_war_charge_behind() {
+        for kind in [
+            PickupKind::RobotArmor,
+            PickupKind::RoyalArmor,
+            PickupKind::ScoutArmor,
+        ] {
+            for who in [0usize, 1] {
+                let mut s = empty_range(0x5150);
+                s.pickups.clear();
+                s.pickups.push(Pickup {
+                    kind,
+                    pos: [0.0, 0.0, 0.0],
+                    respawn_t: 0.0,
+                });
+                {
+                    let f = &mut s.fighters[who];
+                    f.pos = [0.0, 0.0, 0.0];
+                    f.inventory[2] = GunKind::Spear;
+                    f.active = 2;
+                    f.gun = GunKind::Spear;
+                    f.ammo = 1;
+                    // a live value in every field the two war weapons own
+                    f.bow_draw_t = 2.0;
+                    f.spear_charge_t = SPEAR_MAX_CHARGE_S;
+                    f.spear_wind_t = SPEAR_WINDUP_S;
+                    f.spear_power = SPEAR_CHARGE_V0_MAX;
+                    f.spear_max_charge = true;
+                }
+                s.step(PlayerCmd {
+                    aim: [0.0, 1.0, 0.0],
+                    ..Default::default()
+                });
+                let f = &s.fighters[who];
+                let tag = format!("{kind:?}/fighter {who}");
+                assert!(f.armor_set.is_mech(), "{tag}: the fixture never boarded");
+                assert_eq!(f.bow_draw_t, 0.0, "{tag}: a drawn bow boarded the chassis");
+                assert_eq!(f.spear_charge_t, 0.0, "{tag}: a wind boarded the chassis");
+                assert_eq!(f.spear_wind_t, 0.0, "{tag}: a windup boarded the chassis");
+                assert_eq!(f.spear_power, 1.0, "{tag}: the charged speed was banked");
+                assert!(!f.spear_max_charge, "{tag}: the +10% flag was banked");
+            }
+        }
+    }
+
+    /// ...and the consequence, end to end: wind a real spear through the
+    /// player's own fire path, board, dismount, and let the sim run.
+    ///
+    /// FAILS on the pre-change code - the frozen wind survives the whole
+    /// ride, the first tick on foot is a release edge, and a javelin the
+    /// player never asked for leaves the hand a windup later.
+    #[test]
+    fn a_wind_taken_into_a_chassis_does_not_throw_on_dismount() {
+        let mut s = empty_range(0x5151);
+        s.pickups.clear();
+        s.pickups.push(Pickup {
+            kind: PickupKind::RobotArmor,
+            pos: [0.0, 0.0, 0.0],
+            respawn_t: 0.0,
+        });
+        {
+            let f = &mut s.fighters[0];
+            f.pos = [0.0, 0.0, -3.0]; // off the pad while he winds
+            f.inventory[2] = GunKind::Spear;
+            f.active = 2;
+            f.gun = GunKind::Spear;
+            f.ammo = 3;
+            f.reserve = 3;
+            f.protect_t = 0.0;
+        }
+        // straight UP, so nothing this test throws can find a body and
+        // change what there is to count
+        let aim = [0.0, 1.0, 0.0];
+        for _ in 0..((SPEAR_CHARGE_FULL_S / DT) as usize) {
+            s.step(PlayerCmd {
+                aim,
+                shoot: true,
+                ..Default::default()
+            });
+        }
+        assert!(
+            s.fighters[0].spear_charge_t > 0.0,
+            "the fixture never actually wound the spear"
+        );
+        // step onto the pad on the tick he is still holding
+        s.fighters[0].pos = [0.0, 0.0, 0.0];
+        s.step(PlayerCmd {
+            aim,
+            shoot: true,
+            ..Default::default()
+        });
+        assert!(s.fighters[0].in_heavy_mech(), "the fixture never boarded");
+        // seal, then leave. The trigger is UP for all of it - which is
+        // exactly the release edge the pre-change code fired on.
+        for _ in 0..((MECH_ENTER_S / DT) as usize + 2) {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        s.step(PlayerCmd {
+            aim,
+            exit_mech: true,
+            ..Default::default()
+        });
+        for _ in 0..(((MECH_EXIT_S + SPEAR_WINDUP_S) / DT) as usize + 6) {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        let f = &s.fighters[0];
+        assert!(!f.in_mech(), "the fixture never dismounted");
+        assert_eq!(f.spear_wind_t, 0.0, "a throw started on its own");
+        assert_eq!(f.spear_power, 1.0, "the charged speed came back out with him");
+        assert!(!f.spear_max_charge, "the +10% flag came back out with him");
+        assert!(
+            !s.missiles.iter().any(|m| m.shooter == 0),
+            "a javelin left the hand of a man who pressed nothing"
+        );
     }
 
     /// §4.1-B: overdraw. Holding past full keeps charging to +15%, tops
@@ -29607,9 +29815,11 @@ mod tests {
                 );
             }
             // 2. NOBODY SPAWNS INSIDE ANYTHING. Both teams, every slot
-            //    the shipped `spawn_point` lays out.
+            //    the shipped `spawn_point` lays out — all sixteen, not
+            //    the first eight. The back rank is the half that was
+            //    never checked against geometry.
             for team in [Team::Blue, Team::Red] {
-                for slot in 0..8 {
+                for slot in 0..MAX_PER_TEAM {
                     let (p, _) = spawn_point(team, slot, l.half);
                     for c in &l.cover {
                         let inside = p[0] > c.min[0] - BODY_RADIUS
@@ -29638,6 +29848,130 @@ mod tests {
                     p[0],
                     p[1]
                 );
+            }
+        }
+    }
+
+    /// The first eight slots are the v6 line, to the BIT, on every map.
+    ///
+    /// The expected x table is hand-written here and not re-derived from
+    /// `SPAWN_PITCH`, so retuning the pitch breaks this test rather than
+    /// quietly moving the goalposts with it — that is the point of the
+    /// test. Compared as raw bits because "byte-identical 8v8" is the
+    /// claim, and 1e-6 of drift is still a different replay.
+    #[test]
+    fn the_first_spawn_row_is_the_v6_line_bit_for_bit() {
+        const X: [f32; 8] = [-10.5, -7.5, -4.5, -1.5, 1.5, 4.5, 7.5, 10.5];
+        for half in [34.0f32, 42.5, 55.25] {
+            for slot in 0..8usize {
+                let (b, by) = spawn_point(Team::Blue, slot, half);
+                let (r, ry) = spawn_point(Team::Red, slot, half);
+                assert_eq!(b[0].to_bits(), X[slot].to_bits(), "blue x slot {slot}");
+                assert_eq!(r[0].to_bits(), X[slot].to_bits(), "red x slot {slot}");
+                assert_eq!(b[2].to_bits(), (-half + 2.5).to_bits(), "blue z slot {slot}");
+                assert_eq!(r[2].to_bits(), (half - 2.5).to_bits(), "red z slot {slot}");
+                assert_eq!(b[1].to_bits(), 0f32.to_bits());
+                assert_eq!(by.to_bits(), 0f32.to_bits());
+                assert_eq!(ry.to_bits(), std::f32::consts::PI.to_bits());
+            }
+        }
+    }
+
+    /// NOBODY IS STACKED ON ANYBODY, at any roster size up to the cap.
+    ///
+    /// 2.5 m is hand-picked below the 3.0 m pitch and well above the
+    /// 0.68 m two bodies actually need: it is a formation floor, not a
+    /// collision floor, so it survives a retune of either. v6 passed
+    /// this trivially by walking one endless line; a second rank is the
+    /// thing that can collide, and does the moment the row gap is zero.
+    #[test]
+    fn no_two_spawn_slots_share_a_patch_of_ground() {
+        for half in [34.0f32, 55.25] {
+            for team in [Team::Blue, Team::Red] {
+                let p: Vec<[f32; 3]> = (0..MAX_PER_TEAM)
+                    .map(|s| spawn_point(team, s, half).0)
+                    .collect();
+                for i in 0..p.len() {
+                    for j in (i + 1)..p.len() {
+                        let d = ((p[i][0] - p[j][0]).powi(2) + (p[i][2] - p[j][2]).powi(2)).sqrt();
+                        assert!(
+                            d >= 2.5,
+                            "half {half}: {team:?} slots {i} and {j} are {d:.2} m apart"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every rank lands INSIDE the band `SPAWN_CLEAR_M` keeps empty, and
+    /// inside the playfield clamp.
+    ///
+    /// This is the assertion that bounds how many rows the formation may
+    /// grow to: add a third rank at this gap and the back row crosses
+    /// `SPAWN_CLEAR_M` and starts spawning men in curtain walls. The
+    /// clearance is checked with a BODY_RADIUS of margin because a spawn
+    /// point is a body, not a point.
+    #[test]
+    fn spawn_rows_fit_inside_the_cleared_band() {
+        for half in [34.0f32, 42.5, 55.25] {
+            for team in [Team::Blue, Team::Red] {
+                for slot in 0..MAX_PER_TEAM {
+                    let (p, yaw) = spawn_point(team, slot, half);
+                    // inside the empty band, with a body's worth spare
+                    assert!(
+                        p[2].abs() + BODY_RADIUS > half - SPAWN_CLEAR_M,
+                        "half {half}: {team:?} slot {slot} at z {:.2} is out of the \
+                         cleared band and may be inside authored cover",
+                        p[2]
+                    );
+                    // and inside the playfield clamp, both axes
+                    assert!(
+                        p[0].abs() < half - 0.5 && p[2].abs() < half - 0.5,
+                        "half {half}: {team:?} slot {slot} at ({:.1}, {:.1}) is \
+                         outside the body clamp",
+                        p[0],
+                        p[2]
+                    );
+                    // and on its OWN side, facing the other one
+                    match team {
+                        Team::Blue => {
+                            assert!(p[2] < 0.0, "blue slot {slot} is on red's half");
+                            assert_eq!(yaw, 0.0);
+                        }
+                        Team::Red => {
+                            assert!(p[2] > 0.0, "red slot {slot} is on blue's half");
+                            assert_eq!(yaw, std::f32::consts::PI);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A 16v16 actually builds, fields 32 fighters, and none of them
+    /// starts inside a wall on the map the expansion was for.
+    ///
+    /// `TdmSim::new` clamped to 8, so this fielded a 16-man roster as
+    /// eight men before `MAX_PER_TEAM`.
+    #[test]
+    fn a_sixteen_a_side_fields_thirty_two_and_none_is_in_a_wall() {
+        for seed in 0..8u64 {
+            let s = TdmSim::new(cfg(seed, MAX_PER_TEAM, Mode::Tdm, MapKind::Bailey));
+            assert_eq!(s.fighters.len(), MAX_PER_TEAM * 2, "seed {seed}");
+            for (i, f) in s.fighters.iter().enumerate() {
+                for c in &s.cover {
+                    let inside = f.pos[0] > c.min[0] - BODY_RADIUS
+                        && f.pos[0] < c.max[0] + BODY_RADIUS
+                        && f.pos[2] > c.min[2] - BODY_RADIUS
+                        && f.pos[2] < c.max[2] + BODY_RADIUS
+                        && f.pos[1] < c.max[1] - 0.05;
+                    assert!(
+                        !inside,
+                        "seed {seed}: fighter {i} spawned at ({:.1}, {:.1}) inside {c:?}",
+                        f.pos[0], f.pos[2]
+                    );
+                }
             }
         }
     }
