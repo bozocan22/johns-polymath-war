@@ -242,15 +242,32 @@ fn systems_lines(
     for w in mounts {
         // ASCII only — no font asset ships, so every ornament is a drawn
         // node or a plain character. '>' is the marker the old strip used.
-        let label = format!("{} {}", if *w == selected { ">" } else { " " }, mount_name(*w));
-        let qty = match w {
-            sim::MechWeapon::Gatling => format!("{rounds}"),
-            sim::MechWeapon::Rockets => format!("{pod}"),
-            // heat mounts count nothing — their resource is the bottom
-            // right numeral, and a second copy here is the bug.
-            sim::MechWeapon::Autocannon
-            | sim::MechWeapon::Plasma
-            | sim::MechWeapon::Repair => String::new(),
+        let is_sel = *w == selected;
+        let label = format!("{} {}", if is_sel { ">" } else { " " }, mount_name(*w));
+        // THE SELECTED MOUNT NEVER PRINTS ITS QUANTITY. Whatever resource
+        // it spends — rounds, pods or heat — is already the bottom-right
+        // numeral, directly below this row and eight times the size.
+        //
+        // The first consolidation pass applied this to heat mounts only,
+        // reasoning that heat was the duplicate. It was the wrong cut: a
+        // heavy on its turret showed `> TURRET 300` immediately above a
+        // `300` numeral, which is the same defect wearing a different
+        // unit. Caught in `handback/brief-vii/hud_contrast/05-level-south.png`
+        // by looking at the frame rather than at the diff.
+        //
+        // An UNSELECTED mount still prints its count, and should: "how
+        // many rockets are waiting" is the one thing the column knows
+        // that the numeral cannot say.
+        let qty = if is_sel {
+            String::new()
+        } else {
+            match w {
+                sim::MechWeapon::Gatling => format!("{rounds}"),
+                sim::MechWeapon::Rockets => format!("{pod}"),
+                sim::MechWeapon::Autocannon
+                | sim::MechWeapon::Plasma
+                | sim::MechWeapon::Repair => String::new(),
+            }
         };
         v.push((label, qty));
     }
@@ -1542,6 +1559,22 @@ mod tests {
                     assert_ne!(l, "HULL", "the hull numeral is repeated in the column");
                     assert_ne!(l, "HEAT", "the heat numeral is repeated in the column");
                     assert!(!v.contains('%'), "a percent reading survived in {v:?}");
+                    // The SELECTED mount's resource is the bottom-right
+                    // numeral. Any value on the selected row is that
+                    // number printed twice, whatever its unit.
+                    //
+                    // This is deliberately written against the ROW rather
+                    // than against a constant: a heavy on its turret
+                    // shipped `> TURRET 300` above a `300` numeral, and a
+                    // test that only banned the strings HULL and HEAT
+                    // passed it happily. Ban the SHAPE, not the words.
+                    if l.starts_with('>') {
+                        assert!(
+                            v.is_empty(),
+                            "selected mount {l:?} prints {v:?}, which the \
+                             bottom-right numeral already shows"
+                        );
+                    }
                 }
             }
         }
