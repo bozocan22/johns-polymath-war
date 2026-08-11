@@ -1482,3 +1482,101 @@ removed from or reordered in the sim's stream.
    are published for the visual half; nothing reads them yet.
 
 — **FRIDAY22**
+
+
+---
+
+# FRIDAY33 - BRIEF X, THE AGILE MECH (2026-08-10)
+
+`TRV-0011` / SPEC15 P3, "the largest visual item". Presentation only:
+`agile_mech.rs` (new, 700 lines), `main.rs`, `mech_lineup.rs`. **`sim.rs`
+untouched. `SCOUT_SCALE` untouched (owner question Q5 is still open).**
+
+## What the machine is now
+
+A new module, wired in with two lines. `spawn_scout_chassis` is deleted
+from `main.rs` (354 lines); `agile_mech::spawn_agile_chassis` replaces it
+at both call sites. ~150 parts, 3 meshes, 7 materials, 4 of them shared
+with the heavy.
+
+Five silhouette elements, none of them in the Big's vocabulary:
+reverse-jointed legs (hip forward-high, knee forward-low, ankle swept
+back, compact foot, heel spur), swept dorsal fins, a 0.245-wide wedge
+helmet with a visor slit, shoulders at 0.40 half-width, a forward-canted
+torso. §2's four material roles exist as four roles for the first time -
+the old palette painted armour and mechanism the same colour.
+
+## What the capture found that no test could
+
+1. **A steel tripod standing beside the machine's knee.** The HEAVY's
+   barrier emitter - housing, three petals, lit tips. §P1 SIX VARIANTS
+   re-parented it from the Big's `armor_rig` (hidden unless the Big is
+   worn) onto the soldier's THORAX (visible for everyone) and nothing
+   replaced the hiding the old parent gave for free. It has been riding
+   every scout AND every infantryman since. `mech_barrier_sync`'s own
+   comment still reasons from the old parent. Gated on `in_heavy_mech()`
+   now. **Not a Brief X defect - it predates this work.**
+2. **The pilot's own bright torso showing through the machine's lower
+   back**, 15 mm of it, between the rib box and the backpack.
+3. **The pilot showing through the machine's CROTCH during the dodge
+   roll.** The tumble is the only camera angle in this game that looks at
+   a chassis from underneath, and the pelvis had no floor.
+4. **Two gold tabs on the hips**: the pilot's waist stripe is 0.345 x
+   0.27 and the pelvis was 0.385 x 0.265.
+
+Every one of those was invisible to 438 tests and obvious in a PNG.
+
+## What I am least sure about, and what I deferred
+
+- **The opposition Agile keeps DARK BLUE as its primary armour** and
+  carries the chassis's orange on its layered plates only. Two owner
+  rulings from the same day pull opposite ways (Brief X §2 "orange
+  becomes the Agile Mech's identity" vs "the light chassis takes the SAME
+  two blues as the heavy so the enemy fields one army"). I honoured both
+  by ROLE. If the owner wants the opposition Agile orange-primary,
+  `scout_hull_foe` and `scout_plate_foe` are the whole change.
+- **The double jump fires and gains altitude, but the Agile has no
+  airborne POSE.** `try_mech_jump`'s compress/tuck is heavy-only, so the
+  only visible evidence is the horizon dropping. §0's "still fires and is
+  visible" is satisfied weakly. A client-side airborne tuck would be pure
+  presentation and in my lane; it is new work, not preservation, so I
+  flagged it rather than sneaking it in.
+- **CLIMB is not an Agile Mech ability and Brief X §0's table is
+  misleading about it.** `climb_target` requires `!p.in_mech()` and a
+  DROPPED plate on the target: hull-climbing is a verb for a pilot ON
+  FOOT against an enemy mech. There is no frame of an Agile Mech climbing
+  to take, and I did not claim one.
+- **No true black-matte silhouette.** The harness has no stencil or depth
+  output and a luminance threshold failed (the exhibit stands against a
+  dark wall). `agile_body/09-squint-derived.png` is post-processed from
+  `mech_gallery/01`: native, then 30 m by downsampling 3.33x, then hue
+  removed. It answers "does it separate by shape" honestly; it is not a
+  matte, and its filename says derived.
+- **`config/settings.txt` carries `fov_idx = 4` (100 deg) against
+  `FOV_DEFAULT_IDX = 3`.** Every frame in this pass was taken through it.
+  All my comparisons are same-settings, but none is what a clean checkout
+  produces.
+- **The portrait shows `MechTrim::Stripped`** - the player is slot 0 and
+  `MechTrim::ALL[i % 4]` gives them the bare frame, so the pauldrons,
+  knee cops, belly band and gorget are absent from `agile_body`. They are
+  in `trims/01-trims-front.png`, which is the only capture that shows
+  them.
+- **The palette is DATA now.** Six colours moved out of `build_kit`'s
+  inline literals into `agile_mech` consts, which is what makes SPEC15's
+  trap 4 testable at all. `the_enemy_agile_never_out_luminates_the_ally`
+  pins the hull separation at >= 8x in linear light (it measures 17x) and
+  the strict form, every enemy surface below every ally surface. That is
+  the guard Trevor's Task 5 asked for.
+
+Nine tests, mutation-proven from a FILE COPY. Two of them failed for real
+during the build: the pauldron lip overhung the published shoulder width
+by 11 mm, and an assertion I wrote about the elbow was simply wrong (the
+MOUNTS are the widest point of this machine and always were, because
+`MOUNT_X` is pinned by the sim). The sole test had to be strengthened to
+earn its place - it was recomputing its own expected value.
+
+Captures, all from the release binary built at 21:51: `agile_body` 8
+shots, `agile_moves` 12, `mech_gallery` 11, `trims` 2, `medic` 9. Exit 0
+and zero panics on every run.
+
+- **FRIDAY33**
