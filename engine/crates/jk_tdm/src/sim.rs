@@ -22195,6 +22195,130 @@ mod tests {
         assert_eq!(s.missiles.len(), 1, "the spear left the hand");
     }
 
+    /// §12/§13 (owner) — the spear is a PHYSICAL PROJECTILE, not a
+    /// hitscan: gravity, momentum, believable flight.
+    ///
+    /// **What was already true before this test, and is not re-proved
+    /// here.** Launch along the crosshair aim is measured by
+    /// `a_thrown_spear_reaches_where_it_is_aimed` (under 1 degree off a
+    /// deliberately off-axis aim). Stick-versus-bounce on impact is
+    /// measured by the `impact_angle_to_surface_deg` cases. Preview and
+    /// flight agreeing is `arc_prediction_matches_real_flight` and
+    /// `preview_matches_flight_within_5cm`. Rotation toward the flight
+    /// direction is CLIENT work and correctly so - the sim's whole
+    /// contribution is publishing `Missile.vel` and, deliberately, not
+    /// clearing it on impact so a stuck shaft keeps the angle it bit at.
+    ///
+    /// What NOTHING measured was the flight itself: that it takes time,
+    /// that horizontal momentum is conserved, and that the fall is
+    /// constant acceleration rather than a damped drift. Those are the
+    /// three properties that separate a thrown object from a bullet.
+    ///
+    /// Every assertion here is a RELATIONSHIP - a ratio, a
+    /// conservation, an ordering - so none of them restates a constant
+    /// the integrator already owns, and none of them can be satisfied
+    /// by the code simply agreeing with itself.
+    #[test]
+    fn the_spear_flies_it_does_not_arrive() {
+        let mut s = armed_with(0x4825, GunKind::Spear);
+        let aim = normalize([0.0, 0.10, 1.0]);
+        // a committed throw, so this measures the flight the spec cares
+        // about rather than a flick
+        for _ in 0..((SPEAR_CHARGE_FULL_S + 0.2) / DT) as usize {
+            s.step(PlayerCmd { shoot: true, aim, ..Default::default() });
+        }
+        for _ in 0..((SPEAR_WINDUP_S / DT) as usize + 4) {
+            s.step(PlayerCmd { aim, ..Default::default() });
+        }
+        let m = s.missiles.first().expect("the javelin must leave the hand");
+        let (o, v_launch) = (m.pos, m.vel);
+        let horiz0 = (v_launch[0] * v_launch[0] + v_launch[2] * v_launch[2]).sqrt();
+        assert!(horiz0 > 1.0, "the fixture must actually throw something forward");
+
+        // sample the whole flight
+        let mut samples: Vec<([f32; 3], [f32; 3])> = Vec::new();
+        for _ in 0..(4.0 / DT) as usize {
+            s.step(PlayerCmd { aim, ..Default::default() });
+            let Some(m) = s.missiles.first() else { break };
+            samples.push((m.pos, m.vel));
+            if m.stuck_t.is_some() {
+                break;
+            }
+        }
+        assert!(samples.len() > 60, "too short a flight to measure");
+
+        // (1) MOMENTUM. Nothing acts on the horizontal component, so it
+        // is conserved EXACTLY - compared raw-bit, because "close" would
+        // pass under a drag term small enough to hide.
+        for (k, (_, v)) in samples.iter().enumerate() {
+            assert_eq!(
+                (v[0].to_bits(), v[2].to_bits()),
+                (v_launch[0].to_bits(), v_launch[2].to_bits()),
+                "tick {k}: horizontal momentum changed in flight - something \
+                 is damping the spear"
+            );
+        }
+
+        // (2) NOT A HITSCAN. Time to cross 25 m of ground is the
+        // distance over the (now proven constant) horizontal speed, and
+        // it is a third of a second of real flight, not an instant.
+        let reach = 25.0_f32;
+        let crossed = samples
+            .iter()
+            .position(|(p, _)| {
+                ((p[0] - o[0]).powi(2) + (p[2] - o[2]).powi(2)).sqrt() >= reach
+            })
+            .expect("the spear never covered 25 m");
+        let t_cross = (crossed + 1) as f32 * DT;
+        assert!(
+            t_cross > 0.3,
+            "25 m in {t_cross:.3}s is a bullet, not a javelin"
+        );
+        assert!(
+            (t_cross - reach / horiz0).abs() < 2.0 * DT,
+            "time of flight must be distance over speed: {t_cross:.4}s vs \
+             {:.4}s",
+            reach / horiz0
+        );
+
+        // (3) GRAVITY is a constant acceleration, not a damping. Under
+        // constant acceleration the drop off the launch line goes as t²,
+        // so doubling the time quadruples the drop. Explicit Euler adds
+        // a half-tick term - the exact ratio is (4N+2)/(N+1), which is
+        // 3.92 at N=24 and climbs toward 4 - so the window is set around
+        // that. A drag term or a terminal-velocity clamp lands well
+        // BELOW it; nothing physical lands above.
+        let drop_at = |n: usize| -> f32 {
+            let (p, _) = samples[n - 1];
+            let t = n as f32 * DT;
+            // where the spear would be with no gravity at all
+            let free = [
+                o[0] + v_launch[0] * t,
+                o[1] + v_launch[1] * t,
+                o[2] + v_launch[2] * t,
+            ];
+            free[1] - p[1]
+        };
+        let (n1, n2) = (24usize, 48usize);
+        let (d1, d2) = (drop_at(n1), drop_at(n2));
+        assert!(d1 > 0.0 && d2 > d1, "the spear must FALL off its launch line");
+        let ratio = d2 / d1;
+        assert!(
+            (3.6..=4.1).contains(&ratio),
+            "doubling the flight time changed the drop by x{ratio:.3}, not by \
+             about four - that is not constant acceleration ({d1:.4} m at \
+             {n1} ticks, {d2:.4} m at {n2})"
+        );
+
+        // (4) and it is still going DOWN faster every tick, all the way
+        for w in samples.windows(2) {
+            assert!(
+                w[1].1[1] < w[0].1[1],
+                "vertical velocity must fall monotonically under gravity"
+            );
+        }
+    }
+
     /// §2 (Brief V): the spear THRUST connects for 70 frontal — and a
     /// WHIFF locks the weapon out visibly longer than a hit. A missed
     /// thrust is committed, not free.
