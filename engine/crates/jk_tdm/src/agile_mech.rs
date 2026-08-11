@@ -266,6 +266,21 @@ pub fn spawn_agile_chassis(
     part(cube(), lv.plate.clone(), Vec3::new(0.0, 0.215, -0.140), Quat::IDENTITY, Vec3::new(0.26, 0.20, 0.045));
     // the waist collar bridges pelvis crown (0.345) to rib floor (0.370)
     part(cyl(), lv.steel.clone(), Vec3::new(0.0, 0.357, 0.0), Quat::IDENTITY, Vec3::new(0.315, 0.045, 0.255));
+    // THE LUMBAR HOUSING, and it is not decoration: the first capture of
+    // this chassis showed a bright white tab and a pale curve in the
+    // small of its back, which was the PILOT's own torso ball (0.40 wide,
+    // 0.30 deep, centred y 0.455) protruding through a gap between the
+    // rib box's back face (z = -0.12 at its floor) and the backpack
+    // (which starts at y 0.51). Fifteen millimetres of exposed white on a
+    // navy machine, and unmistakable at 5x.
+    //
+    // Closed with a mass rather than by widening the ribs, because the
+    // gap is a REAR-ONLY one and thickening the whole torso to fix it
+    // would have cost the profile taper §3 asks for.
+    part(cube(), lv.blue.clone(), Vec3::new(0.0, 0.425, -0.152), Quat::IDENTITY, Vec3::new(0.300, 0.245, 0.085));
+    for y in [0.335_f32, 0.500] {
+        part(cyl(), lv.steel.clone(), Vec3::new(0.0, y, -0.170), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.062, 0.270, 0.062));
+    }
 
     // =================================================================
     // TORSO — canted forward, tapering into the hips (§5)

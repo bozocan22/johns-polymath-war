@@ -5506,7 +5506,12 @@ const HANDS_BEATS: &[CapBeat] = &[
 /// back up. So the head close-up is level and the leg close-up is
 /// negative — the opposite of the intuition.
 const AGILE_BODY_BEATS: &[CapBeat] = &[
-    CapBeat { look: Some((0.0, 0.05)), ..beat(0.4) },
+    // Boom pulled BACK to 1.35, not left at the default. At 2.2 m a
+    // 2.0 m machine fills the frame and its feet land behind the vitals
+    // panel - which is where the first run of this script put them, so
+    // the one element the whole redesign turns on (the reverse-jointed
+    // leg) was the one element cropped out.
+    CapBeat { look: Some((0.0, 0.12)), boom: Some(1.35), ..beat(0.4) },
     // the four cardinal views. FRONT first: it is the one the silhouette
     // argument is made from, and the one the old build's own capture set
     // led with, so the two are directly comparable.
@@ -9702,6 +9707,19 @@ fn plasma_hit_sync(
 /// field itself.
 #[derive(Component)]
 struct MechBarrier {
+    /// The whole module — housing, petals and field.
+    ///
+    /// Stored because its VISIBILITY needs gating and nothing owned it.
+    /// §P1 SIX VARIANTS re-parented this module from the Big's
+    /// `armor_rig` (which `sync_fighters` hides unless the Big is worn)
+    /// onto the soldier's THORAX, which is visible for everyone. The
+    /// note in `mech_barrier_sync` still says "parented to the heavy's
+    /// armor_rig" and reasons from it; it is no longer true, and the
+    /// consequence is that a khaki emitter housing with three steel
+    /// petals has been hanging at the left hip of every scout and every
+    /// infantryman since. Found by BRIEF X's first `agile_body` capture,
+    /// as a floating tripod beside the Agile Mech's knee.
+    root: Entity,
     /// The folding emitter arms - three panels that lie along the
     /// forearm stowed and swing out to frame the field.
     petals: [Entity; 3],
@@ -9888,7 +9906,7 @@ fn spawn_mech_barrier(commands: &mut Commands, kit: &ModelKit) -> (Entity, MechB
             }
         }
     }
-    (root, MechBarrier { petals, field })
+    (root, MechBarrier { root, petals, field })
 }
 
 /// §owner MECH SENSOR OVERLAY: the optic housing, and the target box.
@@ -10309,13 +10327,35 @@ fn mech_barrier_sync(
         let Some(f) = game.sim.fighters.get(vis.index) else { continue };
         // Up only in a HEAVY chassis, with the pool still standing.
         //
-        // `in_mech()` included the ScoutMech, and the barrier geometry is
-        // parented to the heavy's `armor_rig` - which `sync_fighters`
+        // `in_mech()` included the ScoutMech, and the barrier geometry
+        // WAS parented to the heavy's `armor_rig` - which `sync_fighters`
         // hides outright unless `armor_set == RobotSuit`. So a medic
         // raising their guard ran the whole deploy animation, petals and
         // ripple and all, on parts nobody could see, every frame, for
         // every scout on the field.
-        let want = f.in_heavy_mech() && f.shield_up && f.mech_shield_hp > 0.0;
+        //
+        // THAT REASONING EXPIRED. §P1 SIX VARIANTS moved the module onto
+        // the soldier's THORAX (there are two heavy hulls per fighter now
+        // and only one is ever visible, so a barrier on either would
+        // vanish in the other chassis) - and the thorax is visible for
+        // EVERYONE. Nothing replaced the hiding the old parent gave for
+        // free, so the emitter housing and its three petals have been
+        // riding the left hip of every scout and every infantryman ever
+        // since. BRIEF X's first capture photographed it as a steel
+        // tripod standing beside the Agile Mech's knee.
+        //
+        // So the module's own root is gated here, on the same predicate
+        // the deploy already used. One system owns the barrier's whole
+        // visibility story, which is what stopped being true above.
+        let heavy = f.in_heavy_mech();
+        if let Ok((_, mut v)) = parts.get_mut(bar.root) {
+            *v = if heavy {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+        let want = heavy && f.shield_up && f.mech_shield_hp > 0.0;
         // one clock, read back off the field's own scale so no extra
         // per-fighter state is needed for a purely cosmetic animation
         let cur = parts
