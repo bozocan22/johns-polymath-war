@@ -770,6 +770,42 @@ pub fn menu_row_at(
 #[derive(Component)]
 pub struct ValueCell;
 
+/// ONE option pill's node. Extracted from `pill_row` so the one property
+/// that was a shipped visual bug is testable without a Bevy world.
+///
+/// THE BUG (`handback/brief-vii/menus/03-armoury-page.png`): this node
+/// carried `height: Val::Px(PILL_H)`, a HARD height. The armoury grid
+/// divides its width evenly between the pills of a row (`flex_basis: 0`),
+/// so a six-pill SHINS row gives each plate about 110 px - and
+/// "PAULDRON L", "REREBRACE L", "VAMBRACE L", "GAUNTLET L", "POLEYN L",
+/// "GREAVE L" and "SABATON L" all wrap to two lines at that width. Two
+/// lines of `T_DATA` measure taller than `PILL_H`, and because a plate's
+/// `Overflow` is visible (the whole plate has to be, or the standard's
+/// overhang is guillotined) the second line drew OUTSIDE the pill's
+/// coloured fill. In the capture the bare "L" and "R" of every wrapped
+/// plate hang below their own red chip, under the next row.
+///
+/// `min_height` is the fix, and it is the right one rather than "shorten
+/// the labels": the labels come from `sim::ArmorPiece::short_name`, which
+/// this module may not edit, and any future row of long options would
+/// reopen the same hole. A pill that GROWS cannot overflow.
+pub fn pill_node() -> Node {
+    Node {
+        flex_grow: 1.0,
+        // flex_basis 0 so every pill in the row is the same width
+        // regardless of its label's length
+        flex_basis: Val::Px(0.0),
+        // NOT `height`. See the doc comment above.
+        min_height: Val::Px(PILL_H),
+        padding: UiRect::vertical(Val::Px(U)),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(U2),
+        border: UiRect::left(Val::Px(RULE_KEEL_PX)),
+        ..default()
+    }
+}
+
 /// A row of option pills: a fixed label gutter followed by N pills that
 /// each grow, so a row of two options and a row of six both fill the
 /// plate exactly.
@@ -790,7 +826,12 @@ pub fn pill_row<C: Component + Copy>(
     p.spawn((
         Node {
             flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
+            // STRETCH, not Center. Pills in one row are now free to grow
+            // (see `pill_node`), and centred siblings of unequal height
+            // leave a ragged row of floating chips. Stretch makes every
+            // pill in a row match the tallest, which is what the ARMOURY
+            // capture's even rows depend on.
+            align_items: AlignItems::Stretch,
             column_gap: Val::Px(U2),
             margin: UiRect::bottom(Val::Px(U2)),
             width: Val::Percent(100.0),
@@ -809,6 +850,9 @@ pub fn pill_row<C: Component + Copy>(
             Node {
                 width: Val::Px(ROW_LABEL_W),
                 flex_shrink: 0.0,
+                // the row stretches now, so the gutter label has to opt
+                // back out or it sits at the top of a two-line row
+                align_self: AlignSelf::Center,
                 ..default()
             },
         ));
@@ -817,18 +861,7 @@ pub fn pill_row<C: Component + Copy>(
                 Button,
                 *comp,
                 PlateRow { kind: RowKind::Normal },
-                Node {
-                    flex_grow: 1.0,
-                    // flex_basis 0 so every pill in the row is the same
-                    // width regardless of its label's length
-                    flex_basis: Val::Px(0.0),
-                    height: Val::Px(PILL_H),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(U2),
-                    border: UiRect::left(Val::Px(RULE_KEEL_PX)),
-                    ..default()
-                },
+                pill_node(),
                 BackgroundColor(Color::NONE),
                 BorderColor(branding::palette::BRONZE),
                 BorderRadius::ZERO,
@@ -1241,6 +1274,35 @@ mod tests {
         assert_eq!(row_state(true, Interaction::None), RowState::Selected);
         assert_eq!(row_state(false, Interaction::Hovered), RowState::Hovered);
         assert_eq!(row_state(false, Interaction::None), RowState::Idle);
+    }
+
+    /// An option pill must be free to GROW.
+    ///
+    /// This is the armoury-grid overflow, pinned. With a hard
+    /// `height: Px(PILL_H)` a wrapped two-line label rendered its second
+    /// line outside the pill's own fill - the capture shows the "L" and
+    /// "R" of PAULDRON, REREBRACE, VAMBRACE, GAUNTLET, POLEYN, GREAVE and
+    /// SABATON hanging below their chips. A plate cannot clip its X axis
+    /// (the standard overhangs it), so the pill has to size to its
+    /// content instead of being trusted not to have any.
+    ///
+    /// Asserts the SHAPE, not a pixel: the defect is "a fixed main-axis
+    /// size on a node whose content can be taller than it", and that is
+    /// exactly what `height != Auto` means here.
+    #[test]
+    fn an_option_pill_grows_rather_than_spilling_its_label() {
+        let n = pill_node();
+        assert_eq!(
+            n.height,
+            Val::Auto,
+            "a pill may not carry a hard height - a wrapped label then \
+             draws outside its own fill"
+        );
+        assert_eq!(n.min_height, Val::Px(PILL_H), "PILL_H is the FLOOR now");
+        // and it must still be an equal-width cell, or the grid's columns
+        // stop lining up
+        assert_eq!(n.flex_basis, Val::Px(0.0));
+        assert_eq!(n.flex_grow, 1.0);
     }
 
     /// The spacing scale is a scale. If someone adds a value that is not a
