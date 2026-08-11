@@ -5250,291 +5250,38 @@ struct RangeText;
 #[derive(Component)]
 struct CompassText;
 
-/// §9.1 (Brief IV): one cell of the vertical weapon strip on the right
-/// screen edge - active slot at full opacity with an accent, inactive 40%.
-#[derive(Component)]
-struct WeaponStripCell(usize);
+// BRIEF XII-A (owner, 2026-08-11): `WeaponStripCell` / `weapon_strip` and
+// `ShieldReadout` / `shield_readout` were DELETED here.
+//
+// The strip was the washed-out element the owner named: low-alpha text
+// that faded to alpha 0.45 after four seconds idle, over a scene that can
+// be pale sand. It was also the THIRD copy of the heat reading
+// (`PLASMA BOW 40%`), behind the bottom-right numeral and the systems
+// column's `HEAT` row.
+//
+// Both are folded into `hud::paint_systems`: the mount list still comes
+// from `MechWeapon::for_set` (the strip's hardest-won lesson — it once
+// printed `TURRET 0 / ROCKETS 0` inside a Mechanical Medic), and the
+// shield line still refuses to print a medic's dead `mech_shield_hp`,
+// which is what the §18 note below was really about. What did NOT
+// survive is the ASCII bar `[####------]`, the permanent `GUARD STOWED`
+// row, and the heat percentage.
+//
+// The §18 reasoning, kept because it is the reason the shield line reads
+// the way it does:
+//
+// The spec asked for "current / maximum shield value and recharge
+// state". Exactly one of the two shields in this game HAS those: the
+// mech barrier is a real 280-point pool that stops absorbing when it is
+// spent and refills after a quiet spell. The soldier's tower shield is
+// not a pool at all - it is a damage REDUCTION plate (65% standing,
+// 95% crouched, inside a 60-degree arc), with no durability anywhere in
+// the sim.
+//
+// So a readout must not print "0 / 0" for the soldier and call it a
+// shield value. A readout that invents a field to fill a layout is worse
+// than one that admits the field does not exist.
 
-/// §9.1: the strip - updates names/opacity, fades after 4 s idle.
-/// §18 THE SHIELD READOUT, under the weapon strip on the right edge.
-///
-/// The spec asked for "current / maximum shield value and recharge
-/// state". Exactly one of the two shields in this game HAS those: the
-/// mech barrier is a real 280-point pool that stops absorbing when it is
-/// spent and refills after a quiet spell. The soldier's tower shield is
-/// not a pool at all - it is a damage REDUCTION plate (65% standing,
-/// 95% crouched, inside a 60-degree arc), with no durability anywhere in
-/// the sim.
-///
-/// So this does not print "0 / 0" for the soldier and call it a shield
-/// value. Each shield reports the number that actually governs it: the
-/// barrier its charge, the plate its block fraction and the arc that
-/// fraction is worth anything inside. A readout that invents a field to
-/// fill a layout is worse than one that admits the field does not exist.
-#[derive(Component)]
-struct ShieldReadout;
-
-fn shield_readout(
-    game: Res<Game>,
-    mut q: Query<(&mut Text, &mut TextColor), With<ShieldReadout>>,
-) {
-    let p = &game.sim.fighters[game.sim.player];
-    let Ok((mut t, mut tc)) = q.get_single_mut() else { return };
-    if !p.alive() {
-        **t = String::new();
-        return;
-    }
-    // team-neutral chrome; the STATE is what carries colour here, and
-    // only two states are worth a colour: spent, and holding.
-    // §owner MEDIC: `in_heavy_mech`, not `in_mech`.
-    //
-    // The barrier is the HEAVY's forearm module. The sim's damage path
-    // returns before it ever consults the pool for a `ScoutMech`, so a
-    // medic's `mech_shield_hp` is a field nothing reads and nothing
-    // decrements - and this panel printed it as `BARRIER UP
-    // [##########] 280/280` for the whole match. Two panels away the
-    // medic's own vitals line says of exactly this class of thing: "No
-    // power core, no brace, no barrier: it has none of them, and
-    // printing dead fields is worse than printing nothing." It was
-    // printing the dead field.
-    let (line, col) = if p.in_heavy_mech() {
-        let hp = p.mech_shield_hp;
-        let frac = (hp / sim::MECH_SHIELD_HP).clamp(0.0, 1.0);
-        let bars = (frac * 10.0).round() as usize;
-        let state = if hp <= 0.0 {
-            "DOWN"
-        } else if p.shield_up {
-            "UP"
-        } else {
-            "STOWED"
-        };
-        // recharging is a real, visible state: the pool only refills
-        // after MECH_SHIELD_RECHARGE_DELAY_S without a hit, so a pilot
-        // who just took one needs to know the wait has not started.
-        let charging = hp < sim::MECH_SHIELD_HP
-            && p.mech_shield_quiet_t >= sim::MECH_SHIELD_RECHARGE_DELAY_S;
-        (
-            format!(
-                "BARRIER  {}  [{}{}]  {:.0}/{:.0}{}",
-                state,
-                "#".repeat(bars),
-                "-".repeat(10 - bars),
-                hp,
-                sim::MECH_SHIELD_HP,
-                if charging { "  ^" } else { "" }
-            ),
-            if hp <= 0.0 {
-                Color::srgb(0.95, 0.35, 0.30)
-            } else if p.shield_up {
-                Color::srgb(0.55, 0.85, 0.98)
-            } else {
-                Color::srgba(0.85, 0.88, 0.92, 0.55)
-            },
-        )
-    } else if p.in_scout_mech() {
-        // ...and the light chassis gets an EMPTY line rather than the
-        // infantry plate's. A medic is sealed in a hull, so the tower
-        // shield is as absent as the barrier; falling through to the
-        // `GUARD` branch would swap one lie for another.
-        **t = String::new();
-        return;
-    } else {
-        // the plate. Its number is the fraction of a frontal hit it
-        // eats, and that fraction genuinely changes with stance, so the
-        // readout changes with stance too.
-        let block = if p.crouch {
-            sim::SHIELD_BLOCK_CROUCH
-        } else {
-            sim::SHIELD_BLOCK_STAND
-        };
-        let arc = sim::SHIELD_ARC_COS.acos().to_degrees() * 2.0;
-        (
-            if p.shield_up {
-                format!("GUARD  UP  BLOCKS {:.0}%  FRONT {:.0}", block * 100.0, arc)
-            } else {
-                "GUARD  STOWED".to_string()
-            },
-            if p.shield_up {
-                Color::srgb(0.55, 0.85, 0.98)
-            } else {
-                Color::srgba(0.85, 0.88, 0.92, 0.55)
-            },
-        )
-    };
-    **t = line;
-    *tc = TextColor(col);
-}
-
-fn weapon_strip(
-    time: Res<Time>,
-    game: Res<Game>,
-    mut last_active: Local<usize>,
-    mut idle_t: Local<f32>,
-    mut q: Query<(
-        &WeaponStripCell,
-        &mut Text,
-        &mut TextColor,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
-) {
-    let p = &game.sim.fighters[game.sim.player];
-    // §C.7 (Brief VIII): in a chassis the strip IS the two hull mounts -
-    // the carried inventory is sealed away with the rest of the infantry
-    // kit, exactly as the sim's slot keys already treat it.
-    let in_mech = p.in_mech();
-    let cur = if in_mech {
-        match p.mech_weapon {
-            sim::MechWeapon::Rockets => 1,
-            _ => 0,
-        }
-    } else if p.shield_up {
-        3 // raising the plate un-fades the strip and moves the accent
-    } else {
-        p.active
-    };
-    if cur != *last_active {
-        *last_active = cur;
-        *idle_t = 0.0;
-    } else {
-        *idle_t += time.delta_secs();
-    }
-    let strip_fade = if *idle_t > 4.0 { 0.45 } else { 1.0 };
-    for (cell, mut t, mut tc, mut bg, mut bd) in &mut q {
-        let (name, qty, active) = if in_mech {
-            // §owner: the strip is built from the CHASSIS's own mount
-            // list, not from a hardcoded heavy pair.
-            //
-            // It read "TURRET 0 / ROCKETS 0" inside a Mechanical Medic -
-            // two mounts it does not have, both showing an ammo count it
-            // does not use, both in the empty-magazine danger colour.
-            // `MechWeapon::for_set` existed for exactly this and was
-            // never wired to it, which is the most ordinary way a
-            // feature ends up half-built: the data was right and nothing
-            // asked it the question.
-            let mounts = sim::MechWeapon::for_set(p.armor_set);
-            match mounts.get(cell.0) {
-                Some(w) => {
-                    // ammo where a mount HAS ammo, heat where it does
-                    // not. A count of zero on a weapon that never counts
-                    // is worse than no number at all.
-                    // §6: the mounts keep their single-string labels -
-                    // "TURRET 240  BURST" is not a name and a quantity,
-                    // it is a name and a MODE, and splitting it into the
-                    // infantry grammar would have cost the mode column.
-                    let label = match w {
-                        // §30: the turret's FIRE MODE, on the mount it
-                        // belongs to. It reads from `turret_mode_of` -
-                        // the sim's own accessor - and the mode's name
-                        // comes from `TurretMode::label`, which is the
-                        // only place those three strings exist. A HUD
-                        // that spells them a second time is a HUD that
-                        // will eventually disagree with the weapon.
-                        sim::MechWeapon::Gatling => {
-                            let mode = game.sim.turret_mode_of(game.sim.player);
-                            let burst = game.sim.turret_burst_shot(game.sim.player);
-                            // mid-burst, say WHERE in the burst - the
-                            // whole point of a 3-round mode is knowing
-                            // whether the next pull starts a new one
-                            if burst > 0 {
-                                format!(
-                                    "TURRET {}  {} {}/3",
-                                    p.mech_rounds,
-                                    mode.label(),
-                                    burst
-                                )
-                            } else {
-                                format!("TURRET {}  {}", p.mech_rounds, mode.label())
-                            }
-                        }
-                        sim::MechWeapon::Rockets => format!("ROCKETS {}", p.pod_ammo),
-                        sim::MechWeapon::Autocannon => "AUTOCANNON".to_string(),
-                        sim::MechWeapon::Plasma => {
-                            format!("PLASMA BOW  {:.0}%", p.gatling_heat * 100.0)
-                        }
-                        sim::MechWeapon::Repair => "REPAIR BEAM".to_string(),
-                    };
-                    (label, String::new(), p.mech_weapon == *w)
-                }
-                None => {
-                    **t = String::new();
-                    *bg = BackgroundColor(Color::NONE);
-                    *bd = BorderColor(Color::NONE);
-                    continue;
-                }
-            }
-        } else if cell.0 == 3 {
-            // the shield is an ESSENTIAL slot: always listed, lit while
-            // raised. MUST branch before the inventory index - the
-            // carried array is only 3 wide.
-            //
-            // §6 (owner spec, 2026-08-10): "Shield [4], an interactive
-            // slot showing quantity." Its quantity is ONE, and that is
-            // a fact rather than a layout filler: the plate is carried
-            // from spawn, is never consumed, and cannot be picked up a
-            // second time. The temptation here is to print a durability
-            // - the §18 note on `shield_readout` is about resisting
-            // exactly that, because the soldier's plate is a damage
-            // REDUCTION with no pool anywhere in the sim, and a
-            // fabricated `0 / 0` would be worse than no number.
-            ("SHIELD".to_string(), "x1".to_string(), p.shield_up)
-        } else {
-            let g = p.inventory[cell.0];
-            let n = if g == GunKind::Fists {
-                "-".to_string()
-            } else {
-                gun(g).name.to_string()
-            };
-            // §6: the quantity, per slot, for real. The sim has carried
-            // `slot_ammo` per weapon slot all along - it is what a
-            // weapon switch saves into and restores from - and the strip
-            // showed none of it, so three of the four slots were a name
-            // and nothing else. The ACTIVE slot reads the live counters
-            // rather than the stashed pair, because `slot_ammo` is only
-            // written on the way out of a slot and would lag by a whole
-            // magazine.
-            let qty = if g == GunKind::Fists {
-                String::new()
-            } else if cell.0 == p.active {
-                format!("{}/{}", p.ammo, p.reserve)
-            } else {
-                let (mag, res) = p.slot_ammo[cell.0];
-                format!("{mag}/{res}")
-            };
-            (n, qty, cell.0 == p.active && !p.shield_up)
-        };
-        // §6: ONE slot grammar for all four rows - cursor, name,
-        // quantity, key. The columns are padded rather than laid out
-        // because the HUD font is monospaced, so a `{:<9}` IS a column
-        // and costs no extra nodes on a strip that redraws every frame.
-        **t = format!(
-            // §0 (Brief VII): ASCII only - U+25B8 had no font glyph.
-            "{} {:<9} {:>7}  [{}]",
-            if active { ">" } else { " " },
-            name,
-            qty,
-            cell.0 + 1
-        );
-        let a = if active { 1.0 } else { 0.40 } * strip_fade;
-        *tc = TextColor(Color::srgba(0.92, 0.93, 0.95, a));
-        // The SLOT itself: a tile that is lit when the slot is live and
-        // sunk when it is not. Text alone was the whole complaint - four
-        // right-aligned strings do not read as an inventory, and the
-        // shield least of all, because it is the one row whose name is
-        // not a weapon anybody recognises.
-        let f = strip_fade;
-        *bg = BackgroundColor(if active {
-            Color::srgba(0.16, 0.15, 0.12, 0.72 * f)
-        } else {
-            Color::srgba(0.05, 0.05, 0.06, 0.42 * f)
-        });
-        *bd = BorderColor(if active {
-            Color::srgba(0.85, 0.72, 0.35, 0.95 * f)
-        } else {
-            Color::srgba(0.60, 0.62, 0.66, 0.28 * f)
-        });
-    }
-}
 
 /// §7: the stance/stability bracket around the crosshair - widens with
 /// the CURRENT spread (bloom + movement + stance), so the player watches
@@ -6261,6 +6008,49 @@ const BARRIER_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(4.6) },
 ];
 
+/// BRIEF XII-A: THE SAME MECH HUD AGAINST A PALE SCENE AND A DARK ONE.
+///
+/// The owner's "washed out" complaint cannot be answered by one frame.
+/// The legacy weapon strip looked perfectly fine in every capture this
+/// project ever took, because every capture this project ever took was
+/// aimed across open sand in daylight; it disappeared against the pale
+/// wall nobody had photographed. So this script is the instrument for
+/// exactly that question and nothing else: one chassis, one HUD, six
+/// looks chosen to span the brightest and darkest surfaces the camera
+/// can reach from the spawn without a teleport.
+///
+/// HEAVY, not the medic: it is the only chassis with a barrier, and the
+/// `BARRIER` row is one of the two rows the folded weapon strip added to
+/// the systems column. Digit4 raises the plate on the key a player uses.
+const HUD_CONTRAST_BEATS: &[CapBeat] = &[
+    // first person - the pilot's actual view, and the one the HUD is
+    // composed for
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    // raise the barrier, so the shield row is on screen for every frame
+    // below rather than for one of them
+    CapBeat { press: &[CapKey::K(KeyCode::Digit4)], ..beat(0.7) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit4)], ..beat(0.8) },
+    // UP: sky. The palest thing in the build.
+    CapBeat { look: Some((0.0, 0.45)), ..beat(1.0) },
+    CapBeat { snap: Some("01-pale-sky"), ..beat(1.7) },
+    // DOWN: the ground immediately under the chassis, which is in its
+    // own shadow and is the darkest surface reachable without moving.
+    CapBeat { look: Some((0.0, -0.55)), ..beat(1.9) },
+    CapBeat { snap: Some("02-dark-ground"), ..beat(2.5) },
+    // and the four compass looks at eye level, so the pair above is not
+    // the only evidence and a middling scene is on record too
+    CapBeat { look: Some((0.0, 0.0)), ..beat(2.7) },
+    CapBeat { snap: Some("03-level-north"), ..beat(3.3) },
+    CapBeat { look: Some((1.5708, 0.0)), ..beat(3.5) },
+    CapBeat { snap: Some("04-level-east"), ..beat(4.1) },
+    CapBeat { look: Some((3.1416, 0.0)), ..beat(4.3) },
+    CapBeat { snap: Some("05-level-south"), ..beat(4.9) },
+    CapBeat { look: Some((4.7124, 0.0)), ..beat(5.1) },
+    CapBeat { snap: Some("06-level-west"), ..beat(5.7) },
+    CapBeat { end: true, ..beat(6.1) },
+];
+
 const MEDIC_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((0.0, 0.06)), ..beat(0.4) },
     CapBeat { snap: Some("01-medic-rear"), ..beat(1.4) },
@@ -6971,6 +6761,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // §owner MEDIC: the light chassis, in first and third person.
     "medic" => MEDIC_BEATS,
         "barrier" => BARRIER_BEATS,
+        // BRIEF XII-A: the pale/dark contrast pair.
+        "hud_contrast" => HUD_CONTRAST_BEATS,
         "trims" => TRIMS_BEATS,
         "hands" => HANDS_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
@@ -7022,7 +6814,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 37] = [
+const CAPTURE_SCRIPTS: [&str; 38] = [
+    // BRIEF XII-A: the pale-vs-dark readability pair. See
+    // `HUD_CONTRAST_BEATS` - no script before it had ever pointed a
+    // camera at a HUD against two different backdrops.
+    "hud_contrast",
     // BRIEF X: the AGILE MECH's own two instruments - the portrait, and
     // the four abilities §0 says this redesign must not break. `medic`
     // photographs the same chassis but it is a WEAPONS script (plasma,
@@ -7394,7 +7190,10 @@ fn capture_board_medic(
         {
             sim::ArmorSet::ScoutMech
         }
-        "barrier" => sim::ArmorSet::RobotSuit,
+        // BRIEF XII-A: the HEAVY, because the barrier row only exists on
+        // this chassis - a medic's `mech_shield_hp` is a field the sim's
+        // damage path never consults.
+        "barrier" | "hud_contrast" => sim::ArmorSet::RobotSuit,
         _ => return,
     };
     let p = game.sim.player;
@@ -8624,8 +8423,11 @@ fn main() {
                 compass_system,
                 stability_bracket,
                 health_vignette,
-                weapon_strip,
-                shield_readout,
+                // BRIEF XII-A: `weapon_strip` and `shield_readout` were
+                // deleted here. Their content is folded into
+                // `hud::paint_systems`, which is one system that already
+                // ran — so the net system count went DOWN by two rather
+                // than sideways.
             )
                 .run_if(in_state(GameState::Playing)),
         )
@@ -16671,83 +16473,10 @@ fn setup(
         PromptText,
         HudRoot,
     ));
-    // §9.1 (Brief IV): vertical weapon strip, right screen edge -
-    // three guns plus the SHIELD essential on [4]
-    //
-    // §6 (owner spec, 2026-08-10): each row is a SLOT now, not a line of
-    // text. Fixed width, a border and a fill, so the four read as a
-    // column of containers with things in them - which is the whole of
-    // the ask against `Shield [4]`. The alternative (leave it as text
-    // and call the shield "in the inventory" because the word appears)
-    // is what the strip already did.
-    //
-    // One node per row, still: the tile IS the text node's own box, so
-    // this costs four `BackgroundColor`s and no extra entities on a
-    // widget that repaints every frame.
-    for slot in 0..4usize {
-        commands.spawn((
-            Text::new(""),
-            TextFont {
-                font_size: 16.0,
-                ..default()
-            },
-            TextColor(Color::srgba(0.92, 0.93, 0.95, 0.4)),
-            // A SLOT IS ONE LINE. Two captures went into learning that a
-            // fixed-width tile plus the default wrap is a trap: 258 px
-            // fitted every infantry row and folded "[1]" onto a second
-            // line inside a mech, because a hull mount's label carries a
-            // name, a count AND a fire mode ("TURRET 298  AUTO 2/3").
-            // Widening to 310 moved the fold and did not remove it,
-            // which is the tell that width was the wrong lever.
-            //
-            // ...and no fixed width either, which was the third attempt
-            // and the one the capture finally liked. With `no_wrap` and
-            // a fixed box the mech row stopped folding and started
-            // running off the RIGHT edge of the screen instead - the
-            // text is laid out inside the box and overruns forwards,
-            // and the box is pinned to the right margin.
-            //
-            // So the tile SIZES TO ITS CONTENT. Anchored right, it grows
-            // leftward into empty sky and nothing can ever be clipped or
-            // folded. The infantry rows still line up as a column
-            // because the row grammar pads its columns in a monospaced
-            // font - `{:<9}` and `{:>7}` make every rifle row the same
-            // number of characters, and therefore the same width - and
-            // only the two mech rows sit proud, which is honest: they
-            // are saying more.
-            TextLayout::new_with_no_wrap(),
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(14.0),
-                top: Val::Percent(40.0 + slot as f32 * 4.6),
-                padding: UiRect::axes(Val::Px(9.0), Val::Px(3.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.05, 0.06, 0.42)),
-            BorderColor(Color::srgba(0.60, 0.62, 0.66, 0.28)),
-            WeaponStripCell(slot),
-            HudRoot,
-        ));
-    }
-    // §18: the shield's own line, directly under the four strip cells so
-    // it reads as part of the same block rather than as a stray label.
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 15.0,
-            ..default()
-        },
-        TextColor(Color::srgba(0.85, 0.88, 0.92, 0.55)),
-        Node {
-            position_type: PositionType::Absolute,
-            right: Val::Px(14.0),
-            top: Val::Percent(40.0 + 4.0 * 4.6),
-            ..default()
-        },
-        ShieldReadout,
-        HudRoot,
-    ));
+    // BRIEF XII-A: the four weapon-strip tiles and the shield line
+    // used to spawn here. Deleted with their systems; the mount list,
+    // LOCK and the shield line now live in the HUD's mech systems
+    // column, which is a widget that already existed.
     // §7 compass strip
     commands.spawn((
         Text::new(""),

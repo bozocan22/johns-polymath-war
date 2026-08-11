@@ -102,9 +102,25 @@ const THREAT: Color = Color::srgb(1.0, 0.18, 0.15);
 /// systems labels are all gold or `GOLD_DIM`; nothing else is.
 const SYSTEMS: Color = palette::GOLD;
 
-/// Panel fill for a PERMANENT reading. Mech mode only — reference rule 4.
+/// Panel fill for a PERMANENT reading in MECH mode — reference rule 4.
 fn plate() -> Color {
     palette::PANEL.with_alpha(0.72)
+}
+
+/// XII-A: the HUMAN plate.
+///
+/// It used to be `Color::NONE` — bare white type sitting directly on the
+/// world, which is exactly the failure mode the owner called
+/// "washed out" on the legacy strip: unreadable over pale sand. The
+/// brief's rule is that every PERMANENT reading gets a plate or a dark
+/// outline, and health/ammo are the two most permanent readings in the
+/// build.
+///
+/// This is a scrim, not a panel: less than half the mech plate's opacity
+/// and no border at all, so the human HUD keeps its "flat on the world"
+/// density (reference img2) while the numerals stop competing with sand.
+fn scrim() -> Color {
+    palette::PANEL.with_alpha(0.30)
 }
 
 // ---- anchors --------------------------------------------------------------
@@ -186,38 +202,70 @@ fn ammo_pair(ammo: u32, reserve: u32) -> (String, String) {
     (format!("{ammo}"), format!("{reserve}"))
 }
 
-/// The mech systems column: label/value pairs, no bar graphs, no
-/// sub-second floats.
+/// The display name of a hull mount. Cosmetic labelling only — the sim
+/// has no `name()` on `MechWeapon`, and this is the only place this
+/// module spells them.
+fn mount_name(w: sim::MechWeapon) -> &'static str {
+    match w {
+        sim::MechWeapon::Gatling => "TURRET",
+        sim::MechWeapon::Autocannon => "AUTOCANNON",
+        sim::MechWeapon::Rockets => "ROCKETS",
+        sim::MechWeapon::Plasma => "PLASMA",
+        sim::MechWeapon::Repair => "REPAIR",
+    }
+}
+
+/// The mech systems column — BRIEF XII-A: this IS the folded weapon
+/// strip, and it carries ONLY what is not already on the screen.
 ///
-/// Every one of these facts used to be printed as ASCII art
-/// (`STRIDE [###.......]`, `CHARGE [########]`) or as a raw float
-/// (`VENTING 1.4s`). Bars are drawn `Node`s now; timers are states.
+/// Deleted from it in XII-A: the `HULL` row (the bottom-left numeral is
+/// directly above it) and the `HEAT` row (the bottom-right numeral is
+/// directly above it). Heat now appears exactly once, and a mount whose
+/// resource IS heat prints no quantity here at all — printing it would
+/// re-create the third copy this pass exists to remove.
+///
+/// `mounts` comes from `MechWeapon::for_set`, never a hardcoded pair:
+/// the old strip printed `TURRET 0 / ROCKETS 0` inside a medic for
+/// exactly that reason.
+///
+/// `shield` is `None` unless a shield is actually UP — the owner's
+/// "everything else stays hidden unless needed".
 fn systems_lines(
-    hull: f32,
-    hull_max: f32,
-    heat: f32,
-    venting: bool,
+    mounts: &[sim::MechWeapon],
+    selected: sim::MechWeapon,
+    rounds: u32,
+    pod: u8,
     locked: bool,
+    shield: Option<(&'static str, String)>,
 ) -> Vec<(String, String)> {
-    let mut v = vec![(
-        "HULL".to_string(),
-        format!("{:.0}", hull.max(0.0)),
-    )];
-    let _ = hull_max;
-    v.push((
-        "HEAT".to_string(),
-        if venting {
-            "VENTING".to_string()
-        } else {
-            format!("{heat:.0}%")
-        },
-    ));
-    v.push((
-        "LOCK".to_string(),
-        if locked { "TRACKING" } else { "-" }.to_string(),
-    ));
+    let mut v: Vec<(String, String)> = Vec::new();
+    for w in mounts {
+        // ASCII only — no font asset ships, so every ornament is a drawn
+        // node or a plain character. '>' is the marker the old strip used.
+        let label = format!("{} {}", if *w == selected { ">" } else { " " }, mount_name(*w));
+        let qty = match w {
+            sim::MechWeapon::Gatling => format!("{rounds}"),
+            sim::MechWeapon::Rockets => format!("{pod}"),
+            // heat mounts count nothing — their resource is the bottom
+            // right numeral, and a second copy here is the bug.
+            sim::MechWeapon::Autocannon
+            | sim::MechWeapon::Plasma
+            | sim::MechWeapon::Repair => String::new(),
+        };
+        v.push((label, qty));
+    }
+    if locked {
+        v.push(("LOCK".to_string(), "TRACKING".to_string()));
+    }
+    if let Some((label, value)) = shield {
+        v.push((label.to_string(), value));
+    }
     v
 }
+
+/// How many rows the systems column can ever need: two mounts, `LOCK`,
+/// and a shield line.
+const SYSTEMS_ROWS: usize = 4;
 
 /// The single top-centre urgent line. ONE line, highest priority only.
 ///
@@ -391,10 +439,6 @@ struct SystemsRow(usize);
 struct SystemsLabel(usize);
 #[derive(Component)]
 struct SystemsValue(usize);
-#[derive(Component)]
-struct HullFill;
-#[derive(Component)]
-struct HeatFill;
 /// The vitals / ammo containers, so the plate can appear in mech mode
 /// and vanish in human mode.
 #[derive(Component)]
@@ -609,12 +653,16 @@ fn spawn_ammo(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
                     margin: UiRect::bottom(Val::Px(14.0)),
                     ..default()
                 },
-                text(T_NUMERAL_SM, palette::INK_FAINT).0,
+                // XII-A: INK_SOFT, not INK_FAINT. 0.42 grey against pale
+                // sand is the washed-out failure in miniature; the pair
+                // still reads as big/small because the SIZES differ by
+                // 3x, which is the property rule 3 actually asks for.
+                text(T_NUMERAL_SM, palette::INK_SOFT).0,
                 TextFont {
                     font_size: T_NUMERAL_SM,
                     ..default()
                 },
-                TextColor(palette::INK_FAINT),
+                TextColor(palette::INK_SOFT),
                 TextLayout::new_with_no_wrap(),
                 AmmoReserve,
                 XiiFade,
@@ -699,8 +747,11 @@ fn spawn_equip(r: &mut ChildBuilder) {
             top: Val::Percent(off[1] * 100.0),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::FlexStart,
+            padding: UiRect::axes(Val::Px(7.0), Val::Px(3.0)),
             ..default()
         },
+        // XII-A: a scrim behind the one PERMANENT top-left reading.
+        BackgroundColor(scrim()),
         HullBarRow,
     ))
     .with_children(|p| {
@@ -758,7 +809,7 @@ fn spawn_systems(r: &mut ChildBuilder) {
         MechOnly,
     ))
     .with_children(|p| {
-        for i in 0..3 {
+        for i in 0..SYSTEMS_ROWS {
             p.spawn((
                 Node {
                     flex_direction: FlexDirection::Row,
@@ -782,35 +833,11 @@ fn spawn_systems(r: &mut ChildBuilder) {
                 ));
             });
         }
-        // Two DRAWN bars. The old HUD wrote `[####......]` in text —
-        // the loudest debug tell in the build — while real `Node` bars
-        // already existed ten lines away.
-        for marker in 0..2 {
-            p.spawn((
-                Node {
-                    width: Val::Px(150.0),
-                    height: Val::Px(5.0),
-                    ..default()
-                },
-                BackgroundColor(palette::PANEL_HI),
-                HullBarRow,
-            ))
-            .with_children(|b| {
-                let mut e = b.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(SYSTEMS),
-                ));
-                if marker == 0 {
-                    e.insert(HullFill);
-                } else {
-                    e.insert(HeatFill);
-                }
-            });
-        }
+        // XII-A: the two drawn bars that used to sit here are gone. The
+        // hull bar repeated the segmented bar in the bottom-left
+        // cluster, and the heat bar was the second of the three heat
+        // displays this pass removes. Nothing in this column now
+        // restates a number that is already on the screen.
     });
 }
 
@@ -924,14 +951,21 @@ fn mode_sync(
         }
     }
     // Reference rule 4, and the whole of the density split: in HUMAN
-    // mode the numbers sit flat on the world with no plate, no border,
-    // no chrome. In MECH mode the same clusters get a panel and a gold
-    // rule, because a machine frames its readouts.
+    // mode the numbers sit on a bare scrim with no border and no
+    // chrome. In MECH mode the same clusters get a full panel and a
+    // gold rule, because a machine frames its readouts.
+    //
+    // XII-A moved human from `Color::NONE` to `scrim()`. The density
+    // split survives — 0.30 against 0.72, borderless against ruled —
+    // but a white numeral over pale sand is now legible, which was the
+    // owner's "washed-out" complaint and which no amount of density
+    // discipline excuses.
     for (mut bg, mut bc) in &mut plates {
         let (b, o) = if mech {
             (plate(), palette::GOLD_DIM)
         } else {
-            (Color::NONE, Color::NONE)
+            // XII-A: a scrim, not nothing. See `scrim`.
+            (scrim(), Color::NONE)
         };
         bg.0 = b;
         bc.0 = o;
@@ -1197,8 +1231,6 @@ fn paint_systems(
     mut q: ParamSet<(
         Query<(&SystemsLabel, &mut Text)>,
         Query<(&SystemsValue, &mut Text)>,
-        Query<&mut Node, With<HullFill>>,
-        Query<&mut Node, With<HeatFill>>,
     )>,
 ) {
     if *mode != HudMode::Mech {
@@ -1214,20 +1246,34 @@ fn paint_systems(
     let locked = bracket
         .iter()
         .any(|c| c.0.alpha() > 0.02);
-    let hull_max = p.mech_hull_max().max(1.0);
-    let heat = heat_pct(p.gatling_heat, p.in_scout_mech());
-    let rows = systems_lines(p.hull, hull_max, heat, p.gatling_vent_t > 0.0, locked);
+    // XII-A: the folded weapon strip. `for_set` is the sim's own list.
+    //
+    // The shield line appears ONLY while a shield is actually up. The
+    // barrier is the HEAVY's forearm module — the sim's damage path
+    // returns before it consults the pool for a `ScoutMech`, so a
+    // medic's `mech_shield_hp` is a field nothing reads, and the old
+    // `shield_readout` printed it as a full bar for the whole match.
+    // That trap is not re-inherited here.
+    let shield = if p.shield_up && p.in_heavy_mech() {
+        Some(("BARRIER", format!("{:.0}", p.mech_shield_hp.max(0.0))))
+    } else if p.shield_up && !p.in_mech() {
+        Some(("GUARD", "UP".to_string()))
+    } else {
+        None
+    };
+    let rows = systems_lines(
+        sim::MechWeapon::for_set(p.armor_set),
+        p.mech_weapon,
+        p.mech_rounds,
+        p.pod_ammo,
+        locked,
+        shield,
+    );
     for (slot, mut t) in &mut q.p0() {
         **t = rows.get(slot.0).map(|r| r.0.clone()).unwrap_or_default();
     }
     for (slot, mut t) in &mut q.p1() {
         **t = rows.get(slot.0).map(|r| r.1.clone()).unwrap_or_default();
-    }
-    if let Ok(mut n) = q.p2().get_single_mut() {
-        n.width = Val::Percent((p.hull.max(0.0) / hull_max * 100.0).clamp(0.0, 100.0));
-    }
-    if let Ok(mut n) = q.p3().get_single_mut() {
-        n.width = Val::Percent(heat.clamp(0.0, 100.0));
     }
 }
 
@@ -1421,24 +1467,102 @@ mod tests {
     /// build and it must not come back.
     #[test]
     fn systems_column_has_no_debug_art() {
-        for heat in [0.0, 37.0, 100.0] {
-            for venting in [false, true] {
+        for set in [sim::ArmorSet::RobotSuit, sim::ArmorSet::ScoutMech] {
+            let mounts = sim::MechWeapon::for_set(set);
+            for sel in mounts {
                 for locked in [false, true] {
-                    for (l, v) in systems_lines(412.0, 600.0, heat, venting, locked) {
-                        for s in [&l, &v] {
-                            assert!(!s.contains('#'), "ASCII bar in {s:?}");
-                            assert!(!s.contains('['), "ASCII bar in {s:?}");
-                            assert!(!s.contains(".."), "ASCII bar in {s:?}");
-                            // no "1.4s"-style raw float
-                            assert!(
-                                !(s.contains('.') && s.contains('s')),
-                                "raw sub-second float in {s:?}"
-                            );
+                    for shield in [None, Some(("BARRIER", "280".to_string()))] {
+                        for (l, v) in
+                            systems_lines(mounts, *sel, 240, 4, locked, shield.clone())
+                        {
+                            for s in [&l, &v] {
+                                assert!(!s.contains('#'), "ASCII bar in {s:?}");
+                                assert!(!s.contains('['), "ASCII bar in {s:?}");
+                                assert!(!s.contains(".."), "ASCII bar in {s:?}");
+                                // no "1.4s"-style raw float
+                                assert!(
+                                    !(s.contains('.') && s.contains('s')),
+                                    "raw sub-second float in {s:?}"
+                                );
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// XII-A, the whole point of the pass: the systems column restates
+    /// NEITHER of the two big numerals.
+    ///
+    /// Mutation proof: this fails on the pre-change `systems_lines`,
+    /// which opened with a literal `HULL` row and a literal `HEAT` row.
+    #[test]
+    fn systems_column_repeats_no_numeral() {
+        for set in [sim::ArmorSet::RobotSuit, sim::ArmorSet::ScoutMech] {
+            let mounts = sim::MechWeapon::for_set(set);
+            for locked in [false, true] {
+                let rows = systems_lines(mounts, mounts[0], 240, 4, locked, None);
+                for (l, v) in &rows {
+                    assert_ne!(l, "HULL", "the hull numeral is repeated in the column");
+                    assert_ne!(l, "HEAT", "the heat numeral is repeated in the column");
+                    assert!(!v.contains('%'), "a percent reading survived in {v:?}");
+                }
+            }
+        }
+    }
+
+    /// The mount list comes from the chassis, not from a hardcoded pair.
+    /// The old strip printed `TURRET 0 / ROCKETS 0` inside a medic.
+    #[test]
+    fn systems_column_lists_the_chassis_you_are_in() {
+        let medic = sim::MechWeapon::for_set(sim::ArmorSet::ScoutMech);
+        let rows = systems_lines(medic, sim::MechWeapon::Repair, 240, 4, false, None);
+        let labels: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(labels.iter().all(|l| !l.contains("TURRET")));
+        assert!(labels.iter().all(|l| !l.contains("ROCKETS")));
+        // exactly one selection marker, and it is on the selected mount
+        assert_eq!(rows.iter().filter(|r| r.0.starts_with('>')).count(), 1);
+        assert!(rows.iter().any(|r| r.0 == "> REPAIR"));
+        // ...and neither medic mount invents a round count
+        assert!(rows.iter().all(|r| r.1.is_empty()), "{rows:?}");
+    }
+
+    /// `LOCK` and the shield line are HIDDEN unless they are true —
+    /// the owner's "everything else stays hidden unless needed". The
+    /// pre-change column printed `LOCK -` permanently.
+    #[test]
+    fn optional_rows_are_hidden_until_needed() {
+        let m = sim::MechWeapon::for_set(sim::ArmorSet::RobotSuit);
+        let quiet = systems_lines(m, m[0], 240, 4, false, None);
+        assert_eq!(quiet.len(), 2, "{quiet:?}");
+        assert!(quiet.iter().all(|r| r.0 != "LOCK"));
+        let busy = systems_lines(
+            m,
+            m[0],
+            240,
+            4,
+            true,
+            Some(("BARRIER", "280".to_string())),
+        );
+        assert_eq!(busy.len(), 4, "{busy:?}");
+        assert!(busy.iter().any(|r| r.0 == "LOCK"));
+        assert!(busy.iter().any(|r| r.0 == "BARRIER"));
+        // the column can never overflow the rows that were spawned
+        assert!(busy.len() <= SYSTEMS_ROWS);
+    }
+
+    /// The human HUD is no longer bare text on the world. Mutation
+    /// proof: the pre-change code painted `Color::NONE` here, whose
+    /// alpha is 0, and this asserts a floor above it — while the
+    /// density split against the mech plate is still asserted.
+    #[test]
+    fn human_readings_have_a_backing_but_stay_lighter_than_mech() {
+        let s = scrim().alpha();
+        let m = plate().alpha();
+        assert!(s > 0.15, "a {s} scrim will not carry white over sand");
+        assert!(s < m * 0.6, "the human HUD is as heavy as the mech's");
     }
 
     /// The urgent line is ONE line and the priority order is fixed:
