@@ -1380,16 +1380,26 @@ fn javelin_plant_pose(p: f32) -> JavelinPose {
 /// for the whole of it). The hips coil AWAY through the charge and then
 /// fire open through the plant, so the separation builds over seconds
 /// rather than appearing in the last 0.4 s.
+///
+/// `plant` is `Some(spear_plant_frac_of)` while the sim says this body
+/// is in `SpearStance::Planting`, and `None` otherwise. It used to be
+/// the raw `spear_wind_t` and this function then wrote `1.0 -
+/// spear_wind_t / SPEAR_WINDUP_S` itself - a sim constant, and the sim's
+/// own direction of travel, reimplemented on the client side of the
+/// boundary. The `Option` is load-bearing rather than decorative: the
+/// plant fraction is legitimately 0.0 on its first tick, so a bare f32
+/// could not tell "the plant has just begun" from "there is no plant",
+/// which is exactly the tie `spear_stance_of` was written to settle.
 fn torso_coil_yaw(
     gun: GunKind,
-    spear_wind_t: f32,
+    plant: Option<f32>,
     knife_phase: f32,
     in_mech: bool,
     release_t: f32,
     wind: f32,
 ) -> f32 {
     if gun == GunKind::Spear {
-        if spear_wind_t > 0.0 {
+        if let Some(wp) = plant {
             // §owner: the plant now STARTS fully coiled and spends all
             // 0.4 s firing open.
             //
@@ -1400,8 +1410,7 @@ fn torso_coil_yaw(
             // over the hold, snapped to 0 at the release, and coiled
             // back again before the throw. `COIL_PLANT_FRAC` retires
             // with it.
-            let wp = (1.0 - spear_wind_t / SPEAR_WINDUP_S).clamp(0.0, 1.0);
-            COIL_AWAY_RAD + COIL_SWING_RAD * wp
+            COIL_AWAY_RAD + COIL_SWING_RAD * wp.clamp(0.0, 1.0)
         } else if knife_phase > 0.0 {
             let tw = THRUST_WIND_S * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
             let ph = knife_phase;
@@ -12421,9 +12430,18 @@ fn spawn_armor_rig(
     // to get that is to change the PAINT and one silhouette element,
     // not to fork the model.
     //
-    // Elite OVERRIDES the side tones rather than combining with them:
-    // there are three paints, not four. The side still reads off the
-    // lamps, which `elite` never touches.
+    // Elite OVERRIDES the side tones rather than combining with them -
+    // the elite arm of `mech_body_tones` never falls through to the
+    // khaki/navy arm, so the royal red is a replacement, not a layer.
+    //
+    // (This comment used to say "there are three paints, not four".
+    // That stopped being true when the ROYAL ALLY livery shipped:
+    // `mech_body_tones` matches on `(elite, ally)` and has four arms -
+    // royal-ally, royal-foe, khaki, navy - each with its own base/light/
+    // dark triple. Four paints. The half of the sentence that is still
+    // true is the override, which is why only that half survives.)
+    //
+    // The side still reads off the lamps, which `elite` never touches.
     elite: bool,
 ) -> (Entity, MechHullDetach) {
     let root = commands
@@ -17861,10 +17879,20 @@ fn input_and_step(
     // LEFT aim / RIGHT-or-T fire - has been dead since Brief VI; its
     // leftovers were still being printed to the player in three places.)
     // §1 (Brief VI): CS:GO grammar - LEFT fires, always. RIGHT is the
-    // ALT function: a two-stage zoom CYCLE on scoped weapons (Rule 2), a
-    // draw on projectile weapons (bow/spear, Brief II grammar), and - as
-    // of the owner's 2026-08-04 note - a HOLD-TO-FOCUS on everything
-    // else. swap_mouse still swaps.
+    // ALT function: a two-stage zoom CYCLE on scoped weapons (Rule 2),
+    // and - as of the owner's 2026-08-04 note - a HOLD-TO-FOCUS on
+    // everything else. swap_mouse still swaps.
+    //
+    // PROJECTILE WEAPONS: this line used to say RIGHT was "a draw on
+    // projectile weapons (bow/spear, Brief II grammar)". It is not, and
+    // has not been since the owner's input split: RIGHT is PRE-AIM only
+    // - the settle, the lean-in, the steadier hold - and LEFT is what
+    // charges the bow or winds the javelin. `sim::aim_phase(ready,
+    // pre_aim, attack)` is the authority on which of the three states a
+    // frame is in; nothing over here decides it. `alt_capable` below
+    // still records that a bow/spear HAS a richer alt behaviour, which
+    // is what the viewmodel asks about - but the behaviour is a pre-aim
+    // pose, not a draw.
     //
     // WHY THIS OVERRIDES BRIEF VI. That brief gave standard guns no ADS
     // state at all, on CS:GO's authority. But CS:GO is first-person only,
@@ -18879,7 +18907,12 @@ fn sync_fighters(
         let spear_release_t = life[vis.index].spear_release_t;
         let spear_yaw = torso_coil_yaw(
             f.gun,
-            f.spear_wind_t,
+            // the SIM's plant fraction, not `f.spear_wind_t` and not a
+            // client rearrangement of it. `spear_plant_frac_of` returns
+            // 0 outside the plant, so the stance question is asked once
+            // and answered once, here.
+            (game.sim.spear_stance_of(vis.index) == sim::SpearStance::Planting)
+                .then(|| game.sim.spear_plant_frac_of(vis.index)),
             f.knife_phase,
             in_mech,
             spear_release_t,
@@ -21533,11 +21566,13 @@ fn fp_viewmodel(
     // and ~31 deg of rotation. Read raw it snaps 0.98 -> 0 the frame the
     // spear leaves the hand (a 1-frame teleport); winding UP is tracked
     // exactly, and only the RELEASE gets a tail.
-    let raw_wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
-        1.0 - p.spear_wind_t / SPEAR_WINDUP_S
-    } else {
-        0.0
-    };
+    //
+    // §owner: this is the sim's `spear_plant_frac_of`, not the third
+    // hand-written `1.0 - spear_wind_t / SPEAR_WINDUP_S`. The accessor
+    // returns 0 in every stance but the plant, so the gun-kind test and
+    // the clock test both fold into the one call - and `SPEAR_WINDUP_S`
+    // stops being arithmetic the viewmodel has to keep in step.
+    let raw_wind = game.sim.spear_plant_frac_of(game.sim.player);
     const SPEAR_WIND_RELEASE_S: f32 = 0.13;
     if raw_wind >= st.spear_wind_ease {
         st.spear_wind_ease = raw_wind;
@@ -26523,20 +26558,23 @@ mod band_tests {
     /// second of a seven-second hold.
     #[test]
     fn the_hips_coil_while_the_javelin_charges() {
-        let held = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0, 1.0);
+        let held = torso_coil_yaw(GunKind::Spear, None, 0.0, false, -1.0, 1.0);
         assert!(
             held.abs().to_degrees() > 30.0,
             "a fully wound thrower's hips are square: {:.1} deg",
             held.abs().to_degrees()
         );
         // and it hands over to the plant's own curve continuously
-        let plant_start = torso_coil_yaw(GunKind::Spear, SPEAR_WINDUP_S, 0.0, false, 0.0, 0.0);
+        // the FIRST tick of the plant is plant-frac 0.0 - which is
+        // exactly the value a bare f32 could not tell from "no plant",
+        // and the reason the parameter is an Option.
+        let plant_start = torso_coil_yaw(GunKind::Spear, Some(0.0), 0.0, false, 0.0, 0.0);
         assert!(
             (held - plant_start).abs() < 1e-5,
             "coil jumps {held} -> {plant_start} at the release"
         );
         // a rifleman never twists, whatever is held
-        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0, 1.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::M4, None, 0.0, false, -1.0, 1.0), 0.0);
     }
 
     /// The directional read: the strip that lights is the one facing the
@@ -30212,8 +30250,10 @@ mod rig_separation_tests {
         // SPEAR_WINDUP_S to 0) and track the peak |separation|
         let mut peak_deg = 0.0_f32;
         for i in 0..=100 {
-            let wind_t = SPEAR_WINDUP_S * (1.0 - i as f32 / 100.0);
-            let sep = torso_coil_yaw(GunKind::Spear, wind_t, 0.0, false, 0.0, 0.0);
+            // the plant fraction runs 0 -> 1 (the sim's direction of
+            // travel now, not the countdown the client used to invert)
+            let plant = i as f32 / 100.0;
+            let sep = torso_coil_yaw(GunKind::Spear, Some(plant), 0.0, false, 0.0, 0.0);
             peak_deg = peak_deg.max(sep.abs().to_degrees());
         }
         assert!(
@@ -30227,8 +30267,7 @@ mod rig_separation_tests {
         // the document's exact failure mode to rule out: if root and
         // torso were the SAME rotation (a fused single trunk bone), this
         // would be identically 0.0 at every sample - it is not.
-        let mid_wind = SPEAR_WINDUP_S * 0.5;
-        let sep = torso_coil_yaw(GunKind::Spear, mid_wind, 0.0, false, 0.0, 0.0);
+        let sep = torso_coil_yaw(GunKind::Spear, Some(0.5), 0.0, false, 0.0, 0.0);
         assert_ne!(sep, 0.0, "torso and root must NOT share one fused rotation");
     }
 
@@ -30241,12 +30280,12 @@ mod rig_separation_tests {
         // 0.0 and still read as rest only because the old curve was
         // silent at t=0 - which was itself the bug: a real release
         // starts at the release yaw, not at neutral.)
-        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0, 0.0), 0.0);
-        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::M4, None, 0.0, false, -1.0, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::Spear, None, 0.0, false, -1.0, 0.0), 0.0);
         // a gun that is not a spear never twists, whatever the clock says
-        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, 0.0, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::M4, None, 0.0, false, 0.0, 0.0), 0.0);
         // and long after a throw, the follow-through has fully settled
-        assert!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 3.0, 0.0).abs() < 1e-3);
+        assert!(torso_coil_yaw(GunKind::Spear, None, 0.0, false, 3.0, 0.0).abs() < 1e-3);
     }
 }
 
@@ -30752,8 +30791,10 @@ mod elastic_load_tests {
 
         // 3. handoff continuity: the last windup frame and the first
         //    follow-through frame must be within a couple of degrees
-        let last_windup = torso_coil_yaw(GunKind::Spear, DT, 0.0, false, -1.0, 0.0);
-        let first_follow = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0, 0.0);
+        // the last frame of the plant is plant-frac ~1
+        let last_windup =
+            torso_coil_yaw(GunKind::Spear, Some(1.0 - DT / SPEAR_WINDUP_S), 0.0, false, -1.0, 0.0);
+        let first_follow = torso_coil_yaw(GunKind::Spear, None, 0.0, false, 0.0, 0.0);
         assert!(
             (last_windup - first_follow).abs() < 0.09, // ~5 deg
             "release must not pop: windup ended at {last_windup}, follow-through starts at {first_follow}"
