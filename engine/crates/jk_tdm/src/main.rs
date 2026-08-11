@@ -5556,48 +5556,67 @@ const AGILE_BODY_BEATS: &[CapBeat] = &[
 /// verb for a pilot on foot against an enemy mech's stripped plates
 /// (`climb_target` requires `!p.in_mech()` and a dropped plate bit), so
 /// no frame of an Agile Mech climbing exists to take. See the report.
+/// The beat times are the SIM's own clocks, not guesses. `ROLL_LOAD_S`
+/// 0.10 + `ROLL_S` 0.55 + `ROLL_EASE_S` 0.14 = a 0.79 s tumble whose
+/// progress runs through `ease_out`, so it is more than half turned by a
+/// third of the way in; `FLIP_S` is 0.62.
+///
+/// THE ROLL COMES FIRST, before any jump. The first run of this table put
+/// it after the double jump and photographed a machine standing perfectly
+/// still twice: the dodge needs `grounded`, the subject was still coming
+/// down, and the two frames labelled "roll" showed no roll at all. A beat
+/// that names a state it never reaches is worse than no beat - it puts a
+/// picture of the wrong thing under the right caption.
 const AGILE_MOVES_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((0.0, 0.10)), orbit: Some(PI * 0.72), ..beat(0.3) },
     CapBeat { snap: Some("01-standing"), ..beat(1.0) },
     // WALKING, so the gait is in the record next to the standing pose.
     CapBeat { press: &[CapKey::K(KeyCode::KeyW)], ..beat(1.2) },
     CapBeat { snap: Some("02-walking"), ..beat(1.9) },
+    // GROUND DODGE ROLL, from a walk so it launches FORWARD rather than
+    // defaulting to the facing. A full tumble about a point 0.6 m up:
+    // mid-roll is where a detached plate, a floating mount or a shin
+    // through the floor would show, and nothing in this harness had ever
+    // taken that frame on this chassis.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(2.1) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(2.2) },
+    CapBeat { snap: Some("03-roll-early"), ..beat(2.22) },
+    CapBeat { snap: Some("04-roll-inverted"), ..beat(2.38) },
+    CapBeat {
+        release: &[CapKey::K(KeyCode::KeyW)],
+        snap: Some("05-roll-recover"),
+        ..beat(2.62)
+    },
     // GROUND JUMP, then the SECOND press in the air - the scout's own
-    // `scout_air_jump_used` charge. Two frames: the first ascent, and the
-    // kick that only this chassis has.
-    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(2.1) },
-    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(2.2) },
-    CapBeat { snap: Some("03-jump-first"), ..beat(2.45) },
-    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(2.55) },
-    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(2.65) },
-    CapBeat { snap: Some("04-double-jump"), ..beat(2.9) },
-    CapBeat { snap: Some("05-double-jump-apex"), ..beat(3.3) },
-    // GROUND DODGE ROLL. W is still held, so it launches forward rather
-    // than defaulting to the facing. The roll is a full tumble about a
-    // point 0.6 m up, so mid-roll is where a detached plate or a shin
-    // through the floor would show.
-    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(4.4) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(4.5) },
-    CapBeat { snap: Some("06-roll-early"), ..beat(4.62) },
-    CapBeat { snap: Some("07-roll-inverted"), ..beat(4.80) },
-    CapBeat { snap: Some("08-roll-recover"), ..beat(5.05) },
-    // AIR FLIP, then the SECOND flip - `scout_second_flip_used`, the one
-    // charge no other chassis has. Jump, Q, Q again.
-    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(6.0) },
-    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(6.1) },
-    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.25) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.35) },
-    CapBeat { snap: Some("09-air-flip-first"), ..beat(6.50) },
-    CapBeat { snap: Some("10-air-flip-inverted"), ..beat(6.68) },
-    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.95) },
-    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(7.05) },
-    CapBeat { snap: Some("11-air-flip-second"), ..beat(7.20) },
+    // `scout_air_jump_used` charge, which no other chassis has. Two
+    // frames: the first ascent, and the kick that follows it.
+    // (`ROLL_CD_S` is 0.9 s on top of the 0.79 s roll, so the jump waits
+    // until 4.0 - pressing Space earlier is legal, but a subject still
+    // easing out of a tumble makes an unreadable frame.)
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(4.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(4.1) },
+    CapBeat { snap: Some("06-jump-first"), ..beat(4.35) },
+    CapBeat { press: &[CapKey::K(KeyCode::Space)], ..beat(4.45) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(4.55) },
+    CapBeat { snap: Some("07-double-jump-kick"), ..beat(4.80) },
+    CapBeat { snap: Some("08-double-jump-apex"), ..beat(5.25) },
+    // AIR FLIP, then the SECOND flip - `scout_second_flip_used`. Jump,
+    // Q, and Q again once `flip_t` has run out at +0.62.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyW), CapKey::K(KeyCode::Space)], ..beat(6.6) },
+    CapBeat { release: &[CapKey::K(KeyCode::Space)], ..beat(6.7) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.85) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(6.95) },
+    CapBeat { snap: Some("09-air-flip-first"), ..beat(7.00) },
+    CapBeat { snap: Some("10-air-flip-inverted"), ..beat(7.20) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyQ)], ..beat(7.55) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyQ)], ..beat(7.65) },
+    CapBeat { snap: Some("11-air-flip-second"), ..beat(7.78) },
     CapBeat {
         release: &[CapKey::K(KeyCode::KeyW)],
         snap: Some("12-landed"),
-        ..beat(7.9)
+        ..beat(8.6)
     },
-    CapBeat { end: true, ..beat(8.4) },
+    CapBeat { end: true, ..beat(9.1) },
 ];
 
 /// §owner THE FOUR ARMOUR TRIMS, in one frame.
@@ -14353,6 +14372,10 @@ fn setup(
         }
         m
     };
+    // BRIEF X: the Agile Mech's palette is DATA, declared once in
+    // `agile_mech`, so a test can reach it. This is only the adapter into
+    // Bevy's `Color`; the numbers themselves are not repeated here.
+    let srgb3 = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
     let kit = ModelKit {
         cube: meshes.add(with_tangents(Cuboid::new(1.0, 1.0, 1.0).into())),
         cyl: meshes.add(with_tangents(Cylinder::new(0.5, 1.0).into())),
@@ -14689,7 +14712,7 @@ fn setup(
         // industrial armour" - hence metallic 0.10 and roughness 0.55,
         // both unchanged. Paint, not a traffic cone.
         scout_hull: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.90, 0.42, 0.11), // industrial orange
+            base_color: srgb3(agile_mech::ARMOR_ALLY), // industrial orange
             metallic: 0.10,
             perceptual_roughness: 0.55, // painted, not polished
             ..default()
@@ -14702,7 +14725,7 @@ fn setup(
         // are the big rounded masses (torso egg, head dome, limb shells),
         // so this is what the machine reads as at range.
         scout_hull_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.075, 0.125, 0.265),
+            base_color: srgb3(agile_mech::ARMOR_FOE),
             metallic: 0.35,
             perceptual_roughness: 0.50,
             ..default()
@@ -14712,7 +14735,7 @@ fn setup(
         // desaturated yellow and read as a second amber rather than as a
         // second LAYER.
         scout_plate: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.56, 0.235, 0.075), // burnt orange
+            base_color: srgb3(agile_mech::PLATE_ALLY), // burnt orange
             metallic: 0.12,
             perceptual_roughness: 0.52,
             ..default()
@@ -14747,7 +14770,7 @@ fn setup(
         // If the owner wants the opposition Agile orange-primary like the
         // player's, this line and `scout_hull_foe` are the whole change.
         scout_plate_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.40, 0.165, 0.060),
+            base_color: srgb3(agile_mech::PLATE_FOE),
             metallic: 0.30,
             perceptual_roughness: 0.48,
             ..default()
@@ -14795,7 +14818,7 @@ fn setup(
         // hue, or a blue-grey next to an orange just reads as a second
         // colour of paint.
         agile_blue: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.195, 0.285, 0.435), // steel blue
+            base_color: srgb3(agile_mech::BLUE_ALLY), // steel blue
             metallic: 0.80,
             perceptual_roughness: 0.34,
             ..default()
@@ -14805,7 +14828,7 @@ fn setup(
         // mechanism reads at all on a dark machine - and it is still far
         // beneath the ally's orange, so the luminance rule is unaffected.
         agile_blue_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.150, 0.215, 0.345),
+            base_color: srgb3(agile_mech::BLUE_FOE),
             metallic: 0.75,
             perceptual_roughness: 0.36,
             ..default()
@@ -14823,7 +14846,7 @@ fn setup(
         // edges, two temple pods, the reactor band and the two muzzles:
         // fourteen pieces, none larger than 16 cm.
         agile_energy: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.55, 0.82, 1.00),
+            base_color: srgb3(agile_mech::ENERGY),
             emissive: LinearRgba::new(0.45, 1.50, 3.00, 1.0),
             perceptual_roughness: 0.28,
             ..default()

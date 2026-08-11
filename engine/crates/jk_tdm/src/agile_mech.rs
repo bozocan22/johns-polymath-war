@@ -142,6 +142,19 @@ pub fn segment(a: Vec3, b: Vec3) -> (Vec3, Quat, f32) {
 /// perpendicular to the limb, not perpendicular to the world. Positive
 /// `off` is the segment's left-hand normal when walking a → b, which for
 /// this leg's thigh and shin is the FORWARD face.
+/// Centre of one sole plate, for a leg at `x`.
+///
+/// A function rather than a literal because it is the one placement on
+/// this machine that has a RIGHT ANSWER: the underside of this plate is
+/// the ground line, and a chassis whose sole floats reads as hovering
+/// while a chassis whose sole sinks reads as broken. Written inline, a
+/// mutation to it was invisible to every test in the crate — the guard
+/// below could only re-check `GROUND_Y + SOLE_H*0.5 - SOLE_H*0.5`, which
+/// is arithmetic about itself. Now the guard calls what the model calls.
+fn sole_centre(x: f32) -> Vec3 {
+    Vec3::new(x, GROUND_Y + SOLE_H * 0.5, -0.020)
+}
+
 fn offset_from(a: Vec3, b: Vec3, along: f32, off: f32) -> Vec3 {
     let d = (b - a).normalize_or_zero();
     let n = Vec3::new(0.0, -d.z, d.y);
@@ -151,6 +164,43 @@ fn offset_from(a: Vec3, b: Vec3, along: f32, off: f32) -> Vec3 {
 // ---------------------------------------------------------------------
 // THE PALETTE (§2)
 // ---------------------------------------------------------------------
+
+/// The Agile Mech's own colours, as sRGB triples, in ONE place.
+///
+/// They live here rather than as literals in `ModelKit`'s constructor
+/// because SPEC15's trap 4 says the ally/enemy read rests on VALUE and
+/// that "the luminance rule is unguarded" - and a rule can only be
+/// guarded if the numbers it is about are reachable from a test. They
+/// were not; `build_kit` typed them inline. `the_enemy_agile_never_out_
+/// luminates_the_ally` is the guard, and it is the one Trevor's Task 5
+/// asked for, paid for here because this is the pass that moved the
+/// colours.
+pub const ARMOR_ALLY: [f32; 3] = [0.90, 0.42, 0.11]; // industrial orange
+pub const ARMOR_FOE: [f32; 3] = [0.075, 0.125, 0.265]; // faction dark blue
+pub const PLATE_ALLY: [f32; 3] = [0.56, 0.235, 0.075]; // burnt orange
+pub const PLATE_FOE: [f32; 3] = [0.40, 0.165, 0.060]; // deep rust
+pub const BLUE_ALLY: [f32; 3] = [0.195, 0.285, 0.435]; // steel blue
+pub const BLUE_FOE: [f32; 3] = [0.150, 0.215, 0.345];
+/// Shared by both sides - a technology colour, not a livery colour.
+pub const ENERGY: [f32; 3] = [0.55, 0.82, 1.00];
+
+/// CIE relative luminance of an sRGB triple.
+///
+/// Written out rather than approximated with a 0.299/0.587/0.114 luma:
+/// the gamma decode is the whole point. In gamma space the enemy's blue
+/// and the ally's orange look four times apart; in linear light they are
+/// seventeen, and seventeen is the number a player's eye is actually
+/// working with at 30 m.
+pub fn relative_luminance(c: [f32; 3]) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+}
 
 /// The six material roles of §2, resolved for one side.
 ///
@@ -258,7 +308,24 @@ pub fn spawn_agile_chassis(
     // This is also why Brief X's "relatively narrow profile" is bought in
     // the LEGS, the SHOULDERS and the HEAD rather than at the waist: a
     // waist gap is the one place this rig structurally cannot give.
-    part(cube(), lv.graphite.clone(), Vec3::new(0.0, 0.195, 0.0), Quat::IDENTITY, Vec3::new(0.385, 0.30, 0.265));
+    //
+    // 0.40 x 0.30 and both numbers are floors, not taste: the pilot's
+    // waist stripe is 0.345 across and 0.27 DEEP and it is `look.accent`
+    // - bright gold on the ally. The first build's 0.385 x 0.265 left
+    // 2.5 mm of it proud at the front corners, which photographed as two
+    // small yellow tabs on the machine's hips in every frame.
+    part(cube(), lv.graphite.clone(), Vec3::new(0.0, 0.195, 0.0), Quat::IDENTITY, Vec3::new(0.400, 0.30, 0.300));
+    // THE BELLY PAN — a floor, and found the same way the lumbar housing
+    // was. `agile_moves` photographs the dodge roll, which turns the
+    // machine completely over, and that is the only camera angle in the
+    // game that looks at a chassis from UNDERNEATH. The pelvis block's
+    // floor was at y = 0.045 and the pilot's lowest torso shell reaches
+    // down to 0.01, so for a third of a second every roll showed a pale
+    // ellipse and a gold stripe through the machine's own crotch.
+    //
+    // A capture of a state nobody had ever staged found it in one frame;
+    // no test in this crate could have.
+    part(cube(), lv.graphite.clone(), Vec3::new(0.0, 0.030, 0.0), Quat::IDENTITY, Vec3::new(0.360, 0.090, 0.290));
     // the hip drum — one cylinder through both hip balls, so the two legs
     // visibly share an axle. §1's "simple mechanical connectors".
     part(cyl(), lv.blue.clone(), Vec3::new(0.0, HIP.y, HIP.z), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.175, 0.40, 0.175));
@@ -453,7 +520,7 @@ pub fn spawn_agile_chassis(
         // for "compact feet"; the old header asked for "BIG FEET" and
         // said so in capitals. This is the reversal, deliberately.
         part(cyl(), lv.blue.clone(), Vec3::new(sd * LEG_X, -0.448, -0.104), Quat::IDENTITY, Vec3::new(0.078, 0.115, 0.078));
-        part(cube(), lv.armor.clone(), Vec3::new(sd * LEG_X, GROUND_Y + SOLE_H * 0.5, -0.020), Quat::IDENTITY, Vec3::new(0.135, SOLE_H, 0.300));
+        part(cube(), lv.armor.clone(), sole_centre(sd * LEG_X), Quat::IDENTITY, Vec3::new(0.135, SOLE_H, 0.300));
         part(cube(), lv.graphite.clone(), Vec3::new(sd * LEG_X, GROUND_Y + 0.032, 0.148), Quat::from_rotation_x(0.22), Vec3::new(0.115, 0.048, 0.092));
         // THE HEEL SPUR. Two centimetres of geometry doing a lot of work:
         // it is what makes a reverse joint read as a reverse joint rather
@@ -590,11 +657,18 @@ mod tests {
     /// every other test in the crate.
     #[test]
     fn the_sole_lands_exactly_on_the_ground_line() {
-        let sole_centre = GROUND_Y + SOLE_H * 0.5;
-        assert!(
-            (sole_centre - SOLE_H * 0.5 - GROUND_Y).abs() < 1e-6,
-            "sole bottom must be GROUND_Y"
-        );
+        // calls the SAME function the model calls - an earlier version of
+        // this test recomputed the expression instead, so nudging the
+        // plate up 9 cm in the builder left the suite green. Rule 12.
+        for x in [-LEG_X, LEG_X] {
+            let c = sole_centre(x);
+            assert!(
+                (c.y - SOLE_H * 0.5 - GROUND_Y).abs() < 1e-6,
+                "sole bottom is {} , not GROUND_Y {GROUND_Y}",
+                c.y - SOLE_H * 0.5
+            );
+            assert!((c.x - x).abs() < 1e-6, "the sole left its own leg");
+        }
         // and the heel spur, the one piece that hangs behind and below
         // the ankle, must not dig through it
         let heel_bottom = GROUND_Y + 0.060 - 0.048 * 0.5 - 0.150 * 0.5 * 0.38_f32.sin();
@@ -623,9 +697,19 @@ mod tests {
         // pass - this assertion is why that got fixed instead of shipped.)
         let px = SHOULDER_HALF_W - PAULDRON_W * 0.5;
         assert!(px + 0.098 * 0.5 <= SHOULDER_HALF_W + 1e-6, "the pauldron lip overhangs");
-        // and the arm underneath it must be inboard of the cap, or the
-        // shoulder reads as a shelf with nothing under it
-        assert!(0.368 + 0.108 * 0.5 < SHOULDER_HALF_W, "the elbow is wider than the shoulder");
+        // The SHOULDER is not the widest point of this machine and never
+        // could be: `MOUNT_X` is pinned at 0.445 by the sim, the arm has
+        // to reach it, and so the elbow sits outboard of the cap. (An
+        // earlier version of this test asserted the opposite and failed,
+        // which is the right way round to find out.) What §3's "smaller
+        // shoulder structure" claim really is, then, is this: the
+        // shoulder is inboard of the weapon it feeds, so the machine's
+        // outline tapers from the mount IN toward the neck rather than
+        // bulging at the top the way a heavy's hull housings do.
+        assert!(
+            SHOULDER_HALF_W < MOUNT_X,
+            "{SHOULDER_HALF_W} is not inboard of the mount at {MOUNT_X}"
+        );
     }
 
     /// The machine must stay inside the height envelope the old one
@@ -639,6 +723,55 @@ mod tests {
         const OLD_CROWN: f32 = 1.02 + 0.42 * 0.5;
         assert!(CROWN_Y <= OLD_CROWN, "{CROWN_Y} exceeds the old {OLD_CROWN}");
         assert!(CROWN_Y - GROUND_Y > 1.6, "the machine has lost its stature");
+    }
+
+    /// SPEC15 trap 4, guarded at last: "ally/enemy separation rests on
+    /// VALUE, not hue, and the enemy's light blue is ALREADY brighter
+    /// than the ally's brightest tone. Only part coverage saves it."
+    ///
+    /// Two invariants, and the second is the strict one:
+    ///  - the DOMINANT armour, which is what a machine reads as at range,
+    ///    separates by at least 8x in linear light;
+    ///  - and the enemy's brightest surface stays below the ally's
+    ///    DIMMEST, so no enemy panel can ever be mistaken for an ally
+    ///    panel however the light falls.
+    ///
+    /// Mutation-proof: swap either side's hull colour, or lighten the
+    /// enemy's rust plate past the ally's burnt orange, and this fails.
+    /// The thresholds are judgement calls stated as numbers; they are not
+    /// derived from the colours they judge.
+    #[test]
+    fn the_enemy_agile_never_out_luminates_the_ally() {
+        let l = relative_luminance;
+        let ratio = l(ARMOR_ALLY) / l(ARMOR_FOE);
+        assert!(
+            ratio >= 8.0,
+            "hull separation is only {ratio:.1}x ({} vs {})",
+            l(ARMOR_ALLY),
+            l(ARMOR_FOE)
+        );
+        let brightest_foe = l(ARMOR_FOE).max(l(PLATE_FOE)).max(l(BLUE_FOE));
+        let dimmest_ally = l(ARMOR_ALLY).min(l(PLATE_ALLY)).min(l(BLUE_ALLY));
+        assert!(
+            brightest_foe < dimmest_ally,
+            "an enemy surface at {brightest_foe:.4} is brighter than an \
+             ally surface at {dimmest_ally:.4}"
+        );
+        // and the shared energy accent must out-shine every PAINTED
+        // surface on either side, or "lit" stops reading as lit.
+        assert!(l(ENERGY) > l(ARMOR_ALLY), "the accent is dimmer than the paint");
+    }
+
+    /// A sanity anchor for `relative_luminance` itself, so the guard
+    /// above cannot be satisfied by a broken formula. Black is 0, white
+    /// is 1, and mid-grey sRGB 0.5 decodes to ~0.214 - the classic value
+    /// that catches anyone who forgot the gamma.
+    #[test]
+    fn relative_luminance_decodes_gamma() {
+        assert!(relative_luminance([0.0; 3]).abs() < 1e-6);
+        assert!((relative_luminance([1.0; 3]) - 1.0).abs() < 1e-4);
+        let mid = relative_luminance([0.5; 3]);
+        assert!((mid - 0.2140).abs() < 0.002, "mid grey decoded to {mid}");
     }
 
     /// The leg is a REVERSE JOINT, and that is a geometric claim, not a
