@@ -22868,6 +22868,7 @@ fn esc_toggle(
     state: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
     ret: Res<frontend::NavReturn>,
+    learn_ret: Res<frontend::LearnReturn>,
     mut exit: EventWriter<AppExit>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
@@ -22886,7 +22887,12 @@ fn esc_toggle(
             // opened from. Escape did nothing here for the whole life of
             // the old flow, because there was nothing behind it.
             GameState::Intro => next.set(GameState::MainMenu),
-            GameState::Learn => next.set(ret.0.clone()),
+            // LEARN reads its OWN slot. It used to read `ret`, which
+            // Manual and Controls overwrite with `Learn` on the way in -
+            // so after a trip to either, Escape and BACK both pointed at
+            // the screen the player was already on and the only exit left
+            // was killing the process.
+            GameState::Learn => next.set(learn_ret.0.clone()),
             // The title screen keeps exactly two BUTTONS, so quitting has
             // to live somewhere that is not a third one: the quiet
             // tertiary row, and this key.

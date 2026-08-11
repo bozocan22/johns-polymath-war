@@ -277,6 +277,31 @@ impl Default for NavReturn {
     }
 }
 
+/// Where LEARN's own `Back` should return to.
+///
+/// A SECOND slot, because the navigation is two levels deep and one slot
+/// cannot hold two levels. Title -> Learn -> Manual is a real path, and
+/// with a single `NavReturn` it dead-ended the player:
+///
+/// 1. Title -> LEARN sets the slot to `Title`.
+/// 2. LEARN -> MANUAL overwrites the SAME slot with `Learn`, because
+///    Escape out of Manual has to land back on Learn.
+/// 3. Escape returns to Learn, correctly.
+/// 4. LEARN's BACK now reads `Learn` and sets the state it is already in.
+///
+/// The button was not merely inert - Escape reads the same slot, so both
+/// exits died together and the only way off the screen was killing the
+/// process. Manual and Controls keep using `NavReturn`; they never touch
+/// this, so step 2 can no longer destroy step 1.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct LearnReturn(pub GameState);
+
+impl Default for LearnReturn {
+    fn default() -> Self {
+        LearnReturn(GameState::Title)
+    }
+}
+
 // ---- the introductory match ---------------------------------------------
 
 /// Per the spec: the first match is FIXED. 4v4, first to 25 kills.
@@ -1191,6 +1216,7 @@ fn front_buttons(
     q: Query<(&Interaction, &FrontAction), Changed<Interaction>>,
     state: Res<State<GameState>>,
     mut ret: ResMut<NavReturn>,
+    mut learn_ret: ResMut<LearnReturn>,
     mut next: ResMut<NextState<GameState>>,
     mut entry: ResMut<crate::IntroEntryPage>,
     mut game: ResMut<crate::Game>,
@@ -1205,10 +1231,11 @@ fn front_buttons(
                 crate::begin_match(intro_match_config(), &mut game, &mut next);
             }
             FrontAction::Learn => {
-                ret.0 = state.get().clone();
+                // LEARN's own slot, not the shared one - see `LearnReturn`.
+                learn_ret.0 = state.get().clone();
                 next.set(GameState::Learn);
             }
-            FrontAction::Back => next.set(ret.0.clone()),
+            FrontAction::Back => next.set(learn_ret.0.clone()),
             FrontAction::FullManual => {
                 ret.0 = GameState::Learn;
                 next.set(GameState::Manual);
@@ -1279,6 +1306,7 @@ pub struct FrontendPlugin;
 impl Plugin for FrontendPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NavReturn>()
+            .init_resource::<LearnReturn>()
             .add_systems(OnEnter(GameState::Title), (open_title, spawn_curtain))
             .add_systems(OnExit(GameState::Title), close_front)
             .add_systems(OnEnter(GameState::Learn), (open_learn, spawn_curtain))
@@ -1312,6 +1340,45 @@ fn in_front_end(state: Res<State<GameState>>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LEARN's BACK must never point at LEARN.
+    ///
+    /// The shipped bug: one `NavReturn` served a two-level path, so
+    /// Title -> LEARN -> MANUAL -> Escape -> LEARN left BACK (and Escape,
+    /// which reads the same slot) aiming at the screen the player was
+    /// already on. Both exits died together; only killing the process got
+    /// you out.
+    ///
+    /// HONEST LIMIT, so nobody reads more into a green tick than is
+    /// there: this replays the writes the two systems make rather than
+    /// running them - `front_buttons` needs a Bevy world, `Game` and an
+    /// `AppExit` writer. It fails if the two slots are ever collapsed back
+    /// into one, which is the actual defect; it would NOT catch someone
+    /// rewiring `FrontAction::Back` to read `NavReturn` again. Doing that
+    /// properly needs an App-level test, and that is worth building the
+    /// next time this module is opened.
+    #[test]
+    fn learn_back_survives_a_trip_through_the_manual() {
+        let mut nav = NavReturn::default();
+        let mut learn = LearnReturn::default();
+
+        // 1. Title -> LEARN records where LEARN was opened from.
+        learn.0 = GameState::Title;
+        // 2. LEARN -> MANUAL records ITS return in the shared slot,
+        //    because Escape out of Manual has to land back on Learn.
+        nav.0 = GameState::Learn;
+
+        // 3. Escape out of Manual: correct, and must stay correct.
+        assert_eq!(nav.0, GameState::Learn, "Escape out of MANUAL lost LEARN");
+
+        // 4. The regression itself.
+        assert_ne!(
+            learn.0,
+            GameState::Learn,
+            "LEARN's BACK points at LEARN - the player is trapped"
+        );
+        assert_eq!(learn.0, GameState::Title, "BACK must reach the title screen");
+    }
 
     /// The spec is a fixed 4v4 to 25. If either number moves, the
     /// introductory match is no longer the one that was asked for.
