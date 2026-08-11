@@ -240,3 +240,72 @@ without it. One sentence from the owner settles it and the change is
 two lines.
 
 -- FRIDAY22
+
+---
+
+## FRIDAY22 — 2026-08-11 — CASTLE BAILEY v7: +30%, randomised, retargeted 8v8–16v16
+
+`sim.rs` only. `main.rs`/`hud.rs` were live under another session the
+whole time; I did not touch them, and the client half of this map (the
+palette in `map_look.rs:187`) is Friday33's if it needs one.
+
+**Picked Bailey over Gardens.** The brief said castle; Bailey's
+vocabulary is keep, drum towers, curtain walls. The Gardens' is hedges, a
+gazebo and fountain basins — the grounds *outside* a castle. Scaling that
+one gets you a bigger park.
+
+**Size:** authored half 40.0 → `BAILEY_HALF` 52.0, so 99×99 m playable →
+130×130. `MAP_METRICS.md` has no player-count row, so the number is my
+judgement and is written down as one: 16v16 is 524 m² a body (~23 m mean
+spacing), 8v8 is 1048 (~32 m). Both land inside the 25–35 m engagement
+band §6.4 names, at opposite ends. The old map put 16v16 at 17 m, under
+the band and inside §6.3's "close range" transfer — that is the
+crampedness the brief was naming.
+
+**Randomised** off the `rng` already threaded into `build_map`: curtain
+wall stand-off, gate width and sally-port position per wall; drum tower
+radius and corner stand-off; rampart length and parapet breaks; a raised
+causeway on a randomly chosen flank; four outbuildings; five L-shaped
+building corners; six big trees; twelve barricades. Everything randomised
+is placed as a **180° rotated pair**, because teams spawn facing each
+other down z and point symmetry is what makes a random layout fair.
+
+**Three things worth knowing:**
+
+1. **The "bridge" is a causeway and cannot be anything else.** Cover is
+   an `Aabb` with a top and no underside, so there is no walking under
+   anything in this engine, ever. A raised road with a drop each side and
+   a ramp at each end is what is buildable, and it reads as a bridge from
+   on top of it, which is where it is played from.
+2. **Everything stays under `BOT_TERRAIN_M`.** Bailey publishes no
+   `Climb` links, so a blocker over 3.5 m is one `ground_reach` refuses
+   to route through and cannot route around either. That constraint is
+   now a named constant with the reasoning on it, not an accident.
+3. **Two defects found by mutation-testing my own tests, not by reading
+   them.** All four outbuildings were being rejected on every seed — the
+   feature compiled and did nothing, and I only know because an unseeded
+   value planted in that loop failed to move the layout digest. And the
+   doorway I had written was wider than the wall it was in.
+
+**Least sure about:** the three-sided court. I chose it over a 3–4 m
+doorway because that would put every outbuilding under the 7 m aperture
+floor — but that floor is `MAP_METRICS` §10.2's own flagged ANALOGY to
+`BOT_CLIMB_LANE_M` and has never been measured. If somebody runs the
+aperture experiment §10.2 scopes (one afternoon) and 4 m turns out to be
+fine, these should become real enclosed buildings with doors.
+
+**Deferred, and it is the one that blocks the headline:** `spawn_point`
+still lays out **8 slots per team**. A real 16v16 spawns slots 8–15 in a
+lop-sided row trailing off to one side. The map is sized for 16v16; the
+spawn row is not. That is a shared function every map reads and it is a
+separate change with its own test surface.
+
+**Not verified visually.** No capture — this is a `sim.rs`-only change
+and I did not build the client. The layout claims here rest on tests and
+arithmetic, not on a screenshot of the map.
+
+`cargo test --release -p jk_tdm` — 485 before, **488 passed, 0 failed, 2
+ignored** after. Four are mine; the other delta is the concurrent
+`main.rs` session's.
+
+— **FRIDAY22**
