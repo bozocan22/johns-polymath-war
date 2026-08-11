@@ -65,6 +65,10 @@ mod map_look;
 mod mech_lineup;
 mod mech_recoil;
 mod menu_ui;
+/// THE MUZZLE FLASH. Same two-line wiring as `branding` and
+/// `mech_recoil`: this line, and one `add_plugins` below. It reads the
+/// shot clock every other fresh-shot effect reads and owns nothing else.
+mod muzzle_flash;
 mod sim;
 
 use bevy::audio::Volume;
@@ -400,10 +404,19 @@ fn bow_draw_visual(bow_draw_t: f32, fire_cd: f32, fire_period: f32, is_player: b
 /// actually describe.
 const BOW_TIP_Y: f32 = 0.392;
 /// Tip depth. The recurve steps backward, so the tips sit behind the riser.
-const BOW_TIP_Z: f32 = -0.088;
+///
+/// §owner THE RECURVE: moved back from -0.088 to -0.100 in the design
+/// pass. The limb now SWEEPS - four segments on rising tilts instead of
+/// three square steps - and a swept limb's last segment reaches further
+/// back in z than a stepped one at the same tip height. At -0.088 the
+/// string ran THROUGH that segment; at -0.100 it clears the belly of
+/// the recurve by about a centimetre, which is also what a real string
+/// does. `BOW_STRING_Z` moves with it, so the slack-string tension is
+/// unchanged.
+const BOW_TIP_Z: f32 = -0.100;
 /// The nock at REST - a hair behind the tips, which is what gives an
 /// undrawn string its slight tension rather than a dead straight line.
-const BOW_STRING_Z: f32 = -0.098;
+const BOW_STRING_Z: f32 = -0.110;
 /// How far back the nock travels at full draw. Scaled to this bow's
 /// 0.78 m span rather than to a real 0.7 m draw length: at true scale the
 /// hand ends up behind the shoulder and the IK chain runs out of arm.
@@ -1171,7 +1184,10 @@ fn chain_lag_chase(lag: f32, target: f32, dt: f32) -> f32 {
 // same follow-through with no discontinuity.
 const COIL_AWAY_RAD: f32 = -0.73; // windup: torso coils away from the target
 const COIL_SWING_RAD: f32 = 1.08; // plant -> whip: hips fire open through it
-const COIL_PLANT_FRAC: f32 = 0.68; // windup fraction where the plant blocks
+// (`COIL_PLANT_FRAC` = 0.68 lived here - the point inside the 0.4 s
+// plant where the hips stopped coiling away and started firing open.
+// The CHARGE owns the coiling-away half now, so the plant is all
+// swing. See `torso_coil_yaw`.)
 const THRUST_AWAY_RAD: f32 = -0.45;
 const THRUST_SWING_RAD: f32 = 0.80;
 /// The yaw BOTH the throw windup and the thrust end on (COIL_AWAY +
@@ -1271,17 +1287,117 @@ fn spear_followthrough_yaw_from(release_t: f32, tip_onset: f32, tip_peak: f32) -
     (SPEAR_RELEASE_YAW + OVERSHOOT_RAD * drive) * decay
 }
 
-fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bool, release_t: f32) -> f32 {
+/// §owner THE OVERHEAD JAVELIN WIND, third person - the whole pose, as
+/// six numbers driven by ONE fraction.
+///
+/// "A real overhead javelin wind: throwing arm raised high with the
+/// spear angled forward-and-down over the shoulder, the opposite arm
+/// extended forward for balance, weight shifted back into a wide braced
+/// stance. It must read at a glance as *this player is winding up to
+/// throw*."
+///
+/// What was there instead: NOTHING. The third-person spear branch fired
+/// on `spear_cocked || spear_wind_t > 0`, `spear_cocked` was
+/// `cam_ctl.ads` for the player, and the whole wind fraction it posed
+/// against came from `spear_wind_t` - which is the RELEASE clock and is
+/// zero for the entire charge. So holding the charge produced one frozen
+/// frame of the plant's t=0, and after the input rework moved charging
+/// to LMB it produced not even that: RMB was no longer held, so the
+/// branch was not entered at all and a charging thrower stood in the
+/// ordinary rifle carry with the shaft pointing straight downrange,
+/// hidden behind his own body. The capture is in
+/// `handback/brief-vii/spear_flight/00-charging.png` from before this
+/// pass - HUD reading JAVELIN WIND, and no spear visible anywhere.
+///
+/// `w` is `TdmSim::spear_wind_frac_of` - the sim's own clock, never a
+/// client timer, so the pose and the release cannot disagree about how
+/// wound the throw is.
+struct JavelinPose {
+    /// weapon-root position, torso space
+    hand: Vec3,
+    /// spear pitch. POSITIVE angles the head DOWN, which is what
+    /// "angled forward-and-down over the shoulder" means once the hand
+    /// is behind the ear and the point is out past the front foot.
+    pitch: f32,
+    /// shaft yaw across the body - the point tracks back toward the
+    /// aim line while the hand goes out to the side of the head
+    yaw: f32,
+    /// left-hand IK target: the balance arm, out toward the target
+    off_hand: Vec3,
+    /// how far the hips sink into the brace, metres
+    sink: f32,
+    /// front/rear thigh split, radians - the wide braced stance
+    stagger: f32,
+}
+
+fn javelin_wind_pose(w: f32) -> JavelinPose {
+    let w = w.clamp(0.0, 1.0);
+    JavelinPose {
+        hand: Vec3::new(0.22 + 0.07 * w, 0.66 + 0.25 * w, 0.06 - 0.34 * w),
+        pitch: 0.06 + 0.21 * w,
+        yaw: -0.10 - 0.15 * w,
+        off_hand: Vec3::new(-0.10 - 0.09 * w, 0.56 + 0.15 * w, 0.40 + 0.28 * w),
+        sink: 0.05 * w,
+        stagger: 0.36 * w,
+    }
+}
+
+/// The PLANT, which begins exactly where `javelin_wind_pose(1.0)` ends.
+///
+/// That continuity is the point: the old plant started with the shaft
+/// 77 degrees NOSE-UP, which is nowhere the wind could hand it over
+/// from, so any real charge-then-release would have snapped through a
+/// pose the player never saw coming. `p` is
+/// `TdmSim::spear_plant_frac_of`.
+fn javelin_plant_pose(p: f32) -> JavelinPose {
+    let p = p.clamp(0.0, 1.0);
+    // a short extra LOAD, then the whip - the same two-beat shape the
+    // previous plant had, re-hung on the wind's end pose
+    const LOAD_FRAC: f32 = 0.30;
+    let load = ease_out((p / LOAD_FRAC).min(1.0));
+    let whip = ease_out(((p - LOAD_FRAC) / (1.0 - LOAD_FRAC)).max(0.0));
+    let base = javelin_wind_pose(1.0);
+    JavelinPose {
+        hand: base.hand
+            + Vec3::new(0.02, 0.05, -0.09) * load
+            + Vec3::new(-0.14, -0.30, 1.02) * whip,
+        // loads a little further nose-down, then swings THROUGH to a
+        // shallow nose-up release - a javelin leaves the hand climbing
+        pitch: base.pitch + 0.18 * load - 0.66 * whip,
+        yaw: base.yaw * (1.0 - whip),
+        off_hand: base.off_hand + Vec3::new(0.06, -0.16, -0.34) * whip,
+        sink: base.sink * (1.0 - 0.7 * whip),
+        stagger: base.stagger * (1.0 - 0.5 * whip),
+    }
+}
+
+/// `wind` is `spear_wind_frac_of` - the charge, which the old signature
+/// had no way to see (`spear_wind_t` is the release clock and reads 0
+/// for the whole of it). The hips coil AWAY through the charge and then
+/// fire open through the plant, so the separation builds over seconds
+/// rather than appearing in the last 0.4 s.
+fn torso_coil_yaw(
+    gun: GunKind,
+    spear_wind_t: f32,
+    knife_phase: f32,
+    in_mech: bool,
+    release_t: f32,
+    wind: f32,
+) -> f32 {
     if gun == GunKind::Spear {
         if spear_wind_t > 0.0 {
-            let wp = 1.0 - spear_wind_t / SPEAR_WINDUP_S;
-            if wp < COIL_PLANT_FRAC {
-                COIL_AWAY_RAD * (wp / COIL_PLANT_FRAC) // windup: torso coils away
-            } else {
-                // plant -> whip: hips fire open, fast
-                COIL_AWAY_RAD
-                    + COIL_SWING_RAD * ((wp - COIL_PLANT_FRAC) / (1.0 - COIL_PLANT_FRAC))
-            }
+            // §owner: the plant now STARTS fully coiled and spends all
+            // 0.4 s firing open.
+            //
+            // It used to spend its own first 68% coiling AWAY and only
+            // then swing - which was right when the plant WAS the whole
+            // wind, and became a visible unwind-then-rewind the moment
+            // the charge got a coil of its own: the hips reached -0.73
+            // over the hold, snapped to 0 at the release, and coiled
+            // back again before the throw. `COIL_PLANT_FRAC` retires
+            // with it.
+            let wp = (1.0 - spear_wind_t / SPEAR_WINDUP_S).clamp(0.0, 1.0);
+            COIL_AWAY_RAD + COIL_SWING_RAD * wp
         } else if knife_phase > 0.0 {
             let tw = THRUST_WIND_S * if in_mech { MECH_THRUST_TIME_MULT } else { 1.0 };
             let ph = knife_phase;
@@ -1291,6 +1407,11 @@ fn torso_coil_yaw(gun: GunKind, spear_wind_t: f32, knife_phase: f32, in_mech: bo
                 THRUST_AWAY_RAD
                     + THRUST_SWING_RAD * ease_out(((ph - tw) / 0.16).clamp(0.0, 1.0))
             }
+        } else if wind > 0.0 {
+            // THE CHARGE. The hips wind away over the whole hold and
+            // stop where the plant's own curve starts, so the handover
+            // at the release is continuous.
+            COIL_AWAY_RAD * wind.clamp(0.0, 1.0)
         } else {
             spear_followthrough_yaw(release_t)
         }
@@ -2907,14 +3028,43 @@ fn weapon_bounded_extent(kind: GunKind) -> (f32, f32) {
 /// Taking the real corners is both more accurate AND stricter: it checks
 /// eleven or twenty of them instead of two, and every one is somewhere
 /// the weapon actually is.
+/// §owner: measured in the CAMERA's frame, not the model's - which is
+/// two fixes at once, and the sweep was wrong in both directions before
+/// them.
+///
+/// MIRROR. The viewmodel is yawed by PI, so model +X is screen LEFT.
+/// The old expression `h.x - w.pos.x` treats them as the same axis, so
+/// every part sitting off the weapon's centre line was measured on the
+/// wrong side: the bow's arrow rest at model x +0.036 reaches 5.1 cm
+/// LEFT of the riser on screen and was recorded as reaching 2.1 cm
+/// RIGHT. Symmetric parts (which is nearly all of them) were unaffected,
+/// which is why it survived.
+///
+/// ROLL. `vm_carry` can now cant a weapon about the view axis, and a
+/// cant is precisely a trade of vertical reach for horizontal reach -
+/// the whole reason the bow is allowed to be tall. Measuring the
+/// UNROLLED model would say the war bow reaches 39 cm straight up and
+/// 2 cm sideways, when what it actually does at 24 degrees is reach 36
+/// up and 16 out. Every gun carries roll 0 and is byte-identical.
+///
+/// Still conservative: each part contributes its rotated AABB corners,
+/// and the model's own 0.9 render scale is deliberately NOT applied, so
+/// every reach is over-stated by 11%.
 fn weapon_bounded_corners(kind: GunKind) -> Vec<(f32, f32)> {
     let prof = screen_profile(kind);
+    let (rs, rc) = vm_carry(kind).roll.sin_cos();
     weapon_parts(kind)
         .into_iter()
         .filter(|w| profile_bounds_part(prof, w))
-        .map(|w| {
+        .flat_map(|w| {
             let h = w.half();
-            (h.x - w.pos.x, w.pos.y + h.y)
+            // model -> camera: x mirrors, then the cant rotates both.
+            let cx = -w.pos.x;
+            [(-h.x, -h.y), (-h.x, h.y), (h.x, -h.y), (h.x, h.y)].map(|(dx, dy)| {
+                let (px, py) = (cx + dx, w.pos.y + dy);
+                // leftward reach is POSITIVE, matching the callers
+                (-(px * rc - py * rs), px * rs + py * rc)
+            })
         })
         .collect()
 }
@@ -2925,7 +3075,14 @@ fn weapon_bounded_corners(kind: GunKind) -> Vec<(f32, f32)> {
 // actually moves the weapon toward the midline was unbounded. The bow's
 // is the one that matters - it pulls 7.5 cm LEFT at full draw.
 /// Full draw brings the bow up and in toward the aiming eye.
-const VM_BOW_DRAW_SHIFT: Vec3 = Vec3::new(-0.075, 0.030, 0.050);
+///
+/// §owner: the inward pull is 4.5 cm now, not 7.5. It is real - an
+/// archer at anchor HAS brought the bow hand in toward the sight line -
+/// but the owner's rule is that the centre stays clear, and the bow's
+/// new carry is out at x +0.30. Seven and a half centimetres of it was
+/// the single largest sustained shift in the arsenal and existed to
+/// walk a bow held LEFT of the crosshair back across it.
+const VM_BOW_DRAW_SHIFT: Vec3 = Vec3::new(-0.045, 0.030, 0.060);
 /// The inspect turn.
 const VM_INSPECT_SHIFT: Vec3 = Vec3::new(-0.06, -0.02, 0.06);
 /// The grenade coil, deepening with the charge.
@@ -2997,6 +3154,12 @@ fn carry_offset(
     sprint_e: f32,
     dip: f32,
     wind: f32,
+    // §owner REDUCED SWAY: `vm_steady` for the weapon in hand. It scales
+    // the BOB and nothing else - the sprint lower, the landing dip, the
+    // fire slide and the javelin wind are all reads the player is
+    // entitled to at full size on every weapon, and damping them would
+    // be hiding information rather than steadying a hold.
+    steady: f32,
 ) -> Vec3 {
     let s = if speed_frac < VM_BOB_DEADZONE {
         0.0 // standing = frozen bob clock = zero positional motion
@@ -3007,7 +3170,7 @@ fn carry_offset(
     let bob = Vec2::new(
         0.0065 * s * theta.sin(),
         0.004 * s * (2.0 * theta).sin(),
-    ) * air;
+    ) * (air * steady);
     Vec3::new(
         bob.x + sprint_e * 0.02 + wind * 0.07,
         // the run-lower and the landing dip pull DOWN, never up
@@ -3022,26 +3185,149 @@ fn carry_offset(
 /// `fp_viewmodel`'s sight-alignment shift derives from the same numbers -
 /// two copies of this table would drift and the sights would land
 /// off-eye.
-fn vm_carry(wk: GunKind) -> (Vec3, f32) {
+/// §owner REDUCED SWAY: how much idle motion a weapon is allowed.
+///
+/// *"Controlled, stable, responsive"* rather than *"loose, exaggerated,
+/// cinematic"* - asked for the bow and the spear SPECIFICALLY, which is
+/// why this is a per-weapon number and not a global retune. A trained
+/// soldier carries a bow or a javelin efficiently; the rifles keep the
+/// motion they have, because nothing was wrong with it.
+///
+/// One factor, scaling three things that are all the same idea: the
+/// walk bob, the mouse-lag sway, and the breathing drift. It never
+/// touches an aim: every one of those is a viewmodel translation or
+/// rotation, and the round still leaves the camera ray.
+fn vm_steady(kind: GunKind) -> f32 {
+    match kind {
+        GunKind::Bow | GunKind::Spear => 0.45,
+        _ => 1.0,
+    }
+}
+
+/// Where a weapon is held in first person, and how it is turned there.
+///
+/// This used to be `(Vec3, f32)`, and the f32 was named `extra_rx` and
+/// documented as "the CANT" that "rolls the upper limb out of the
+/// centre". It is applied as `Quat::from_rotation_x`, which after the
+/// model's own 180 degree yaw is a PITCH: it tipped the bow's top limb
+/// AWAY from the eye and moved it sideways by exactly nothing. The bow
+/// was never canted. It stood dead upright, 16 cm LEFT of the sight
+/// line, for as long as that comment has been there - which is what the
+/// first-person capture shows.
+///
+/// Three named angles instead, because a weapon needs different ones
+/// for different reasons and one f32 could only ever be the wrong two:
+/// PITCH tips it away, ROLL is the archer's cant, YAW aims the point.
+struct VmCarry {
+    /// camera-space metres. Z is NEGATIVE forward - a POSITIVE z is
+    /// behind the eye, which is where most of a couched javelin lives.
+    pos: Vec3,
+    /// about the model's own X. Positive tips the top away from the eye.
+    pitch: f32,
+    /// about the VIEW axis - the real cant. POSITIVE takes the top of
+    /// the weapon to screen-RIGHT (and, necessarily, its bottom to
+    /// screen-left; on a bow that is the lower limb, and it leaves the
+    /// frame through the bottom before it reaches the midline).
+    roll: f32,
+    /// on top of the 0.026 rad every weapon carries. That base value
+    /// CONVERGES the muzzle on screen centre, which is right for a rifle
+    /// carried at the shoulder and wrong for anything the owner wants
+    /// kept off the crosshair: NEGATIVE yaw diverges the point outward.
+    yaw: f32,
+}
+
+const fn carry(pos: Vec3, pitch: f32, roll: f32, yaw: f32) -> VmCarry {
+    VmCarry { pos, pitch, roll, yaw }
+}
+
+/// Every viewmodel is drawn at this scale. Named because the projection
+/// helper below and the spawn that places the models must agree, and
+/// because `ads_shift` already multiplies a sight height by it.
+const VM_MODEL_SCALE: f32 = 0.9;
+
+impl VmCarry {
+    /// The full model rotation, exactly as `setup` builds it.
+    fn rotation(&self) -> Quat {
+        Quat::from_rotation_y(PI + 0.026 + self.yaw)
+            * Quat::from_rotation_z(self.roll)
+            * Quat::from_rotation_x(self.pitch)
+    }
+
+    /// Where a WEAPON-LOCAL point lands on screen, in units of HALF
+    /// SCREEN HEIGHT: (0,0) is the crosshair, (0,1) the top edge.
+    /// `None` = the point is at or behind the eye and is not drawn.
+    ///
+    /// §owner THE SACRED CENTRE, as an instrument. The intrusion sweep
+    /// answers a different and weaker question - it compares a weapon's
+    /// reach against a circle sized for the distance the weapon's ROOT
+    /// is at - and for a 2 m polearm that is barely a question at all:
+    /// the head sits a metre and a half past the root, where a fixed
+    /// lateral offset has shrunk to a fraction of its screen size. The
+    /// old javelin cleared the sweep with room and still drew its point
+    /// 8% of a half-width from dead centre, which is ON the crosshair.
+    ///
+    /// This projects properly instead, so a part is judged where the
+    /// player actually sees it.
+    fn screen_point(&self, shift: Vec3, local: Vec3) -> Option<Vec2> {
+        let p = self.pos + shift + self.rotation() * (local * VM_MODEL_SCALE);
+        // the camera looks down -Z, so forward depth is -z
+        let depth = -p.z;
+        if depth <= 1e-3 {
+            return None;
+        }
+        let half_h = depth * (VM_FOV_DEG.to_radians() * 0.5).tan();
+        Some(Vec2::new(p.x / half_h, p.y / half_h))
+    }
+}
+
+/// Radius of the "never obstructed" zone, in half-heights.
+///
+/// The project has always sized this at 12% of screen HEIGHT (see
+/// `every_weapon_holds_its_own_screen_profile`'s `r_at`, whose 0.24 is
+/// this same number one factor of half-height away).
+const VM_CENTRE_CLEAR: f32 = 0.24;
+
+fn vm_carry(wk: GunKind) -> VmCarry {
     match wk {
-        // §owner THE CANT. The bow stands upright again (see
-        // `BOW_TIP_Y`), which puts a 0.39 m upper limb back near the
-        // sight line - the exact problem that laying it flat was meant
-        // to solve, and the exact problem archers solve by CANTING the
-        // bow rather than by felling it.
+        // §owner THE BOW ON THE RIGHT. The reference is explicit and
+        // says the same thing three ways: weapon on the RIGHT of frame,
+        // crosshair never obstructed, nothing crosses the centre. The
+        // riser sits low and to the right, the limbs sweep up-and-right
+        // out of shot, the string runs diagonally, and the whole middle
+        // of the screen is empty sky.
         //
-        // 0.42 rad (24 degrees) rolls the upper limb out of the centre
-        // while the bow still unmistakably reads as upright. Held left
-        // of centre (x -0.16) so the riser sits beside the crosshair
-        // rather than under it, and kept far forward (z -0.66) and low
-        // (y -0.24), because an upright bow is the tallest thing on any
-        // weapon relative to its own carry and the central
-        // 12%-of-screen-height circle has to stay clear at every pose.
-        GunKind::Bow => (Vec3::new(-0.16, -0.24, -0.66), 0.42),
-        GunKind::Spear => (Vec3::new(0.15, -0.10, -0.28), -0.12),
-        GunKind::Glock | GunKind::Deagle => (Vec3::new(0.10, -0.125, -0.30), 0.0),
-        GunKind::M249 => (Vec3::new(0.13, -0.14, -0.42), 0.0),
-        _ => (Vec3::new(0.11, -0.13, -0.32), 0.0),
+        // It was at x -0.16 - LEFT of the sight line - and photographed
+        // as a black post through the middle-left of the frame.
+        //
+        // 0.42 rad of ROLL is the archer's cant, and now that it is a
+        // roll rather than a pitch it does the job the old comment
+        // claimed: the upper limb leaves toward the top-right corner and
+        // the lower limb leaves through the bottom of the frame. Kept
+        // forward (z -0.60) and low (y -0.30) because an upright bow is
+        // the tallest thing in the arsenal relative to its own carry.
+        GunKind::Bow => carry(Vec3::new(0.30, -0.30, -0.60), 0.10, 0.42, 0.0),
+        // §owner THE JAVELIN, COUCHED. "Only a small amount of the spear
+        // should be visible - ideally just the tip/head on the right
+        // side."
+        //
+        // The old carry put the grip 0.28 m IN FRONT of the eye, which
+        // sounds like less of the weapon and is in fact more: 2.1 m of
+        // shaft then runs away downrange, and a line of constant camera
+        // x converges on the vanishing point, so the head ended up at
+        // about 8% of half-width from dead centre with the shaft drawn
+        // diagonally across the reticle to reach it.
+        //
+        // Moving the grip BEHIND the eye (positive z) is what actually
+        // shortens the visible run: everything nearer than about 0.35 m
+        // is off the right-hand edge, so what remains on screen is the
+        // last third - the head, and a short diagonal of shaft entering
+        // from the bottom-right corner.
+        GunKind::Spear => carry(Vec3::new(0.42, -0.17, 0.22), 0.0, 0.0, 0.0),
+        GunKind::Glock | GunKind::Deagle => {
+            carry(Vec3::new(0.10, -0.125, -0.30), 0.0, 0.0, 0.0)
+        }
+        GunKind::M249 => carry(Vec3::new(0.13, -0.14, -0.42), 0.0, 0.0, 0.0),
+        _ => carry(Vec3::new(0.11, -0.13, -0.32), 0.0, 0.0, 0.0),
     }
 }
 
@@ -3659,6 +3945,23 @@ struct ModelKit {
     gold: Handle<StandardMaterial>,
     white: Handle<StandardMaterial>,
     med_glow: Handle<StandardMaterial>,
+    /// §owner MECH WEAPON LOOK: the repair beam's translucent GREEN
+    /// sheath, and the bloom where it lands.
+    ///
+    /// These exist because the repair beam had no colour of its own. It
+    /// drew its shaft with `barrier_edge` (the SHIELD film's blue) and
+    /// its travelling packets with `core_glow` (the DANGER red) - so the
+    /// one thing on this battlefield that means "I am mending you"
+    /// rendered as a shield-coloured bar carrying red warning lights,
+    /// which is two other signals and neither of them healing. `med_glow`
+    /// was already the friendly repair green and was already in the kit;
+    /// nothing was missing but the wiring.
+    ///
+    /// Two layers for the same reason `plasma_core`/`plasma_halo` are
+    /// two: the packet is near-white at the middle because a hot thing
+    /// is, and the hue lives in the sheath around it.
+    repair_sheath: Handle<StandardMaterial>,
+    repair_bloom: Handle<StandardMaterial>,
     armor_dark: Handle<StandardMaterial>,
     core_glow: Handle<StandardMaterial>,
     /// §owner the plasma bolt's two layers. The CORE is nearly white -
@@ -3682,6 +3985,12 @@ struct ModelKit {
     grey_mid: Handle<StandardMaterial>,
     grey_dark: Handle<StandardMaterial>,
     grey_black: Handle<StandardMaterial>,
+    /// §owner BOW & SPEAR: the two materials the tackle palette needed
+    /// and the four greys could not supply. `wood` and `string` already
+    /// existed above and are reused rather than duplicated - see `Tone`.
+    leather: Handle<StandardMaterial>,
+    blade: Handle<StandardMaterial>,
+    collar: Handle<StandardMaterial>,
     // §11 (Brief IV): the Mech Armada palette - khaki faceted plates
     // over shadowed joints, one red sensor slit
     mech_khaki: Handle<StandardMaterial>,
@@ -3835,7 +4144,7 @@ struct ModelKit {
 }
 
 /// §2.1 tone slots of the weapon palette.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Tone {
     Light,
     Mid,
@@ -3847,6 +4156,34 @@ enum Tone {
     /// weak point carries MECH_VISOR_MULT), and a reticle that shared
     /// its handle would start reading as a hit marker.
     Reticle,
+    // ---- §owner BOW & SPEAR: the TACKLE palette ----------------------
+    //
+    // The four greys are a FIREARM vocabulary - flat machined metal in
+    // four values - and the bow and the spear are not firearms. Built
+    // out of that palette the war bow photographed as a black post with
+    // a grey wire across it (`handback/brief-vii/bow_draw_fp`, the
+    // frames dated before this pass), which is what the owner was
+    // looking at when they asked for "warm mid-brown wood, a slim black
+    // leather grip, a pale taut string".
+    //
+    // Four more slots, and they are MATERIALS rather than values: wood
+    // has grain, leather is matte and near-black, cord is pale and
+    // unmetallic, and a forged blade is dark. The handles behind them
+    // already existed (`kit.wood`, `kit.string`) and two of them had no
+    // reader at all - the bowstring material has been built every
+    // startup since the bow shipped and drawn on nothing.
+    /// Warm mid-brown, grained. Bow limbs and riser core, spear shaft,
+    /// arrow shaft - the same stick in all three places, on purpose.
+    Wood,
+    /// Near-black matte leather. The bow's grip wrap only.
+    Leather,
+    /// Pale, unmetallic cord. The bowstring.
+    Cord,
+    /// Dark forged steel. Spear blade and arrow head - a war head is
+    /// dark iron, not the bright `Light` grey a receiver is.
+    Blade,
+    /// The short red binding that seats a blade on a shaft.
+    Collar,
 }
 
 impl ModelKit {
@@ -3857,6 +4194,11 @@ impl ModelKit {
             Tone::Dark => self.grey_dark.clone(),
             Tone::Black => self.grey_black.clone(),
             Tone::Reticle => self.optic_red.clone(),
+            Tone::Wood => self.wood.clone(),
+            Tone::Leather => self.leather.clone(),
+            Tone::Cord => self.string.clone(),
+            Tone::Blade => self.blade.clone(),
+            Tone::Collar => self.collar.clone(),
         }
     }
 }
@@ -4087,7 +4429,7 @@ fn fp_muzzle_local(p: &Fighter) -> Vec3 {
     }
     // infantry: the carried gun's own offset, run forward to about the
     // end of a typical barrel at the shared 0.9 model scale
-    let (tr, _) = vm_carry(p.gun);
+    let tr = vm_carry(p.gun).pos;
     Vec3::new(tr.x, tr.y, tr.z - 0.60 * 0.9)
 }
 
@@ -4179,11 +4521,22 @@ fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    // shaft, then the bodkin head: a tapered point, not a blunt end
+    // §owner THE ARROW: "a dark leaf/bodkin head, plain shaft matching
+    // the bow's wood, modest fletching. Do not over-detail it. It must
+    // read instantly in flight at gameplay distance."
+    //
+    // Five parts, and the count is the design. What changed from the
+    // version before it is exactly two things: the head is DARK and
+    // FLAT (it was a bright `steel` square section, which at 82 m/s
+    // read as a grey pip on a grey dash), and the vanes are smaller.
+    // The shaft is `kit.wood` - literally the bow's material handle,
+    // so "matching the bow's wood" cannot come apart.
     for (mat, z, sc) in [
-        (kit.wood.clone(), 0.02, Vec3::new(0.020, 0.020, 0.72)),
-        (kit.steel.clone(), 0.40, Vec3::new(0.030, 0.030, 0.10)),
-        (kit.grey_black.clone(), 0.465, Vec3::new(0.012, 0.012, 0.05)),
+        (kit.wood.clone(), 0.02, Vec3::new(0.019, 0.019, 0.72)),
+        // the leaf: wide and thin, so the head has an OUTLINE at range
+        // rather than being a slightly fatter piece of shaft
+        (kit.blade.clone(), 0.405, Vec3::new(0.026, 0.011, 0.085)),
+        (kit.blade.clone(), 0.470, Vec3::new(0.011, 0.008, 0.055)),
         // the nock, so the tail reads as an arrow and not a cut stick
         (kit.grey_black.clone(), -0.345, Vec3::new(0.024, 0.024, 0.03)),
     ] {
@@ -4200,6 +4553,11 @@ fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity
         .spawn((Transform::IDENTITY, Visibility::default()))
         .set_parent(root)
         .id();
+    // MODEST: 0.038 tall where they were 0.048, and pulled in to a
+    // 0.022 radius. Kept WHITE rather than dropped to the warm cord
+    // tone - the vanes are the only bright thing on a dark-headed,
+    // brown-shafted arrow, and brightness is what "reads instantly at
+    // gameplay distance" actually buys.
     for i in 0..3 {
         let a = i as f32 * std::f32::consts::TAU / 3.0;
         commands
@@ -4207,9 +4565,9 @@ fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.white.clone()),
                 Transform {
-                    translation: Vec3::new(a.cos() * 0.026, a.sin() * 0.026, -0.28),
+                    translation: Vec3::new(a.cos() * 0.022, a.sin() * 0.022, -0.275),
                     rotation: Quat::from_rotation_z(a),
-                    scale: Vec3::new(0.006, 0.048, 0.13),
+                    scale: Vec3::new(0.005, 0.038, 0.115),
                 },
             ))
             .set_parent(spin);
@@ -4217,35 +4575,125 @@ fn spawn_arrow_model(commands: &mut Commands, kit: &ModelKit) -> (Entity, Entity
     (root, spin)
 }
 
-/// §owner: a real SPEAR - leaf blade, collar, shaft, butt spike. Same
-/// unit-length envelope as the arrow.
+/// §owner ONE SPEAR, EVERYWHERE: the javelin's single geometry table.
+///
+/// The owner asked for the design to be used "consistently everywhere" -
+/// viewmodel, third person, the thrown missile, any pickup. It was not:
+/// the HELD spear lived in `weapon_parts` (a 1.85 m shaft, four-grey
+/// palette, three cord wraps, a butt spike) and the THROWN one in
+/// `spawn_spear_model` (a 0.86-unit shaft, bright `steel` blade, no
+/// grip, no rivets). Two tables, two silhouettes, one weapon - and the
+/// one the player watches most, the one in flight, was the plainer of
+/// the two.
+///
+/// So there is one table now, in METRES, measured from the GRIP with
+/// +Z toward the point, and both call sites read it. Neither can drift
+/// from the other because there is nothing left to drift.
+///
+/// The design, per the owner's reference, is three things and no more:
+///   a DARK LEAF BLADE with a pronounced midrib,
+///   a short RED/DARK COLLAR binding blade to shaft,
+///   a plain WARM-WOOD SHAFT.
+struct SpearPart {
+    cyl: bool,
+    tone: Tone,
+    /// centre, metres forward of the grip
+    z: f32,
+    /// across the shaft. A cylinder takes `w` as its diameter and
+    /// ignores `t`; a box is `w` wide and `t` thick, which is what makes
+    /// a leaf blade a blade and not a stick.
+    w: f32,
+    t: f32,
+    /// along the shaft
+    len: f32,
+}
+
+const fn sp(cyl: bool, tone: Tone, z: f32, w: f32, t: f32, len: f32) -> SpearPart {
+    SpearPart { cyl, tone, z, w, t, len }
+}
+
+/// Where the THROWN spear's sim position sits along the shaft.
+///
+/// A javelin is drawn balanced, not nose-first: this is the point the
+/// missile's `pos` lands on, and it is chosen so the head still stands
+/// the same ~1.05 m ahead of the sim point it always has. Move it and
+/// every spear in flight appears to lead or trail its own hitbox.
+const SPEAR_MISSILE_ORIGIN_Z: f32 = 0.545;
+/// The `sync_missiles` z-scale a spear slot is drawn at. The profile is
+/// in metres, the missile root multiplies z by this, so the model table
+/// is pre-divided by it and the two cancel exactly.
+const SPEAR_MISSILE_LEN: f32 = 1.9;
+
+fn spear_profile() -> [SpearPart; 12] {
+    [
+        // ---- the plain warm-wood shaft, in three collinear runs -----
+        // Three rather than one so that a section is CENTRED at the
+        // hand: `profile_bounds_part`/`GRIP_WINDOW_M` selects the
+        // spear's bounded geometry by |z| <= 0.15, and a single 1.6 m
+        // cylinder centred at z 0.65 falls outside that window - which
+        // would leave the screen-intrusion sweep measuring an empty set
+        // and passing vacuously. The middle run is also a hair fatter,
+        // the swell a javelin has where the hand goes.
+        sp(true, Tone::Wood, -0.325, 0.032, 0.032, 0.350),
+        sp(true, Tone::Wood, 0.000, 0.036, 0.036, 0.300),
+        sp(true, Tone::Wood, 0.655, 0.032, 0.032, 1.010),
+        // ---- the collar: short, red, binding blade to shaft ---------
+        sp(true, Tone::Collar, 1.200, 0.046, 0.046, 0.090),
+        // ---- the leaf blade -----------------------------------------
+        // Four flats that widen out of the collar, belly at the widest,
+        // then taper to a point - the leaf outline, in the blocky
+        // vocabulary every weapon in this game is built from.
+        sp(false, Tone::Blade, 1.275, 0.052, 0.014, 0.090),
+        sp(false, Tone::Blade, 1.360, 0.070, 0.014, 0.100),
+        sp(false, Tone::Blade, 1.455, 0.048, 0.012, 0.110),
+        sp(false, Tone::Blade, 1.545, 0.024, 0.010, 0.090),
+        // THE MIDRIB, and "pronounced" is the whole brief for it: at
+        // 26 mm through a 14 mm blade it stands 6 mm proud on each
+        // face, so it catches light as a spine down the middle rather
+        // than reading as a scratch. One tone lighter than the blade
+        // for the same reason.
+        sp(false, Tone::Mid, 1.375, 0.013, 0.026, 0.310),
+        // and the ridge running back over the collar, so the spine
+        // starts at the shaft and not in mid-air
+        sp(false, Tone::Mid, 1.205, 0.013, 0.022, 0.080),
+        // ---- the butt -----------------------------------------------
+        // One plain dark cap and a short spike. A javelin needs weight
+        // behind the hand to fly nose-first, and a shaft that simply
+        // stops reads as a cut stick.
+        sp(true, Tone::Blade, -0.525, 0.040, 0.040, 0.070),
+        sp(true, Tone::Blade, -0.585, 0.020, 0.020, 0.060),
+    ]
+}
+
+/// The THROWN spear, built from `spear_profile` - the same object the
+/// player was just holding, re-anchored on its balance point.
 fn spawn_spear_model(commands: &mut Commands, kit: &ModelKit) -> Entity {
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
-    for (cyl, mat, z, sc) in [
-        (true, kit.wood.clone(), -0.02, Vec3::new(0.030, 0.86, 0.030)),
-        // leaf blade: wide, flat, and long enough to read at range
-        (false, kit.steel.clone(), 0.435, Vec3::new(0.055, 0.016, 0.20)),
-        (false, kit.grey_light.clone(), 0.520, Vec3::new(0.022, 0.014, 0.06)),
-        // collar where blade meets shaft, and the butt spike
-        (true, kit.grey_black.clone(), 0.330, Vec3::new(0.044, 0.05, 0.044)),
-        (true, kit.grey_black.clone(), -0.455, Vec3::new(0.034, 0.07, 0.034)),
-    ] {
-        let mesh = if cyl { kit.cyl.clone() } else { kit.cube.clone() };
-        let rot = if cyl {
-            Quat::from_rotation_x(FRAC_PI_2)
+    // `sync_missiles` scales this slot by (1, 1, SPEAR_MISSILE_LEN), so
+    // only the ALONG-SHAFT numbers are pre-divided; the cross-section is
+    // already in world metres and must stay there or the shaft fattens
+    // in flight.
+    let k = 1.0 / SPEAR_MISSILE_LEN;
+    for p in spear_profile() {
+        let mesh = if p.cyl { kit.cyl.clone() } else { kit.cube.clone() };
+        let (rot, scale) = if p.cyl {
+            (
+                Quat::from_rotation_x(FRAC_PI_2),
+                Vec3::new(p.w, p.len * k, p.w),
+            )
         } else {
-            Quat::IDENTITY
+            (Quat::IDENTITY, Vec3::new(p.w, p.t, p.len * k))
         };
         commands
             .spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(mat),
+                MeshMaterial3d(kit.tone(p.tone)),
                 Transform {
-                    translation: Vec3::new(0.0, 0.0, z),
+                    translation: Vec3::new(0.0, 0.0, (p.z - SPEAR_MISSILE_ORIGIN_Z) * k),
                     rotation: rot,
-                    scale: sc,
+                    scale,
                 },
             ))
             .set_parent(root);
@@ -5439,19 +5887,105 @@ const IDLE_LIFE_BEATS: &[CapBeat] = &[
 
 // §4 (Brief VII v2): bow draw -> hold -> sway onset -> release. Switches
 // to the bow, then holds fire for ~1s (past full draw) before releasing.
+//
+// §owner BOW & SPEAR: the ORBIT beats are new, and they are the reason
+// this script was not an instrument. Every frame it had ever taken was
+// from dead behind the archer, where an upright bow held in front of the
+// chest is a 5 cm strip of wood directly behind a 40 cm torso - so the
+// third-person war bow had never once been photographed. The frames
+// dated before this pass show a soldier with both arms out and no bow at
+// all, and that was read as "the bow is missing" when it was really "the
+// camera has never left the one angle that hides it".
 const BOW_DRAW_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.6) },
     CapBeat { snap: Some("01-bow-equipped"), ..beat(1.0) },
     CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.1) },
     CapBeat { snap: Some("02-bow-draw-start"), ..beat(1.3) },
     CapBeat { snap: Some("03-bow-full-draw"), ..beat(1.9) },
+    // the same full draw, from where the bow is actually visible
+    CapBeat { orbit: Some(FRAC_PI_2), boom: Some(0.75), ..beat(2.0) },
+    CapBeat { snap: Some("03b-full-draw-profile"), ..beat(2.6) },
+    CapBeat { orbit: Some(PI * 0.72), ..beat(2.7) },
+    CapBeat { snap: Some("03c-full-draw-front-quarter"), ..beat(3.3) },
     CapBeat {
         release: &[CapKey::M(MouseButton::Left)],
         snap: Some("04-bow-release"),
-        ..beat(2.0)
+        ..beat(3.4)
     },
-    CapBeat { snap: Some("05-bow-after-shot"), ..beat(2.4) },
-    CapBeat { end: true, ..beat(2.8) },
+    CapBeat { snap: Some("05-bow-after-shot"), ..beat(3.8) },
+    CapBeat { end: true, ..beat(4.2) },
+];
+
+/// §owner THE SPEAR IN FIRST PERSON - and there has never been one.
+///
+/// `spear_flight` is the only spear script and it never presses V, so
+/// every javelin frame this project owns is a third-person one. The
+/// owner's §6 is entirely about what the first-person carry looks like
+/// ("only a small amount of the spear should be visible - ideally just
+/// the tip/head on the right side"), which made it a rule with no
+/// instrument behind it. This is the instrument.
+///
+/// Idle, then PRE-AIM (RMB - which under the new input model is
+/// pre-aim only and does not charge), then the LMB charge, then the
+/// release and the plant.
+const SPEAR_FP_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.9) },
+    CapBeat { snap: Some("01-fp-spear-idle"), ..beat(1.4) },
+    // RMB alone: the settle. Nothing may travel toward the centre.
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.5) },
+    CapBeat { snap: Some("02-fp-spear-preaim"), ..beat(2.1) },
+    // and the charge on top of it
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.2) },
+    CapBeat { snap: Some("03-fp-spear-charging"), ..beat(3.0) },
+    CapBeat { snap: Some("04-fp-spear-full-charge"), ..beat(5.4) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left)],
+        ..beat(5.5)
+    },
+    CapBeat { snap: Some("05-fp-spear-plant"), ..beat(5.65) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Right)],
+        snap: Some("06-fp-spear-thrown"),
+        ..beat(6.1)
+    },
+    CapBeat { end: true, ..beat(6.5) },
+];
+
+/// §owner §7 THE CHARGING MOTION, THIRD PERSON - the overhead wind.
+///
+/// The pose it photographs did not exist before this pass and neither
+/// did any way of looking at it: `spear_flight` shoots from directly
+/// behind, where a spear held along the aim line is end-on and hidden
+/// by its own thrower. Front-quarter and profile, at three points
+/// through a long charge, then the plant.
+const SPEAR_WIND_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.5) },
+    CapBeat { orbit: Some(PI * 0.72), boom: Some(0.85), look: Some((0.0, 0.06)), ..beat(0.6) },
+    CapBeat { snap: Some("01-carry"), ..beat(1.2) },
+    // RMB is PRE-AIM only now - it must NOT start a wind on its own,
+    // and this frame is the evidence for that half of the input rework
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.3) },
+    CapBeat { snap: Some("02-preaim-not-a-wind"), ..beat(1.9) },
+    // LMB is the charge
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.0) },
+    CapBeat { snap: Some("03-wind-early"), ..beat(2.5) },
+    CapBeat { snap: Some("04-wind-full"), ..beat(5.2) },
+    CapBeat { orbit: Some(FRAC_PI_2), ..beat(5.3) },
+    CapBeat { snap: Some("05-wind-full-profile"), ..beat(5.9) },
+    // the plant runs SPEAR_WINDUP_S = 0.40 s from the release
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(6.0) },
+    CapBeat { snap: Some("06-plant-load"), ..beat(6.12) },
+    CapBeat { snap: Some("07-plant-whip"), ..beat(6.32) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Right)],
+        snap: Some("08-follow-through"),
+        ..beat(6.6)
+    },
+    CapBeat { end: true, ..beat(7.0) },
 ];
 
 /// The same draw, seen from inside the archer's head.
@@ -5553,9 +6087,23 @@ const AGILE_BODY_BEATS: &[CapBeat] = &[
 /// too.
 ///
 /// What it CANNOT show, stated rather than implied: hull CLIMBING is a
-/// verb for a pilot on foot against an enemy mech's stripped plates
-/// (`climb_target` requires `!p.in_mech()` and a dropped plate bit), so
+/// verb for a pilot on foot against an enemy mech's stripped plates, so
 /// no frame of an Agile Mech climbing exists to take. See the report.
+///
+/// The MECHANISM, corrected 2026-08-11 — the first version of this note
+/// said `climb_target` "requires `!p.in_mech()` and a dropped plate bit",
+/// and the first half of that is backwards in a way that could get the
+/// real gate deleted. `climb_target` contains NO test on the climber at
+/// all. What it requires is that the TARGET `m` **is** a mech
+/// (`!m.in_mech() → continue`) and has the plate off
+/// (`m.mech_plates_dropped & zone.bit() == 0 → continue`, commented
+/// "covered - climbing is the payoff"). The climber's on-foot condition
+/// lives at the CALL SITE, `sim.rs:8732` (`&& !self.fighters[p].in_mech()`),
+/// and is repeated in the HUD prompt at `main.rs:23959`. The function's
+/// own doc says why it is split that way: those "are the CALLER's
+/// conditions", so the prompt can tell "nothing in reach" from "in reach
+/// but too tired". **Do not delete the call-site gate believing this
+/// function defends itself — it does not.**
 /// The beat times are the SIM's own clocks, not guesses. `ROLL_LOAD_S`
 /// 0.10 + `ROLL_S` 0.55 + `ROLL_EASE_S` 0.14 = a 0.79 s tumble whose
 /// progress runs through `ease_out`, so it is more than half turned by a
@@ -6015,6 +6563,68 @@ const MECH_CAPTURE_BEATS: &[CapBeat] = &[
 // full speed, heat climbing), and release - all from a fixed, known-
 // clear spot so barrel spin / tracers / heat-driven spread are all
 // checkable against a real capture rather than taken on faith.
+/// THE MUZZLE FLASH, on the two weapons that bracket the arsenal.
+///
+/// This script exists because nothing in the harness could see the
+/// effect. Every firing script that already existed either snaps on a
+/// pose (the sights runs, which never pull the trigger) or on a
+/// projectile downrange, and a flash lives 50 ms — so a beat placed by
+/// feel photographs the gap between two rounds and reports "no flash"
+/// about a working feature. That is the instrument gap that hid the
+/// first-person bow for months.
+///
+/// The beat spacing is therefore ARITHMETIC, not taste. The AK's cycle
+/// is 0.1 s and the flare lives 0.05 s, so a single snap is a coin
+/// flip; six snaps at 0.037 s — deliberately NOT a multiple of the
+/// cycle — cannot all land in the same phase of it. The AWM is bolt
+/// action, so its two snaps are placed just after the trigger press
+/// instead, where the one round it fires has to be.
+///
+/// Third person: the flare has to be judged against the BARREL it
+/// leaves, and in first person the barrel is a foreshortened stub in the
+/// corner of the frame. The last two beats go first-person anyway,
+/// because that path is a separate entity on a separate render layer and
+/// a layer mistake there is invisible from outside.
+const MUZZLE_FLASH_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, 0.06)), ..beat(0.3) },
+    // 01 BEFORE: the same rifle, same framing, trigger not pulled. Every
+    // other frame is read against this one.
+    CapBeat { snap: Some("01-rifle-not-firing"), ..beat(0.9) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(1.1) },
+    CapBeat { snap: Some("02-rifle-firing-a"), ..beat(1.137) },
+    CapBeat { snap: Some("03-rifle-firing-b"), ..beat(1.174) },
+    CapBeat { snap: Some("04-rifle-firing-c"), ..beat(1.211) },
+    CapBeat { snap: Some("05-rifle-firing-d"), ..beat(1.248) },
+    CapBeat { snap: Some("06-rifle-firing-e"), ..beat(1.285) },
+    CapBeat { snap: Some("07-rifle-firing-f"), ..beat(1.322) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(1.5) },
+    // the SNIPER - the biggest bore in `weapon_parts`, and the one gun
+    // whose flare has to clear a slotted muzzle brake
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(1.7) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(1.8) },
+    CapBeat { snap: Some("08-sniper-not-firing"), ..beat(2.4) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.6) },
+    CapBeat { snap: Some("09-sniper-firing-a"), ..beat(2.63) },
+    CapBeat { snap: Some("10-sniper-firing-b"), ..beat(2.66) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(2.8) },
+    // and the same sniper round from FIRST person, which is a different
+    // entity on a different render layer
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(3.0) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(3.1) },
+    // back to the rifle - the AWM's viewmodel is hidden by design when
+    // its scope class takes over, so first person needs the AK
+    CapBeat { press: &[CapKey::K(KeyCode::Digit1)], ..beat(3.3) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit1)], ..beat(3.4) },
+    CapBeat { snap: Some("11-fp-rifle-not-firing"), ..beat(4.0) },
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(4.2) },
+    CapBeat { snap: Some("12-fp-rifle-firing-a"), ..beat(4.237) },
+    CapBeat { snap: Some("13-fp-rifle-firing-b"), ..beat(4.274) },
+    CapBeat { snap: Some("14-fp-rifle-firing-c"), ..beat(4.311) },
+    CapBeat { snap: Some("15-fp-rifle-firing-d"), ..beat(4.348) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(4.6) },
+    CapBeat { end: true, ..beat(5.0) },
+];
+
 const MINIGUN_CHECK_BEATS: &[CapBeat] = &[
     CapBeat { look: Some((0.0, 0.08)), ..beat(0.2) },
     CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(0.3) },
@@ -6309,6 +6919,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "hands" => HANDS_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
+        "spear_fp" => SPEAR_FP_BEATS,
+        "spear_wind" => SPEAR_WIND_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
         "mech_jump" => MECH_JUMP_BEATS,
@@ -6323,6 +6935,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
             CLASS_LOOK_BEATS
         }
         "minigun_check" => MINIGUN_CHECK_BEATS,
+        "muzzle_flash" => MUZZLE_FLASH_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
         _ => &[],
@@ -6353,7 +6966,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 34] = [
+const CAPTURE_SCRIPTS: [&str; 37] = [
     // BRIEF X: the AGILE MECH's own two instruments - the portrait, and
     // the four abilities §0 says this redesign must not break. `medic`
     // photographs the same chassis but it is a WEAPONS script (plasma,
@@ -6384,6 +6997,10 @@ const CAPTURE_SCRIPTS: [&str; 34] = [
     "idle_life",
     "bow_draw",
     "bow_draw_fp",
+    // §owner BOW & SPEAR: the two views nothing had ever taken - the
+    // javelin in first person, and the overhead wind from the side.
+    "spear_fp",
+    "spear_wind",
     "mech_scale",
     "mech_fp",
     // §owner: the chassis jump, all four phases - the one thing in
@@ -6401,6 +7018,8 @@ const CAPTURE_SCRIPTS: [&str; 34] = [
     "class_marksman",
     "melee_dirs",
     "minigun_check",
+    // the flare on the barrel, rifle and sniper, third and first person
+    "muzzle_flash",
     "menus",
     "traversal",
     "map_lap",
@@ -6508,6 +7127,8 @@ fn capture_quick_deploy(
         // both bow scripts press Digit3, so slot 3 has to actually hold a
         // bow or they capture whatever the default special happens to be
         Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
+        // and both new spear scripts press Digit3 for the same reason
+        Some("spear_fp") | Some("spear_wind") => sel.loadout[2] = GunKind::Spear,
         // the seven iron-sighted guns across three runs; the AWM is
         // deliberately absent (scoped-class hides its viewmodel by
         // design) as are the bow/spear/minigun, which have no irons
@@ -6528,6 +7149,11 @@ fn capture_quick_deploy(
         // molotov, and the whole point of the second half of that script
         // is that the two throwables are different SHAPES in the hand.
         Some("grenade_hold") => sel.grenade_preset = 1,
+        // the flare script brackets the arsenal: the medium rifle flare
+        // on slot 1, the biggest-bore one in the game on slot 3
+        Some("muzzle_flash") => {
+            sel.loadout = [GunKind::Ak47, GunKind::Glock, GunKind::Awm];
+        }
         Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
@@ -6602,7 +7228,10 @@ fn capture_quick_deploy(
     // Task 0 before-clips: both need a clear stage so the moves and the
     // lap read on camera instead of clipping into whatever cover the
     // default spawn abuts.
-    if matches!(cap.script.as_deref(), Some("traversal") | Some("map_lap")) {
+    // The flare is a small bright thing photographed against whatever is
+    // behind the barrel. Staged in the open for the same reason: against
+    // a stone face at the default spawn it is a bright patch on a wall.
+    if matches!(cap.script.as_deref(), Some("traversal") | Some("map_lap") | Some("muzzle_flash")) {
         let stage = capture_stage_pos(&game.sim);
         let f = &mut game.sim.fighters[0];
         f.pos = stage;
@@ -6651,8 +7280,8 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 4] =
-    ["minigun_check", "traversal", "map_lap", "agile_moves"];
+const CAPTURE_KEEP_ALIVE: [&str; 5] =
+    ["minigun_check", "traversal", "map_lap", "agile_moves", "muzzle_flash"];
 
 fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     let Some(name) = cap.script.as_deref() else { return };
@@ -7843,6 +8472,11 @@ fn main() {
         .add_plugins(frontend::FrontendPlugin)
         .add_plugins(mech_lineup::MechGalleryPlugin)
         .add_plugins(mech_recoil::MechRecoilPlugin)
+        // The flare on the barrel. Registered as a plugin rather than as
+        // two more names in the `spawn_casings` tuple below: it owns its
+        // own meshes, materials and Startup, and `main.rs` is the most
+        // contended file in this repo.
+        .add_plugins(muzzle_flash::MuzzleFlashPlugin)
         .init_resource::<IntroPage>()
         .init_resource::<IntroEntryPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
@@ -9043,11 +9677,19 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // elevation turret on top of the scope, windage on the side
             parts.push(wp(true, Tone::Dark, (0.0, 0.148, 0.10), 0.0, (0.036, 0.030, 0.036)));
             parts.push(wp(true, Tone::Black, (0.0, 0.166, 0.10), 0.0, (0.026, 0.012, 0.026)));
-            parts.push(wp(true, Tone::Dark, (0.052, 0.10, 0.10), FRAC_PI_2, (0.032, 0.028, 0.032)));
+            // §owner (found by the corrected intrusion measurement, not
+            // by eye): the windage turret and the bolt handle were at
+            // POSITIVE model x, and the viewmodel is yawed 180 degrees -
+            // so "a stub off the RIGHT of the receiver" was drawn on the
+            // screen LEFT, reaching 9.4 cm inboard from a carry of 11.
+            // The rifle crossed the vertical midline with the one part
+            // whose own comment says which side it belongs on. Mirrored:
+            // negative model x is screen right.
+            parts.push(wp(true, Tone::Dark, (-0.052, 0.10, 0.10), FRAC_PI_2, (0.032, 0.028, 0.032)));
             // bolt handle: a stub off the right of the receiver, angled
             // down and back the way a turned-down bolt sits
-            parts.push(wp(true, Tone::Mid, (0.046, 0.045, -0.05), FRAC_PI_2, (0.018, 0.075, 0.018)));
-            parts.push(wp(true, Tone::Black, (0.082, 0.032, -0.05), FRAC_PI_2, (0.024, 0.030, 0.024)));
+            parts.push(wp(true, Tone::Mid, (-0.046, 0.045, -0.05), FRAC_PI_2, (0.018, 0.075, 0.018)));
+            parts.push(wp(true, Tone::Black, (-0.082, 0.032, -0.05), FRAC_PI_2, (0.024, 0.030, 0.024)));
             // detachable box magazine under the action
             parts.push(wp(false, Tone::Dark, (0.0, -0.075, 0.03), 0.10, (0.038, 0.10, 0.10)));
             parts.push(wp(false, Tone::Black, (0.0, -0.128, 0.03), 0.10, (0.042, 0.012, 0.11)));
@@ -9115,37 +9757,63 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // The riser stays at the origin so `weapon_hand_specs`' grip
             // socket (0, 0, 0.03) and the nock at the string's centre are
             // both untouched by the reorientation.
-            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 0.012), 0.0, (0.052, 0.150, 0.058)));
-            // grip swell above and below the hand, so the riser is not a
-            // plain brick. Pulled in to +-0.055 (from +-0.075): upright,
-            // the first limb segment starts at 0.115, and swells at the
-            // old spacing merged into it as one continuous post.
-            parts.push(wp(false, Tone::Dark, (0.0, 0.055, 0.012), 0.0, (0.044, 0.05, 0.050)));
-            parts.push(wp(false, Tone::Dark, (0.0, -0.055, 0.012), 0.0, (0.044, 0.05, 0.050)));
+            // §owner THE DESIGN: "a classic recurve - warm mid-brown
+            // wood, gently swept limbs that recurve at the tips, a slim
+            // black leather grip at the centre, a pale taut string.
+            // Elegant and simple, not ornate, not a war-machine."
+            //
+            // What it replaced was four flat greys and three square
+            // limb steps, which photographed as a black post with a
+            // grey wire across it. Three things changed and only three:
+            // the MATERIALS (wood / leather / cord, see `Tone`), the
+            // limb from stepped to SWEPT, and a grip that is a wrap
+            // rather than two swells.
+            //
+            // The riser core is slimmer than the old 0.052 - the wrap
+            // has to stand PROUD of it or it is a stripe, not a grip.
+            parts.push(wp(false, Tone::Wood, (0.0, 0.0, 0.012), 0.0, (0.038, 0.150, 0.052)));
+            // where the riser fades into the limb, either side
+            parts.push(wp(false, Tone::Wood, (0.0, 0.095, 0.012), 0.0, (0.034, 0.046, 0.046)));
+            parts.push(wp(false, Tone::Wood, (0.0, -0.095, 0.012), 0.0, (0.034, 0.046, 0.046)));
+            // THE GRIP: one slim black leather wrap at the centre,
+            // proud of the riser on both x and z so it reads as
+            // something bound ON rather than painted on.
+            parts.push(wp(false, Tone::Leather, (0.0, 0.0, 0.012), 0.0, (0.046, 0.108, 0.060)));
             for side in [-1.0_f32, 1.0] {
-                // three segments per limb: each shorter, thinner, and
-                // further back than the last - the curve
-                // `len` is along the limb (Y now); `thick` across it
-                for (dy, dz, len, thick, d) in [
-                    (0.115, 0.000, 0.150, 0.030, 0.044),
-                    (0.235, -0.030, 0.120, 0.026, 0.038),
-                    (0.330, -0.072, 0.090, 0.022, 0.032),
+                // FOUR segments per limb on RISING tilts - each shorter,
+                // thinner and swept harder than the last, so the limb
+                // reads as one continuous curve instead of a staircase.
+                // The chain is walked, not guessed: each centre is the
+                // previous segment's end plus half of this one along its
+                // own tilt, and the last lands on (BOW_TIP_Y, BOW_TIP_Z)
+                // where the string is anchored.
+                //
+                // `tilt` is a rotation about X, which for an upright bow
+                // is exactly the sweep plane. It mirrors with the limb:
+                // the lower limb has to bend BACK too, and back is the
+                // other sign once the segment runs the other way - hence
+                // `side * tilt` rather than a shared constant.
+                for (dy, z, len, thick, d, tilt) in [
+                    (0.15629, 0.00674, 0.088, 0.030, 0.042, -0.12_f32),
+                    (0.23375, -0.01403, 0.088, 0.026, 0.038, -0.36),
+                    (0.30562, -0.04835, 0.072, 0.022, 0.034, -0.55),
+                    (0.36190, -0.08467, 0.062, 0.019, 0.030, -0.62),
                 ] {
                     parts.push(wp(
                         false,
-                        Tone::Dark,
-                        (0.0, side * dy, 0.012 + dz),
-                        0.0,
+                        Tone::Wood,
+                        (0.0, side * dy, z),
+                        side * tilt,
                         (thick, len, d),
                     ));
                 }
-                // the light tip / string nock at the end of the recurve
+                // the pale horn nock the string actually sits in
                 parts.push(wp(
                     false,
                     Tone::Light,
                     (0.0, side * BOW_TIP_Y, BOW_TIP_Z),
                     0.0,
-                    (0.026, 0.040, 0.028),
+                    (0.022, 0.034, 0.030),
                 ));
             }
             // The string is NOT in this list - it is two live halves hung
@@ -9155,41 +9823,41 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // The arrow rest. Upright there IS an "on top" again: the
             // shaft passes beside the riser on X and rests on a shelf
             // that stands proud of it, which is where a real one sits.
+            //
+            // Leather, not bright grey: it is a rest, and on this bow
+            // the only pale things are the string and the two horn
+            // nocks. (An emissive RED PIP used to sit above it - a
+            // 6 mm `Tone::Reticle` cube. On a weapon with no sights it
+            // was decoration, and "not ornate" retires it. Nothing
+            // reads `ReticleDot` on the bow: the drift path only
+            // touches guns that carry `push_red_dot`.)
             parts.push(wd(
                 false,
-                Tone::Light,
-                (BOW_ARROW_X, -0.016, 0.030),
+                Tone::Leather,
+                (BOW_ARROW_X, -0.015, 0.030),
                 0.0,
-                (0.030, 0.018, 0.062),
+                (0.026, 0.015, 0.056),
             ));
-            parts.push(wd(false, Tone::Reticle, (0.0, 0.052, 0.044), 0.0, (0.006, 0.006, 0.006)));
         }
         GunKind::Spear => {
-            // §owner: a JAVELIN, not a broomstick with a wedge on it. The
-            // head is a leaf blade with a raised midrib and a socket that
-            // swallows the shaft; the haft carries a bound grip where the
-            // hand goes and a weighted butt that balances the throw.
-            parts.push(wp(true, Tone::Dark, (0.0, 0.0, 0.35), FRAC_PI_2, (0.032, 1.85, 0.032)));
-            // leaf blade: a wide belly tapering to a point, with the
-            // midrib proud along its spine
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.30), 0.0, (0.058, 0.016, 0.20)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.42), 0.0, (0.030, 0.013, 0.10)));
-            parts.push(wp(false, Tone::Mid, (0.0, 0.0, 1.30), 0.0, (0.014, 0.026, 0.19)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.0, 1.485), 0.0, (0.012, 0.010, 0.05)));
-            // socket: the collar the blade seats into, with two rivets
-            parts.push(wp(true, Tone::Black, (0.0, 0.0, 1.17), FRAC_PI_2, (0.046, 0.11, 0.046)));
-            for rz in [1.135_f32, 1.205] {
-                parts.push(wp(true, Tone::Mid, (0.026, 0.0, rz), FRAC_PI_2, (0.012, 0.012, 0.012)));
+            // §owner ONE SPEAR, EVERYWHERE. This arm used to carry its
+            // own 14-part table; the thrown missile carried a different
+            // five-part one. Both read `spear_profile` now, so the
+            // javelin in the hand and the javelin in the air are the
+            // same object down to the millimetre.
+            for p in spear_profile() {
+                parts.push(wp(
+                    p.cyl,
+                    p.tone,
+                    (0.0, 0.0, p.z),
+                    if p.cyl { FRAC_PI_2 } else { 0.0 },
+                    if p.cyl {
+                        (p.w, p.len, p.w)
+                    } else {
+                        (p.w, p.t, p.len)
+                    },
+                ));
             }
-            // bound grip where the hand sits - three cord wraps
-            for gz in [-0.06_f32, 0.0, 0.06] {
-                parts.push(wp(true, Tone::Mid, (0.0, 0.0, gz), FRAC_PI_2, (0.040, 0.030, 0.040)));
-            }
-            // weighted butt + a spike, the counterweight that makes a
-            // javelin fly nose-first
-            parts.push(wp(true, Tone::Black, (0.0, 0.0, -0.54), FRAC_PI_2, (0.044, 0.10, 0.044)));
-            parts.push(wp(true, Tone::Mid, (0.0, 0.0, -0.62), FRAC_PI_2, (0.020, 0.07, 0.020)));
-            parts.push(wd(false, Tone::Light, (0.0, 0.0, 1.10), 0.0, (0.045, 0.045, 0.02)));
         }
         GunKind::Minigun => {
             // §7: six-barrel cluster round a spine, deep motor housing at
@@ -9314,7 +9982,9 @@ fn spawn_weapon_model(
             commands
                 .spawn((
                     Mesh3d(kit.cube.clone()),
-                    MeshMaterial3d(kit.tone(Tone::Light)),
+                    // §owner "a pale taut string" - Cord, not the
+                    // receiver grey it wore before.
+                    MeshMaterial3d(kit.tone(Tone::Cord)),
                     bow_string_half(side, 0.0),
                     BowStringHalf(side),
                 ))
@@ -9488,18 +10158,37 @@ fn spawn_plasma_bow_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
                 Vec3::new(w, h, d));
         }
         // the emitter node at each tip, where the string's light starts
-        part(kit.cyl.clone(), kit.core_glow.clone(),
+        part(kit.cyl.clone(), kit.plasma_core.clone(),
             Vec3::new(0.0, sd * 0.455, 0.02), Quat::from_rotation_z(FRAC_PI_2),
             Vec3::new(0.048, 0.055, 0.048));
+        part(kit.cyl.clone(), kit.plasma_halo.clone(),
+            Vec3::new(0.0, sd * 0.455, 0.02), Quat::from_rotation_z(FRAC_PI_2),
+            Vec3::new(0.095, 0.062, 0.095));
         part(kit.cube.clone(), kit.mech_metal.clone(),
             Vec3::new(0.0, sd * 0.455, 0.02), Quat::IDENTITY, Vec3::new(0.055, 0.05, 0.055));
     }
-    // the STRING - a bar of light tip to tip. On a plasma bow the string
-    // IS the energy, so it is emissive rather than cord-coloured.
-    part(kit.cube.clone(), kit.core_glow.clone(), Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY, Vec3::new(0.012, 0.91, 0.012));
+    // §owner MECH WEAPON LOOK: THE COLOUR WAS THE BUG.
+    //
+    // Everything lit on this weapon - both tip nodes, the string and the
+    // nocked bolt - was painted `core_glow`, which is this game's DANGER
+    // RED: the enemy sensor slit, the damaged core, the warning lamp. So
+    // the medic's primary read as a hot iron bow, and, worse, it did not
+    // match its own ammunition: `plasma_core`/`plasma_halo` (near-white
+    // centre, cyan sheath) were already built, already commented "cyan,
+    // and deliberately NOT the red of `core_glow`", and already what the
+    // bolt turns into the instant it leaves the rail. The weapon and its
+    // projectile were two different weapons.
+    //
+    // Nothing new is invented here; the two right handles are used.
+    // Each lit run is now CORE + HALO, the two-layer recipe those
+    // materials were built as a pair for - a single flat bar cannot be
+    // both hot at the middle and coloured at the edge.
+    part(kit.cube.clone(), kit.plasma_core.clone(), Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY, Vec3::new(0.012, 0.91, 0.012));
+    part(kit.cube.clone(), kit.plasma_halo.clone(), Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY, Vec3::new(0.034, 0.90, 0.034));
     // the ARROW RAIL and the bolt sitting on it
     part(kit.cube.clone(), kit.mech_metal.clone(), Vec3::new(0.045, 0.0, 0.20), Quat::IDENTITY, Vec3::new(0.020, 0.030, 0.34));
-    part(kit.cyl.clone(), kit.core_glow.clone(), Vec3::new(0.045, 0.0, 0.26), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.022, 0.30, 0.022));
+    part(kit.cyl.clone(), kit.plasma_core.clone(), Vec3::new(0.045, 0.0, 0.26), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.022, 0.30, 0.022));
+    part(kit.cyl.clone(), kit.plasma_halo.clone(), Vec3::new(0.045, 0.0, 0.26), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.29, 0.055));
     // COOLING fins down the back of the riser, and the capacitor bank
     for k in 0..4 {
         part(kit.cube.clone(), kit.mech_metal.clone(),
@@ -9507,7 +10196,18 @@ fn spawn_plasma_bow_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             Vec3::new(0.085, 0.012, 0.075));
     }
     part(kit.cube.clone(), kit.mech_khaki_dk.clone(), Vec3::new(0.0, 0.0, -0.055), Quat::IDENTITY, Vec3::new(0.065, 0.20, 0.055));
-    part(kit.cube.clone(), kit.med_glow.clone(), Vec3::new(0.036, 0.0, -0.055), Quat::IDENTITY, Vec3::new(0.010, 0.16, 0.030));
+    part(kit.cube.clone(), kit.plasma_core.clone(), Vec3::new(0.036, 0.0, -0.055), Quat::IDENTITY, Vec3::new(0.010, 0.16, 0.030));
+    // ENERGY COILS wound round the riser - the "where does the charge
+    // live" detail the silhouette had nowhere. Three windings, each a
+    // dark ring with a cyan seam, so the frame reads as a capacitor and
+    // not as a stick of khaki.
+    for k in 0..3 {
+        let y = -0.075 + k as f32 * 0.075;
+        part(kit.cyl.clone(), kit.mech_shadow.clone(),
+            Vec3::new(0.0, y, 0.105), Quat::IDENTITY, Vec3::new(0.115, 0.030, 0.145));
+        part(kit.cyl.clone(), kit.plasma_core.clone(),
+            Vec3::new(0.0, y, 0.105), Quat::IDENTITY, Vec3::new(0.122, 0.011, 0.152));
+    }
     root
 }
 
@@ -9534,26 +10234,73 @@ fn spawn_repair_emitter_vm(commands: &mut Commands, kit: &ModelKit) -> Entity {
             ))
             .set_parent(root);
     };
-    part(kit.cube.clone(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.08), Quat::IDENTITY, Vec3::new(0.14, 0.14, 0.32));
+    // §owner MECH WEAPON LOOK, second pass. What the `medic` capture
+    // actually showed (09-repair-beam.png, before): a grey-olive LOZENGE.
+    // Every part of it was khaki, metal or shadow, the one lit piece was
+    // a `barrier_edge` ball - a translucent SHIELD film, all but invisible
+    // against the sand - and the dish read as an oval blob because a flat
+    // cylinder seen near edge-on has no rim to catch light. The tool did
+    // not say "medical" and it barely said "tool".
+    //
+    // Three changes, in order of how much they buy:
+    //   1. the dish is now a CUP with a lit RIM. A bright ring around a
+    //      dark recess is what makes a projector read as open rather than
+    //      solid, from any angle, and it is the silhouette cue that
+    //      survives at distance.
+    //   2. a GREEN CROSS on the housing. One glance, no reading. This is
+    //      the whole "distinct from a weapon" requirement discharged in
+    //      two boxes, and it costs nothing.
+    //   3. the emitter's own colour is `med_glow`, the SAME green as the
+    //      beam it fires - so the tool and its effect finally agree.
+    //      They previously disagreed with each other AND with the HUD.
+    part(kit.cube.clone(), kit.mech_khaki.clone(), Vec3::new(0.0, 0.0, 0.06), Quat::IDENTITY, Vec3::new(0.125, 0.135, 0.30));
+    // a dark waist band, so the housing is not one unbroken khaki slab
+    part(kit.cube.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.0, 0.10), Quat::IDENTITY, Vec3::new(0.135, 0.075, 0.09));
     part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, -0.075, 0.02), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.055, 0.14, 0.055));
-    // the DISH, its recess, and the node
-    part(kit.cyl.clone(), kit.mech_khaki_lt.clone(), Vec3::new(0.0, 0.0, 0.29), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.30, 0.055, 0.30));
-    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.0, 0.305), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.045, 0.22));
-    part(kit.ball.clone(), kit.barrier_edge.clone(), Vec3::new(0.0, 0.0, 0.32), Quat::IDENTITY, Vec3::splat(0.10));
-    // four struts holding the dish off the body
+    // (2) THE CROSS - two bars on the upper face of the housing.
+    part(kit.cube.clone(), kit.med_glow.clone(), Vec3::new(0.0, 0.072, 0.055), Quat::IDENTITY, Vec3::new(0.028, 0.012, 0.115));
+    part(kit.cube.clone(), kit.med_glow.clone(), Vec3::new(0.0, 0.072, 0.055), Quat::IDENTITY, Vec3::new(0.095, 0.012, 0.034));
+    // (1) THE CUP: a lit rim ring, a deep dark recess behind it, and the
+    // node burning at the bottom of the well.
+    part(kit.cyl.clone(), kit.mech_metal.clone(), Vec3::new(0.0, 0.0, 0.255), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.30, 0.075, 0.30));
+    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.0, 0.275), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.245, 0.070, 0.245));
+    part(kit.cyl.clone(), kit.med_glow.clone(), Vec3::new(0.0, 0.0, 0.294), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.29, 0.016, 0.29));
+    part(kit.cyl.clone(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.0, 0.298), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.235, 0.020, 0.235));
+    part(kit.ball.clone(), kit.med_glow.clone(), Vec3::new(0.0, 0.0, 0.268), Quat::IDENTITY, Vec3::splat(0.105));
+    part(kit.ball.clone(), kit.repair_bloom.clone(), Vec3::new(0.0, 0.0, 0.272), Quat::IDENTITY, Vec3::splat(0.185));
+    // six FOCUS TEETH round the mouth of the cup - the detail that makes
+    // it an instrument rather than a bowl
+    for k in 0..6 {
+        let a = k as f32 * std::f32::consts::TAU / 6.0;
+        part(kit.cube.clone(), kit.mech_khaki_lt.clone(),
+            Vec3::new(a.cos() * 0.135, a.sin() * 0.135, 0.30), Quat::from_rotation_z(a),
+            Vec3::new(0.055, 0.020, 0.055));
+    }
+    // four struts holding the cup off the body
     for k in 0..4 {
         let a = k as f32 * std::f32::consts::TAU / 4.0 + 0.78;
         part(kit.cube.clone(), kit.mech_metal.clone(),
-            Vec3::new(a.cos() * 0.145, a.sin() * 0.145, 0.235), Quat::from_rotation_z(a),
-            Vec3::new(0.075, 0.022, 0.11));
+            Vec3::new(a.cos() * 0.125, a.sin() * 0.125, 0.205), Quat::from_rotation_z(a),
+            Vec3::new(0.070, 0.022, 0.105));
     }
-    // coil stack behind, and its lit seam
+    // coil stack behind, each ring separated by a lit green winding, so
+    // the charge reads as stored somewhere rather than appearing at the
+    // muzzle out of nothing
     for k in 0..3 {
+        let z = -0.04 + k as f32 * 0.058;
         part(kit.cyl.clone(), kit.mech_metal.clone(),
-            Vec3::new(0.0, 0.0, -0.02 + k as f32 * 0.055), Quat::from_rotation_x(FRAC_PI_2),
-            Vec3::new(0.165, 0.028, 0.165));
+            Vec3::new(0.0, 0.0, z), Quat::from_rotation_x(FRAC_PI_2),
+            Vec3::new(0.170, 0.030, 0.170));
+        part(kit.cyl.clone(), kit.med_glow.clone(),
+            Vec3::new(0.0, 0.0, z + 0.021), Quat::from_rotation_x(FRAC_PI_2),
+            Vec3::new(0.155, 0.010, 0.155));
     }
-    part(kit.cube.clone(), kit.barrier_edge.clone(), Vec3::new(0.0, 0.085, 0.08), Quat::IDENTITY, Vec3::new(0.014, 0.012, 0.26));
+    // the feed line running the coils forward to the cup
+    for sd in [-1.0_f32, 1.0] {
+        part(kit.cube.clone(), kit.med_glow.clone(),
+            Vec3::new(sd * 0.066, 0.0, 0.09), Quat::IDENTITY,
+            Vec3::new(0.010, 0.030, 0.235));
+    }
     root
 }
 
@@ -10177,6 +10924,37 @@ const REPAIR_BEAMS: usize = 4;
 const REPAIR_SEGMENTS: usize = 14;
 const REPAIR_PACKETS: usize = 5;
 
+/// The repair beam's two own materials: `(sheath, bloom)`.
+///
+/// Built here rather than inline in `setup`'s `ModelKit` literal - see the
+/// note at the call site for why that literal must not grow.
+fn repair_beam_materials(
+    materials: &mut Assets<StandardMaterial>,
+) -> (Handle<StandardMaterial>, Handle<StandardMaterial>) {
+    // Alphas chosen so a beam crossing a teammate does not hide him: the
+    // sheath is a veil you read THROUGH, and all the actual brightness is
+    // in the packets that run inside it.
+    let sheath = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.35, 0.95, 0.50, 0.38),
+        emissive: LinearRgba::new(0.30, 2.2, 0.55, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
+    let bloom = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.70, 1.0, 0.78, 0.30),
+        emissive: LinearRgba::new(0.8, 3.2, 1.1, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
+    (sheath, bloom)
+}
+
 fn spawn_repair_beam_vis(
     commands: &mut Commands,
     kit: &ModelKit,
@@ -10186,7 +10964,9 @@ fn spawn_repair_beam_vis(
             commands
                 .spawn((
                     Mesh3d(kit.cyl.clone()),
-                    MeshMaterial3d(kit.barrier_edge.clone()),
+                    // §owner MECH WEAPON LOOK: GREEN, not the shield's
+                    // blue. See `ModelKit::repair_sheath`.
+                    MeshMaterial3d(kit.repair_sheath.clone()),
                     Transform::IDENTITY,
                     Visibility::Hidden,
                 ))
@@ -10198,7 +10978,11 @@ fn spawn_repair_beam_vis(
             commands
                 .spawn((
                     Mesh3d(kit.ball.clone()),
-                    MeshMaterial3d(kit.core_glow.clone()),
+                    // ...and these were `core_glow`, the DANGER RED. A
+                    // healing beam was carrying warning lights up its own
+                    // length. `med_glow` is the friendly repair green and
+                    // has been in the kit the whole time.
+                    MeshMaterial3d(kit.med_glow.clone()),
                     Transform::IDENTITY,
                     Visibility::Hidden,
                 ))
@@ -10208,7 +10992,7 @@ fn spawn_repair_beam_vis(
     let landing = commands
         .spawn((
             Mesh3d(kit.ball.clone()),
-            MeshMaterial3d(kit.barrier_fill.clone()),
+            MeshMaterial3d(kit.repair_bloom.clone()),
             Transform::IDENTITY,
             Visibility::Hidden,
         ))
@@ -14376,6 +15160,23 @@ fn setup(
     // `agile_mech`, so a test can reach it. This is only the adapter into
     // Bevy's `Color`; the numbers themselves are not repeated here.
     let srgb3 = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
+    // §owner MECH WEAPON LOOK: built OUTSIDE the `ModelKit` literal below,
+    // deliberately, and this is not style.
+    //
+    // That literal is a single expression with ~130 nested
+    // `materials.add(StandardMaterial { .. })` sub-expressions in it, and
+    // it sits inside the largest function of a 30k-line crate. It is
+    // already AT rustc's stack limit here: adding these two inline made
+    // the compiler die with STATUS_STACK_BUFFER_OVERRUN (0xc0000409) -
+    // not a type error, a crash - and the crate stopped building. The
+    // same fragility is on record twenty lines from `N_HELMETS`, where a
+    // const-generic argument taken from a table's own `.len()` crashed
+    // rustc in this same file.
+    //
+    // A free function moves the construction into its own stack frame and
+    // leaves one plain identifier at the use site. ANY new material added
+    // here should follow this pattern rather than growing the literal.
+    let (repair_sheath, repair_bloom) = repair_beam_materials(&mut materials);
     let kit = ModelKit {
         cube: meshes.add(with_tangents(Cuboid::new(1.0, 1.0, 1.0).into())),
         cyl: meshes.add(with_tangents(Cylinder::new(0.5, 1.0).into())),
@@ -14386,8 +15187,27 @@ fn setup(
         grey_black: materials.add(tex_metal(Color::srgb_u8(0x1E, 0x20, 0x24), 0.05, 0.60, 3.0)),
         gunmetal: materials.add(tex_metal(Color::srgb(0.16, 0.17, 0.19), 0.8, 0.45, 3.0)),
         steel: materials.add(tex_metal(Color::srgb(0.62, 0.64, 0.68), 0.95, 0.30, 3.0)),
-        wood: materials.add(tex_wood(Color::srgb(0.42, 0.28, 0.15), Vec2::new(1.0, 2.5))),
-        string: materials.add(metal(Color::srgb(0.85, 0.82, 0.70), 0.0, 0.9)),
+        // §owner BOW & SPEAR: "warm mid-brown wood". Lifted from the old
+        // 0.42/0.28/0.15 - that reads as dark walnut under this map's
+        // fill light, and the reference is a MID brown you can still see
+        // grain in at 30 m. The grain tiling runs long down the limb.
+        wood: materials.add(tex_wood(Color::srgb(0.56, 0.37, 0.19), Vec2::new(1.0, 2.5))),
+        // "a pale taut string" - already here, and until this pass it
+        // was built every startup and drawn on absolutely nothing.
+        string: materials.add(metal(Color::srgb(0.88, 0.85, 0.74), 0.0, 0.85)),
+        // "a slim black leather grip". Matte and near-black: the point
+        // of it is that the hand's position on the riser reads as a
+        // DARK band against the wood, from any distance.
+        leather: materials.add(tex_metal(Color::srgb(0.075, 0.065, 0.060), 0.0, 0.95, 3.0)),
+        // "a dark leaf-shaped blade". Darker and less mirror-like than
+        // `steel` (0.62 grey, 0.95 metallic), which is a receiver
+        // finish; forged iron is dark and only catches light on an
+        // edge, which is exactly what makes the midrib read.
+        blade: materials.add(tex_metal(Color::srgb(0.20, 0.21, 0.23), 0.85, 0.42, 3.0)),
+        // "a short red/dark collar binding blade to shaft" - oxblood,
+        // deliberately desaturated so it never competes with the ENEMY
+        // signal red (`mech_red`), which is a gameplay colour.
+        collar: materials.add(tex_metal(Color::srgb(0.34, 0.085, 0.070), 0.05, 0.75, 3.0)),
         lens: materials.add(StandardMaterial {
             base_color: Color::srgb(0.3, 0.8, 1.0),
             emissive: LinearRgba::new(0.4, 1.6, 2.4, 1.0),
@@ -14409,6 +15229,8 @@ fn setup(
             unlit: true,
             ..default()
         }),
+        repair_sheath,
+        repair_bloom,
         armor_dark: materials.add(tex_metal(Color::srgb(0.14, 0.15, 0.18), 0.9, 0.35, 2.4)),
         core_glow: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.25, 0.15),
@@ -15412,15 +16234,18 @@ fn setup(
     let mut vm_weapons = [Entity::PLACEHOLDER; N_WEAPONS];
     for (wi, wk) in ALL_WEAPONS.into_iter().enumerate() {
         let model = spawn_weapon_model(&mut commands, &kit, wk, true, true);
-        let (tr, extra_rx) = vm_carry(wk);
+        let c = vm_carry(wk);
         commands
             .entity(model)
             .insert((
                 Transform {
-                    translation: tr,
-                    rotation: Quat::from_rotation_y(PI + 0.026)
-                        * Quat::from_rotation_x(extra_rx),
-                    scale: Vec3::splat(0.9),
+                    translation: c.pos,
+                    // yaw, then ROLL, then pitch. Order matters and this
+                    // one is chosen so `roll` is a roll about the VIEW
+                    // axis (the archer's cant) rather than about the
+                    // weapon's own long axis - see `VmCarry`.
+                    rotation: c.rotation(),
+                    scale: Vec3::splat(VM_MODEL_SCALE),
                 },
                 Visibility::Hidden,
             ))
@@ -17810,6 +18635,36 @@ fn sync_fighters(
             game.sim.mech_jump_phase_of(vis.index),
             game.sim.mech_jump_compression_of(vis.index),
         );
+        // §owner THE JAVELIN WIND. Asked of the sim, never guessed from
+        // a clock over here: `spear_stance_of` says which half of the
+        // throw this body is in and the two fraction accessors say how
+        // far through it. `spear_wind_t` is deliberately NOT read - it
+        // is the release clock, it is zero for the entire charge, and
+        // reading it is exactly how the charge came to have no pose.
+        //
+        // The one thing added on this side is the pre-aim READY, which
+        // is a CLIENT input state (RMB for you, line of sight for a
+        // bot) and has no sim field to ask for. It is capped at a third
+        // of the wind and the sim's own fraction always wins, so it can
+        // only ever be a lean-in before the charge starts.
+        let aiming = if is_player { cam_ctl.ads } else { f.los_time > 0.0 };
+        let spear_plant = game.sim.spear_plant_frac_of(vis.index);
+        let spear_wind = {
+            let w = game.sim.spear_wind_frac_of(vis.index);
+            let ready = if f.gun == GunKind::Spear && aiming && !in_mech {
+                0.30
+            } else {
+                0.0
+            };
+            w.max(ready)
+        };
+        let javelin = if spear_plant > 0.0 {
+            Some(javelin_plant_pose(spear_plant))
+        } else if spear_wind > 0.0 {
+            Some(javelin_wind_pose(spear_wind))
+        } else {
+            None
+        };
         let (hip_y, torso_pitch_base) = if rolling {
             (0.25, 1.0) // curled tight around the tumble pivot
         } else if airborne {
@@ -17826,6 +18681,16 @@ fn sync_fighters(
             )
         } else {
             gait_pose(f.crouch, rig.phase, amp, rig.accel_lean, settle)
+        };
+        // "weight shifted back into a wide braced stance" - the hips
+        // SINK and the trunk settles back over the rear foot. Additive
+        // over whatever the gait just produced, so a thrower winding on
+        // the move still walks.
+        let (hip_y, torso_pitch_base) = match &javelin {
+            Some(j) if !rolling && !airborne => {
+                (hip_y - j.sink, torso_pitch_base - 0.9 * j.sink)
+            }
+            _ => (hip_y, torso_pitch_base),
         };
         // legs: thigh (hip), shin (knee), foot (ankle) per side.
         // Sign convention: +X rotation swings the limb BACKWARD, so knees
@@ -17894,17 +18759,31 @@ fn sync_fighters(
                 // sprint gets a snap.
                 toe = toe_off_angle(rig.phase + off, amp);
             }
+            // THE BRACED STANCE. One number, opposite signs: the LEFT
+            // leg steps forward, the RIGHT (the throwing side) drives
+            // back. Angles only - no lateral translation, because the
+            // hip x is set once at spawn and a second writer here is
+            // how a stance starts drifting.
+            let stagger = match &javelin {
+                Some(j) if !rolling && !airborne => {
+                    // li 0 is the left leg, li 1 the right
+                    if li == 0 { -j.stagger } else { j.stagger }
+                }
+                _ => 0.0,
+            };
             if let Ok((mut t, _)) = parts.get_mut(leg[0]) {
                 t.translation.y = hip_y;
                 t.rotation = if rolling || f.crouch || airborne {
                     Quat::from_rotation_x(thigh)
                 } else {
                     // swing in the plane of MOVEMENT (crossover strafe)
-                    Quat::from_axis_angle(swing_axis, thigh)
+                    Quat::from_axis_angle(swing_axis, thigh + stagger)
                 };
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[1]) {
-                t.rotation = Quat::from_rotation_x(shin);
+                // both knees soften into the brace - a wide stance with
+                // locked legs is a man standing still with his feet apart
+                t.rotation = Quat::from_rotation_x(shin + stagger.abs() * 0.55);
             }
             if let Ok((mut t, _)) = parts.get_mut(leg[2]) {
                 t.rotation = Quat::from_rotation_x(foot);
@@ -17946,7 +18825,14 @@ fn sync_fighters(
             }
         }
         let spear_release_t = life[vis.index].spear_release_t;
-        let spear_yaw = torso_coil_yaw(f.gun, f.spear_wind_t, f.knife_phase, in_mech, spear_release_t);
+        let spear_yaw = torso_coil_yaw(
+            f.gun,
+            f.spear_wind_t,
+            f.knife_phase,
+            in_mech,
+            spear_release_t,
+            spear_wind,
+        );
         // §1 (Brief VII), extending §4 (Brief IV): the living-motion
         // layer - breathing, weight shift, micro-sway, grip fidget, and
         // reactions (suppression/explosion flinch, ally-death snap, kill
@@ -18244,8 +19130,12 @@ fn sync_fighters(
             rig.sprint_t = (rig.sprint_t + dir * dt / rate).clamp(0.0, 1.0);
         }
         let wr_pitch = aim_pitch - torso_pitch;
-        let spear_cocked =
-            f.gun == GunKind::Spear && if is_player { cam_ctl.ads } else { true };
+        // (`spear_cocked` lived here: `gun == Spear && (player ? ads :
+        // TRUE)`. The bot half of that is why every enemy spearman on
+        // the field stood permanently cocked, wound up forever and
+        // never throwing - a pose is not a state, and the state is the
+        // sim's. Both halves are `spear_wind` now; a bot that has line
+        // of sight gets the same pre-aim lean the player's RMB does.)
         // The string follows the sim's draw clock, not the ADS toggle it
         // used to guess from. See `bow_draw_visual`.
         let bow_draw = if f.gun == GunKind::Bow {
@@ -18262,11 +19152,8 @@ fn sync_fighters(
         // is held when NOT shooting. Aimed blends in over 220 ms and out
         // over 140 ms; un-aimed carry is low-ready when contact is live
         // (recent fire or recent damage), patrol otherwise.
-        let aiming = if is_player {
-            cam_ctl.ads
-        } else {
-            f.los_time > 0.0
-        };
+        // (`aiming` is defined once, up beside the javelin stance -
+        // the leg brace needs it several hundred lines before here.)
         {
             let dir = if aiming { 1.0 } else { -1.0 };
             let rate = if aiming { 0.22 } else { 0.14 };
@@ -18297,41 +19184,25 @@ fn sync_fighters(
             }
         };
         let reload_cant = if f.reload_t > 0.0 { 0.44 } else { 0.0 };
-        let (wr_pos, wr_rot) = if spear_cocked || f.spear_wind_t > 0.0 {
-            // §owner: a JAVELIN THROW, in two beats you can read from
-            // across the field.
+        let (wr_pos, wr_rot) = if let Some(j) = &javelin {
+            // §owner: THE OVERHEAD JAVELIN WIND, and then the plant.
             //
-            // The old motion travelled about six centimetres and rotated
-            // a little - technically present, invisible in play. A throw
-            // is the most telegraphed action in the game and SHOULD be:
-            // it is a committed, single-shot, empty-your-hands decision,
-            // and the enemy is entitled to see it coming.
+            // Both come out of one pair of pure functions driven by the
+            // SIM's own fractions (`javelin_wind_pose` /
+            // `javelin_plant_pose`), so the arm cannot be somewhere the
+            // release clock disagrees with, and a test can sample the
+            // whole motion without a Bevy world.
             //
-            // COCK (first ~65% of the wind): the arm hauls the shaft up
-            // and back over the shoulder, out to the side of the head.
-            // WHIP (last ~35%): the hips are already opening under it
-            // (`torso_coil_yaw`), and the arm drives through hard, past
-            // neutral, so the release looks thrown rather than dropped.
-            let wp = if f.spear_wind_t > 0.0 {
-                (1.0 - f.spear_wind_t / SPEAR_WINDUP_S).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            const COCK_FRAC: f32 = 0.65;
-            let (cock, whip) = if wp < COCK_FRAC {
-                (ease_out(wp / COCK_FRAC), 0.0)
-            } else {
-                (1.0, ease_out((wp - COCK_FRAC) / (1.0 - COCK_FRAC)))
-            };
+            // The aim line is folded in gently while winding and fully
+            // by the release: a thrower tracks the target with his
+            // BODY through the hold, and only the last quarter of the
+            // throw is a line down the shaft.
             (
-                Vec3::new(
-                    0.16 + 0.10 * cock - 0.06 * whip,
-                    0.72 + 0.17 * cock - 0.10 * whip,
-                    0.02 - 0.34 * cock + 0.78 * whip,
-                ),
-                Quat::from_rotation_x(
-                    wr_pitch - 1.35 - 0.62 * cock + 1.45 * whip + jerk * 1.5,
-                ),
+                j.hand,
+                Quat::from_rotation_y(j.yaw)
+                    * Quat::from_rotation_x(
+                        wr_pitch * (0.30 + 0.70 * spear_plant) + j.pitch + jerk * 1.5,
+                    ),
             )
         } else if f.gun == GunKind::Bow {
             // The bow stands in front of the LEFT side, and it COMES UP as
@@ -18536,13 +19407,18 @@ fn sync_fighters(
                         let (q, e) = solve_arm_ik(sh_r, sprung, pole);
                         right = (q, e, 0.0);
                     }
-                    // §3.2: through the windup the OFF ARM points at the
-                    // target - the classic javelin sight line, and the
-                    // single most readable tell of the committed throw
-                    let lt = if f.gun == GunKind::Spear && f.spear_wind_t > 0.0 {
-                        Vec3::new(-0.06, 0.58, 0.55)
-                    } else {
-                        fore_t.unwrap_or(Vec3::new(-0.12, 0.38, 0.16))
+                    // §owner: "the opposite arm extended forward for
+                    // balance" - the classic javelin sight line, and
+                    // the single most readable tell of the wind.
+                    //
+                    // It used to be one fixed point that only appeared
+                    // during the 0.4 s plant; it now rides the same
+                    // fraction the rest of the pose does, so the arm
+                    // comes up WITH the charge instead of snapping out
+                    // at the moment of release.
+                    let lt = match &javelin {
+                        Some(j) => j.off_hand,
+                        None => fore_t.unwrap_or(Vec3::new(-0.12, 0.38, 0.16)),
                     };
                     let sprung_l = if rig.hand_l.is_nan() {
                         rig.hand_l = lt;
@@ -20517,6 +21393,10 @@ fn fp_viewmodel(
     // 0.97 suppression), and the recoil's visible rotation is damped
     // separately below - the bullet still goes where the sim says.
     let supp = 1.0 - cam_ctl.ads_t * 0.97;
+    // §owner REDUCED SWAY for the bow and the spear - one factor, three
+    // consumers (the bob below, `sway_rad`, and `breathe`). A hull mount
+    // is not "a weapon in the hands" and keeps the machine's own motion.
+    let steady = if p.in_mech() { 1.0 } else { vm_steady(p.gun) };
     // §2.3 (Brief IV): MINIMAL bob - half the old amplitudes. CS:GO's
     // gun barely bobs; steadiness is what reads as professional.
     // §1.3 (Brief VI): the bob CLOCK only advances while moving - theta
@@ -20537,9 +21417,10 @@ fn fp_viewmodel(
     let (new_sway, new_sway_v) = damped_spring(st.sway, st.sway_v, tgt, 196.0, dt);
     st.sway = new_sway;
     st.sway_v = new_sway_v;
-    let sway_rad = st.sway * (PI / 180.0) * supp;
+    let sway_rad = st.sway * (PI / 180.0) * supp * steady;
     // breathing idle: 0.28 Hz, ±0.4°
-    let breathe = (time.elapsed_secs() * std::f32::consts::TAU * 0.28).sin() * 0.007 * supp;
+    let breathe =
+        (time.elapsed_secs() * std::f32::consts::TAU * 0.28).sin() * 0.007 * supp * steady;
     // pitch lag: the muzzle trails fast camera pitch by up to ~4°
     let pv = (cam_ctl.pitch - st.prev_pitch) / dt;
     st.prev_pitch = cam_ctl.pitch;
@@ -20701,16 +21582,38 @@ fn fp_viewmodel(
         // a hull mount has no iron pair - `sight_line_y` reads the
         // STOWED rifle; the mount gets a small generic pull-in
         Vec3::new(-0.03, 0.015, 0.05) * ads_e
+    } else if matches!(p.gun, GunKind::Bow | GunKind::Spear) {
+        // §owner PRE-AIM MOVES THEM OUTWARD, NEVER INWARD.
+        //
+        // This is the branch the bow and the spear used to fall through,
+        // and what it did to them was the exact opposite of the owner's
+        // rule. `-tr.x` CANCELS the weapon's lateral carry: right-click
+        // slid whichever of them you were holding to the vertical
+        // midline and parked it on the crosshair. That is the pose the
+        // player now spends the most time in, because RMB became
+        // pre-aim-only in the input rework - so the one frame the rule
+        // is written about was the one frame nothing enforced it.
+        //
+        // Neither weapon has sights to align (`sight_line_y` is None
+        // for both, correctly), so there is nothing an inward shift
+        // could even be aligning. What a pre-aim IS for these two is a
+        // settle: a little closer to the body, a little steadier, and
+        // for the spear "slightly closer and further RIGHT" in the
+        // owner's own words.
+        let s = if p.gun == GunKind::Spear {
+            Vec3::new(0.050, 0.020, 0.050)
+        } else {
+            Vec3::new(0.020, 0.010, 0.060)
+        };
+        s * ads_e
     } else if let Some(sy) = sight_line_y(p.gun) {
-        let (tr, _) = vm_carry(p.gun);
+        let tr = vm_carry(p.gun).pos;
         Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
     } else {
-        // no iron pair - still cancel THIS gun's own lateral carry. The
-        // old hardcoded -0.11 was the default carry's x, so it doubled
-        // the bow's -0.10 into -0.21 instead of zeroing it, and left the
-        // spear at +0.04. A nominal sight height stands in for the
-        // missing one.
-        let (tr, _) = vm_carry(p.gun);
+        // no iron pair - still cancel THIS gun's own lateral carry (the
+        // fists and the hip-fired minigun land here). A nominal sight
+        // height stands in for the missing one.
+        let tr = vm_carry(p.gun).pos;
         Vec3::new(-tr.x, -(tr.y + 0.0866 * 0.9), 0.10) * ads_e
     };
     // §3 (Brief IV): the signature reload replaces the flat dip - the
@@ -20868,7 +21771,7 @@ fn fp_viewmodel(
             + rl_t
             + mel_t
             + VM_GRENADE_SHIFT * gr
-            + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind);
+            + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind, steady);
         // §3.4: low-ready is ROTATION ONLY - it appears in these three
         // Quats and nowhere in `tf.translation` above. Muzzle UP is
         // NEGATIVE pitch here (sprint's `+ sp * 0.61` is what lowers the
@@ -24925,17 +25828,17 @@ mod band_tests {
     fn vm_never_bounces() {
         // standing still: ZERO positional motion at every bob phase
         for th in 0..100 {
-            let o = carry_offset(0.0, th as f32 * 0.37, true, 0.0, 0.0, 0.0, 0.0);
+            let o = carry_offset(0.0, th as f32 * 0.37, true, 0.0, 0.0, 0.0, 0.0, 1.0);
             assert_eq!(o, Vec3::ZERO, "standing = frozen bob: {o:?}");
         }
         // ...and anywhere below the dead-zone
-        let o = carry_offset(VM_BOB_DEADZONE * 0.9, 1.3, true, 0.0, 0.0, 0.0, 0.0);
+        let o = carry_offset(VM_BOB_DEADZONE * 0.9, 1.3, true, 0.0, 0.0, 0.0, 0.0, 1.0);
         assert_eq!(o, Vec3::ZERO, "sub-deadzone speed must not bob");
         // bounce meter: the whole fire-kick envelope at a standstill -
         // no lateral or vertical translation, rear slide ≤ 2 cm
         for ph in 0..=20 {
             let kick = ph as f32 / 20.0;
-            let o = carry_offset(0.0, 0.0, true, kick, 0.0, 0.0, 0.0);
+            let o = carry_offset(0.0, 0.0, true, kick, 0.0, 0.0, 0.0, 1.0);
             assert!(
                 o.x == 0.0 && o.y == 0.0,
                 "firing adds ZERO lateral/vertical translation: {o:?}"
@@ -24947,18 +25850,18 @@ mod band_tests {
             );
         }
         // after the envelope: exactly rest (≤ 2 mm demanded, 0 delivered)
-        let rest = carry_offset(0.0, 0.0, true, 0.0, 0.0, 0.0, 0.0);
+        let rest = carry_offset(0.0, 0.0, true, 0.0, 0.0, 0.0, 0.0, 1.0);
         assert!(rest.length() <= 0.002, "rest within 2 mm after the spray");
         // the kick return window is the ≤ 120 ms contract
         assert!(VM_KICK_RETURN_S <= 0.12 + 1e-6);
         // run-lower: full sprint pulls the weapon DOWN, never up
         for th in 0..50 {
-            let o = carry_offset(1.0, th as f32 * 0.41, true, 0.0, 1.0, 0.0, 0.0);
+            let o = carry_offset(1.0, th as f32 * 0.41, true, 0.0, 1.0, 0.0, 0.0, 1.0);
             assert!(o.y < 0.0, "sprint must lower the weapon: {o:?}");
         }
         // airborne: bob is exactly ÷ 5
-        let g = carry_offset(0.8, 1.1, true, 0.0, 0.0, 0.0, 0.0);
-        let a = carry_offset(0.8, 1.1, false, 0.0, 0.0, 0.0, 0.0);
+        let g = carry_offset(0.8, 1.1, true, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let a = carry_offset(0.8, 1.1, false, 0.0, 0.0, 0.0, 0.0, 1.0);
         assert!(
             (a.x / g.x - VM_AIR_BOB).abs() < 1e-5
                 && (a.y / g.y - VM_AIR_BOB).abs() < 1e-5,
@@ -25002,10 +25905,16 @@ mod band_tests {
             // one, because that needs a point the weapon really occupies.
             let (bl, bu) = weapon_bounded_extent(kind);
             let corners = weapon_bounded_corners(kind);
-            let (carry, _) = vm_carry(kind);
+            let carry = vm_carry(kind).pos;
             // the root, in the same frame the sweep above uses: vm_carry
-            // stores forward as NEGATIVE z, the camera frame as positive
-            let base = Vec3::new(carry.x, carry.y, -carry.z);
+            // stores forward as NEGATIVE z, the camera frame as positive.
+            //
+            // ABS on z, because a carry may now be BEHIND the eye (the
+            // couched javelin is): what the reticle-circle radius needs
+            // is the DISTANCE the weapon is drawn at, and a signed
+            // negative would hand `r_at` a negative radius that every
+            // corner trivially clears.
+            let base = Vec3::new(carry.x, carry.y, carry.z.abs());
             for sf in [0.0_f32, 0.3, 0.6, 1.0] {
                 for th in 0..80 {
                     for grounded in [true, false] {
@@ -25046,6 +25955,7 @@ mod band_tests {
                                             sp,
                                             0.04,
                                             0.0,
+                                            vm_steady(kind),
                                         )
                                         + VM_BOW_DRAW_SHIFT * draw
                                         + VM_GRENADE_SHIFT * cook
@@ -25262,6 +26172,295 @@ mod band_tests {
         // it is not in ALL_WEAPONS - assert that stays true, since the
         // loop above would fail loudly if it were ever added
         assert!(!ALL_WEAPONS.contains(&GunKind::Fists));
+    }
+
+    // ---- §owner BOW & SPEAR ------------------------------------------
+
+    /// §2/§6: *"weapon on the right, crosshair never obstructed, nothing
+    /// crosses the centre."*
+    ///
+    /// Fails on the code this replaced: the bow was carried at x -0.16,
+    /// which is the wrong side of the screen outright.
+    #[test]
+    fn the_bow_and_the_spear_are_carried_on_the_right() {
+        for kind in [GunKind::Bow, GunKind::Spear] {
+            let c = vm_carry(kind);
+            assert!(
+                c.pos.x > 0.10,
+                "{kind:?} is carried at x {:.3} - the owner's rule is the \
+                 RIGHT of frame",
+                c.pos.x
+            );
+        }
+        // and the bow's cant is a ROLL, not the pitch it used to be: a
+        // pitch cannot move a limb sideways, which is the entire job.
+        assert!(
+            vm_carry(GunKind::Bow).roll.abs() > 0.2,
+            "the bow is not canted - the upper limb has nothing taking it \
+             out of the centre"
+        );
+    }
+
+    /// §2/§6 THE SACRED CENTRE, projected properly.
+    ///
+    /// Every part corner of the bow and the spear, at every SUSTAINED
+    /// pose either can be held in, must land outside the 12%-of-screen-
+    /// height circle at the crosshair - measured at the depth the part
+    /// is actually drawn at, which is the whole point (see
+    /// `VmCarry::screen_point`).
+    ///
+    /// Mutation-proved against the shipped code twice over: the old
+    /// spear carry `(0.15, -0.10, -0.28)` puts its own point 0.16 half
+    /// -heights from centre, well inside the 0.24 circle, and the old
+    /// bow carry puts the riser on the left-hand side of it.
+    #[test]
+    fn the_bow_and_the_spear_leave_the_centre_of_the_screen_empty() {
+        for kind in [GunKind::Bow, GunKind::Spear] {
+            let c = vm_carry(kind);
+            let parts = weapon_parts(kind);
+            for pull in [0.0_f32, 0.5, 1.0] {
+                for ads in [0.0_f32, 1.0] {
+                    for sprint in [0.0_f32, 1.0] {
+                        // every sustained shift the render path adds,
+                        // at the same signs `fp_viewmodel` uses
+                        let pre = if kind == GunKind::Spear {
+                            Vec3::new(0.050, 0.020, 0.050)
+                        } else {
+                            Vec3::new(0.020, 0.010, 0.060)
+                        };
+                        let draw = if kind == GunKind::Bow { pull } else { 0.0 };
+                        let shift = pre * ads
+                            + VM_BOW_DRAW_SHIFT * draw
+                            + carry_offset(
+                                sprint,
+                                pull * 6.28,
+                                true,
+                                0.0,
+                                sprint,
+                                0.0,
+                                0.0,
+                                vm_steady(kind),
+                            )
+                            - VM_SUPPRESS_SHAKE;
+                        for w in &parts {
+                            let h = w.half();
+                            for sx in [-1.0_f32, 1.0] {
+                                for sy in [-1.0_f32, 1.0] {
+                                    for sz in [-1.0_f32, 1.0] {
+                                        let local =
+                                            w.pos + Vec3::new(sx * h.x, sy * h.y, sz * h.z);
+                                        let Some(s) = c.screen_point(shift, local) else {
+                                            continue; // behind the eye, not drawn
+                                        };
+                                        assert!(
+                                            s.length() > VM_CENTRE_CLEAR,
+                                            "{kind:?}: a corner lands {:.3} half-heights \
+                                             from the crosshair (limit {VM_CENTRE_CLEAR}) \
+                                             at pull {pull} ads {ads} sprint {sprint}",
+                                            s.length()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// §6: *"during pre-aim it comes slightly closer and further RIGHT,
+    /// never toward the centre."*
+    ///
+    /// Fails on the shipped code, which sent BOTH weapons to the
+    /// midline on right-click: the no-iron-sights branch of `ads_shift`
+    /// applies `-tr.x`, which cancels the carry exactly.
+    #[test]
+    fn pre_aim_moves_the_bow_and_the_spear_outward() {
+        for kind in [GunKind::Bow, GunKind::Spear] {
+            let c = vm_carry(kind);
+            // the spear's own head is the part §6 is written about
+            let nose = Vec3::new(0.0, 0.0, if kind == GunKind::Spear { 1.545 } else { 0.0 });
+            let hip = c.screen_point(Vec3::ZERO, nose).unwrap();
+            let pre = if kind == GunKind::Spear {
+                Vec3::new(0.050, 0.020, 0.050)
+            } else {
+                Vec3::new(0.020, 0.010, 0.060)
+            };
+            let aimed = c.screen_point(pre, nose).unwrap();
+            assert!(
+                aimed.x > hip.x,
+                "{kind:?}: pre-aim moved it from screen x {:.3} to {:.3} - \
+                 that is toward the centre, not away from it",
+                hip.x,
+                aimed.x
+            );
+        }
+    }
+
+    /// §8 REDUCED SWAY: the bow and the spear, and only those two.
+    #[test]
+    fn the_bow_and_spear_carry_steadier_than_the_rifles() {
+        for kind in ALL_WEAPONS {
+            let s = vm_steady(kind);
+            let want_calm = matches!(kind, GunKind::Bow | GunKind::Spear);
+            assert_eq!(
+                s < 1.0,
+                want_calm,
+                "{kind:?}: steadiness {s} - only the bow and the spear are \
+                 damped, the guns keep the motion they have"
+            );
+        }
+        // and it really reaches the bob, at full amplitude
+        let calm = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, 0.0, vm_steady(GunKind::Bow));
+        let loud = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, 0.0, vm_steady(GunKind::Ak47));
+        assert!(
+            calm.x.abs() < loud.x.abs() * 0.6 && calm.y.abs() < loud.y.abs() * 0.6,
+            "the damped bob is not damped: {calm:?} vs {loud:?}"
+        );
+        // ...and it damps the BOB ONLY. Sprint-lower and the landing dip
+        // are reads the player is owed at full size on every weapon.
+        let a = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 0.0, 0.45);
+        let b = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 0.0, 1.0);
+        assert_eq!(a, b, "steadiness must not touch the sprint lower or the dip");
+    }
+
+    /// §5: ONE SPEAR, EVERYWHERE - the held javelin and the thrown one
+    /// are built from the same table, so they cannot be different
+    /// objects. Fails on the shipped code, where they were two hand
+    /// -written tables with different part counts and palettes.
+    #[test]
+    fn the_thrown_spear_is_the_spear_that_was_held() {
+        let held = weapon_parts(GunKind::Spear);
+        let profile = spear_profile();
+        assert_eq!(
+            held.len(),
+            profile.len(),
+            "the held spear no longer comes from `spear_profile`"
+        );
+        for (w, p) in held.iter().zip(profile.iter()) {
+            assert_eq!(w.cyl, p.cyl);
+            assert_eq!(w.tone, p.tone);
+            assert!((w.pos.z - p.z).abs() < 1e-6, "z drifted at {}", p.z);
+        }
+        // the design, checked rather than described: a dark leaf blade,
+        // a red collar, and a warm-wood shaft
+        assert!(profile.iter().any(|p| p.tone == Tone::Collar), "no collar");
+        assert!(
+            profile.iter().filter(|p| p.tone == Tone::Blade).count() >= 4,
+            "the leaf blade needs its taper"
+        );
+        assert!(
+            profile.iter().filter(|p| p.tone == Tone::Wood).count() >= 3,
+            "the shaft is the warm wood, in the runs the grip window needs"
+        );
+        // and the midrib is genuinely PRONOUNCED - thicker through than
+        // the blade flats it rides on
+        let rib = profile
+            .iter()
+            .filter(|p| p.tone == Tone::Mid)
+            .map(|p| p.t)
+            .fold(0.0_f32, f32::max);
+        let flat = profile
+            .iter()
+            .filter(|p| p.tone == Tone::Blade && !p.cyl)
+            .map(|p| p.t)
+            .fold(0.0_f32, f32::max);
+        assert!(rib > flat * 1.5, "midrib {rib} vs blade {flat} - not pronounced");
+    }
+
+    /// §1: the bow is WOOD, LEATHER and CORD, not the firearm greys.
+    #[test]
+    fn the_bow_is_built_out_of_bow_materials() {
+        let parts = weapon_parts(GunKind::Bow);
+        let wood = parts.iter().filter(|w| w.tone == Tone::Wood).count();
+        assert!(wood >= 8, "only {wood} wooden parts - riser and both limbs?");
+        assert!(
+            parts.iter().any(|w| w.tone == Tone::Leather),
+            "no leather grip at the centre"
+        );
+        // "not ornate": no emissive anything on a weapon with no sights
+        assert!(
+            !parts.iter().any(|w| w.tone == Tone::Reticle),
+            "the bow is carrying an emissive pip"
+        );
+        // the limbs SWEEP - a stepped limb has every segment square on
+        assert!(
+            parts.iter().filter(|w| w.tilt.abs() > 0.05).count() >= 8,
+            "the limbs are not swept"
+        );
+    }
+
+    /// §7: the wind is one fraction, and the plant starts where it ends.
+    ///
+    /// Fails on the shipped pose, whose plant began 77 degrees NOSE-UP
+    /// with the hand at (0.16, 0.72, 0.02) - nowhere a wind could hand
+    /// over from, because there was no wind pose at all.
+    #[test]
+    fn the_javelin_plant_begins_where_the_wind_ends() {
+        let end = javelin_wind_pose(1.0);
+        let start = javelin_plant_pose(0.0);
+        assert!(
+            (end.hand - start.hand).length() < 1e-5,
+            "the hand jumps {:?} -> {:?} at the release",
+            end.hand,
+            start.hand
+        );
+        assert!((end.pitch - start.pitch).abs() < 1e-5);
+    }
+
+    /// §7: it must READ as a wind-up - arm high, point angled DOWN,
+    /// off arm forward, hips sunk, stance wide. All monotone in the
+    /// sim's own fraction so there is no frame that undoes itself.
+    #[test]
+    fn the_javelin_wind_reads_as_a_wind() {
+        let rest = javelin_wind_pose(0.0);
+        let full = javelin_wind_pose(1.0);
+        assert!(full.hand.y > rest.hand.y + 0.15, "the arm never got raised");
+        assert!(full.hand.z < rest.hand.z - 0.20, "the hand never went back");
+        assert!(full.pitch > 0.0, "the point must angle DOWN over the shoulder");
+        assert!(
+            full.off_hand.z > rest.off_hand.z + 0.15,
+            "the balance arm never reached forward"
+        );
+        assert!(full.sink > 0.0 && full.stagger > 0.2, "no braced stance");
+        let mut prev = javelin_wind_pose(0.0);
+        for i in 1..=20 {
+            let p = javelin_wind_pose(i as f32 / 20.0);
+            assert!(p.hand.y >= prev.hand.y, "the raise reverses at {i}");
+            assert!(p.stagger >= prev.stagger, "the stance narrows at {i}");
+            prev = p;
+        }
+        // the WHIP throws the hand forward past where it started
+        let released = javelin_plant_pose(1.0);
+        assert!(
+            released.hand.z > rest.hand.z + 0.4,
+            "the plant never drives through: z {} vs {}",
+            released.hand.z,
+            rest.hand.z
+        );
+    }
+
+    /// §7: the hips coil through the CHARGE now, not only through the
+    /// 0.4 s plant. Fails on the shipped `torso_coil_yaw`, which had no
+    /// wind parameter and returned the follow-through's 0.0 for every
+    /// second of a seven-second hold.
+    #[test]
+    fn the_hips_coil_while_the_javelin_charges() {
+        let held = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0, 1.0);
+        assert!(
+            held.abs().to_degrees() > 30.0,
+            "a fully wound thrower's hips are square: {:.1} deg",
+            held.abs().to_degrees()
+        );
+        // and it hands over to the plant's own curve continuously
+        let plant_start = torso_coil_yaw(GunKind::Spear, SPEAR_WINDUP_S, 0.0, false, 0.0, 0.0);
+        assert!(
+            (held - plant_start).abs() < 1e-5,
+            "coil jumps {held} -> {plant_start} at the release"
+        );
+        // a rifleman never twists, whatever is held
+        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0, 1.0), 0.0);
     }
 
     /// The directional read: the strip that lights is the one facing the
@@ -28879,7 +30078,7 @@ mod rig_separation_tests {
         let mut peak_deg = 0.0_f32;
         for i in 0..=100 {
             let wind_t = SPEAR_WINDUP_S * (1.0 - i as f32 / 100.0);
-            let sep = torso_coil_yaw(GunKind::Spear, wind_t, 0.0, false, 0.0);
+            let sep = torso_coil_yaw(GunKind::Spear, wind_t, 0.0, false, 0.0, 0.0);
             peak_deg = peak_deg.max(sep.abs().to_degrees());
         }
         assert!(
@@ -28894,7 +30093,7 @@ mod rig_separation_tests {
         // torso were the SAME rotation (a fused single trunk bone), this
         // would be identically 0.0 at every sample - it is not.
         let mid_wind = SPEAR_WINDUP_S * 0.5;
-        let sep = torso_coil_yaw(GunKind::Spear, mid_wind, 0.0, false, 0.0);
+        let sep = torso_coil_yaw(GunKind::Spear, mid_wind, 0.0, false, 0.0, 0.0);
         assert_ne!(sep, 0.0, "torso and root must NOT share one fused rotation");
     }
 
@@ -28907,12 +30106,12 @@ mod rig_separation_tests {
         // 0.0 and still read as rest only because the old curve was
         // silent at t=0 - which was itself the bug: a real release
         // starts at the release yaw, not at neutral.)
-        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0), 0.0);
-        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, -1.0, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, -1.0, 0.0), 0.0);
         // a gun that is not a spear never twists, whatever the clock says
-        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, 0.0), 0.0);
+        assert_eq!(torso_coil_yaw(GunKind::M4, 0.0, 0.0, false, 0.0, 0.0), 0.0);
         // and long after a throw, the follow-through has fully settled
-        assert!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 3.0).abs() < 1e-3);
+        assert!(torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 3.0, 0.0).abs() < 1e-3);
     }
 }
 
@@ -29418,8 +30617,8 @@ mod elastic_load_tests {
 
         // 3. handoff continuity: the last windup frame and the first
         //    follow-through frame must be within a couple of degrees
-        let last_windup = torso_coil_yaw(GunKind::Spear, DT, 0.0, false, -1.0);
-        let first_follow = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0);
+        let last_windup = torso_coil_yaw(GunKind::Spear, DT, 0.0, false, -1.0, 0.0);
+        let first_follow = torso_coil_yaw(GunKind::Spear, 0.0, 0.0, false, 0.0, 0.0);
         assert!(
             (last_windup - first_follow).abs() < 0.09, // ~5 deg
             "release must not pop: windup ended at {last_windup}, follow-through starts at {first_follow}"
