@@ -77,6 +77,15 @@ mod menu_ui;
 /// shot clock every other fresh-shot effect reads and owns nothing else.
 mod muzzle_flash;
 mod sim;
+/// §owner: the bow's and the spear's published hand anchors. Read
+/// `weapon_anchors.rs` for the attach contract - it is the thing a hand
+/// system binds to.
+mod weapon_anchors;
+/// §3: the first-person javelin pose - the charge AND the throw. Its
+/// own file so the pose can be tested without a Bevy App, and so the
+/// most contended file in the repo grows by one line instead of two
+/// hundred.
+mod spear_fp;
 
 use bevy::audio::Volume;
 use bevy::input::mouse::MouseMotion;
@@ -448,6 +457,31 @@ const BOW_HAND_OFF: Vec3 = Vec3::new(0.018, 0.0, -0.030);
 /// `bow_draw_visual`'s 0..1.
 fn bow_nock_local(draw: f32) -> Vec3 {
     Vec3::new(0.0, 0.0, BOW_STRING_Z - BOW_DRAW_PULL * draw.clamp(0.0, 1.0))
+}
+
+/// Where the bow HAND holds: the centre of the leather wrap on the
+/// riser. Static, and the same point the wrap part is built at.
+const BOW_GRIP_LOCAL: Vec3 = Vec3::new(0.0, 0.0, 0.012);
+/// Where the spear HAND holds: the swell at the middle of the shaft,
+/// which is `spear_profile`'s centre run and the balance point the
+/// thrown model is re-anchored on.
+const SPEAR_GRIP_LOCAL: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+
+/// The local transform of one published anchor - the ONE place an
+/// anchor's position is decided, for the spawn and for the per-frame
+/// update alike.
+///
+/// `draw` is `bow_draw_visual`'s 0..1 and is ignored by the static
+/// anchors. Everything live routes through `bow_nock_local`, so an
+/// anchor cannot end up somewhere the string is not.
+fn weapon_anchor_local(kind: weapon_anchors::AnchorKind, draw: f32) -> Transform {
+    use weapon_anchors::AnchorKind as A;
+    Transform::from_translation(match kind {
+        A::BowGrip => BOW_GRIP_LOCAL,
+        A::BowNock => bow_nock_local(draw),
+        A::BowDrawHand => bow_nock_local(draw) + BOW_HAND_OFF,
+        A::SpearGrip => SPEAR_GRIP_LOCAL,
+    })
 }
 
 /// Pose one half of the string - from a limb tip to the nock.
@@ -3243,12 +3277,11 @@ fn carry_offset(
     kick: f32,
     sprint_e: f32,
     dip: f32,
-    wind: f32,
     // §owner REDUCED SWAY: `vm_steady` for the weapon in hand. It scales
-    // the BOB and nothing else - the sprint lower, the landing dip, the
-    // fire slide and the javelin wind are all reads the player is
-    // entitled to at full size on every weapon, and damping them would
-    // be hiding information rather than steadying a hold.
+    // the BOB and nothing else - the sprint lower, the landing dip and
+    // the fire slide are all reads the player is entitled to at full
+    // size on every weapon, and damping them would be hiding
+    // information rather than steadying a hold.
     steady: f32,
 ) -> Vec3 {
     let s = if speed_frac < VM_BOB_DEADZONE {
@@ -3261,11 +3294,16 @@ fn carry_offset(
         0.0065 * s * theta.sin(),
         0.004 * s * (2.0 * theta).sin(),
     ) * (air * steady);
+    // §owner: the javelin's `wind` term is GONE from here. It was the
+    // plant clock only - it read 0 for the whole charge - and the whole
+    // first-person javelin pose now comes out of `spear_fp`, charge and
+    // plant together, as one continuous curve. Two owners of the same
+    // motion is exactly the split this file keeps re-growing.
     Vec3::new(
-        bob.x + sprint_e * 0.02 + wind * 0.07,
+        bob.x + sprint_e * 0.02,
         // the run-lower and the landing dip pull DOWN, never up
-        bob.y - dip - sprint_e * 0.06 + wind * 0.09,
-        kick * VM_KICK_SLIDE_M + wind * 0.30,
+        bob.y - dip - sprint_e * 0.06,
+        kick * VM_KICK_SLIDE_M,
     )
 }
 
@@ -8679,12 +8717,30 @@ fn main() {
 /// number the sim produced and writes Transforms nothing reads back.
 fn bow_string_sync(
     bows: Query<(&BowDraw, &Children)>,
-    mut halves: Query<(&BowStringHalf, &mut Transform), Without<NockedArrow>>,
-    mut arrows: Query<(&mut Transform, &mut Visibility), With<NockedArrow>>,
+    mut halves: Query<
+        (&BowStringHalf, &mut Transform),
+        (Without<NockedArrow>, Without<weapon_anchors::WeaponAnchor>),
+    >,
+    mut arrows: Query<
+        (&mut Transform, &mut Visibility),
+        (With<NockedArrow>, Without<weapon_anchors::WeaponAnchor>),
+    >,
+    // §owner: the LIVE hand anchors ride the same `bow_nock_local` the
+    // string and the arrow do, from the same system, on the same frame.
+    // Three copies of "where the nock is" is exactly what this system
+    // was written to end.
+    mut anchors: Query<
+        (&weapon_anchors::WeaponAnchor, &mut Transform),
+        (Without<NockedArrow>, Without<BowStringHalf>),
+    >,
 ) {
     for (draw, children) in &bows {
         for child in children.iter() {
-            if let Ok((side, mut t)) = halves.get_mut(*child) {
+            if let Ok((a, mut t)) = anchors.get_mut(*child) {
+                if a.0.is_live() {
+                    *t = weapon_anchor_local(a.0, draw.pull);
+                }
+            } else if let Ok((side, mut t)) = halves.get_mut(*child) {
                 *t = bow_string_half(side.0, draw.pull);
             } else if let Ok((mut t, mut v)) = arrows.get_mut(*child) {
                 *t = bow_nocked_arrow(draw.pull);
@@ -9928,6 +9984,31 @@ fn spawn_weapon_model(
     // string - and the reason is visible in the capture scripts: the
     // third-person script cannot see the viewmodel, and until `bow_draw_fp`
     // existed nothing had ever looked at it.
+    // §owner THE PUBLISHED HAND ANCHORS. Spawned for BOTH views and for
+    // every wielder, because a hand system that only found them on the
+    // viewmodel would be a hand system that works in first person and
+    // nowhere else - which is the shape of half the bugs in this file's
+    // history. See `weapon_anchors.rs` for what a hand must do with
+    // them.
+    {
+        let list = match kind {
+            GunKind::Bow => weapon_anchors::anchors_for_bow(),
+            GunKind::Spear => weapon_anchors::anchors_for_spear(),
+            _ => &[][..],
+        };
+        for a in list {
+            commands
+                .spawn((
+                    weapon_anchor_local(*a, 0.0),
+                    weapon_anchors::WeaponAnchor(*a),
+                    // no mesh: an anchor is a coordinate frame. It still
+                    // needs Visibility so Bevy propagates a
+                    // GlobalTransform for it.
+                    Visibility::default(),
+                ))
+                .set_parent(root);
+        }
+    }
     if kind == GunKind::Bow {
         commands.entity(root).insert(BowDraw { pull: 0.0, nocked: true });
         for side in [-1.0_f32, 1.0] {
@@ -21129,11 +21210,16 @@ struct VmState {
     lowready_v: f32,
     inspect: bool,
     inspect_t: f32,
-    /// §3.2: the spear windup fraction, EASED. `spear_wind_t` snaps from
-    /// its last tick straight to 0 on release, and this value drives
-    /// ~30 cm of translation and ~31 deg of rotation - reading it raw
-    /// teleported the viewmodel in a single frame.
+    /// §3: the javelin HOLD - `spear_wind_frac_of` while the charge is
+    /// running, then LATCHED at the value the trigger came off at for
+    /// the length of the plant, so `spear_fp::plant_pose` hands over
+    /// from the pose the player was actually looking at.
     spear_wind_ease: f32,
+    /// §3: the smoothed first-person javelin pose. Kept as a POSE and
+    /// not as a fraction because the only edge that needs smoothing is
+    /// the end of the throw, where the target jumps from 56 cm of
+    /// reach-through back to carry in one frame.
+    spear_pose: spear_fp::SpearFpPose,
     /// §2.5 finger-settle spring state (k=220) - see `fp_viewmodel`.
     finger: f32,
     finger_v: f32,
@@ -21382,27 +21468,50 @@ fn fp_viewmodel(
     let lr = st.lowready;
     // §C: a hull mount never plays the rifle's reload theatre
     let reloading = p.reload_t > 0.0 && !p.in_mech();
-    // §3: the spear windup reads in FIRST person too - the arm hauls
-    // back and up through the wind, then the release whips through
-    // §3.2: the windup fraction drives ~30 cm of viewmodel translation
-    // and ~31 deg of rotation. Read raw it snaps 0.98 -> 0 the frame the
-    // spear leaves the hand (a 1-frame teleport); winding UP is tracked
-    // exactly, and only the RELEASE gets a tail.
+    // §3 THE FIRST-PERSON JAVELIN, CHARGE AND ALL.
     //
-    // §owner: this is the sim's `spear_plant_frac_of`, not the third
-    // hand-written `1.0 - spear_wind_t / SPEAR_WINDUP_S`. The accessor
-    // returns 0 in every stance but the plant, so the gun-kind test and
-    // the clock test both fold into the one call - and `SPEAR_WINDUP_S`
-    // stops being arithmetic the viewmodel has to keep in step.
-    let raw_wind = game.sim.spear_plant_frac_of(game.sim.player);
+    // What was here read `spear_plant_frac_of` on its own. That is the
+    // 0.4 s THROW, so the seven-second charge posed the viewmodel by
+    // exactly nothing and pre-aim, half charge and full charge were the
+    // same three numbers - `spear_fp/02-fp-spear-preaim.png` and
+    // `04-fp-spear-full-charge.png` are the same spear on the same
+    // pixel with the HUD reading JAVELIN FULL underneath.
+    //
+    // Both of the sim's clocks now, asked of the sim: `spear_stance_of`
+    // settles which phase this is, `spear_wind_frac_of` drives the
+    // raise, `spear_plant_frac_of` drives the throw. Nothing here is
+    // re-derived from `spear_wind_t`.
+    //
+    // `spear_wind_ease` is the HOLD - the wind fraction, LATCHED at the
+    // value the trigger came off at and then left alone through the
+    // plant, so `spear_fp::plant_pose` starts from the pose the player
+    // was actually looking at instead of snapping to full charge first.
+    // It also keeps its old job of decaying the pose out after the
+    // throw rather than teleporting it back to carry.
+    let stance = game.sim.spear_stance_of(game.sim.player);
     const SPEAR_WIND_RELEASE_S: f32 = 0.13;
-    if raw_wind >= st.spear_wind_ease {
-        st.spear_wind_ease = raw_wind;
-    } else {
-        st.spear_wind_ease +=
-            (raw_wind - st.spear_wind_ease) * (dt / SPEAR_WIND_RELEASE_S).min(1.0);
-    }
-    let wind = st.spear_wind_ease;
+    let spear_target = match stance {
+        sim::SpearStance::Winding => {
+            st.spear_wind_ease = game.sim.spear_wind_frac_of(game.sim.player);
+            spear_fp::spear_fp_pose(st.spear_wind_ease, None)
+        }
+        // the latched hold is NOT touched here - that is the point of it
+        sim::SpearStance::Planting => spear_fp::spear_fp_pose(
+            st.spear_wind_ease,
+            Some(game.sim.spear_plant_frac_of(game.sim.player)),
+        ),
+        sim::SpearStance::Carried => spear_fp::SpearFpPose::REST,
+    };
+    // The wind and the plant are continuous with each other by
+    // construction, so the only edge that needs a tail is the one at the
+    // END of the plant, where a 56 cm reach-through would otherwise
+    // teleport back to carry in a single frame.
+    st.spear_pose = spear_fp::lerp(
+        st.spear_pose,
+        spear_target,
+        (dt / SPEAR_WIND_RELEASE_S).min(1.0),
+    );
+    let spear_pose = st.spear_pose;
     // §2.3: ROTATIONAL recoil that SNAPS back - kick is ~70% pitch-up /
     // 30% roll, recovered inside 140 ms regardless of the gun's cadence;
     // translation kick capped at 1.5 cm. The gun never wanders.
@@ -21675,13 +21784,14 @@ fn fp_viewmodel(
             + rl_t
             + mel_t
             + VM_GRENADE_SHIFT * gr
-            + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, wind, steady);
+            + spear_pose.offset
+            + carry_offset(s, st.theta, p.grounded, kick_vm, sp, dip, steady);
         // §3.4: low-ready is ROTATION ONLY - it appears in these three
         // Quats and nowhere in `tf.translation` above. Muzzle UP is
         // NEGATIVE pitch here (sprint's `+ sp * 0.61` is what lowers the
         // weapon), and inward yaw shares sprint's positive sign.
         tf.rotation = Quat::from_rotation_y(
-            sway_rad.x + sp * 0.35 - wind * 0.25 + 0.85 * ie + drift + rl_e.y + mel_e.y
+            sway_rad.x + sp * 0.35 + spear_pose.yaw + 0.85 * ie + drift + rl_e.y + mel_e.y
                 + lr * LOWREADY_YAW,
         ) * Quat::from_rotation_x(
             kick_vm * 0.16 * VIEW_KICK_TRIM
@@ -21692,7 +21802,7 @@ fn fp_viewmodel(
                 + mel_e.x
                 - 0.12 * gr
                 + sp * 0.61
-                - wind * 0.55
+                + spear_pose.pitch
                 + 0.22 * ie
                 - lr * LOWREADY_PITCH,
         ) * Quat::from_rotation_z(kick_vm * 0.07 * VIEW_KICK_TRIM + rl_e.z + mel_e.z + 0.08 * gr);
@@ -21712,24 +21822,20 @@ const ARC_PREVIEW_SPAN: f32 = 0.62;
 
 #[allow(clippy::too_many_arguments)]
 fn arc_preview(
-    time: Res<Time>,
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
     arc: Res<ArcVis>,
     mut arc_state: ResMut<ArcState>,
-    mut prev_yaw: Local<Option<f32>>,
     cam_q: Query<&Transform, With<MainCam>>,
     mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let spec = gun(p.gun);
     let show = cam_ctl.ads && p.alive() && spec.projectile.is_some() && p.roll_t <= 0.0;
-    // client-side yaw rate for the cone width (mirrors the sim's model)
-    let dt = time.delta_secs().max(1e-4);
-    let yaw_rate = prev_yaw
-        .map(|py| (wrap_angle(cam_ctl.yaw - py) / dt).abs())
-        .unwrap_or(0.0);
-    *prev_yaw = Some(cam_ctl.yaw);
+    // §9 (dead code, not tuning): a `yaw_rate` was computed here every
+    // frame "for the cone width" and never read - the cone has taken its
+    // width from the sim's own `aim_spread_of` since that copy was
+    // retired. It is gone, and `time` / `prev_yaw` with it.
     if !show {
         arc_state.range = None;
         for e in arc
@@ -21778,7 +21884,8 @@ fn arc_preview(
     // hard on/off at 0.5 m/s instead of the sim's 34%->95% ramp, and read
     // `spec.spread` where the sim uses `base_spread` (heat-aware). A
     // drawn bow is aimed, matching `step_bow_draw`'s own ADS-true call.
-    let moving = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt();
+    // (the `moving` speed computed here went the same way as
+    // `yaw_rate`: the sim owns the movement penalty now.)
     let spread = game
         .sim
         .aim_spread_of(game.sim.player, settled || p.gun == GunKind::Bow);
@@ -22864,15 +22971,37 @@ HEAT {:.0}%", p.mech_rounds, p.gatling_heat)
                     }
                 }
             }
-        } else if p.spear_charge_t > 0.0 {
+        } else if game.sim.spear_stance_of(game.sim.player) == sim::SpearStance::Winding {
             // §owner JAVELIN: the wind, on screen. A charge you cannot
             // see is a charge you cannot time, and this one has a real
             // ceiling - the bar filling tells you when holding longer
             // has stopped buying anything.
-            let frac = (p.spear_charge_t / sim::SPEAR_CHARGE_FULL_S).clamp(0.0, 1.0);
+            //
+            // §owner (this pass): THE SEVEN-SECOND HOLD NOW HAS A TELL.
+            // `spear_max_charged` pays +10% damage four seconds after
+            // the bar fills, and until now the HUD said "FULL" for both
+            // halves of that - so the bonus was a mechanic no player
+            // could ever have discovered, since nothing on screen
+            // changed when they earned it. `spear_max_charged_of` is
+            // the sim's own answer and it stays true through the plant,
+            // so the readout cannot disagree with the damage.
+            //
+            // The bar and the phase come from the accessors too:
+            // `spear_charge_t / SPEAR_CHARGE_FULL_S` was a sim constant
+            // being divided on the client, which is the same split
+            // `spear_wind_frac_of` exists to close.
+            let frac = game.sim.spear_wind_frac_of(game.sim.player);
+            let maxed = game.sim.spear_max_charged_of(game.sim.player);
             let n = (frac * 10.0).round() as i32;
-            let bar: String = (0..10).map(|i| if i < n { '#' } else { '.' }).collect();
-            let tag = if frac >= 1.0 { "FULL" } else { "WIND" };
+            // at max the bar fills SOLID - a shape change, not a colour
+            // one, so it reads the same to everybody
+            let full_ch = if maxed { '=' } else { '#' };
+            let bar: String = (0..10).map(|i| if i < n { full_ch } else { '.' }).collect();
+            let tag = match (maxed, frac >= 1.0) {
+                (true, _) => "MAX  +10%",
+                (false, true) => "FULL",
+                (false, false) => "WIND",
+            };
             format!("JAVELIN {tag}
 [{bar}]")
         } else if p.shield_up {
@@ -25743,17 +25872,17 @@ mod band_tests {
     fn vm_never_bounces() {
         // standing still: ZERO positional motion at every bob phase
         for th in 0..100 {
-            let o = carry_offset(0.0, th as f32 * 0.37, true, 0.0, 0.0, 0.0, 0.0, 1.0);
+            let o = carry_offset(0.0, th as f32 * 0.37, true, 0.0, 0.0, 0.0, 1.0);
             assert_eq!(o, Vec3::ZERO, "standing = frozen bob: {o:?}");
         }
         // ...and anywhere below the dead-zone
-        let o = carry_offset(VM_BOB_DEADZONE * 0.9, 1.3, true, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let o = carry_offset(VM_BOB_DEADZONE * 0.9, 1.3, true, 0.0, 0.0, 0.0, 1.0);
         assert_eq!(o, Vec3::ZERO, "sub-deadzone speed must not bob");
         // bounce meter: the whole fire-kick envelope at a standstill -
         // no lateral or vertical translation, rear slide ≤ 2 cm
         for ph in 0..=20 {
             let kick = ph as f32 / 20.0;
-            let o = carry_offset(0.0, 0.0, true, kick, 0.0, 0.0, 0.0, 1.0);
+            let o = carry_offset(0.0, 0.0, true, kick, 0.0, 0.0, 1.0);
             assert!(
                 o.x == 0.0 && o.y == 0.0,
                 "firing adds ZERO lateral/vertical translation: {o:?}"
@@ -25765,18 +25894,18 @@ mod band_tests {
             );
         }
         // after the envelope: exactly rest (≤ 2 mm demanded, 0 delivered)
-        let rest = carry_offset(0.0, 0.0, true, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let rest = carry_offset(0.0, 0.0, true, 0.0, 0.0, 0.0, 1.0);
         assert!(rest.length() <= 0.002, "rest within 2 mm after the spray");
         // the kick return window is the ≤ 120 ms contract
         assert!(VM_KICK_RETURN_S <= 0.12 + 1e-6);
         // run-lower: full sprint pulls the weapon DOWN, never up
         for th in 0..50 {
-            let o = carry_offset(1.0, th as f32 * 0.41, true, 0.0, 1.0, 0.0, 0.0, 1.0);
+            let o = carry_offset(1.0, th as f32 * 0.41, true, 0.0, 1.0, 0.0, 1.0);
             assert!(o.y < 0.0, "sprint must lower the weapon: {o:?}");
         }
         // airborne: bob is exactly ÷ 5
-        let g = carry_offset(0.8, 1.1, true, 0.0, 0.0, 0.0, 0.0, 1.0);
-        let a = carry_offset(0.8, 1.1, false, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let g = carry_offset(0.8, 1.1, true, 0.0, 0.0, 0.0, 1.0);
+        let a = carry_offset(0.8, 1.1, false, 0.0, 0.0, 0.0, 1.0);
         assert!(
             (a.x / g.x - VM_AIR_BOB).abs() < 1e-5
                 && (a.y / g.y - VM_AIR_BOB).abs() < 1e-5,
@@ -25869,7 +25998,6 @@ mod band_tests {
                                             kick,
                                             sp,
                                             0.04,
-                                            0.0,
                                             vm_steady(kind),
                                         )
                                         + VM_BOW_DRAW_SHIFT * draw
@@ -26152,7 +26280,6 @@ mod band_tests {
                                 0.0,
                                 sprint,
                                 0.0,
-                                0.0,
                                 vm_steady(kind),
                             )
                             - VM_SUPPRESS_SHAKE;
@@ -26224,16 +26351,16 @@ mod band_tests {
             );
         }
         // and it really reaches the bob, at full amplitude
-        let calm = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, 0.0, vm_steady(GunKind::Bow));
-        let loud = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, 0.0, vm_steady(GunKind::Ak47));
+        let calm = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, vm_steady(GunKind::Bow));
+        let loud = carry_offset(1.0, 1.2, true, 0.0, 0.0, 0.0, vm_steady(GunKind::Ak47));
         assert!(
             calm.x.abs() < loud.x.abs() * 0.6 && calm.y.abs() < loud.y.abs() * 0.6,
             "the damped bob is not damped: {calm:?} vs {loud:?}"
         );
         // ...and it damps the BOB ONLY. Sprint-lower and the landing dip
         // are reads the player is owed at full size on every weapon.
-        let a = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 0.0, 0.45);
-        let b = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 0.0, 1.0);
+        let a = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 0.45);
+        let b = carry_offset(0.0, 0.0, true, 0.0, 1.0, 0.05, 1.0);
         assert_eq!(a, b, "steadiness must not touch the sprint lower or the dip");
     }
 
@@ -28175,6 +28302,67 @@ mod bow_string_tests {
 
     /// Sample draws across the full range, ends included.
     const DRAWS: [f32; 6] = [0.0, 0.2, 0.45, 0.7, 0.9, 1.0];
+
+    /// §owner ANCHORS: the published hand points are where the bow
+    /// actually is, and the live ones actually live.
+    ///
+    /// Mutation-proved by construction rather than by transcription:
+    /// nothing here re-types a coordinate, it asserts the RELATIONS a
+    /// hand system depends on. Weld `BowNock` to a constant and the
+    /// travel assert fails; drop `BOW_HAND_OFF` from `BowDrawHand` and
+    /// the "behind the string" assert fails.
+    #[test]
+    fn the_published_anchors_track_the_draw() {
+        use weapon_anchors::AnchorKind as A;
+        // the grip does NOT move with the draw - it is the bow hand
+        let g0 = weapon_anchor_local(A::BowGrip, 0.0).translation;
+        let g1 = weapon_anchor_local(A::BowGrip, 1.0).translation;
+        assert_eq!(g0, g1, "the bow hand cannot travel with the string");
+        // the nock does, by the full pull, monotonically, and BACKWARD
+        let mut prev = weapon_anchor_local(A::BowNock, 0.0).translation.z;
+        for d in DRAWS.iter().skip(1) {
+            let z = weapon_anchor_local(A::BowNock, *d).translation.z;
+            assert!(z <= prev, "the nock anchor moved FORWARD at draw {d}");
+            prev = z;
+        }
+        let travel = weapon_anchor_local(A::BowNock, 0.0).translation.z - prev;
+        assert!(
+            (travel - BOW_DRAW_PULL).abs() < 1e-6,
+            "the nock anchor travelled {travel} over a full draw, the string \
+             travels {BOW_DRAW_PULL}"
+        );
+        // and the anchor is ON the string, at every draw
+        for d in DRAWS {
+            assert_eq!(
+                weapon_anchor_local(A::BowNock, d).translation,
+                bow_nock_local(d),
+                "the anchor left the string at draw {d}"
+            );
+        }
+        // the DRAW HAND hooks it from behind - never occupying it
+        for d in DRAWS {
+            let nock = weapon_anchor_local(A::BowNock, d).translation;
+            let hand = weapon_anchor_local(A::BowDrawHand, d).translation;
+            assert!(
+                hand.z < nock.z,
+                "the draw hand is in FRONT of the string at draw {d}"
+            );
+            assert!(
+                (hand - nock).length() > 0.02,
+                "the draw hand is sitting inside the string at draw {d}"
+            );
+        }
+        // the spear's grip is on the shaft's centre run, not out on the
+        // blade or off the butt
+        let s = weapon_anchor_local(A::SpearGrip, 0.0).translation;
+        let prof = spear_profile();
+        let shaft = &prof[1];
+        assert!(
+            (s.z - shaft.z).abs() <= shaft.len * 0.5,
+            "the spear grip at z {:.3} is not inside the hand swell",
+            s.z
+        );
+    }
 
     /// The two halves meet AT the nock, and their far ends stay pinned to
     /// the limb tips.
