@@ -796,8 +796,17 @@ pub fn pill_node() -> Node {
         // regardless of its label's length
         flex_basis: Val::Px(0.0),
         // NOT `height`. See the doc comment above.
+        //
+        // And NO vertical padding, deliberately. The first version of this
+        // added `U` top and bottom, which grew every WRAPPED pill by 10px
+        // rather than the 2px it actually needs - and the SOLDIER page,
+        // which was already overrunning the viewport before this module
+        // was touched (`02-soldier-page.png` at HEAD ends mid-spec-block,
+        // with no plate border and no seal), lost two more lines of its
+        // loadout spec. `min_height` alone contains the label, which was
+        // the whole requirement; the padding was comfort bought with
+        // space this page does not have.
         min_height: Val::Px(PILL_H),
-        padding: UiRect::vertical(Val::Px(U)),
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
         column_gap: Val::Px(U2),
