@@ -198,6 +198,14 @@ pub const ART_SCRIM_A: f32 = 0.86;
 /// rather than flashy."
 pub const FADE_S: f32 = 0.24;
 
+/// The creator credit on the title screen, in the owner's own words.
+///
+/// A const, so it is data the title screen reads rather than a literal
+/// buried in a spawn call - the same reason `LEARN_CARDS` is a table.
+/// Uppercase because every other word on this surface is; the name's
+/// written form is `Can.Bozovali`.
+pub const CREATOR_CREDIT: &str = "CREATOR   CAN.BOZOVALI";
+
 // ---- what a click does ---------------------------------------------------
 
 /// Every front-end action, in one enum.
@@ -761,6 +769,18 @@ fn open_title(
                 Text::new("FOUR AGAINST FOUR. FIRST TO TWENTY-FIVE.".to_string()),
                 TextFont { font_size: T_SUB, ..default() },
                 TextColor(palette::GOLD),
+                // Was U8. The credit below is part of the same block now,
+                // so the gap belongs UNDER the pair, not between them.
+                Node { margin: UiRect::bottom(Val::Px(U2)), ..default() },
+            ));
+            // The creator credit, where the owner asked for it. Smaller and
+            // quieter than the tagline on purpose: it sits with the line
+            // above rather than competing with it, and nothing on this
+            // screen may out-shout the two buttons.
+            col.spawn((
+                Text::new(CREATOR_CREDIT.to_string()),
+                TextFont { font_size: T_MICRO, ..default() },
+                TextColor(palette::INK_SOFT),
                 Node { margin: UiRect::bottom(Val::Px(U8)), ..default() },
             ));
             hero_column(col, HERO_W, |c| {
