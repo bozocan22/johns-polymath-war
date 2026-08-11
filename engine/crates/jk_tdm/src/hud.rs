@@ -1250,6 +1250,40 @@ fn paint_equip(game: Res<Game>, mut q: Query<&mut Text, With<EquipText>>) {
     if p.reload_t > 0.0 {
         s += "RELOAD    ...\n";
     }
+    // §owner THE JAVELIN CHARGE, and the seven-second hold's TELL.
+    //
+    // `spear_max_charged_of` pays +10% damage four seconds after the
+    // charge fills and had ZERO readers anywhere in the client, so the
+    // bonus was a mechanic no player could discover: nothing on screen
+    // changed when they earned it. Three states, one row, in this
+    // panel's own LABEL/STATUS grammar - and no float and no bar, per
+    // this file's §0 ban on printing raw sub-second numbers.
+    //
+    // Both facts come from the sim's own accessors rather than from
+    // `spear_charge_t / SPEAR_CHARGE_FULL_S`, which is a sim constant
+    // divided on the client and the exact split those accessors were
+    // published to close.
+    match game.sim.spear_stance_of(game.sim.player) {
+        sim::SpearStance::Winding => {
+            s += if game.sim.spear_max_charged_of(game.sim.player) {
+                "JAVELIN   MAX +10%\n"
+            } else if game.sim.spear_wind_frac_of(game.sim.player) >= 1.0 {
+                "JAVELIN   FULL\n"
+            } else {
+                "JAVELIN   WIND\n"
+            };
+        }
+        sim::SpearStance::Planting => {
+            // the earned bonus survives the release, and so does its
+            // readout - the accessor is deliberately true through both
+            s += if game.sim.spear_max_charged_of(game.sim.player) {
+                "JAVELIN   THROWN  MAX\n"
+            } else {
+                "JAVELIN   THROWN\n"
+            };
+        }
+        sim::SpearStance::Carried => {}
+    }
     **t = s;
 }
 

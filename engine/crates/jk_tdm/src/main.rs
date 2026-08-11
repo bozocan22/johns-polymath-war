@@ -5822,17 +5822,23 @@ const SPEAR_FP_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.2) },
     CapBeat { snap: Some("03-fp-spear-charging"), ..beat(3.0) },
     CapBeat { snap: Some("04-fp-spear-full-charge"), ..beat(5.4) },
+    // §owner: THE SEVEN-SECOND HOLD. `spear_max_charged` pays +10% four
+    // seconds AFTER the bar fills, and no script had ever held that
+    // long - so the one frame the max-charge tell exists in had never
+    // been photographed by anything. The charge starts at 2.2 s, so
+    // this is the first frame past it.
+    CapBeat { snap: Some("05-fp-spear-max-charge"), ..beat(9.4) },
     CapBeat {
         release: &[CapKey::M(MouseButton::Left)],
-        ..beat(5.5)
+        ..beat(9.5)
     },
-    CapBeat { snap: Some("05-fp-spear-plant"), ..beat(5.65) },
+    CapBeat { snap: Some("06-fp-spear-plant"), ..beat(9.65) },
     CapBeat {
         release: &[CapKey::M(MouseButton::Right)],
-        snap: Some("06-fp-spear-thrown"),
-        ..beat(6.1)
+        snap: Some("07-fp-spear-thrown"),
+        ..beat(10.1)
     },
-    CapBeat { end: true, ..beat(6.5) },
+    CapBeat { end: true, ..beat(10.5) },
 ];
 
 /// §owner §7 THE CHARGING MOTION, THIRD PERSON - the overhead wind.
@@ -19189,6 +19195,25 @@ fn sync_fighters(
                 j.hand,
                 Quat::from_rotation_y(j.yaw)
                     * Quat::from_rotation_x(
+                        // §owner OPEN, and photographed: this pose does
+                        // NOT read as the reference. See
+                        // `spear_wind/04-wind-full.png` and
+                        // `05-wind-full-profile.png` - the arm is high
+                        // and the weapon is overhead, but the blade
+                        // stands UP beside the ear pointing back over
+                        // the shoulder rather than forward-and-down,
+                        // which reads as a shouldered pike.
+                        //
+                        // `- j.pitch` was tried here and CAPTURED: it
+                        // makes it worse, laying the shaft flat across
+                        // the body with the butt out front and the
+                        // blade behind. So the flip is not a sign
+                        // error in this one term, and it is not being
+                        // shipped on a guess. Whoever takes this needs
+                        // the whole chain - `wr_pitch`, the weapon
+                        // root's own carry rotation and the hand
+                        // socket - in front of them, one axis at a
+                        // time, with a capture between each.
                         wr_pitch * (0.30 + 0.70 * spear_plant) + j.pitch + jerk * 1.5,
                     ),
             )
