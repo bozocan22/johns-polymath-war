@@ -39,6 +39,9 @@
 /// live in this file and answered a different brief; read that module's
 /// header for the four reversals and why each was deliberate.
 mod agile_mech;
+/// The CASTLE BAILEY capture tour. Its own module for the reason
+/// `branding` is: a beat table is bulk, and this file is contended.
+mod bailey_capture;
 mod branding;
 /// §20 THE MECH COCKPIT - the first-person shell, its instruments and
 /// its vibration. Its own module for the reason `branding` is: it wires
@@ -1599,6 +1602,15 @@ impl ForgeProfile {
             },
         })
     }
+}
+
+/// The Forge row's button labels, one per slot: `SAVE 1 .. SAVE N`.
+///
+/// Pure, so `forge_row_follows_the_constant` can assert the count without
+/// a Bevy world — and so the menu cannot disagree with `FORGE_SLOTS`
+/// again. Slots are 1-based on screen because a player counts from one.
+fn forge_slot_labels(verb: &str) -> Vec<String> {
+    (1..=FORGE_SLOTS).map(|s| format!("{verb} {s}")).collect()
 }
 
 fn forge_slot_path(slot: usize) -> std::path::PathBuf {
@@ -3195,6 +3207,28 @@ fn ready_up_step(x: &mut f32, v: &mut f32, target: f32, dt: f32) {
             - READY_UP_OMEGA * READY_UP_OMEGA * (*x - target);
         *v += a * h;
         *x += *v * h;
+    }
+}
+
+/// §owner PRE-AIM MOVES THEM OUTWARD, NEVER INWARD - the shift itself,
+/// as a value both `ads_shift` and the tests can READ.
+///
+/// It lived inline in `ads_shift` and was then re-typed, digit for
+/// digit, by two tests that exist to police it - so changing the
+/// production numbers left both of them green while asserting about a
+/// pose the game no longer struck. Same shape as the melee-depth copy
+/// and the arc-preview copy before it: the guard has to read the thing
+/// it guards, or it is guarding its own transcription.
+///
+/// Non-bow/spear guns return ZERO here; their pre-aim is the
+/// sight-alignment branch of `ads_shift` and has nothing to do with this
+/// rule.
+fn preaim_shift(gun: GunKind) -> Vec3 {
+    match gun {
+        // "slightly closer and further RIGHT", in the owner's words
+        GunKind::Spear => Vec3::new(0.050, 0.020, 0.050),
+        GunKind::Bow => Vec3::new(0.020, 0.010, 0.060),
+        _ => Vec3::ZERO,
     }
 }
 
@@ -5440,11 +5474,17 @@ fn equip_hint(set: ArmorSet) -> &'static str {
     match set {
         ArmorSet::None => "",
         ArmorSet::Folk => "FOLK ARMOR EQUIPPED - hold C to BRACE the shieldwall",
-        ArmorSet::RobotSuit => "BIG MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
+        // At 78 characters these two spanned the frame and crossed the
+        // centre of the screen - the one region BRIEF_XII keeps clear and
+        // that both of the owner's reference HUDs keep clear absolutely.
+        // The keys are all in `BIND_REGISTRY` and on the Controls screen;
+        // a boarding toast is not a keyboard map. What it keeps is the
+        // single fact a pilot cannot look up mid-fight and dies without.
+        ArmorSet::RobotSuit => "BIG MECH BOARDED - your REAR is the weak plate",
         // §P1 SIX VARIANTS. Same hint as the Big, because the controls
         // ARE the same - the tier is a trade in the numbers, and the one
         // sentence a pilot needs on boarding is which way not to turn.
-        ArmorSet::RoyalMech => "ROYAL MECH BOARDED - 1/2: MOUNTS - C: REPULSOR - U: DISMOUNT - protect your REAR",
+        ArmorSet::RoyalMech => "ROYAL MECH BOARDED - your REAR is the weak plate",
         ArmorSet::Recon => "RECON WEAVE EQUIPPED - faster, silent, regenerates",
         // §owner AGILE SUPPORT MECH: the hint names the two things a
         // pilot has to know that the heavy's does not - the cannon has
@@ -6437,8 +6477,18 @@ const MECH_CAPTURE_BEATS: &[CapBeat] = &[
 /// corner of the frame. The last two beats go first-person anyway,
 /// because that path is a separate entity on a separate render layer and
 /// a layer mistake there is invisible from outside.
+/// ORBITED, and that is the whole difference between this script and a
+/// useless one. The first run took the third-person frames from the
+/// default boom, which sits RIGIDLY BEHIND the player - so the barrel,
+/// and therefore the flare on the end of it, was behind the soldier's
+/// own torso in every frame. What those frames DID show was the flash's
+/// point light washing the fence and the ground warm, which is evidence
+/// the effect fired and no evidence at all about what it looks like.
+/// `orbit` swings the boom without turning the subject; 1.35 rad is
+/// close to a profile, which is the only angle a muzzle is visible from
+/// in third person.
 const MUZZLE_FLASH_BEATS: &[CapBeat] = &[
-    CapBeat { look: Some((0.0, 0.06)), ..beat(0.3) },
+    CapBeat { look: Some((0.0, 0.06)), orbit: Some(1.35), boom: Some(0.85), ..beat(0.3) },
     // 01 BEFORE: the same rifle, same framing, trigger not pulled. Every
     // other frame is read against this one.
     CapBeat { snap: Some("01-rifle-not-firing"), ..beat(0.9) },
@@ -6461,7 +6511,14 @@ const MUZZLE_FLASH_BEATS: &[CapBeat] = &[
     CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(2.8) },
     // and the same sniper round from FIRST person, which is a different
     // entity on a different render layer
-    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(3.0) },
+    // orbit and boom are PERSISTENT capture state - reset them before
+    // first person or the viewmodel frames inherit the profile swing.
+    CapBeat {
+        orbit: Some(0.0),
+        boom: Some(1.0),
+        press: &[CapKey::K(KeyCode::KeyV)],
+        ..beat(3.0)
+    },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(3.1) },
     // back to the rifle - the AWM's viewmodel is hidden by design when
     // its scope class takes over, so first person needs the AK
@@ -6792,6 +6849,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "muzzle_flash" => MUZZLE_FLASH_BEATS,
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
+        bailey_capture::SCRIPT => bailey_capture::BEATS,
         _ => &[],
     }
 }
@@ -6820,7 +6878,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 38] = [
+const CAPTURE_SCRIPTS: [&str; 39] = [
+    // The CASTLE BAILEY. Every other script here deploys onto
+    // `Selected::default().map` (Arena), so the 130 m castle map had
+    // never appeared in a single frame this project has taken.
+    bailey_capture::SCRIPT,
     // BRIEF XII-A: the pale-vs-dark readability pair. See
     // `HUD_CONTRAST_BEATS` - no script before it had ever pointed a
     // camera at a HUD against two different backdrops.
@@ -6999,6 +7061,10 @@ fn capture_quick_deploy(
         Some("sights_c") => {
             sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Ak47];
         }
+        // the ONLY script that leaves Arena. `capture_quick_deploy` runs
+        // before `start_match` reads `Selected`, so setting the map here
+        // is what actually picks it.
+        Some(bailey_capture::SCRIPT) => sel.map = MapKind::Bailey,
         Some("class_line") => sel.class = sim::Class::Line,
         Some("class_skirmisher") => sel.class = sim::Class::Skirmisher,
         Some("class_warden") => sel.class = sim::Class::Warden,
@@ -7138,8 +7204,16 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 5] =
-    ["minigun_check", "traversal", "map_lap", "agile_moves", "muzzle_flash"];
+const CAPTURE_KEEP_ALIVE: [&str; 6] = [
+    "minigun_check",
+    "traversal",
+    "map_lap",
+    "agile_moves",
+    "muzzle_flash",
+    // nine seconds standing still in the open on a 130 m map with bots
+    // on it; a dead subject respawns and takes the camera with it
+    bailey_capture::SCRIPT,
+];
 
 fn capture_keep_subject_alive(cap: Res<CaptureMode>, mut game: ResMut<Game>) {
     let Some(name) = cap.script.as_deref() else { return };
@@ -21435,12 +21509,7 @@ fn fp_viewmodel(
         // settle: a little closer to the body, a little steadier, and
         // for the spear "slightly closer and further RIGHT" in the
         // owner's own words.
-        let s = if p.gun == GunKind::Spear {
-            Vec3::new(0.050, 0.020, 0.050)
-        } else {
-            Vec3::new(0.020, 0.010, 0.060)
-        };
-        s * ads_e
+        preaim_shift(p.gun) * ads_e
     } else if let Some(sy) = sight_line_y(p.gun) {
         let tr = vm_carry(p.gun).pos;
         Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
@@ -21636,6 +21705,11 @@ fn fp_viewmodel(
 /// (even spacing, no bunching at the apex) and size down along the arc;
 /// a ±spread cone of fainter arcs widens as the §4 stability degrades,
 /// so the player can watch their own accuracy in real time.
+/// How much of the predicted flight the preview actually DRAWS, as a
+/// fraction of arc length from the muzzle. See the trim comment inside
+/// `arc_preview`: the tail is the half that lands on the crosshair.
+const ARC_PREVIEW_SPAN: f32 = 0.62;
+
 #[allow(clippy::too_many_arguments)]
 fn arc_preview(
     time: Res<Time>,
@@ -21736,7 +21810,14 @@ fn arc_preview(
                 *v = Visibility::Hidden;
                 continue;
             }
-            let want = total * (i as f32 + 0.5) / ents.len() as f32;
+            // §owner: the arc SURVIVES, the marker does not. It is
+            // trimmed to its near span so the dots never walk out to
+            // the impact point - which for a flat shot projects onto
+            // the centre pixel and would be a landing marker made of
+            // dots. What is left reads as "this is a lobbed weapon and
+            // here is the drop", starting down at the muzzle and
+            // fading out well short of the crosshair.
+            let want = total * ARC_PREVIEW_SPAN * (i as f32 + 0.5) / ents.len() as f32;
             let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
             let frac = i as f32 / ents.len() as f32;
             t.translation = Vec3::from_array(pts[k]);
@@ -21752,40 +21833,29 @@ fn arc_preview(
     let dn_dir = perturb_v(d, -spread);
     place_arc(&mut q, &arc.cone[..8], up_dir, 0.8);
     place_arc(&mut q, &arc.cone[8..], dn_dir, 0.8);
-    let (impact, normal, range) = place_arc(&mut q, &arc.dots, d, 1.0);
-    arc_state.range = Some(range);
-
-    // landing ring: oriented to the surface; on a valid target it
-    // THICKENS (shape change - §0.4 forbids a colour change)
-    let near_enemy = game.sim.fighters.iter().enumerate().any(|(j, g)| {
-        j != game.sim.player
-            && g.team != p.team
-            && g.alive()
-            && {
-                let dx = g.pos[0] - impact[0];
-                let dz = g.pos[2] - impact[2];
-                dx * dx + dz * dz < 1.3 * 1.3 && (impact[1] - g.pos[1]).abs() < 2.2
-            }
-    });
-    if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
-        let n = Vec3::from_array(normal).normalize_or(Vec3::Y);
-        t.translation = Vec3::from_array(impact) + n * 0.05;
-        t.rotation = Quat::from_rotation_arc(Vec3::Y, n);
-        t.scale = if near_enemy {
-            Vec3::new(1.0, 3.0, 1.0) // filled-in read: taller, denser ring
-        } else {
-            Vec3::ONE
-        };
-        *v = Visibility::Visible;
-    }
-    // drop-line from the marker straight down to the ground
-    if let Ok((mut t, mut v)) = q.get_mut(arc.drop_line) {
-        let h = impact[1].max(0.0);
-        if h > 0.4 {
-            t.translation = Vec3::new(impact[0], h * 0.5, impact[2]);
-            t.scale = Vec3::new(1.0, h, 1.0);
-            *v = Visibility::Visible;
-        } else {
+    let _ = place_arc(&mut q, &arc.dots, d, 1.0);
+    // §owner THE CROSSHAIR IS SACRED - no landing marker, no range.
+    //
+    // Two briefs forbid a landing marker for the bow and the spear in
+    // bold, and until the input rework this code was reached only while
+    // RMB was held as a real ADS. RMB is PRE-AIM now, which is the pose
+    // the player holds most of the time - so the ring, its drop-line and
+    // the metres readout were being painted on or beside the centre
+    // pixel for most of a bow's life. A flat shot puts the impact point
+    // exactly ON the crosshair, so the ring was literally a second
+    // reticle the player did not ask for.
+    //
+    // `arc_state.range` is left in place as a resource and pinned to
+    // None: the HUD's `{r:.0} m` slot then renders empty rather than
+    // needing the widget torn out of `hud_text`.
+    //
+    // NOT deleted: `sim::predict_arc`. Two sim tests use it as an
+    // independent second implementation of projectile flight and it is
+    // the only double-entry check the missile integrator has. What goes
+    // is the DRAWING.
+    arc_state.range = None;
+    for e in [&arc.ring, &arc.drop_line] {
+        if let Ok((_, mut v)) = q.get_mut(*e) {
             *v = Visibility::Hidden;
         }
     }
@@ -24104,19 +24174,29 @@ fn open_intro(
                 .map(|(i, (n, _))| (*n, CosmeticButton(CosmeticSlot::Tunic, i)))
                 .collect();
             menu_ui::pill_row(b, "OUTFIT", &tunics, sold);
-            // §7.2: the Forge, on screen at last
-            let saves: Vec<(&str, ForgeUiButton)> = vec![
-                ("SAVE 1", ForgeUiButton::Save(1)),
-                ("SAVE 2", ForgeUiButton::Save(2)),
-                ("SAVE 3", ForgeUiButton::Save(3)),
-                ("RANDOMIZE", ForgeUiButton::Randomize),
-            ];
+            // §7.2: the Forge, on screen at last.
+            //
+            // Driven by `FORGE_SLOTS` rather than three hand-typed pairs.
+            // The constant was declared and read by NOTHING while this row
+            // spelled out SAVE 1/2/3 beside it — so raising it to four
+            // would have changed the number the code believes in and left
+            // the menu offering three. That is the same defect class as
+            // `TDM_TARGET_CHOICES`, which `sim.rs` already names as a
+            // known mistake. `forge_slot_labels` is pure and tested.
+            let save_labels = forge_slot_labels("SAVE");
+            let mut saves: Vec<(&str, ForgeUiButton)> = save_labels
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.as_str(), ForgeUiButton::Save(i + 1)))
+                .collect();
+            saves.push(("RANDOMIZE", ForgeUiButton::Randomize));
             menu_ui::pill_row(b, "FORGE", &saves, sold);
-            let loads: Vec<(&str, ForgeUiButton)> = vec![
-                ("LOAD 1", ForgeUiButton::Load(1)),
-                ("LOAD 2", ForgeUiButton::Load(2)),
-                ("LOAD 3", ForgeUiButton::Load(3)),
-            ];
+            let load_labels = forge_slot_labels("LOAD");
+            let loads: Vec<(&str, ForgeUiButton)> = load_labels
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.as_str(), ForgeUiButton::Load(i + 1)))
+                .collect();
             menu_ui::pill_row(b, "", &loads, sold);
             // the spec readout, in its own engraved sub-plate
             b.spawn((
@@ -26058,11 +26138,10 @@ mod band_tests {
                     for sprint in [0.0_f32, 1.0] {
                         // every sustained shift the render path adds,
                         // at the same signs `fp_viewmodel` uses
-                        let pre = if kind == GunKind::Spear {
-                            Vec3::new(0.050, 0.020, 0.050)
-                        } else {
-                            Vec3::new(0.020, 0.010, 0.060)
-                        };
+                        // READ from production. Re-typing these three
+                        // numbers here is what let the shift change
+                        // without either guard noticing.
+                        let pre = preaim_shift(kind);
                         let draw = if kind == GunKind::Bow { pull } else { 0.0 };
                         let shift = pre * ads
                             + VM_BOW_DRAW_SHIFT * draw
@@ -26117,11 +26196,9 @@ mod band_tests {
             // the spear's own head is the part §6 is written about
             let nose = Vec3::new(0.0, 0.0, if kind == GunKind::Spear { 1.545 } else { 0.0 });
             let hip = c.screen_point(Vec3::ZERO, nose).unwrap();
-            let pre = if kind == GunKind::Spear {
-                Vec3::new(0.050, 0.020, 0.050)
-            } else {
-                Vec3::new(0.020, 0.010, 0.060)
-            };
+            // the PRODUCTION shift, not a copy of it - `ads_shift`
+            // calls this same function
+            let pre = preaim_shift(kind);
             let aimed = c.screen_point(pre, nose).unwrap();
             assert!(
                 aimed.x > hip.x,
@@ -26459,6 +26536,99 @@ mod band_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// No equip hint may span the frame.
+    ///
+    /// `equip_hint`'s own comment records the rule and the incident:
+    /// the medic's ran to 120 characters, "off the right edge of the
+    /// frame and over the vitals panel", and every other entry "sits
+    /// near 55 - and that is not a coincidence, it is the width that
+    /// fits". The rule was written down and then not enforced, so the
+    /// Big and Royal hints shipped at 78 and crossed screen centre -
+    /// the one region BRIEF_XII and both reference HUDs keep clear.
+    ///
+    /// Asserted over EVERY variant rather than over the two strings that
+    /// were wrong, so a new chassis cannot reintroduce it.
+    ///
+    /// `ArmorSet` has no `ALL` constant and adding one belongs to the sim
+    /// lane, so the list is spelled out here and guarded: the `match`
+    /// below is exhaustive, so adding a variant to `ArmorSet` fails to
+    /// compile until it is added here too. That is the same protection an
+    /// `ALL` would give, without reaching across the line to write it.
+    #[test]
+    fn no_equip_hint_spans_the_frame() {
+        const HINT_MAX: usize = 60;
+        let every = [
+            ArmorSet::None,
+            ArmorSet::Folk,
+            ArmorSet::RobotSuit,
+            ArmorSet::Recon,
+            ArmorSet::ScoutMech,
+            ArmorSet::RoyalMech,
+        ];
+        for set in every {
+            // exhaustive, so a new variant breaks the build here
+            let _: () = match set {
+                ArmorSet::None
+                | ArmorSet::Folk
+                | ArmorSet::RobotSuit
+                | ArmorSet::Recon
+                | ArmorSet::ScoutMech
+                | ArmorSet::RoyalMech => (),
+            };
+            let h = equip_hint(set);
+            assert!(
+                h.len() <= HINT_MAX,
+                "{set:?}'s hint is {} chars, which spans the frame: {h:?}",
+                h.len()
+            );
+        }
+    }
+
+    /// The Forge row is built FROM `FORGE_SLOTS`, not beside it.
+    ///
+    /// The constant was declared and read by nothing while the menu
+    /// spelled out SAVE 1/2/3 next to it, so raising it would have moved
+    /// the number the code believes in and left the menu unchanged.
+    /// **`len() == FORGE_SLOTS` would be vacuous** — both sides read the
+    /// same constant, so it passes at any value and proves nothing. Rule
+    /// 12. What is asserted instead are properties that can actually be
+    /// false: the labels are 1-based and contiguous (they were typed
+    /// `SAVE 1..3` by hand while `forge_slot_path` is indexed from the
+    /// button's number), and **every slot the menu advertises gets its
+    /// own file**. A menu offering a slot that collides with another
+    /// slot's save is the failure this guards.
+    #[test]
+    fn every_advertised_forge_slot_has_its_own_file() {
+        let saves = forge_slot_labels("SAVE");
+        assert!(!saves.is_empty(), "a Forge with no slots is not a Forge");
+        let mut paths = std::collections::HashSet::new();
+        for (i, label) in saves.iter().enumerate() {
+            let slot = i + 1;
+            assert_eq!(
+                label,
+                &format!("SAVE {slot}"),
+                "labels must be 1-based and contiguous - a player counts \
+                 from one, and `ForgeUiButton::Save` passes this number \
+                 straight to `forge_slot_path`"
+            );
+            assert!(
+                paths.insert(forge_slot_path(slot)),
+                "slot {slot} shares a save file with an earlier slot"
+            );
+        }
+        // SAVE and LOAD must address the same slots or one writes where
+        // the other cannot read.
+        let loads = forge_slot_labels("LOAD");
+        assert_eq!(loads.len(), saves.len());
+        for (s, l) in saves.iter().zip(loads.iter()) {
+            assert_eq!(
+                s.trim_start_matches("SAVE"),
+                l.trim_start_matches("LOAD"),
+                "the SAVE and LOAD rows address different slots"
+            );
         }
     }
 
