@@ -33,6 +33,12 @@
 // where panics and eprintln diagnostics still need to land.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// BRIEF X (owner, 2026-08-10): the AGILE MECH's body and armour. Same
+/// two-line wiring as `branding` - this line, and the one call site in
+/// `spawn_fighter_rigs`. It replaces `spawn_scout_chassis`, which used to
+/// live in this file and answered a different brief; read that module's
+/// header for the four reversals and why each was deliberate.
+mod agile_mech;
 mod branding;
 /// §20 THE MECH COCKPIT - the first-person shell, its instruments and
 /// its vibration. Its own module for the reason `branding` is: it wires
@@ -3806,6 +3812,17 @@ struct ModelKit {
     scout_plate_foe: Handle<StandardMaterial>,
     scout_line: Handle<StandardMaterial>,
     scout_line_foe: Handle<StandardMaterial>,
+    /// BRIEF X §2, the roles the old two-tone light chassis had no name
+    /// for. `agile_blue` is the METALLIC BLUE MACHINERY - joints, inner
+    /// structure, mechanical limb sections, connectors, weapon mounts.
+    /// `agile_energy` is the SUBTLE BRIGHT BLUE TECHNOLOGY, and it is a
+    /// single material shared by both sides on purpose: it is a
+    /// technology colour, not a livery colour, and the friend-or-foe
+    /// signal stays on `scout_line`/`scout_line_foe` where it already
+    /// was. See `agile_mech::Livery`.
+    agile_blue: Handle<StandardMaterial>,
+    agile_blue_foe: Handle<StandardMaterial>,
+    agile_energy: Handle<StandardMaterial>,
     vm_shield_dark: Handle<StandardMaterial>,
     vm_shield_steel: Handle<StandardMaterial>,
     vm_shield_gold: Handle<StandardMaterial>,
@@ -6774,6 +6791,7 @@ fn capture_menus(
     mut stage: Local<usize>,
     mut next: ResMut<NextState<GameState>>,
     mut page: ResMut<IntroPage>,
+    mut cat: ResMut<SettingsCat>,
     window: Query<Entity, With<PrimaryWindow>>,
 ) {
     if cap.script.as_deref() != Some("menus") {
@@ -6836,39 +6854,59 @@ fn capture_menus(
             *stage = 8;
         }
         8 if *t > 6.2 => {
-            snap(&mut commands, "05-settings");
+            snap(&mut commands, "05-settings-controls");
             *stage = 9;
+        }
+        // §owner FRONT END P6: the settings screen is three doors now, and
+        // a capture of one door proves nothing about the other two. This
+        // is the instrument for the category nav, and it is what caught
+        // the first version showing every category at once on frame 1.
+        9 if *t > 6.6 => {
+            cat.0 = 1;
+            *stage = 10;
+        }
+        10 if *t > 7.2 => {
+            snap(&mut commands, "05b-settings-interface");
+            *stage = 11;
+        }
+        11 if *t > 7.6 => {
+            cat.0 = 2;
+            *stage = 12;
+        }
+        12 if *t > 8.2 => {
+            snap(&mut commands, "05c-settings-crosshair");
+            *stage = 13;
         }
         // The pause menu had NO capture coverage at all - it was the one
         // surface nothing could prove, which is exactly why it was chosen
         // to pilot the new design vocabulary.
-        9 if *t > 6.6 => {
+        13 if *t > 8.6 => {
             next.set(GameState::Paused);
-            *stage = 10;
+            *stage = 14;
         }
-        10 if *t > 7.6 => {
+        14 if *t > 9.6 => {
             snap(&mut commands, "06-pause");
-            *stage = 11;
+            *stage = 15;
         }
         // Manual and Controls had no capture coverage at all - the same
         // hole the pause menu sat in until it became the pilot surface.
-        11 if *t > 8.2 => {
+        15 if *t > 10.2 => {
             next.set(GameState::Manual);
-            *stage = 12;
+            *stage = 16;
         }
-        12 if *t > 9.2 => {
+        16 if *t > 11.2 => {
             snap(&mut commands, "07-manual");
-            *stage = 13;
+            *stage = 17;
         }
-        13 if *t > 9.8 => {
+        17 if *t > 11.8 => {
             next.set(GameState::Controls);
-            *stage = 14;
+            *stage = 18;
         }
-        14 if *t > 10.8 => {
+        18 if *t > 12.8 => {
             snap(&mut commands, "08-controls");
-            *stage = 15;
+            *stage = 19;
         }
-        15 if *t > 11.6 => std::process::exit(0),
+        19 if *t > 13.6 => std::process::exit(0),
         _ => {}
     }
 }
@@ -7524,7 +7562,74 @@ impl SettingsGroup {
             Self::Crosshair => "CROSSHAIR",
         }
     }
+
+    /// Which top-level CATEGORY this group is filed under.
+    fn category(self) -> SettingsCategory {
+        match self {
+            Self::Aim => SettingsCategory::Controls,
+            Self::Minimap | Self::Hud => SettingsCategory::Interface,
+            Self::Crosshair => SettingsCategory::Crosshair,
+        }
+    }
 }
+
+/// §owner FRONT END P6: settings are CATEGORY-NAVIGATED, not all at once.
+///
+/// THE DEVIATION, STATED RATHER THAN HIDDEN. The spec named four
+/// categories - GAMEPLAY / CONTROLS / AUDIO / GRAPHICS. This game has
+/// seventeen settings and not one of them is audio or graphics: there is
+/// no volume, no resolution, no quality level, no vsync. Shipping empty
+/// AUDIO and GRAPHICS tabs would advertise controls that do not exist,
+/// and INVENTING them to fill the tabs would break the other half of the
+/// same brief, which says "minimal" twice and "do not add settings".
+///
+/// So the categories are named for what is actually behind them. The
+/// SHAPE the spec asked for - a small set of doors, one at a time,
+/// instead of seventeen rows in two columns - is delivered exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettingsCategory {
+    Controls,
+    Interface,
+    Crosshair,
+}
+
+/// The tabs, in screen order, each with the line that says what is inside.
+const SETTINGS_CATEGORIES: [(SettingsCategory, &str, &str); 3] = [
+    (
+        SettingsCategory::Controls,
+        "CONTROLS",
+        "the mouse, the field of view, and which way is up",
+    ),
+    (
+        SettingsCategory::Interface,
+        "INTERFACE",
+        "the minimap and how your vitals are drawn",
+    ),
+    (
+        SettingsCategory::Crosshair,
+        "CROSSHAIR",
+        "nine ways to draw the one mark you aim with",
+    ),
+];
+
+/// Which category the settings screen is showing.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct SettingsCat(usize);
+
+/// A category tab.
+#[derive(Component, Clone, Copy)]
+struct SettingsTab(usize);
+
+/// Tags a group's whole block - eyebrow and rows together - with the
+/// category it belongs to, so ONE `display` write hides a whole section.
+/// Tagging the rows alone would leave the section's eyebrow floating over
+/// nothing, which is the bug the intro's page tags avoid the same way.
+#[derive(Component, Clone, Copy)]
+struct OnSettingsCat(SettingsCategory);
+
+/// The line under the tabs, rewritten per category.
+#[derive(Component)]
+struct SettingsCatBlurb;
 
 /// Every value row, grouped. REORDERING IS SAFE: `settings_buttons`
 /// matches on the VARIANT, never on an index or a position - which is the
@@ -7767,9 +7872,14 @@ fn main() {
         .add_systems(OnEnter(GameState::Paused), open_menu)
         .add_systems(OnExit(GameState::Paused), close_menu)
         .add_systems(Update, menu_buttons.run_if(in_state(GameState::Paused)))
+        .init_resource::<SettingsCat>()
         .add_systems(OnEnter(GameState::Settings), open_settings)
         .add_systems(OnExit(GameState::Settings), close_settings)
-        .add_systems(Update, settings_buttons.run_if(in_state(GameState::Settings)))
+        .add_systems(
+            Update,
+            (settings_buttons, settings_tab_buttons, settings_paging)
+                .run_if(in_state(GameState::Settings)),
+        )
         // state-agnostic: the M minimap hotkey mutates settings during
         // Playing too, and that change must survive a restart as well
         .add_systems(Update, persist_settings)
@@ -9373,360 +9483,6 @@ impl MechTrim {
     fn wears(self, piece: TrimPiece) -> bool {
         self.plates() > piece as u8
     }
-}
-
-/// §owner AGILE SUPPORT MECH: the light chassis, redesigned.
-///
-/// The owner brought a reference: a squat utility robot, all rounded
-/// masses - one big camera lens for a face, worn amber shells over a
-/// near-black frame, thick simple limbs, big flat feet. The previous
-/// build answered "make it look fast" with exposure: sixty-odd struts,
-/// pistons, louvres and conduits. This one answers "make it look like
-/// a MEDIC" with shape: about forty-five parts, every one of them a
-/// mass you can name from across the map.
-///
-/// The rules this build holds:
-///  - ONE EYE. A single large lens where the heavy has a slit. The
-///    friendliest face a machine can wear is a camera that is visibly
-///    looking at you, and it doubles as the visor read - the lit iris
-///    is the team accent, gold or red, at exactly visor height.
-///  - TWO TONES. Amber shell, black frame. Every armour piece is shell
-///    colour, every joint and mechanism is frame colour, and nothing
-///    is both. The old build had five colour roles on one machine.
-///  - ROUND OVER SHARP. Shells are eggs and domes, joints are balls.
-///    The heavy is all box; this machine should not share a single
-///    silhouette line with it.
-///  - PLANTIGRADE AND PLANTED. The digitigrade leg is gone - it read
-///    as fast, but it also read as skittish, and half its hardware
-///    existed to explain itself (the boom, the calf thrusters, the
-///    stays). Thick shins and big feet say "walks all day carrying a
-///    toolbox", which is the truthful thing to say about a medic.
-///
-/// `trim` is how much armour this one wears - see `MechTrim`. Same
-/// frame, four plate weights, so a lineup of scouts reads as
-/// individuals the way the helmet shapes do for the infantry.
-///
-/// The mount anchors (x = +-0.445, y = 0.30) and the ground line
-/// (y = -0.52) are load-bearing: the repair-beam origin and the sim's
-/// bolt spawn are computed from fighter position, not from this model,
-/// and they were tuned against these positions. Restyle the housings
-/// freely; do not move their centres.
-fn spawn_scout_chassis(
-    commands: &mut Commands,
-    kit: &ModelKit,
-    ally: bool,
-    trim: MechTrim,
-) -> Entity {
-    let root = commands
-        .spawn((Transform::IDENTITY, Visibility::default()))
-        .id();
-    let cube = || kit.cube.clone();
-    let cyl = || kit.cyl.clone();
-    let ball = || kit.ball.clone();
-    // the livery: SHELL (amber armour), TRIM (darker ochre plates),
-    // LINE (the emissive team accent). The frame is always
-    // `mech_shadow` black and the bare metal always `mech_metal` -
-    // shared with the heavy, because bolts and joints have no faction.
-    let shell = if ally { kit.scout_hull.clone() } else { kit.scout_hull_foe.clone() };
-    let plate = if ally { kit.scout_plate.clone() } else { kit.scout_plate_foe.clone() };
-    let line = if ally { kit.scout_line.clone() } else { kit.scout_line_foe.clone() };
-    let mut part = |mesh: Handle<Mesh>,
-                    mat: Handle<StandardMaterial>,
-                    tr: Vec3,
-                    rot: Quat,
-                    sc: Vec3| {
-        commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-                Transform { translation: tr, rotation: rot, scale: sc },
-            ))
-            .set_parent(root);
-    };
-    // the trim thins or thickens the limb shells; the frame never moves
-    let lt = trim.limb_scale();
-
-    // ---- PELVIS: a black frame block the whole machine stands on ------
-    //
-    // It is sized to SWALLOW the pilot, not just to look right. The
-    // chassis shares the soldier's thorax space, and the body under it
-    // is 0.345 m across at the waist stripe - the first build's 0.30 m
-    // pelvis let the man's own hips show through the machine as a pale
-    // band. Every block from here up therefore has a minimum width,
-    // noted where it is not obvious.
-    part(cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.19, -0.02), Quat::IDENTITY, Vec3::new(0.44, 0.40, 0.32));
-    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.385, -0.02), Quat::IDENTITY, Vec3::new(0.24, 0.05, 0.24));
-    part(ball(), line.clone(), Vec3::new(0.0, 0.26, 0.165), Quat::IDENTITY, Vec3::splat(0.030));
-
-    // ---- TORSO: one amber egg over a black core -----------------------
-    // 0.52 wide because the shoulder yoke beneath it is 0.44 and the
-    // chest ball 0.40; the egg has to clear both.
-    part(cube(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.56, -0.02), Quat::IDENTITY, Vec3::new(0.36, 0.36, 0.28));
-    part(ball(), shell.clone(), Vec3::new(0.0, 0.60, 0.035), Quat::from_rotation_x(-0.06), Vec3::new(0.52, 0.44, 0.44));
-    // the drive core, kept from the old identity but tamed: one lit
-    // ring on the chest instead of an exposed cage
-    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.55, 0.275), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.14, 0.030, 0.14));
-    part(cyl(), line.clone(), Vec3::new(0.0, 0.55, 0.285), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.090, 0.028, 0.090));
-    if trim.wears(TrimPiece::Belly) {
-        // belly band - the widest plate, worn low the way tool belts sit
-        part(cube(), plate.clone(), Vec3::new(0.0, 0.425, 0.235), Quat::from_rotation_x(-0.14), Vec3::new(0.36, 0.11, 0.055));
-    }
-    if trim.wears(TrimPiece::Gorget) {
-        // the GORGET - a collar shielding the neck column. Last plate
-        // earned and the smallest, but it rings the one gap in the
-        // machine, so the heaviest trim announces itself at a glance.
-        //
-        // It sat at y=0.80 first, which is INSIDE the torso egg (whose
-        // crown is 0.82) - the heaviest trim's one unique plate was
-        // geometry nothing could ever see. It rides the neck now, in
-        // the 0.82-1.02 gap between the torso crown and the head.
-        part(cyl(), plate.clone(), Vec3::new(0.0, 0.875, 0.0), Quat::IDENTITY, Vec3::new(0.30, 0.075, 0.30));
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.925, 0.0), Quat::IDENTITY, Vec3::new(0.22, 0.045, 0.22));
-        // and a raised lip at the front, so the collar reads as armour
-        // worn over the throat rather than as a washer on a bolt
-        part(cube(), plate.clone(), Vec3::new(0.0, 0.915, 0.115), Quat::from_rotation_x(-0.42), Vec3::new(0.24, 0.10, 0.045));
-    }
-    // ---- BACKPACK: the power unit, replacing the old boom -------------
-    part(cube(), plate.clone(), Vec3::new(0.0, 0.60, -0.245), Quat::IDENTITY, Vec3::new(0.30, 0.28, 0.11));
-    for sd in [-1.0_f32, 1.0] {
-        part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.085, 0.60, -0.305), Quat::IDENTITY, Vec3::new(0.055, 0.20, 0.020));
-    }
-    part(cube(), line.clone(), Vec3::new(0.0, 0.47, -0.30), Quat::IDENTITY, Vec3::new(0.14, 0.014, 0.012));
-
-    // ---- HEAD: the whole design in one part - a big egg with a lens --
-    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 0.85, 0.0), Quat::IDENTITY, Vec3::new(0.11, 0.10, 0.11));
-    part(ball(), shell.clone(), Vec3::new(0.0, 1.02, 0.01), Quat::from_rotation_x(-0.04), Vec3::new(0.50, 0.42, 0.48));
-    // the brow - one trim plate over the lens, which is all the
-    // "expression" a utility machine gets
-    part(cube(), plate.clone(), Vec3::new(0.0, 1.145, 0.13), Quat::from_rotation_x(-0.34), Vec3::new(0.30, 0.045, 0.16));
-    // THE LENS. Bezel ring, dark glass, and the lit iris - the iris is
-    // the team accent at visor height, so friend-or-foe is answered by
-    // the same glance that meets its eye.
-    // (First capture had the bezel BURIED in the egg - its rim poked
-    // out of the head's sides as a floating dark disc while the face
-    // showed no camera at all. The housing is longer now and socketed
-    // half-proud, which is what makes it read as an instrument.)
-    part(cyl(), kit.mech_metal.clone(), Vec3::new(0.0, 1.005, 0.235), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.27, 0.09, 0.27));
-    part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.0, 1.005, 0.272), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.22, 0.030, 0.22));
-    part(ball(), line.clone(), Vec3::new(0.0, 1.005, 0.285), Quat::IDENTITY, Vec3::splat(0.065));
-    // antenna ears - two black stubs, canted out. They do nothing,
-    // which is exactly what the reference's do, and the crown reads
-    // bare without them.
-    for sd in [-1.0_f32, 1.0] {
-        part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.145, 1.245, -0.03), Quat::from_rotation_z(sd * -0.18), Vec3::new(0.035, 0.11, 0.050));
-        part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.160, 1.305, -0.03), Quat::from_rotation_z(sd * -0.18), Vec3::new(0.065, 0.035, 0.075));
-    }
-
-    // ---- SHOULDERS + ARMS: ball joints, dome caps, chunky mitts -------
-    for sd in [-1.0_f32, 1.0] {
-        part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.30, 0.76, 0.0), Quat::IDENTITY, Vec3::splat(0.135));
-        if trim.wears(TrimPiece::Pauldrons) {
-            // the pauldron dome - a half-egg cap riding the joint. Low
-            // and steeply canted: the first pass floated it at head
-            // height and the machine grew mouse ears.
-            part(ball(), shell.clone(), Vec3::new(sd * 0.345, 0.775, 0.0), Quat::from_rotation_z(sd * 0.34), Vec3::new(0.26, 0.155, 0.28));
-        }
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.365, 0.60, 0.02), Quat::from_rotation_z(sd * 0.10), Vec3::new(0.075, 0.28, 0.075));
-        part(ball(), kit.mech_metal.clone(), Vec3::new(sd * 0.395, 0.45, 0.03), Quat::IDENTITY, Vec3::splat(0.10));
-        // forearm - the one place shell wraps frame, because the mounts
-        // ride here and a thin arm under a cannon reads as a mistake
-        part(cube(), shell.clone(), Vec3::new(sd * 0.43, 0.315, 0.055), Quat::from_rotation_z(sd * 0.08), Vec3::new(0.13 * lt, 0.30, 0.16 * lt));
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.405, 0.315, 0.035), Quat::from_rotation_z(sd * 0.08), Vec3::new(0.060, 0.31, 0.060));
-        // the mitt - a black knuckle block, hanging open
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.445, 0.155, 0.06), Quat::IDENTITY, Vec3::new(0.085, 0.050, 0.085));
-        part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.445, 0.095, 0.085), Quat::from_rotation_x(0.20), Vec3::new(0.105, 0.085, 0.125));
-    }
-
-    // ---- HIPS + LEGS: thick, straight, and planted --------------------
-    for sd in [-1.0_f32, 1.0] {
-        part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.17, 0.18, 0.0), Quat::IDENTITY, Vec3::splat(0.125));
-        part(cube(), shell.clone(), Vec3::new(sd * 0.185, 0.015, 0.02), Quat::from_rotation_x(-0.08), Vec3::new(0.165 * lt, 0.30, 0.205 * lt));
-        part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.15, 0.035), Quat::IDENTITY, Vec3::splat(0.115));
-        if trim.wears(TrimPiece::Knees) {
-            part(cube(), plate.clone(), Vec3::new(sd * 0.185, -0.13, 0.115), Quat::from_rotation_x(-0.28), Vec3::new(0.125, 0.10, 0.050));
-        }
-        // the shin carries its mass low - a fat calf is what makes the
-        // whole machine look like it cannot be knocked over
-        part(cube(), shell.clone(), Vec3::new(sd * 0.185, -0.30, -0.005), Quat::from_rotation_x(0.05), Vec3::new(0.15 * lt, 0.28, 0.175 * lt));
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.30, -0.075), Quat::IDENTITY, Vec3::new(0.052, 0.27, 0.052));
-        part(ball(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.445, -0.02), Quat::IDENTITY, Vec3::splat(0.09));
-        // BIG FEET. The reference's whole stance is these two parts.
-        part(cube(), shell.clone(), Vec3::new(sd * 0.185, -0.485, 0.05), Quat::IDENTITY, Vec3::new(0.175, 0.070, 0.33));
-        part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.49, 0.205), Quat::IDENTITY, Vec3::new(0.155, 0.058, 0.085));
-    }
-
-    // ---- MOUNTS: plasma right, repair left - same anchors, new shells -
-    // Plasma: a stub cannon in a trim housing with a lit throat.
-    part(cube(), plate.clone(), Vec3::new(0.445, 0.30, 0.30), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.30));
-    for k in 0..2 {
-        part(cyl(), kit.mech_shadow.clone(), Vec3::new(0.445, 0.30, 0.40 + k as f32 * 0.08),
-            Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.155, 0.035, 0.155));
-    }
-    part(cyl(), line.clone(), Vec3::new(0.445, 0.30, 0.52), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.075, 0.030, 0.075));
-    // Repair: the dish, unchanged in role - it PROJECTS where the
-    // cannon FIRES, and the shapes still say which is which.
-    part(cube(), plate.clone(), Vec3::new(-0.445, 0.30, 0.26), Quat::IDENTITY, Vec3::new(0.135, 0.135, 0.22));
-    part(cyl(), shell.clone(), Vec3::new(-0.445, 0.30, 0.42), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.24, 0.050, 0.24));
-    part(cyl(), kit.mech_shadow.clone(), Vec3::new(-0.445, 0.30, 0.44), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.17, 0.035, 0.17));
-    part(ball(), line.clone(), Vec3::new(-0.445, 0.30, 0.455), Quat::IDENTITY, Vec3::splat(0.070));
-
-    // ---- §1 THE HARDWARE PASS ---------------------------------------
-    //
-    // The owner asked for roughly three times the mechanical detail and
-    // was explicit that this is a GRAPHICS pass: no new articulation on
-    // this chassis. So everything below is bolted to masses that already
-    // exist, and nothing here moves or is read by any system.
-    //
-    // The rule that stops it becoming noise: every piece must be
-    // something a machinist would have had to FIT. A bolt sits on a
-    // seam. An actuator spans two masses that move relative to each
-    // other. A cable leaves a housing and ARRIVES somewhere. A vent is
-    // on the hot side. Detail that cannot answer "what is it attached
-    // to, and why" makes a model busier without making it read as a
-    // machine.
-    //
-    // Positions are derived from the frame's own joint centres rather
-    // than typed fresh, so moving a limb drags its hardware with it
-    // instead of leaving it floating in the old place.
-    {
-        // JOINT COLLARS on every ball: a split ring with a shadow gap.
-        // The cheapest thing that says "this rotates" without animating.
-        for (jx, jy, jz, r, axis_x) in [
-            (0.30_f32, 0.76_f32, 0.0_f32, 0.150_f32, true),
-            (-0.30, 0.76, 0.0, 0.150, true),
-            (0.395, 0.45, 0.03, 0.115, true),
-            (-0.395, 0.45, 0.03, 0.115, true),
-            (0.17, 0.18, 0.0, 0.140, false),
-            (-0.17, 0.18, 0.0, 0.140, false),
-            (0.185, -0.15, 0.035, 0.130, false),
-            (-0.185, -0.15, 0.035, 0.130, false),
-            (0.185, -0.445, -0.02, 0.105, false),
-            (-0.185, -0.445, -0.02, 0.105, false),
-        ] {
-            let rot = if axis_x {
-                Quat::from_rotation_z(FRAC_PI_2)
-            } else {
-                Quat::from_rotation_x(FRAC_PI_2)
-            };
-            part(cyl(), kit.mech_metal.clone(), Vec3::new(jx, jy, jz), rot, Vec3::new(r, 0.028, r));
-            part(cyl(), kit.mech_shadow.clone(), Vec3::new(jx, jy, jz), rot, Vec3::new(r * 0.92, 0.040, r * 0.92));
-        }
-
-        // ACTUATORS across the joints that carry load: a barrel with a
-        // rod sliding out of it, spanning the gap between two masses,
-        // and a clevis at the rod end - a rod that simply stops is a rod
-        // attached to nothing.
-        for sd in [-1.0_f32, 1.0] {
-            for (ax, ay, az, ang, len) in [
-                (0.315_f32, 0.62_f32, -0.075_f32, 0.22_f32, 0.20_f32),
-                (0.375, 0.375, -0.055, -0.18, 0.17),
-                (0.150, 0.055, -0.10, 0.16, 0.22),
-                (0.230, -0.225, -0.095, 0.30, 0.24),
-            ] {
-                part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * ax, ay, az), Quat::from_rotation_x(ang), Vec3::new(0.040, len, 0.040));
-                part(cyl(), kit.mech_metal.clone(),
-                    Vec3::new(sd * ax, ay + len * 0.44, az - ang.sin() * len * 0.44),
-                    Quat::from_rotation_x(ang), Vec3::new(0.024, len * 0.62, 0.024));
-                part(cube(), kit.mech_metal.clone(),
-                    Vec3::new(sd * ax, ay + len * 0.72, az - ang.sin() * len * 0.72),
-                    Quat::from_rotation_x(ang), Vec3::new(0.055, 0.045, 0.030));
-            }
-        }
-
-        // CABLE RUNS. Each leaves the backpack, follows the frame and
-        // ends at a collar - never crossing open air.
-        for sd in [-1.0_f32, 1.0] {
-            for (cx, cy, cz, ang, len) in [
-                (0.145_f32, 0.655_f32, -0.185_f32, 0.55_f32, 0.24_f32),
-                (0.255, 0.545, -0.13, 0.95, 0.22),
-                (0.115, 0.30, -0.175, -0.35, 0.26),
-            ] {
-                part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * cx, cy, cz),
-                    Quat::from_rotation_z(sd * -0.35) * Quat::from_rotation_x(ang),
-                    Vec3::new(0.020, len, 0.020));
-            }
-        }
-
-        // ARMOUR SEAMS: a thin dark line inset along each big shell,
-        // which is what turns a moulded lump into plate that was cut and
-        // fitted. Cheaper and more legible than splitting the mesh.
-        for (sx, sy, sz, w, h) in [
-            (0.0_f32, 0.60_f32, 0.255_f32, 0.34_f32, 0.010_f32),
-            (0.0, 0.72, 0.235, 0.26, 0.010),
-            (0.0, 0.475, 0.245, 0.30, 0.010),
-            (0.0, 1.045, 0.245, 0.24, 0.010),
-        ] {
-            part(cube(), kit.mech_shadow.clone(), Vec3::new(sx, sy, sz), Quat::IDENTITY, Vec3::new(w, h, 0.014));
-        }
-        for sd in [-1.0_f32, 1.0] {
-            for (sy, len) in [(0.045_f32, 0.16_f32), (-0.30, 0.15)] {
-                part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.265, sy, 0.02), Quat::IDENTITY, Vec3::new(0.012, len, 0.10));
-            }
-        }
-
-        // FASTENERS on those seams - showing the bolts is what makes a
-        // panel read as removable rather than as a skin.
-        for (bx, by, bz) in [
-            (0.0_f32, 0.665_f32, 0.262_f32),
-            (0.0, 0.535, 0.262),
-            (0.0, 0.30, 0.235),
-            (0.0, 1.10, 0.235),
-        ] {
-            for sgn in [-1.0_f32, 1.0] {
-                part(ball(), kit.mech_metal.clone(), Vec3::new(bx + sgn * 0.135, by, bz), Quat::IDENTITY, Vec3::splat(0.020));
-            }
-        }
-
-        // COOLING on the hot side only: backpack and hips, never the
-        // face.
-        for (vx, vy, vz, n) in [(0.0_f32, 0.66_f32, -0.315_f32, 4usize), (0.0, 0.235, -0.20, 3)] {
-            for k in 0..n {
-                part(cube(), kit.mech_metal.clone(),
-                    Vec3::new(vx, vy + k as f32 * 0.038, vz),
-                    Quat::from_rotation_x(0.38),
-                    Vec3::new(0.22, 0.012, 0.10));
-            }
-        }
-
-        // SENSOR PODS on the head flanks and crown, each a housing with
-        // a lit face, all pointing where the lens points.
-        for (sx, sy, sz, r) in [
-            (0.205_f32, 1.075_f32, 0.115_f32, 0.030_f32),
-            (-0.205, 1.075, 0.115, 0.030),
-            (0.0, 1.185, 0.115, 0.026),
-        ] {
-            part(cube(), kit.mech_shadow.clone(), Vec3::new(sx, sy, sz), Quat::IDENTITY, Vec3::new(0.065, 0.055, 0.070));
-            part(cyl(), line.clone(), Vec3::new(sx, sy, sz + 0.045), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(r, 0.016, r));
-        }
-
-        // SERVO DRUMS at the wrists and ankles - the joints that get no
-        // collar, because they are the ones that are not balls.
-        for sd in [-1.0_f32, 1.0] {
-            part(cyl(), plate.clone(), Vec3::new(sd * 0.445, 0.175, 0.045), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.075, 0.055, 0.075));
-            part(cyl(), kit.mech_shadow.clone(), Vec3::new(sd * 0.475, 0.175, 0.045), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.055, 0.030, 0.055));
-            part(cyl(), plate.clone(), Vec3::new(sd * 0.185, -0.445, -0.075), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.070, 0.050, 0.070));
-        }
-
-        // FOOT HARDWARE: a toe hinge line and two cleats, so the biggest
-        // flat surface on the machine is not a blank slab.
-        for sd in [-1.0_f32, 1.0] {
-            part(cyl(), kit.mech_metal.clone(), Vec3::new(sd * 0.185, -0.475, 0.145), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.040, 0.175, 0.040));
-            for cz in [-0.04_f32, 0.115] {
-                part(cube(), kit.mech_shadow.clone(), Vec3::new(sd * 0.185, -0.522, cz), Quat::IDENTITY, Vec3::new(0.185, 0.022, 0.055));
-            }
-        }
-
-        // STATUS LAMPS, kept off every silhouette edge so they read as
-        // detail and never as a team signal.
-        for (lx, ly, lz) in [
-            (0.115_f32, 0.79_f32, 0.185_f32),
-            (-0.115, 0.79, 0.185),
-            (0.0, 0.415, -0.30),
-        ] {
-            part(ball(), line.clone(), Vec3::new(lx, ly, lz), Quat::IDENTITY, Vec3::splat(0.017));
-        }
-    }
-    root
 }
 
 /// §25 THE ARMOUR HIT FLASH: green plasma where a round meets a hull.
@@ -14126,7 +13882,12 @@ fn spawn_fighter_rigs(
         // plate weights off one frame, so a lineup of medics reads as
         // individuals rather than as four copies. Visual only - see
         // `MechTrim`.
-        let scout_rig = spawn_scout_chassis(commands, kit, ally, MechTrim::ALL[i % MechTrim::ALL.len()]);
+        let scout_rig = agile_mech::spawn_agile_chassis(
+            commands,
+            kit,
+            ally,
+            MechTrim::ALL[i % MechTrim::ALL.len()],
+        );
         commands
             .entity(scout_rig)
             .insert((Transform::IDENTITY, Visibility::Hidden))
@@ -14747,8 +14508,21 @@ fn setup(
         // shell: it rests on luminance (amber is bright, the foe hull
         // stays near-black iron) and on the emissive accent, gold eye
         // against red eye, which this design puts at visor height.
+        // BRIEF X §2 (owner, 2026-08-10): the ally Agile goes from SERVICE
+        // AMBER to INDUSTRIAL ORANGE. A small move in absolute terms and
+        // a load-bearing one, because of what else is on the field: the
+        // owner's Q4 ruling put the player Royal in GOLD and the
+        // opposition Royal in YELLOW, and (0.86, 0.60, 0.16) amber sits
+        // between those two on the wheel. Rotating the light chassis to
+        // (0.90, 0.42, 0.11) puts a clear hue gap between it and both
+        // Royals while keeping - in fact raising - the luminance the
+        // team read rests on.
+        //
+        // "Avoid extremely bright flat orange; it should read as painted
+        // industrial armour" - hence metallic 0.10 and roughness 0.55,
+        // both unchanged. Paint, not a traffic cone.
         scout_hull: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.86, 0.60, 0.16), // service amber
+            base_color: Color::srgb(0.90, 0.42, 0.11), // industrial orange
             metallic: 0.10,
             perceptual_roughness: 0.55, // painted, not polished
             ..default()
@@ -14766,8 +14540,12 @@ fn setup(
             perceptual_roughness: 0.50,
             ..default()
         }),
+        // BRIEF X §2: "slightly darker orange for secondary plates".
+        // Burnt orange rather than the old ochre, which was really a
+        // desaturated yellow and read as a second amber rather than as a
+        // second LAYER.
         scout_plate: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.60, 0.40, 0.11), // worn ochre trim
+            base_color: Color::srgb(0.56, 0.235, 0.075), // burnt orange
             metallic: 0.12,
             perceptual_roughness: 0.52,
             ..default()
@@ -14783,10 +14561,28 @@ fn setup(
         // Deliberately MATTE (no emissive): the lit accent below has to
         // stay the brightest blue on the machine or it stops reading as
         // lit at all.
+        //
+        // BRIEF X §2 + §13, and a JUDGEMENT CALL worth stating: this slot
+        // goes from light blue to DEEP RUST ORANGE. Two owner rulings
+        // landed on the same day and pull opposite ways here - "orange +
+        // metallic blue becomes the Agile Mech's recognizable identity",
+        // and "the light chassis takes the SAME two blues as the heavy so
+        // the enemy fields one army". The split honours both by role
+        // rather than by machine: the enemy Agile keeps DARK BLUE on its
+        // large armour masses (so its army still reads as one army, and
+        // trap 4's luminance rule is untouched at 0.016 against the ally's
+        // 0.27) and carries the chassis's orange on the LAYERED plates -
+        // knee cops, brow, belly, pauldron lip, shin plate, dish rim. The
+        // metallic-blue MACHINERY role it loses here is not lost at all;
+        // it moved to `agile_blue_foe`, which covers more of the machine
+        // than this ever did.
+        //
+        // If the owner wants the opposition Agile orange-primary like the
+        // player's, this line and `scout_hull_foe` are the whole change.
         scout_plate_foe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.42, 0.58, 0.78),
-            metallic: 0.45,
-            perceptual_roughness: 0.44,
+            base_color: Color::srgb(0.40, 0.165, 0.060),
+            metallic: 0.30,
+            perceptual_roughness: 0.48,
             ..default()
         }),
         // the LIGHT LINES. Emissive, so they hold their colour when the
@@ -14818,6 +14614,51 @@ fn setup(
             base_color: Color::srgb(0.62, 0.86, 1.00),
             emissive: LinearRgba::new(0.60, 1.90, 3.40, 1.0),
             perceptual_roughness: 0.30,
+            ..default()
+        }),
+        // BRIEF X §2, "Secondary materials - metallic blue. Dark metallic
+        // blue, steel blue, blue-gray metal. On joints, inner armour,
+        // mechanical limbs, connectors, weapon mounts, exposed
+        // machinery." That is a role the light chassis never had a
+        // material for: its old palette was shell, plate, black frame and
+        // one lamp, so "machinery" and "armour" were painted the same.
+        //
+        // HIGH metallic and LOW roughness against the armour's 0.10/0.55.
+        // The two roles have to be told apart by MATERIAL, not only by
+        // hue, or a blue-grey next to an orange just reads as a second
+        // colour of paint.
+        agile_blue: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.195, 0.285, 0.435), // steel blue
+            metallic: 0.80,
+            perceptual_roughness: 0.34,
+            ..default()
+        }),
+        // The enemy's machinery sits ABOVE its own hull in value (0.075,
+        // 0.125, 0.265) rather than below it, which is the only way the
+        // mechanism reads at all on a dark machine - and it is still far
+        // beneath the ally's orange, so the luminance rule is unaffected.
+        agile_blue_foe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.150, 0.215, 0.345),
+            metallic: 0.75,
+            perceptual_roughness: 0.36,
+            ..default()
+        }),
+        // BRIEF X §2, "a brighter metallic/electric blue, used SPARINGLY:
+        // energy components, small lights, reactor/core details, armour
+        // seams, mechanical interfaces. Do not make the whole mech neon."
+        //
+        // ONE material for both sides. It is a TECHNOLOGY colour, not a
+        // livery colour, and giving it a foe variant would have made it a
+        // second friend-or-foe signal competing with the visor lamp -
+        // which is exactly the "two answers to one question" split this
+        // codebase keeps shipping. Its total coverage on the machine is
+        // the core ring, two rib channels, two calf channels, two fin
+        // edges, two temple pods, the reactor band and the two muzzles:
+        // fourteen pieces, none larger than 16 cm.
+        agile_energy: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.82, 1.00),
+            emissive: LinearRgba::new(0.45, 1.50, 3.00, 1.0),
+            perceptual_roughness: 0.28,
             ..default()
         }),
         barrier_fill: materials.add(StandardMaterial {
@@ -24209,6 +24050,7 @@ fn open_settings(
     brand: Option<Res<branding::BrandAssets>>,
     mut cam: ResMut<CamCtl>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut cat: ResMut<SettingsCat>,
 ) {
     let aspect = windows
         .get_single()
@@ -24216,16 +24058,24 @@ fn open_settings(
         .unwrap_or(menu_ui::KEY_ART_ASPECT);
     release_cursor(&mut cam, &mut windows);
     cam.ads = false; // no stale scope glass over the menu
+    // Always open on the first tab. Writing it also marks the resource
+    // CHANGED, which is what makes `settings_paging` run its first pass -
+    // without that every category would be on screen at once on frame 1,
+    // which is precisely the screen this replaces.
+    cat.0 = 0;
 
-    // Left column carries three whole sections, right carries the
-    // crosshair's nine rows. Columns break BETWEEN groups and never
-    // inside one - that is what makes the grouping survive the split.
-    // The old layout wrapped ROW-MAJOR through a fixed 1010px grid, which
-    // put the minimap on/off and its own rotate toggle on opposite sides
-    // of the same visual line.
-    const LEFT: [SettingsGroup; 3] =
-        [SettingsGroup::Aim, SettingsGroup::Minimap, SettingsGroup::Hud];
-    const RIGHT: [SettingsGroup; 1] = [SettingsGroup::Crosshair];
+    // §owner FRONT END P6: ONE category at a time. The old layout put all
+    // seventeen rows on screen at once in two columns - which is exactly
+    // the "settings dashboard" the brief is trying to get away from, and
+    // it is also why the two minimap tunables and their own on/off switch
+    // had to be argued into the same column in the first place. With one
+    // category showing, a group is never split and the argument goes away.
+    const GROUP_ORDER: [SettingsGroup; 4] = [
+        SettingsGroup::Aim,
+        SettingsGroup::Minimap,
+        SettingsGroup::Hud,
+        SettingsGroup::Crosshair,
+    ];
 
     let brand = brand.as_deref();
     let root = menu_ui::spawn_surface(&mut commands, brand, aspect);
@@ -24233,49 +24083,88 @@ fn open_settings(
         menu_ui::plate(p, menu_ui::PLATE_W_SETTINGS, |b| {
             menu_ui::title(b, "SETTINGS");
             menu_ui::rule_and_boss(b, true);
-            // ONE line, warm. The old subtitle ran to two full lines in a
-            // cool lavender - the only cool colour on a warm page - and
-            // its second sentence duplicated a pause row one keypress away.
-            b.spawn((
-                Text::new("CHANGES APPLY IMMEDIATELY"),
-                TextFont { font_size: menu_ui::T_MICRO, ..default() },
-                TextColor(branding::palette::PARCHMENT_DIM),
-                Node { margin: UiRect::bottom(Val::Px(menu_ui::U2)), ..default() },
-            ));
+            // ---- the tabs ------------------------------------------
             b.spawn(Node {
                 width: Val::Percent(100.0),
                 flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(menu_ui::U6),
-                align_items: AlignItems::FlexStart,
+                column_gap: Val::Px(menu_ui::U3),
+                margin: UiRect::bottom(Val::Px(menu_ui::U2)),
                 ..default()
             })
-            .with_children(|cols| {
-                for groups in [&LEFT[..], &RIGHT[..]] {
-                    cols.spawn(Node {
+            .with_children(|row| {
+                for (i, (_, name, _)) in SETTINGS_CATEGORIES.iter().enumerate() {
+                    row.spawn(Node {
                         flex_grow: 1.0,
                         flex_basis: Val::Px(0.0),
-                        flex_direction: FlexDirection::Column,
                         ..default()
                     })
-                    .with_children(|col| {
-                        for g in groups {
-                            menu_ui::eyebrow(col, g.title());
-                            for (which, kind, group) in SETTINGS_ROWS {
-                                if group != *g {
-                                    continue;
-                                }
-                                let full = settings_label_text(kind, &settings);
-                                let (name, value) = split_label(&full);
-                                menu_ui::menu_row_at(
-                                    col,
-                                    (which, SettingsLabel(kind)),
-                                    menu_ui::RowKind::Normal,
-                                    name,
-                                    Some(value),
-                                    None,
-                                    menu_ui::ROW_H_DENSE,
-                                );
+                    .with_children(|cell| {
+                        menu_ui::menu_row_at(
+                            cell,
+                            SettingsTab(i),
+                            menu_ui::RowKind::Normal,
+                            name,
+                            None,
+                            None,
+                            menu_ui::ROW_H_DENSE,
+                        );
+                    });
+                }
+            });
+            // The line that says what is behind the door you are looking
+            // at. It replaces "CHANGES APPLY IMMEDIATELY", which was true
+            // and useless: every settings screen in every game applies
+            // immediately, and the sentence was spending the one line
+            // under the title on it.
+            b.spawn((
+                Text::new(SETTINGS_CATEGORIES[0].2.to_string()),
+                TextFont { font_size: menu_ui::T_MICRO, ..default() },
+                TextColor(branding::palette::PARCHMENT_DIM),
+                Node { margin: UiRect::bottom(Val::Px(menu_ui::U3)), ..default() },
+                SettingsCatBlurb,
+            ));
+            b.spawn(Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .with_children(|col| {
+                for g in GROUP_ORDER {
+                    col.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Column,
+                            ..default()
+                        },
+                        OnSettingsCat(g.category()),
+                    ))
+                    .with_children(|sect| {
+                        // The group eyebrow only earns its line when the
+                        // category holds MORE THAN ONE group. On CONTROLS
+                        // and CROSSHAIR it was printing the tab's own name
+                        // back at the player one line below the tab.
+                        let siblings = GROUP_ORDER
+                            .iter()
+                            .filter(|o| o.category() == g.category())
+                            .count();
+                        if siblings > 1 {
+                            menu_ui::eyebrow(sect, g.title());
+                        }
+                        for (which, kind, group) in SETTINGS_ROWS {
+                            if group != g {
+                                continue;
                             }
+                            let full = settings_label_text(kind, &settings);
+                            let (name, value) = split_label(&full);
+                            menu_ui::menu_row_at(
+                                sect,
+                                (which, SettingsLabel(kind)),
+                                menu_ui::RowKind::Normal,
+                                name,
+                                Some(value),
+                                None,
+                                menu_ui::ROW_H_DENSE,
+                            );
                         }
                     });
                 }
@@ -24294,6 +24183,67 @@ fn open_settings(
             menu_ui::seal_footer(b, brand, None);
         });
     });
+}
+
+/// The tabs: click to switch category, and paint the current one as
+/// SELECTED. `menu_ui::paint_row`'s second argument is exactly that
+/// concept, so the tab strip gets the same selection treatment every
+/// pick-row in the game already uses rather than a fourth hover idiom.
+fn settings_tab_buttons(
+    mut cat: ResMut<SettingsCat>,
+    mut q: Query<
+        (
+            &Interaction,
+            &SettingsTab,
+            &menu_ui::PlateRow,
+            &Children,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        With<Button>,
+    >,
+    mut bosses: Query<
+        &mut BackgroundColor,
+        (With<menu_ui::RowBoss>, Without<menu_ui::PlateRow>),
+    >,
+) {
+    for (interaction, tab, row, kids, mut bg, mut border) in &mut q {
+        menu_ui::paint_row(
+            row.kind,
+            cat.0 == tab.0,
+            *interaction,
+            &mut bg,
+            &mut border,
+            Some(kids),
+            &mut bosses,
+        );
+        if *interaction == Interaction::Pressed && cat.0 != tab.0 {
+            cat.0 = tab.0;
+        }
+    }
+}
+
+/// Show only the current category's sections, and rewrite the blurb.
+///
+/// `Display::None`, never `Visibility::Hidden` - a hidden node still
+/// occupies layout space, which would leave the visible category floating
+/// in the middle of three invisible ones. Same rule, same reason, as
+/// `intro_paging`.
+fn settings_paging(
+    cat: Res<SettingsCat>,
+    mut sections: Query<(&OnSettingsCat, &mut Node)>,
+    mut blurb: Query<&mut Text, With<SettingsCatBlurb>>,
+) {
+    if !cat.is_changed() {
+        return;
+    }
+    let (want, _, why) = SETTINGS_CATEGORIES[cat.0.min(SETTINGS_CATEGORIES.len() - 1)];
+    for (owner, mut node) in &mut sections {
+        node.display = if owner.0 == want { Display::Flex } else { Display::None };
+    }
+    for mut t in &mut blurb {
+        **t = why.to_string();
+    }
 }
 
 fn settings_label_text(kind: SettingsButtonKind, s: &GameSettings) -> String {
@@ -28533,6 +28483,41 @@ mod forge_tests {
         let before = settings_label_text(SettingsButtonKind::InvertY, &s);
         s.invert_y = !s.invert_y;
         assert_ne!(before, settings_label_text(SettingsButtonKind::InvertY, &s));
+    }
+
+    /// §owner FRONT END P6: category navigation means EVERY setting is
+    /// still reachable, and every tab still has something behind it.
+    ///
+    /// The failure this catches is the one a category system always has:
+    /// a group whose category is never offered as a tab, so seventeen
+    /// rows become fourteen and nobody notices because the screen looks
+    /// tidier. Mutation-proven: deleting any entry from
+    /// `SETTINGS_CATEGORIES`, or repointing any `SettingsGroup::category`
+    /// arm at a category not in that table, fails here.
+    #[test]
+    fn every_setting_is_still_reachable_behind_some_tab() {
+        let tabs: Vec<SettingsCategory> =
+            SETTINGS_CATEGORIES.iter().map(|(c, _, _)| *c).collect();
+        assert!(!tabs.is_empty());
+        for (_, _, group) in SETTINGS_ROWS {
+            assert!(
+                tabs.contains(&group.category()),
+                "{} is filed under a category no tab offers",
+                group.title(),
+            );
+        }
+        // ...and no tab is a door onto an empty room.
+        for (cat, name, blurb) in SETTINGS_CATEGORIES {
+            let n = SETTINGS_ROWS
+                .iter()
+                .filter(|(_, _, g)| g.category() == cat)
+                .count();
+            assert!(n > 0, "the {name} tab has no settings behind it");
+            assert!(!blurb.is_empty(), "{name} has no line saying what is inside");
+            assert!(name.is_ascii() && blurb.is_ascii(), "{name}: tofu");
+        }
+        // The default tab must exist, or the screen opens on nothing.
+        assert!(SettingsCat::default().0 < SETTINGS_CATEGORIES.len());
     }
 
     /// §C tier 2: a slot file written before the harness field existed
