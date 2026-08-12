@@ -333,9 +333,19 @@ pub const fn intro_match_config() -> MatchConfig {
         seed: 0x7EA9,
         per_team: INTRO_PER_TEAM,
         mode: Mode::Tdm,
-        // Arena: the widest, flattest, most legible of the three PvP maps.
-        // A first match should be readable, not clever.
-        map: sim::MapKind::Arena,
+        // §owner BRIEF XIII §1: "the first 4v4 match must ALWAYS take
+        // place in Castle Gardens." Not a default a player may override -
+        // there is no configuration screen between the title and this
+        // match, which is the whole point of this function.
+        //
+        // Was Arena, chosen as "the widest, flattest, most legible of the
+        // three PvP maps - a first match should be readable, not clever."
+        // That reasoning was sound and is now OUTRANKED, not refuted:
+        // Gardens is the showcase map, and the first thing a new player
+        // sees should be the game's best face rather than its plainest.
+        // BRIEF XIII §7 makes the first match a scripted seven-beat tour
+        // of exactly this map, so the two cannot disagree.
+        map: sim::MapKind::Gardens,
         difficulty: sim::Difficulty::Normal,
         loadout: sim::DEFAULT_LOADOUT,
         tdm_target: INTRO_TDM_TARGET,
@@ -1408,6 +1418,26 @@ mod tests {
         assert_eq!(c.per_team, 4, "the spec says 4v4");
         assert_eq!(c.tdm_target, 25, "the spec says first to 25 kills");
         assert_eq!(c.mode, Mode::Tdm);
+    }
+
+    /// BRIEF XIII §1: *"the first 4v4 match must ALWAYS take place in
+    /// Castle Gardens."*
+    ///
+    /// Its own test because it is a different KIND of requirement from
+    /// the 4v4-to-25 pair above: those are numbers the owner picked, this
+    /// is a place the owner picked, and §7 scripts a seven-beat opening
+    /// tour of that specific map. If the two ever disagree the tour walks
+    /// a player through architecture that is not there.
+    ///
+    /// Asserted as an equality against the named variant rather than
+    /// "not Arena", so swapping to any OTHER map fails too.
+    #[test]
+    fn the_first_match_is_always_castle_gardens() {
+        assert_eq!(
+            intro_match_config().map,
+            sim::MapKind::Gardens,
+            "the intro match is the showcase, and BRIEF XIII names the map"
+        );
     }
 
     /// The introductory match must not be reachable by the setup screen.
