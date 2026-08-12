@@ -6212,12 +6212,32 @@ const SHOTGUN_MODEL_BEATS: &[CapBeat] = &[
     CapBeat { snap: Some("02-side-b"), ..beat(2.9) },
     CapBeat { orbit: Some(PI * 0.8), ..beat(3.1) },
     CapBeat { snap: Some("03-front-quarter"), ..beat(4.0) },
-    // THE UNDERSIDE - the loading gate, the trigger guard, the crossbolt
-    // safety and the action bars all live on this face.
-    CapBeat { orbit: Some(PI * 0.35), look: Some((0.0, -0.62)), boom: Some(0.40), ..beat(4.2) },
-    CapBeat { snap: Some("05-underside-a"), ..beat(5.1) },
-    CapBeat { orbit: Some(PI * 0.65), ..beat(5.3) },
-    CapBeat { snap: Some("06-underside-b"), ..beat(6.2) },
+    // THE UNDERSIDE - one beat, at an orbit that was MEASURED.
+    //
+    // There were two. The pair went out at 0.35 and 0.65 PI and 0.35
+    // came back photographing the character's BACK, with a few pixels of
+    // barrel showing past his hip. Re-aimed to 1.5 PI - the orbit
+    // `02-side-b` proves puts this weapon clear of the torso - and it
+    // came back with the SAME frame, which is the finding: at boom 0.40
+    // and pitch -0.62 the camera sits close in under the subject, and
+    // from there the torso occludes that whole flank no matter which way
+    // the boom is swung. Orbit was not the lever.
+    //
+    // So it is deleted rather than aimed a third time, on the deleted
+    // AWM table's reasoning three screens up: a beat that reliably
+    // photographs nothing is worse than no beat, because it implies a
+    // coverage the handback folder does not have.
+    //
+    // 0.65 PI is kept and is genuinely new - it is the only frame in
+    // this project that looks UP at a gun, and it carries the forend's
+    // finger grooves and the barrel/magazine-tube pair seen as two
+    // separate cylinders. It does NOT resolve the loading gate: that
+    // sits on the receiver's floor, between the two hands, and on this
+    // carry there is no orbit that clears both. Same structural limit
+    // the AWM's buttstock note records - the instrument for it would be
+    // a new CARRY (a low ready, or an inspect pose), not a new angle.
+    CapBeat { orbit: Some(PI * 0.65), look: Some((0.0, -0.62)), boom: Some(0.40), ..beat(4.2) },
+    CapBeat { snap: Some("05-underside"), ..beat(5.1) },
     // and the viewmodel, hip-held, for the receiver top and the optic
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(6.4) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(6.5) },
