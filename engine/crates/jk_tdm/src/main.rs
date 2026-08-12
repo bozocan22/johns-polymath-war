@@ -7160,7 +7160,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // M4-specific - they are "a rifle, from both flanks, then a
         // front quarter, then hip-held" - and a second copy of the same
         // six numbers would be a second thing to keep in step.
-        "m4_model" | "ak_model" | "awm_model" => M4_MODEL_BEATS,
+        "m4_model" | "ak_model" | "awm_model" | "mp5_model" => M4_MODEL_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
         "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
@@ -7200,7 +7200,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 44] = [
+const CAPTURE_SCRIPTS: [&str; 45] = [
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7267,6 +7267,12 @@ const CAPTURE_SCRIPTS: [&str; 44] = [
     // down the barrel by `sights_c`, which is the one angle its
     // magazine, gas tube and selector are all edge-on in.
     "ak_model",
+    // §owner GUN PASS: the SMG's side profile. `sights_b` is the only
+    // script that has ever carried an MP5, and it frames it down the
+    // barrel in ADS - the one angle in which the raked magazine, the
+    // handguard slots, the folded stock and the trigger group are all
+    // edge-on or behind the optic. Same beats as the carbine.
+    "mp5_model",
     // §owner GUN PASS: the sniper's side profile. `muzzle_flash` is the
     // only script that carries an AWM at all and it frames the BARREL
     // TIP - so the bolt handle, the scope, the bipod and the thumbhole
@@ -7415,6 +7421,11 @@ fn capture_quick_deploy(
         // and the sniper, likewise in the primary slot
         Some("awm_model") => {
             sel.loadout = [GunKind::Awm, GunKind::Glock, GunKind::Mp5];
+        }
+        // the SMG hoisted OUT of slot 3 and into the primary, so the
+        // shared beats - which never press a digit - actually frame it
+        Some("mp5_model") => {
+            sel.loadout = [GunKind::Mp5, GunKind::Glock, GunKind::Ak47];
         }
         // the ONLY script that leaves Arena. `capture_quick_deploy` runs
         // before `start_match` reads `Selected`, so setting the map here
@@ -10148,29 +10159,196 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             push_red_dot(&mut parts, 0.1300, -0.02, 0.102); // slide rib top 0.102
         }
         GunKind::Mp5 => {
-            // compact SMG: short everything - slab receiver, raked mag
+            // THE ROLLER-DELAYED SMG. Its own §owner GUN PASS, and the
+            // rifles' passes each found the same failure first: two guns
+            // built from the same boxes read as one gun. The MP5's risk
+            // was worse than the AK-vs-M4 one, because this was a
+            // SHORTENED CARBINE - same slab, same rail, same smooth
+            // handguard, same single flank strut - and a shrunk rifle is
+            // not an SMG, it is a rifle drawn small.
+            //
+            // So this pass is the four things the reference is
+            // recognised BY, and every one is absent from both rifles:
+            //   - the COCKING TUBE over the barrel, with the lever out
+            //     on the LEFT (the "HK slap") and no charging handle on
+            //     the receiver at all;
+            //   - a HOODED front sight ring on that tube;
+            //   - a slotted handguard VENTED THROUGH ITS FLANKS, not
+            //     cross-cut like the two rifles' rail sections;
+            //   - a separate boxy TRIGGER GROUP with the grip hanging
+            //     off it, rather than a grip growing straight out of the
+            //     receiver.
+            //
+            // Tone stays the four greys: `Mid` receiver, `Light`
+            // handguard and pressed-steel details, `Dark` furniture and
+            // barrel, `Black` for cuts. Same palette the shipped model
+            // wore - see the M4's note on why no gun gets a new colour.
+            //
+            // RECEIVER: slab-sided, and SHORT. Front face z 0.21 against
+            // the carbine's 0.29 and the AK's 0.25; the whole gun ends
+            // at the muzzle's 0.42 where those two run to 0.67 and 0.70.
             parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.04), 0.0, (0.05, 0.09, 0.34)));
-            push_rail(&mut parts, 0.075, -0.10, 0.18, 6);
+            // The rail is SHORT too - z -0.05..0.14 in five notches,
+            // against the carbine's ten across 0.38. A claw mount over
+            // the receiver, not a flat-top the length of the gun, and
+            // the shortening is what leaves the receiver's rear top bare
+            // for the iron sight below.
+            push_rail(&mut parts, 0.075, -0.05, 0.14, 5);
             parts.push(wp(true, Tone::Dark, (0.0, 0.03, 0.28), FRAC_PI_2, (0.024, 0.18, 0.024)));
             push_muzzle(&mut parts, 0.03, 0.385, 0.036);
-            parts.push(wp(false, Tone::Light, (0.0, -0.012, 0.16), 0.0, (0.052, 0.058, 0.14)));
-            // §owner GUN PASS: the handguard slots and the receiver seam
+            // TWO receiver seams rather than one. A slab with a single
+            // groove reads as two parts stacked; with an upper and a
+            // lower it reads as a pressed shell, which is what this
+            // receiver is.
             push_panel_line(&mut parts, 0.030, -0.06, 0.14, 0.027);
-            push_ejection_port(&mut parts, 0.028, 0.030, 0.02, 0.070);
-            push_bolts(&mut parts, 0.026, -0.010, -0.05, 0.10, 3);
-            for k in 0..4 {
-                parts.push(wp(false, Tone::Black, (0.0, -0.012, 0.115 + k as f32 * 0.026), 0.0, (0.055, 0.030, 0.006)));
+            push_panel_line(&mut parts, -0.008, -0.10, 0.06, 0.027);
+            push_bolts(&mut parts, 0.026, 0.000, -0.06, 0.12, 3);
+            // EJECTION PORT, hand-built instead of `push_ejection_port`.
+            // That helper bundles a charging handle onto the receiver's
+            // right flank, and this gun's charging handle is a lever on
+            // a tube over the BARREL - carrying both would give the MP5
+            // two of them, and the receiver-mounted one is exactly the
+            // AR/AK feature this pass exists to avoid repeating. The cut
+            // and its lip are the helper's own numbers.
+            //
+            // Moved forward to z 0.06, over the magazine, which is where
+            // a roller-delayed action ejects from and also clears the
+            // folded stock hinged behind it.
+            parts.push(wp(false, Tone::Black, (0.026, 0.038, 0.060), 0.0, (0.006, 0.030, 0.065)));
+            parts.push(wp(false, Tone::Light, (0.026, 0.018, 0.060), 0.0, (0.007, 0.006, 0.065)));
+            // HANDGUARD, short and slotted. The shipped one was a smooth
+            // block with four bands cut ACROSS it - the carbine's quad
+            // rail, on a gun that has no rail there. A real MP5's vents
+            // are oval cuts up the FLANKS, which is also the half of it
+            // a side profile can see: `M4_MODEL_BEATS` frames this gun
+            // from both flanks and from a front quarter, and cross-cuts
+            // are edge-on in all three.
+            parts.push(wp(false, Tone::Light, (0.0, -0.012, 0.170), 0.0, (0.052, 0.058, 0.125)));
+            for sx in [-1.0_f32, 1.0] {
+                for k in 0..5 {
+                    parts.push(wp(
+                        false,
+                        Tone::Black,
+                        (sx * 0.027, -0.010, 0.120 + k as f32 * 0.025),
+                        0.0,
+                        (0.005, 0.024, 0.014),
+                    ));
+                }
             }
-            parts.push(wp(false, Tone::Dark, (0.0, -0.10, 0.10), 0.35, (0.032, 0.17, 0.06)));
-            parts.push(wp(false, Tone::Dark, (0.0, -0.07, -0.05), 0.2, (0.04, 0.11, 0.05)));
-            // folded stock: flat end cap + side-folded strut hugging the
-            // receiver - nothing protrudes past the grip line
-            parts.push(wp(false, Tone::Mid, (0.0, 0.02, -0.135), 0.0, (0.046, 0.075, 0.018)));
-            parts.push(wp(false, Tone::Dark, (0.055, 0.025, 0.02), 0.0, (0.016, 0.02, 0.26)));
-            // §5 (owner): the MP5 was the one gun with no sights modelled
-            // at all. Rear notch on the receiver, front post at the muzzle
-            // end, both at the same height so they line up.
-            parts.push(wp(false, Tone::Black, (0.0, 0.088, 0.30), 0.0, (0.008, 0.016, 0.01)));
+            // and the two collars that cap it, so the handguard starts
+            // and stops somewhere instead of fading into the barrel
+            parts.push(wp(false, Tone::Mid, (0.0, -0.012, 0.112), 0.0, (0.056, 0.062, 0.014)));
+            parts.push(wp(false, Tone::Mid, (0.0, -0.012, 0.228), 0.0, (0.056, 0.062, 0.014)));
+            // COCKING TUBE: the single most recognisable line on this
+            // gun. It leaves the receiver's front face at z 0.20 and
+            // runs over the barrel to the front sight, with the lever
+            // out on the LEFT flank - which is the side the reference
+            // puts it on, and the reason there is no handle on the
+            // right. `Mid` so it separates from the `Dark` barrel it
+            // sits directly above.
+            parts.push(wp(true, Tone::Mid, (0.0, 0.058, 0.280), FRAC_PI_2, (0.020, 0.160, 0.020)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.058, 0.348), 0.0, (0.028, 0.028, 0.030)));
+            parts.push(wp(false, Tone::Dark, (-0.030, 0.058, 0.344), 0.0, (0.036, 0.014, 0.016)));
+            parts.push(wp(false, Tone::Black, (-0.046, 0.058, 0.344), 0.0, (0.012, 0.020, 0.020)));
+            // MAGAZINE WELL and a two-segment CURVED magazine. The
+            // shipped mag was one straight box hung under the receiver
+            // with nothing to enter and no floorplate - the only gun in
+            // the arsenal that never called `push_mag_detail`.
+            //
+            // Raked harder than the AK's (0.42/0.78 against 0.35/0.75),
+            // per the brief, and it has room to be: the well sits at
+            // z 0.07, forward of the trigger group and BEHIND the
+            // handguard, which is the layout an MP5 has and neither
+            // rifle does.
+            parts.push(wp(false, Tone::Mid, (0.0, -0.040, 0.070), 0.0, (0.046, 0.036, 0.076)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.088, 0.078), 0.42, (0.034, 0.105, 0.052)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.162, 0.118), 0.78, (0.032, 0.082, 0.050)));
+            push_mag_detail(&mut parts, -0.208, 0.128, 0.032, 0.036);
+            // TRIGGER GROUP: a separate boxy housing slung under the
+            // receiver with the grip hanging off ITS back, not off the
+            // receiver. That separation is the MP5's, and it is what
+            // stops the lower half reading as the AK's or the carbine's
+            // - on both of those the grip meets the receiver directly.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.040, -0.030), 0.0, (0.044, 0.036, 0.130)));
+            push_panel_line(&mut parts, -0.050, -0.085, 0.020, 0.023);
+            // trigger guard: the three-bar inline pattern the carbine
+            // established - front upright, bottom bar, blade inside.
+            // Daylight through it is the whole point.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.068, 0.014), 0.0, (0.012, 0.028, 0.010)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.079, -0.018), 0.0, (0.012, 0.010, 0.076)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.066, -0.002), 0.0, (0.008, 0.024, 0.008)));
+            // SELECTOR, both flanks. The AK's is deliberately one-sided
+            // because a Kalashnikov's lever is; the reference here is
+            // ambidextrous, and putting it on both sides means whichever
+            // flank a capture faces has one on it.
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Dark, (sx * 0.024, -0.032, -0.024), 0.0, (0.007, 0.011, 0.034)));
+                parts.push(wp(false, Tone::Mid, (sx * 0.025, -0.032, -0.042), 0.0, (0.008, 0.020, 0.020)));
+            }
+            parts.push(wp(false, Tone::Dark, (0.0, -0.070, -0.050), 0.2, (0.040, 0.110, 0.052)));
+            push_grip_detail(&mut parts, 0.021, -0.052, -0.048, 0.20);
+            // FOLDED STOCK. The shipped one was an end cap plus ONE flat
+            // bar down the flank, and the capture is what settled it: at
+            // side profile that bar reads as a rib on the receiver, not
+            // as a stock that has been folded. Nothing about it said
+            // where the fold WAS.
+            //
+            // Four parts fix that, and none of them are longer than the
+            // bar they replace: a hinge block with a visible pin at the
+            // receiver's rear, TWO parallel struts with daylight between
+            // them (a skeleton reads as a folded frame; a slab reads as
+            // a slab), and the butt plate turned EDGE-ON at their
+            // forward end - a plate standing on its edge alongside the
+            // receiver is a plate that has been swung there.
+            //
+            // Everything stays inside `weapon_rear_extent`'s 0.15 (the
+            // rearmost face is the cap's z -0.148) and the outermost
+            // point is the hinge pin at x 0.059, INSIDE the 0.063 the
+            // single bar already reached - so the intrusion sweep gets
+            // strictly easier, not harder.
+            parts.push(wp(false, Tone::Mid, (0.0, 0.020, -0.138), 0.0, (0.048, 0.080, 0.020)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.020, -0.145), 0.0, (0.022, 0.026, 0.006)));
+            // The hinge REACHES the receiver. First cut put it at x
+            // 0.031-0.057 with the receiver's flank at 0.025, so it hung
+            // 6 mm clear in the air - the same class of miss as the
+            // front post below, caught by arithmetic rather than by the
+            // capture, because a side profile is exactly the view a gap
+            // in X is invisible from.
+            parts.push(wp(false, Tone::Mid, (0.038, 0.024, -0.126), 0.0, (0.038, 0.054, 0.028)));
+            parts.push(wp(false, Tone::Black, (0.055, 0.024, -0.126), 0.0, (0.008, 0.012, 0.012)));
+            parts.push(wp(false, Tone::Dark, (0.050, 0.040, -0.060), 0.0, (0.013, 0.013, 0.140)));
+            parts.push(wp(false, Tone::Dark, (0.050, 0.012, -0.060), 0.0, (0.013, 0.013, 0.140)));
+            parts.push(wp(false, Tone::Mid, (0.050, 0.026, 0.020), 0.0, (0.013, 0.062, 0.026)));
+            parts.push(wp(false, Tone::Black, (0.050, 0.026, 0.034), 0.0, (0.015, 0.064, 0.006)));
+            // THE SIGHT LINE.
+            //
+            // The shipped front sight was a 1 cm black chip at y
+            // 0.080-0.096 with the barrel's top at 0.042 - a 3.8 cm gap,
+            // so it hung in mid-air beside the barrel. That is the same
+            // bug the AK's and the carbine's passes each found and each
+            // fixed by SIZING the tower from the two heights it has to
+            // join rather than picking one. Tower runs 0.046 (into the
+            // cocking tube) to 0.094; post runs 0.092 to 0.116, which is
+            // `sight_line_y` exactly; and the reference's hood goes
+            // round it, using the optic's own ring mesh.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.070, 0.322), 0.0, (0.024, 0.048, 0.026)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.104, 0.322), 0.0, (0.006, 0.024, 0.010)));
+            parts.push(wo(Tone::Dark, (0.0, 0.104, 0.322), FRAC_PI_2, 0.036));
+            // REAR NOTCH. The comment this replaces claimed "rear notch
+            // on the receiver, front post at the muzzle end, both at the
+            // same height" and then pushed ONE part - the post. There
+            // was never a rear sight on this gun.
+            //
+            // It goes BEHIND the optic and stays LOW, both for the
+            // reason the carbine's folded iron records: the window's
+            // lower edge is 0.093 (0.1160 less `OPTIC_HALF`), and
+            // anything taller sits between the eye and the glass and
+            // blacks out what you are aiming at. Top face 0.093 exactly.
+            // z -0.085 puts it behind the shortened rail's -0.05, on
+            // bare receiver, so it is a sight ON the gun rather than a
+            // block growing out of the rail.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.076, -0.085), 0.0, (0.028, 0.030, 0.034)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.090, -0.095), 0.0, (0.022, 0.006, 0.010)));
             push_red_dot(&mut parts, 0.1160, 0.005, 0.089); // rail top 0.089
         }
         GunKind::Shotgun => {

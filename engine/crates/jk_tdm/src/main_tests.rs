@@ -954,6 +954,59 @@ mod band_tests {
         }
     }
 
+    /// §owner GUN PASS (MP5): nothing on the SMG floats in the air.
+    ///
+    /// The model shipped with a front sight post at y 0.080-0.096 and
+    /// the barrel it belonged to topping out at 0.042 - a 3.8 cm gap,
+    /// so what the player saw was a black chip hanging beside the
+    /// barrel. It survived a §5 sights pass, a red-dot pass and three
+    /// capture scripts, and the reason is that it is nearly
+    /// unphotographable: `M4_MODEL_BEATS` takes side profiles, a side
+    /// profile cannot see a gap in X at all, and a gap in Y reads as
+    /// "a tall front sight" unless you already know where the barrel
+    /// is. The AK's and the carbine's passes each found the identical
+    /// bug on their own guns by eye. Arithmetic finds it every time.
+    ///
+    /// The rule: every part shares an AABB with at least one other.
+    /// That is a BOUND rather than connectivity - it does not prove
+    /// the model is one piece, and `WPart::half` over-reports a tilted
+    /// box - but it is exactly strong enough to catch a part with
+    /// nothing near it, which is the failure that actually ships. It
+    /// earned its place inside this very pass: the folded stock's
+    /// hinge block was first written 6 mm clear of the receiver flank,
+    /// and this is what said so.
+    ///
+    /// TOUCHING COUNTS. `push_ejection_port` seats its cut-out flush
+    /// with a receiver's side face by construction, so demanding a
+    /// strict overlap would fail correct guns.
+    #[test]
+    fn no_part_of_the_smg_floats() {
+        let parts = weapon_parts(sim::GunKind::Mp5);
+        assert!(
+            parts.len() > 40,
+            "the MP5 is down to {} parts - this test is checking a gun that \
+             is no longer there",
+            parts.len()
+        );
+        let touches = |a: &WPart, b: &WPart| {
+            let (ha, hb) = (a.half(), b.half());
+            let d = (a.pos - b.pos).abs();
+            d.x <= ha.x + hb.x + 1e-5
+                && d.y <= ha.y + hb.y + 1e-5
+                && d.z <= ha.z + hb.z + 1e-5
+        };
+        for (i, p) in parts.iter().enumerate() {
+            assert!(
+                parts.iter().enumerate().any(|(j, q)| j != i && touches(p, q)),
+                "MP5 part {i} at {:?} (size {:?}, {:?}) touches nothing on the \
+                 gun - it is floating in mid-air",
+                p.pos,
+                p.size,
+                p.tone
+            );
+        }
+    }
+
     /// §owner: every firearm carries a 1x red-dot optic, and the
     /// reticle sits at EXACTLY the height focus aligns to the eye.
     ///
