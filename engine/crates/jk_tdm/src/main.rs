@@ -6180,6 +6180,51 @@ const M4_MODEL_BEATS: &[CapBeat] = &[
 // If the stock ever needs to be seen, the instrument is a NEW carry
 // (a low ready, or an inspect pose), not a new camera angle.
 
+/// §owner GUN PASS (870): the carbine's four beats, plus the UNDERSIDE.
+///
+/// The pump gun is the one weapon whose signature feature is on the
+/// BOTTOM of it. A tube-fed shotgun is loaded a shell at a time through
+/// a gate cut into the receiver's underside, and the trigger group hangs
+/// off the same face - and `M4_MODEL_BEATS`, which every gun script has
+/// shared until now, has no beat that can see either. Its three orbits
+/// are all level side or front-quarter views, taken from a camera at
+/// pitch -0.18: enough to look up at a gun carried below the head
+/// anchor, nowhere near enough to look at its floor.
+///
+/// So the 870 gets its own table rather than two more beats bolted onto
+/// the shared one. That is deliberate: `M4_MODEL_BEATS` is now read by
+/// four other scripts, and adding beats to it would silently re-cut
+/// every one of their handback folders.
+///
+/// The underside pair is built on `HAND_DETAIL_BEATS`' finding, which is
+/// the only other place in this file that has ever photographed the
+/// bottom of anything: drop the boom in close and drive the pitch hard
+/// negative, because the boom anchors on the HEAD and pitch orbits the
+/// CAMERA around it rather than tilting the view. Two orbits, because
+/// which flank the gate ends up facing cannot be reasoned out of the
+/// transform stack - the file's own `M4_MODEL_BEATS` says the same thing
+/// about the ejection port.
+const SHOTGUN_MODEL_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, -0.18)), ..beat(0.4) },
+    CapBeat { orbit: Some(PI * 0.5), boom: Some(0.55), ..beat(0.8) },
+    CapBeat { snap: Some("01-side-a"), ..beat(1.8) },
+    CapBeat { orbit: Some(PI * 1.5), ..beat(2.0) },
+    CapBeat { snap: Some("02-side-b"), ..beat(2.9) },
+    CapBeat { orbit: Some(PI * 0.8), ..beat(3.1) },
+    CapBeat { snap: Some("03-front-quarter"), ..beat(4.0) },
+    // THE UNDERSIDE - the loading gate, the trigger guard, the crossbolt
+    // safety and the action bars all live on this face.
+    CapBeat { orbit: Some(PI * 0.35), look: Some((0.0, -0.62)), boom: Some(0.40), ..beat(4.2) },
+    CapBeat { snap: Some("05-underside-a"), ..beat(5.1) },
+    CapBeat { orbit: Some(PI * 0.65), ..beat(5.3) },
+    CapBeat { snap: Some("06-underside-b"), ..beat(6.2) },
+    // and the viewmodel, hip-held, for the receiver top and the optic
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(6.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(6.5) },
+    CapBeat { snap: Some("04-first-person-hip"), ..beat(7.3) },
+    CapBeat { end: true, ..beat(7.7) },
+];
+
 /// §owner GUN PASS: the PISTOLS' own profile, plus the scale pair.
 ///
 /// A dedicated table rather than a fourth alias onto `M4_MODEL_BEATS`,
@@ -7213,6 +7258,8 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // front quarter, then hip-held" - and a second copy of the same
         // six numbers would be a second thing to keep in step.
         "m4_model" | "ak_model" | "awm_model" | "mp5_model" => M4_MODEL_BEATS,
+        // the pump gun does NOT share them - see SHOTGUN_MODEL_BEATS
+        "shotgun_model" => SHOTGUN_MODEL_BEATS,
         "deagle_model" => DEAGLE_MODEL_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
@@ -7253,7 +7300,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 46] = [
+const CAPTURE_SCRIPTS: [&str; 47] = [
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7339,6 +7386,12 @@ const CAPTURE_SCRIPTS: [&str; 46] = [
     // TIP - so the bolt handle, the scope, the bipod and the thumbhole
     // stock have never been in a single frame this machine has taken.
     "awm_model",
+    // §owner GUN PASS: the pump gun's side profile. `sights_c` is the
+    // only script that carries a Shotgun and it frames the gun down the
+    // barrel from behind - the one angle in which the dual-tube layout,
+    // the forend and the loading gate are all edge-on or occluded. The
+    // shotgun's whole read is a SIDE read.
+    "shotgun_model",
     "arrow_flight",
     "spear_flight",
     "class_line",
@@ -7482,6 +7535,10 @@ fn capture_quick_deploy(
         // and the sniper, likewise in the primary slot
         Some("awm_model") => {
             sel.loadout = [GunKind::Awm, GunKind::Glock, GunKind::Mp5];
+        }
+        // and the pump gun, likewise in the primary slot
+        Some("shotgun_model") => {
+            sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Mp5];
         }
         // the hand cannon in the primary slot and the Glock in slot 2 -
         // the beats press Digit2 at the end to put the two pistols in
@@ -10586,22 +10643,153 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             push_red_dot(&mut parts, 0.1160, 0.005, 0.089); // rail top 0.089
         }
         GunKind::Shotgun => {
-            // pump gun: barrel + tube pair over a light pump
-            parts.push(wp(false, Tone::Dark, (0.0, 0.02, 0.02), 0.0, (0.05, 0.085, 0.30)));
-            parts.push(wp(true, Tone::Mid, (0.0, 0.045, 0.38), FRAC_PI_2, (0.028, 0.48, 0.028)));
-            parts.push(wp(true, Tone::Dark, (0.0, -0.005, 0.36), FRAC_PI_2, (0.024, 0.42, 0.024)));
-            parts.push(wp(false, Tone::Light, (0.0, -0.015, 0.30), 0.0, (0.054, 0.05, 0.16)));
-            // §owner GUN PASS: rail slots, port, mag, and the takedown pins
+            // THE REMINGTON 870: a DUAL-TUBE gun, and that is the whole read.
+            //
+            // §owner GUN PASS (870). The rifles' passes each found the same
+            // class of defect and this one is no different, so the three
+            // real bugs are named before the geometry:
+            //
+            //  1. `push_mag_detail(-0.150, ..)` drew a BOX MAGAZINE's
+            //     floorplate and two witness slots 11 cm below a receiver
+            //     whose underside is y -0.0225 - with no magazine body
+            //     anywhere between them. A pump gun feeds from the tube
+            //     under its barrel and has no box at all, so this was a
+            //     detachable mag's underside, detached, hanging in clear
+            //     air under a gun that never had one. Deleted, not moved.
+            //  2. The front bead sat at y 0.082..0.098 over a barrel whose
+            //     top is 0.059 - a 2.3 cm gap with nothing crossing it,
+            //     which is the identical floating-sight bug the AK and the
+            //     carbine were both shipped with. It gets a pedestal that
+            //     REACHES, and it is capped below the optic's window (see
+            //     the bead, below).
+            //  3. The butt pad's rear face landed at z -0.3415 against the
+            //     0.34 `weapon_rear_extent` the chest-clearance sweep
+            //     budgets for this gun. 1.5 mm over, and invisible to the
+            //     test because that test reads the CONSTANT rather than
+            //     the geometry. Pulled inside.
+            //
+            // What the reference is recognised BY, and what the shipped
+            // model had none of: the two tubes reading as TWO (they were
+            // 2.4 cm apart with daylight between them, so at range they
+            // merged into one thin stick), a forend that is visibly
+            // CONNECTED to the action, and a loading gate underneath.
+            //
+            // RECEIVER: deepened DOWNWARD rather than raised. A pump gun's
+            // receiver is deep because the carrier and trigger group live
+            // in it, it is the surface the loading gate is cut into - and
+            // going down leaves the top at 0.0625, which is the
+            // `mount_top` the optic call below is sized against.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.012, 0.02), 0.0, (0.052, 0.101, 0.28)));
+            // BARREL: 3.4 cm gauge against the AK's 2.6 and the AWM's 2.4.
+            // Bulk is the point - this is the biggest bore in the arsenal
+            // and it read as the thinnest tube on any long gun.
+            parts.push(wp(true, Tone::Mid, (0.0, 0.045, 0.38), FRAC_PI_2, (0.034, 0.48, 0.034)));
+            // MAGAZINE TUBE: shorter than the barrel and TOUCHING it.
+            //
+            // Both halves of that are fixes. It ran to z 0.57 against a
+            // barrel ending at 0.62 - a 5 cm difference nothing could see -
+            // so the gun had two full-length tubes instead of a long one
+            // over a short one. And its top face was 2.4 cm below the
+            // barrel's bottom, which is the gap that let the pair merge:
+            // two thin rods with a slot of daylight between them read as
+            // one thick rod at any distance. Seated so its top face is the
+            // barrel's bottom face exactly, and stopped at 0.485.
+            //
+            // Stays `Dark` against the `Mid` barrel deliberately - the
+            // tonal step is what separates them now that they touch.
+            parts.push(wp(true, Tone::Dark, (0.0, 0.013, 0.315), FRAC_PI_2, (0.030, 0.34, 0.030)));
+            // The MAGAZINE CAP, the knurled ring the tube ends in - the
+            // one part at the front of this gun that is not a cylinder
+            // running away from you, and the reason the tube reads as
+            // ENDING rather than as passing behind the muzzle.
+            parts.push(wp(true, Tone::Mid, (0.0, 0.013, 0.492), FRAC_PI_2, (0.038, 0.024, 0.038)));
+            // and the web that bridges cap to barrel, so the tube hangs
+            // off something instead of floating parallel
+            parts.push(wp(false, Tone::Dark, (0.0, 0.033, 0.486), 0.0, (0.024, 0.040, 0.016)));
+            // FOREND: bulkier, and wrapping the tube it slides on rather
+            // than sitting beside it. Top face meets the barrel's
+            // underside, flanks stand proud of the receiver - an 870's
+            // forend is the widest thing on the gun.
+            parts.push(wp(false, Tone::Light, (0.0, 0.0045, 0.29), 0.0, (0.062, 0.051, 0.200)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0045, 0.385), 0.0, (0.064, 0.053, 0.014)));
+            // its finger grooves, cut across the flanks 2 mm proud so they
+            // read as recesses in the forend rather than bands on it
+            for k in 0..7 {
+                parts.push(wp(false, Tone::Black, (0.0, 0.004, 0.212 + k as f32 * 0.026), 0.0, (0.064, 0.030, 0.006)));
+            }
+            // ACTION BARS: the twin rails that carry the forend back into
+            // the receiver. THE pump-action tell, and the shipped model
+            // had 3 cm of clear air between forend and receiver instead.
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Mid, (sx * 0.019, -0.008, 0.155), 0.0, (0.008, 0.010, 0.090)));
+            }
+            // §owner GUN PASS: receiver seam, ejection port, takedown pins
             push_panel_line(&mut parts, 0.024, -0.08, 0.16, 0.026);
             push_ejection_port(&mut parts, 0.027, 0.030, 0.06, 0.075);
-            push_bolts(&mut parts, 0.025, 0.000, -0.06, 0.12, 2);
-            push_mag_detail(&mut parts, -0.150, 0.020, 0.023, 0.036);
-            for k in 0..6 {
-                parts.push(wp(false, Tone::Black, (0.0, -0.015, 0.235 + k as f32 * 0.023), 0.0, (0.056, 0.035, 0.005)));
+            push_bolts(&mut parts, 0.027, -0.010, -0.06, 0.12, 3);
+            // THE LOADING GATE - the one feature no other gun in this
+            // arsenal has, and the reason a tube-fed gun is loaded a shell
+            // at a time. A slot cut into the receiver's UNDERSIDE.
+            //
+            // Straddling the bottom face (-0.0385) rather than hanging
+            // below it is what makes it a cut instead of a tab - the
+            // AWM's forend slots are in this file for having got that
+            // wrong, and this is the same trick applied on purpose.
+            parts.push(wp(false, Tone::Black, (0.0, -0.036, 0.055), 0.0, (0.030, 0.016, 0.078)));
+            // the carrier inside it, catching light the way the ejection
+            // port's lower lip does
+            parts.push(wp(false, Tone::Light, (0.0, -0.0435, 0.055), 0.0, (0.020, 0.005, 0.062)));
+            // TRIGGER GROUP: a CLOSED guard - front upright, bottom bar,
+            // rear upright - with the blade inside it. Thin bars with
+            // daylight between them, the inline pattern the rifles
+            // established; this gun had no trigger guard at all.
+            //
+            // The rear upright is not decoration. Without it the guard is
+            // an open hook, and the crossbolt safety below has nothing at
+            // its own height to be bolted through.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.052, 0.005), 0.0, (0.014, 0.032, 0.010)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.066, -0.030), 0.0, (0.014, 0.010, 0.080)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.052, -0.066), 0.0, (0.014, 0.032, 0.010)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.050, -0.020), 0.0, (0.008, 0.026, 0.008)));
+            // CROSSBOLT SAFETY, both flanks. Seated at y -0.036 so it
+            // straddles the receiver's underside (-0.0385) - the first
+            // placement put it at -0.046, which is below every part on
+            // the gun and a millimetre clear of all of them, i.e. exactly
+            // the floating greeble this whole pass is about.
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Black, (sx * 0.026, -0.036, -0.062), 0.0, (0.012, 0.009, 0.009)));
             }
-            parts.push(wp(false, Tone::Dark, (0.0, -0.035, -0.20), 0.12, (0.045, 0.10, 0.26)));
-            parts.push(wp(false, Tone::Mid, (0.0, -0.035, -0.325), 0.12, (0.05, 0.11, 0.02)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.55), 0.0, (0.008, 0.016, 0.01)));
+            // STOCK, in two sections instead of one slab: a thicker wrist
+            // behind the trigger, then the comb widening into the butt.
+            //
+            // Mostly unphotographable on this carry - the note under
+            // `M4_MODEL_BEATS` explains why a shouldered long gun has no
+            // orbit that sees its butt - so this stays cheap. The wrist is
+            // the half that IS visible, at the firing hand, and it is 8.6
+            // cm deep rather than 7.2 because three grip grooves at the
+            // house 2.6 cm spacing need 6.1 cm of face to sit on: at the
+            // old depth the bottom groove hung off the end of the stock.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.030, -0.115), 0.10, (0.042, 0.086, 0.115)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.040, -0.240), 0.12, (0.045, 0.100, 0.150)));
+            parts.push(wp(false, Tone::Mid, (0.0, -0.043, -0.324), 0.12, (0.048, 0.108, 0.018)));
+            push_grip_detail(&mut parts, 0.021, -0.020, -0.100, 0.10);
+            // MUZZLE: no brake. `push_muzzle` ends a barrel in a squared
+            // block, which is a birdcage or a compensator, and an 870
+            // wears neither - so this is the choke ring and an open bore
+            // instead, which is what the reference actually ends in.
+            parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.605), FRAC_PI_2, (0.040, 0.028, 0.040)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.045, 0.614), FRAC_PI_2, (0.022, 0.016, 0.022)));
+            // THE BEAD, on a pedestal that reaches the barrel.
+            //
+            // Its top is 0.0715, and that is a clearance rather than a
+            // look: the optic's clear window starts at 0.072 (sight line
+            // 0.0950 less `OPTIC_HALF`), and the carbine's pass paid for
+            // the finding that any iron poking into that window blacks out
+            // the thing being aimed at. A shotgun bead is a low pinhead
+            // anyway - and `Light` is what makes it read as the pale bead
+            // an 870 carries rather than as one more dark chip.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.058, 0.578), 0.0, (0.016, 0.020, 0.018)));
+            parts.push(wp(true, Tone::Light, (0.0, 0.0670, 0.578), 0.0, (0.010, 0.009, 0.010)));
             push_red_dot(&mut parts, 0.0950, -0.03, 0.0625); // receiver top 0.0625
         }
         GunKind::Ak47 => {

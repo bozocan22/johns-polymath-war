@@ -374,6 +374,65 @@ mod band_tests {
         assert!(!ALL_WEAPONS.contains(&GunKind::Fists));
     }
 
+    /// NOTHING ON THE PUMP GUN FLOATS.
+    ///
+    /// The single most repeated defect in this file's history is a part
+    /// placed by eye at a height nothing else on the weapon reaches: the
+    /// AWM's bipod legs hanging 2.8 cm under a bare barrel, the M4's
+    /// front post hung off its own base, the AK's the same, the AWM's
+    /// brake cuts floating past the muzzle. Every one of them was found
+    /// by a human opening a PNG, because no test could see geometry.
+    ///
+    /// The 870 was carrying TWO of them at once - a box magazine's
+    /// floorplate and witness slots 11 cm below a receiver it had no
+    /// magazine to hang from, and a front bead 2.3 cm above its barrel -
+    /// which is what makes it the right gun to pin the rule on.
+    ///
+    /// The rule: every part must CONTACT at least one other part of the
+    /// same weapon. Contact, not overlap, because a great many joints in
+    /// this armoury are face-to-face by construction (the magazine tube's
+    /// top face IS the barrel's bottom face; the optic mount's foot sits
+    /// exactly on the receiver's top), and demanding interpenetration
+    /// would be demanding worse modelling.
+    ///
+    /// SHOTGUN ONLY, deliberately. The same sweep over the whole arsenal
+    /// is the obvious next step and it is not taken here for two honest
+    /// reasons: other guns have not been audited for it, and two other
+    /// weapon models are being rewritten concurrently - a test that fails
+    /// on somebody else's in-flight work teaches them nothing about their
+    /// own change. Widen it when the arsenal has been swept.
+    ///
+    /// Mutation-proved against the code this replaced: the shipped
+    /// `push_mag_detail(-0.150, ..)` floorplate and the shipped bead at
+    /// y 0.09 both fail it, and both were on `main`.
+    #[test]
+    fn no_part_of_the_pump_gun_floats_in_mid_air() {
+        // AABBs touch if they overlap on all three axes, with a
+        // half-millimetre of slack for the face-to-face joints above.
+        const TOUCH_M: f32 = 0.0005;
+        let parts = weapon_parts(GunKind::Shotgun);
+        assert!(parts.len() > 20, "the pump gun lost most of its geometry");
+        let touches = |a: &WPart, b: &WPart| {
+            let (ha, hb) = (a.half(), b.half());
+            (0..3).all(|i| {
+                let gap = (a.pos[i] - b.pos[i]).abs() - (ha[i] + hb[i]);
+                gap <= TOUCH_M
+            })
+        };
+        for (i, w) in parts.iter().enumerate() {
+            let anchored = parts
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != i && touches(w, o));
+            assert!(
+                anchored,
+                "shotgun part {i} at {:?} (size {:?}) touches nothing else on \
+                 the gun - it is a chip floating in clear air",
+                w.pos, w.size
+            );
+        }
+    }
+
     // ---- §owner BOW & SPEAR ------------------------------------------
 
     /// §2/§6: *"weapon on the right, crosshair never obstructed, nothing
