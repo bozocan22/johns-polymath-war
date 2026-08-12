@@ -49,6 +49,7 @@ mod branding;
 mod cockpit;
 /// §7 (owner spec): the grenade you are holding, and the fist holding
 /// it. Same two-line wiring as `branding` and `cockpit`.
+mod hand_pose;
 mod held_grenade;
 /// §owner FRONT END (2026-08-10): launch -> intro image -> two options ->
 /// a fixed introductory match -> a result -> the command interface. Its
@@ -9231,13 +9232,23 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
     // four fingers, two segments each, dark knuckle balls at both joints
     for (fi, fx) in [-0.038_f32, -0.013, 0.013, 0.038].into_iter().enumerate() {
         let len = if fi == 0 || fi == 3 { 0.044 } else { 0.052 };
-        let rest = -1.15 * curl;
+        let rest = hand_pose::vm_base_angle(curl);
         let mut base_cmd = commands.spawn((
             Transform::from_xyz(fx * m, 0.0, 0.058).with_rotation(Quat::from_rotation_x(rest)),
             Visibility::default(),
         ));
+        // §HANDS: the INDEX finger of the firing hand belongs to
+        // `TriggerFinger`, which pulls it on the shot. Tagging it as
+        // well would put two writers on one Transform and the last one
+        // to run would win - so the trigger finger keeps its own driver
+        // and every OTHER finger joins the curl chain.
         if fi == 0 && !mirror {
             base_cmd.insert(TriggerFinger { rest });
+        } else {
+            base_cmd.insert(hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::VmBase,
+                m,
+            });
         }
         let base = base_cmd.set_parent(root).id();
         // knuckle line at the palm edge
@@ -9394,12 +9405,20 @@ fn spawn_world_hand_fingered(
     .into_iter()
     .enumerate()
     {
-        // proximal: swings down from the knuckle bar with the curl
-        let a1 = 0.55 + 1.05 * curl;
+        // proximal: swings down from the knuckle bar with the curl.
+        // §HANDS: the angle comes from `hand_pose::joint_rotation` now,
+        // and the joint is TAGGED, so `pose_hand_joints` can rewrite it
+        // every frame. It used to be carved here and never touched
+        // again - one pose for the hand's whole life.
         let prox = commands
             .spawn((
-                Transform::from_xyz(fx * m, -0.020, 0.052)
-                    .with_rotation(Quat::from_rotation_x(-a1)),
+                Transform::from_xyz(fx * m, -0.020, 0.052).with_rotation(
+                    hand_pose::joint_rotation(hand_pose::JointKind::WorldProx, m, curl),
+                ),
+                hand_pose::FingerJoint {
+                    kind: hand_pose::JointKind::WorldProx,
+                    m,
+                },
                 Visibility::default(),
             ))
             .set_parent(root)
@@ -9415,8 +9434,15 @@ fn spawn_world_hand_fingered(
         // the middle knuckle, then the distal segment folding further
         let dist = commands
             .spawn((
-                Transform::from_xyz(0.0, 0.0, len)
-                    .with_rotation(Quat::from_rotation_x(-0.45 - 0.85 * curl)),
+                Transform::from_xyz(0.0, 0.0, len).with_rotation(hand_pose::joint_rotation(
+                    hand_pose::JointKind::WorldDist,
+                    m,
+                    curl,
+                )),
+                hand_pose::FingerJoint {
+                    kind: hand_pose::JointKind::WorldDist,
+                    m,
+                },
                 Visibility::default(),
             ))
             .set_parent(prox)
@@ -9444,8 +9470,12 @@ fn spawn_world_hand_fingered(
     let thumb = commands
         .spawn((
             Transform::from_xyz(-0.038 * m, -0.006, 0.020).with_rotation(
-                Quat::from_rotation_y(0.85 * m) * Quat::from_rotation_x(-0.35 - 0.55 * curl),
+                hand_pose::joint_rotation(hand_pose::JointKind::WorldThumbBase, m, curl),
             ),
+            hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::WorldThumbBase,
+                m,
+            },
             Visibility::default(),
         ))
         .set_parent(root)
@@ -9459,8 +9489,15 @@ fn spawn_world_hand_fingered(
         .set_parent(thumb);
     let thumb_tip = commands
         .spawn((
-            Transform::from_xyz(0.0, 0.0, 0.048)
-                .with_rotation(Quat::from_rotation_x(-0.55 * curl)),
+            Transform::from_xyz(0.0, 0.0, 0.048).with_rotation(hand_pose::joint_rotation(
+                hand_pose::JointKind::WorldThumbTip,
+                m,
+                curl,
+            )),
+            hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::WorldThumbTip,
+                m,
+            },
             Visibility::default(),
         ))
         .set_parent(thumb)
@@ -25662,8 +25699,8 @@ fn open_manual(
     // old prose hardcoded all of them, and the weapon table twelve lines
     // under it was already derived correctly - one screen, two policies.
     let shield = format!(
-        "Always carried. Blocks the FRONT ARC only (+/-{:.0}deg): standing\n\
-         cuts damage {:.0}%, crouched {:.0}%. Sides and rear ignore it - FLANK.\n\
+        "Always carried. Blocks the FRONT ARC only (+/-{:.0}deg): standing cuts \
+         damage {:.0}%, crouched {:.0}%. Sides and rear ignore it - FLANK.\n\
          Shield up = no shooting, slow walk.",
         SHIELD_ARC_COS.acos().to_degrees(),
         SHIELD_BLOCK_STAND * 100.0,
@@ -25675,8 +25712,8 @@ fn open_manual(
          {fire_b} fires; {aim_b} focuses every weapon.",
         MAX_HEALTH,
     );
-    let checkpoints = "Stand in a white ring uncontested to flip it; your team then\n\
-         respawns AT the ring. Contested rings freeze."
+    let checkpoints = "Stand in a white ring uncontested to flip it; your team \
+         then respawns AT the ring. Contested rings freeze."
         .to_string();
     let modes = format!(
         "TDM first to {:.0} - KOTH hold the center {:.0} s -\n\
