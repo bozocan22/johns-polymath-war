@@ -1028,15 +1028,54 @@ mod band_tests {
             farthest < OPTIC_HALF,
             "the dot leaves the window at full drift: {farthest} vs the              {OPTIC_HALF} aperture"
         );
-        // every frame bar clears the aperture
+        // Every piece of the TUBE clears the aperture.
+        //
+        // Measured RADIALLY, which is the change the octagonal tube
+        // forced and is also the more honest question. The old form
+        // asked "is this bar clear in x OR clear in y", which is the
+        // right test for a square frame and the wrong one for a ring:
+        // the four corner rounds sit on the diagonal, clear of the
+        // aperture by construction, yet clear in NEITHER axis alone.
+        //
+        // Each primitive is measured as the primitive it is. A box
+        // contributes the nearest point of its footprint; a cylinder
+        // contributes its axis distance minus its radius, because a
+        // corner round's AABB is meaningfully fatter than the round
+        // itself and bounding it by that box would reject geometry
+        // that never enters the window.
+        let mut saw_round = false;
         for b in parts.iter().filter(|p| p.tone == Tone::Black) {
-            let dx = b.pos.x.abs() - b.size.x * 0.5;
-            let dy = (b.pos.y - 0.10).abs() - b.size.y * 0.5;
+            let (cx, cy) = (b.pos.x, b.pos.y - 0.10);
+            let near = if b.cyl {
+                saw_round = true;
+                // a Z-aligned round: radius is half its X extent
+                (cx * cx + cy * cy).sqrt() - b.size.x * 0.5
+            } else {
+                let dx = (cx.abs() - b.size.x * 0.5).max(0.0);
+                let dy = (cy.abs() - b.size.y * 0.5).max(0.0);
+                (dx * dx + dy * dy).sqrt()
+            };
             assert!(
-                dx >= OPTIC_HALF - 1e-6 || dy >= OPTIC_HALF - 1e-6,
-                "a frame bar intrudes into the clear window"
+                near >= OPTIC_HALF - 1e-6,
+                "the tube intrudes into the clear window: {near} vs the {OPTIC_HALF} aperture"
             );
         }
+        // and the tube really is a ROUND one - four straight walls with
+        // the diagonals filled. Without this the check above is happy
+        // with the flat square frame it replaced.
+        assert!(saw_round, "the optic body must be a tube, not a flat frame");
+        // the objective LENS: present, translucent, and filling the
+        // window rather than blocking it.
+        let glass: Vec<&WPart> = parts.iter().filter(|p| p.tone == Tone::Glass).collect();
+        assert_eq!(glass.len(), 1, "one objective lens");
+        assert!(glass[0].cyl, "the lens is a disc");
+        assert!(
+            glass[0].size.x * 0.5 <= OPTIC_HALF + 1e-6,
+            "the lens is wider than the aperture it sits in"
+        );
+        // the lens sits FORWARD of the dot - a reflex projects its
+        // reticle onto the glass from behind, never in front of it.
+        assert!(glass[0].pos.z > dot.pos.z, "the lens must be forward of the dot");
     }
 
     /// §1.4 Rule-2 gate: scoped + zoomed = the viewmodel is not rendered.

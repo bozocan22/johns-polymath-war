@@ -4280,6 +4280,20 @@ struct ModelKit {
     /// The 1x optic reticle - unlit so it holds its glow in shadow, the
     /// way a real illuminated dot does.
     optic_red: Handle<StandardMaterial>,
+    /// §owner RED DOT: the objective LENS.
+    ///
+    /// A real reflex optic is a tube you look THROUGH a coated lens of,
+    /// and that coating is the single detail that most says "optic"
+    /// rather than "bracket" - the blue-amber sheen on the glass. Alpha
+    /// blended and very nearly clear on purpose: this sits directly
+    /// across the sight picture on all eight firearms, so anything
+    /// heavy enough to read as a tint at rest would be a tint over
+    /// every target in the game.
+    ///
+    /// `unlit` like the barrier field it is modelled on, so the sheen
+    /// holds in shadow instead of going black exactly when a player
+    /// most needs the window legible.
+    optic_glass: Handle<StandardMaterial>,
 }
 
 /// §2.1 tone slots of the weapon palette.
@@ -4295,6 +4309,11 @@ enum Tone {
     /// weak point carries MECH_VISOR_MULT), and a reticle that shared
     /// its handle would start reading as a hit marker.
     Reticle,
+    /// The red dot's coated objective GLASS - translucent, unlit. The
+    /// only alpha-blended slot in the weapon palette, and it exists
+    /// because the alternative for "lens" in a four-grey opaque kit is
+    /// a solid disc, which is a disc you cannot aim through.
+    Glass,
     // ---- §owner BOW & SPEAR: the TACKLE palette ----------------------
     //
     // The four greys are a FIREARM vocabulary - flat machined metal in
@@ -4333,6 +4352,7 @@ impl ModelKit {
             Tone::Dark => self.grey_dark.clone(),
             Tone::Black => self.grey_black.clone(),
             Tone::Reticle => self.optic_red.clone(),
+            Tone::Glass => self.optic_glass.clone(),
             Tone::Wood => self.wood.clone(),
             Tone::Leather => self.leather.clone(),
             Tone::Cord => self.string.clone(),
@@ -4862,6 +4882,24 @@ const OPTIC_DEPTH: f32 = 0.032;
 /// cover the thing being aimed at, which is exactly how the old cross
 /// failed.
 const OPTIC_DOT_M: f32 = 0.0062;
+/// §owner OPTIC BODY: the turret caps and the mount foot.
+///
+/// A windage cap on the side and an elevation cap on top are the two
+/// details that most separate "sight" from "bracket" on a real 1x
+/// reflex, and they are the reason a tube reads as an instrument. Both
+/// are deliberately SHALLOW: this housing already sits at the top of
+/// every firearm's screen profile (`weapon_bounded_corners` measures
+/// it), so a tall turret would spend the whole remaining headroom of
+/// eight guns on decoration.
+const OPTIC_TURRET_D: f32 = 0.010;
+const OPTIC_TURRET_H: f32 = 0.004;
+/// The mount FOOT - the flat clamp plate that sits on the rail, wider
+/// than the post above it. Real optics have a visible separate foot;
+/// the old mount was one featureless slab from receiver to housing.
+const OPTIC_FOOT_W: f32 = 0.026;
+const OPTIC_FOOT_H: f32 = 0.005;
+/// Width of the post bridging foot to tube.
+const OPTIC_POST_W: f32 = 0.015;
 /// §owner: how far the dot floats inside its window at full recoil.
 ///
 /// This is the whole trick behind "the gun stays still and the DOT
@@ -4885,29 +4923,129 @@ const RETICLE_DRIFT_M: f32 = 0.0075;
 /// The cross is 1x - it moves the AIM POINT nowhere. It is a sight
 /// picture, not a zoom: magnification stays whatever `zoom_deg` says.
 fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
+    // `outer` is the ring's CENTRELINE radius, and the whole housing is
+    // built on it: bars sit at it, corner rounds are centred on it, so
+    // every point of the ring is `outer +/- OPTIC_FRAME/2` from centre.
+    // That keeps the outermost reach identical to the flat frame this
+    // replaced - which matters, because eight guns' screen profiles are
+    // measured off this geometry.
     let outer = OPTIC_HALF + OPTIC_FRAME * 0.5;
-    let span = OPTIC_HALF * 2.0 + OPTIC_FRAME * 2.0;
+    // The check the flat frame carried compared `y - outer` - the lower
+    // BAR'S CENTRELINE - against the receiver, so it was quietly
+    // permitting half a bar of overlap. The real lower face is half a
+    // frame lower, and measuring against it turns out to matter: the
+    // MP5's rail top (0.089) is 1 mm ABOVE its tube's true bottom
+    // (0.088), which the old form could not see.
+    //
+    // That 1 mm is not the failure this assert exists to catch. A clamp
+    // SEATS onto a rail, so a shallow overlap is what a mounted optic
+    // looks like; what would be a bug is a housing swallowed by the
+    // receiver. So the bound is the true face with one named seat
+    // allowance, rather than the old accidental one.
+    const OPTIC_SEAT_M: f32 = OPTIC_FRAME * 0.5;
+    let tube_bottom = y - outer - OPTIC_FRAME * 0.5;
     debug_assert!(
-        y - outer >= mount_top - 1e-4,
-        "the optic's lower frame is inside the gun: window bottom {} vs          receiver top {mount_top}",
-        y - outer
+        tube_bottom + OPTIC_SEAT_M >= mount_top - 1e-4,
+        "the optic's tube is inside the gun: tube bottom {tube_bottom} vs receiver top {mount_top}"
     );
-    // housing: left / right posts, then the top and bottom bars
-    parts.push(wp(false, Tone::Black, (-outer, y, z), 0.0, (OPTIC_FRAME, span, OPTIC_DEPTH)));
-    parts.push(wp(false, Tone::Black, (outer, y, z), 0.0, (OPTIC_FRAME, span, OPTIC_DEPTH)));
-    parts.push(wp(false, Tone::Black, (0.0, y + outer, z), 0.0, (span, OPTIC_FRAME, OPTIC_DEPTH)));
-    parts.push(wp(false, Tone::Black, (0.0, y - outer, z), 0.0, (span, OPTIC_FRAME, OPTIC_DEPTH)));
-    // the mount BRIDGES housing to receiver. Sized from the real gap so
-    // the optic never floats and never sinks into the slide.
-    let gap = (y - outer - mount_top).max(0.0);
+    // ---- THE TUBE ----------------------------------------------------
+    //
+    // §owner "more realistic": a reflex optic is a round TUBE with a
+    // coated lens, not the flat open square this was. It cannot be an
+    // actual cylinder - a solid cylinder is a solid disc to look at, and
+    // this is a sight you aim through - so the tube is an OCTAGONAL
+    // RING: four straight walls with four cylindrical corner rounds
+    // filling the diagonals. From the shooter's eye that silhouette
+    // reads round; the window through it stays fully open.
+    //
+    // The corners must be cylinders and the walls must be boxes because
+    // `tilt` rotates about X only: there is no way to place a box on a
+    // 45 degree diagonal in this kit, and a Bevy cylinder tilted a
+    // quarter turn is exactly the Z-aligned rod a corner needs.
+    const DIAG: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let corner = outer * DIAG; // centre of each corner round
+    let wall = corner * 2.0; // straight run between two corners
+    for (x, yy, sx, sy) in [
+        (-outer, 0.0, OPTIC_FRAME, wall),
+        (outer, 0.0, OPTIC_FRAME, wall),
+        (0.0, outer, wall, OPTIC_FRAME),
+        (0.0, -outer, wall, OPTIC_FRAME),
+    ] {
+        parts.push(wp(false, Tone::Black, (x, y + yy, z), 0.0, (sx, sy, OPTIC_DEPTH)));
+    }
+    for (sx, sy) in [(-1.0_f32, -1.0_f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+        parts.push(wp(
+            true,
+            Tone::Black,
+            (corner * sx, y + corner * sy, z),
+            FRAC_PI_2,
+            (OPTIC_FRAME, OPTIC_DEPTH, OPTIC_FRAME),
+        ));
+    }
+    // ---- THE LENS ----------------------------------------------------
+    //
+    // A translucent disc across the OBJECTIVE (muzzle) end, diameter of
+    // the clear window exactly, so it fills the ring without touching
+    // it. In front of the dot, which is where a reflex projects its
+    // reticle from - and being alpha-blended it cannot hide the dot.
+    parts.push(wp(
+        true,
+        Tone::Glass,
+        (0.0, y, z + OPTIC_DEPTH * 0.42),
+        FRAC_PI_2,
+        (OPTIC_HALF * 2.0, 0.002, OPTIC_HALF * 2.0),
+    ));
+    // ---- TURRETS -----------------------------------------------------
+    //
+    // Elevation on top, windage on the right. The elevation cap is a
+    // cylinder (Bevy's cylinder stands on Y, which is the axis this one
+    // needs); the windage cap CANNOT be, because `tilt` is about X and
+    // so no cylinder in this kit can point along X - it is a short box
+    // nub instead, which at this size reads as the same cap.
+    parts.push(wp(
+        true,
+        Tone::Dark,
+        (0.0, y + outer + OPTIC_FRAME * 0.5 + OPTIC_TURRET_H * 0.5, z - OPTIC_DEPTH * 0.22),
+        0.0,
+        (OPTIC_TURRET_D, OPTIC_TURRET_H, OPTIC_TURRET_D),
+    ));
+    parts.push(wp(
+        false,
+        Tone::Dark,
+        (outer + OPTIC_FRAME * 0.5 + OPTIC_TURRET_H * 0.5, y, z - OPTIC_DEPTH * 0.22),
+        0.0,
+        (OPTIC_TURRET_H, OPTIC_TURRET_D, OPTIC_TURRET_D),
+    ));
+    // ---- MOUNT: FOOT + POST -----------------------------------------
+    //
+    // Still sized from the REAL gap, so the optic never floats and never
+    // sinks into the slide - that arithmetic is the one thing here that
+    // was already right and is preserved exactly. What is new is that
+    // the slab is now two pieces: a wide flat FOOT clamped on the rail
+    // and a narrower POST rising off it, which is how a real optic
+    // meets a receiver. When the gap is too shallow for both, the foot
+    // takes all of it - a foot alone still reads as a mount, a floating
+    // post does not.
+    let gap = (tube_bottom - mount_top).max(0.0);
     if gap > 1e-4 {
+        let foot_h = gap.min(OPTIC_FOOT_H);
         parts.push(wp(
             false,
             Tone::Dark,
-            (0.0, mount_top + gap * 0.5, z),
+            (0.0, mount_top + foot_h * 0.5, z),
             0.0,
-            (0.016, gap, OPTIC_DEPTH * 0.7),
+            (OPTIC_FOOT_W, foot_h, OPTIC_DEPTH * 0.8),
         ));
+        let post_h = gap - foot_h;
+        if post_h > 1e-4 {
+            parts.push(wp(
+                false,
+                Tone::Dark,
+                (0.0, mount_top + foot_h + post_h * 0.5, z),
+                0.0,
+                (OPTIC_POST_W, post_h, OPTIC_DEPTH * 0.7),
+            ));
+        }
     }
     // THE DOT - one small emissive square, dead centre.
     //
@@ -16491,6 +16629,17 @@ fn setup(
             base_color: Color::srgb(1.0, 0.14, 0.10),
             emissive: LinearRgba::new(6.0, 0.35, 0.20, 1.0),
             unlit: true,
+            ..default()
+        }),
+        optic_glass: materials.add(StandardMaterial {
+            // a cool blue-violet coating sheen at 14% - enough to catch
+            // the eye as GLASS at the edges, not enough to colour the
+            // world seen through it.
+            base_color: Color::srgba(0.42, 0.60, 0.95, 0.14),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
             ..default()
         }),
     };
