@@ -15,3 +15,35 @@ image = { version = "0.25", default-features = false, features = ["png", "gif"] 
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# THE TEST BINARIES ARE NOT THE SHIPPING BINARY, AND MUST NOT BE BUILT
+# LIKE IT.
+#
+# `jk_tdm` is one crate of ~76k lines, of which ~23k are `#[cfg(test)]`,
+# so its test harness is the largest single thing rustc compiles in this
+# workspace. Two defaults made that harness far more expensive to build
+# than it needs to be, on a machine with ~7.3 GB of RAM:
+#
+#   * `cargo test --release` does NOT use [profile.release]; it uses
+#     [profile.bench], which INHERITS it. That silently handed the test
+#     harness `codegen-units = 1` and thin LTO - i.e. LLVM holding the
+#     whole crate's IR as a single unit. That is the release-mode test
+#     OOM, and it is deterministic rather than bad luck.
+#
+#   * `debuginfo = 2` (the dev/test default) on a crate this size costs
+#     memory and time for debug metadata that a passing assert never
+#     reads. `line-tables-only` keeps file:line in panic backtraces,
+#     which is the part test output actually uses.
+#
+# Neither profile is used by `cargo build [--release]`, so the game
+# binary is byte-for-byte unaffected by everything below.
+
+# `cargo test`
+[profile.test]
+debug = "line-tables-only"
+
+# `cargo test --release`
+[profile.bench]
+codegen-units = 16
+lto = false
+debug = "line-tables-only"
