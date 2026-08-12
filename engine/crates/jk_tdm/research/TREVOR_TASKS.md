@@ -1,553 +1,736 @@
 # TREVOR TASKS — everything that needs to be worked on
 
-**Generated 2026-08-10 from `TREVOR_LEDGER.md` run 1.** Rewritten in full
-each run. Every task carries its `TRV-` rows, so the ledger is the "why"
-and this file is the "do".
+**Generated 2026-08-11 (run 4) from `TREVOR_LEDGER.md`, at HEAD `46d6dbb`.**
+Rewritten in full each run. Every task carries its `TRV-` rows, so the
+ledger is the "why" and this file is the "do".
 
-**266 asks indexed · 111 delivered · 104 open · 21 unverified.**
+**379 asks indexed · 156 delivered · 155 open · 20 unverified.**
 
-## How this is ranked
+---
 
-1. **The owner's own priority order first** — `WHATS_MISSING.md` §0-SPEC15
-   P1 → P2 → P3 → P4, then §0-QUEUE Tier 0 → 4. I did not re-rank into my
-   own taste. Where I would have ordered differently, I say so in one line
-   underneath and leave the owner's order standing.
-2. Then by what unblocks the most other rows.
-3. Then by cost.
+## THE LANE MAP — corrected, and my run-1 version was wrong
 
-**Lanes.** `sim.rs` → **friday22**. `main.rs` + client modules
-(`held_grenade.rs`, `mech_lineup.rs`, `mech_recoil.rs`, `cockpit.rs`,
-`menu_ui.rs`, `branding.rs`, `map_look.rs`) → **friday33**. Those are the
-only two. A third builder has nowhere to go.
+Run 1 of this file said: *"friday22 and friday33. Those are the only two.
+A third builder has nowhere to go."* **That was false and it was idling
+builders.** `git ls-files src/` returns **thirteen modules**. BALANCE
+caught it (`BALANCE_BOARD.md` §4 S4); the row is `TRV-0365`.
 
-**Warn every dispatch about the transient:** both builders run
-`cargo test`, which compiles both files, so a suite run during the other
+| Lane | Files | Currently |
+|---|---|---|
+| **friday22** | `sim.rs` | free |
+| **friday33** | `main.rs` | **dirty — another lane is writing.** Coordinate. |
+| **friday-hud** | `hud.rs` | free |
+| **friday-front** | `frontend.rs`, `menu_ui.rs` | free |
+| **friday-mech** | `agile_mech.rs`, `mech_lineup.rs`, `mech_recoil.rs`, `cockpit.rs` | free |
+| **friday-fx** | `muzzle_flash.rs`, `held_grenade.rs`, `branding.rs`, `map_look.rs` | `muzzle_flash.rs` dirty |
+
+A task that spans `sim.rs` **and** `main.rs` is not one task. Split it and
+say which half comes first. **Warn every dispatch:** both lanes run
+`cargo test`, which compiles both big files, so a suite run during another
 lane's write fails for no reason. Re-run before concluding a failure is
 real.
 
 ---
 
-# BAND 0 — BLOCKED ON YOU, AND ON NOBODY ELSE
+# BAND 0 — THIRTEEN DECISIONS. THIS IS THE REAL STORY OF THE WEEK.
 
-Eight questions. Answering them unblocks 12 rows and stops two builders
-guessing on your behalf. Nothing in this band is work — it is a decision.
+**You are decision-blocked, not work-blocked.** Thirteen questions, zero
+build cost, and between them they gate **31 rows** and stop four builders
+guessing on your behalf. Ranked: what unblocks the most, first.
 
-### Q1 — The mech concept art is not in this repository. Can you re-supply it?
-`TRV-0260` · blocks `TRV-0075`, `0100`, `0115`, `0172`
-
-`BRIEF_VIII_B` §D opens with **"The art is the spec"** and §D.7 makes
-"place it next to the concept art in the handback" the *stated completion
-criterion* for the whole mech section. `PROMPT_mech_rebuild.md` Task 1
-says it in plain words: *"reference that lives only in a chat log is lost
-work."* It was lost. I checked `git log --diff-filter=D` across every
-image type — no image of this kind was ever committed and later deleted.
-It never arrived.
-
-Until it does, three completion criteria in two briefs are unsatisfiable,
-and every judgement about whether the machine matches the art is one
-person's memory of a conversation.
-
-**Drop it into `engine/crates/jk_tdm/handback/reference/`.**
-
-### Q2 — Same for the medic reference art.
-`TRV-0261`
-
-The record quotes you: *"a squat utility robot, rounded masses, one big
-camera lens, worn amber over near-black."* The chassis was rebuilt to it
-and photographed (`medic/01..09.png`). The image itself is not here.
-
-### Q3 — Should the mech's first-person aim leave the visor, or the hull turret?
-`TRV-0053` · the plan itself files this as **"A DECISION FOR THE OWNER, not a task"**
-
-The camera sits at the visor (2.7234 m). Every mech weapon fires from
-`EYE_REL` (1.62 m). The gap is **1.1034 m** — your "1.10 m" confirmed
-exactly, by independent arithmetic, by Thor. A hull turret genuinely *is*
-a metre below the visor, so this may be correct and merely unstated.
-
-Changing it moves every mech engagement, hit test, cover line and tracer
-in the game. Nobody should decide that quietly for you.
-
-### Q4 — ✅ ANSWERED BY OWNER, 2026-08-10. CLOSED.
-`TRV-0013`
-
-The question was: SPEC15 P3 asked for *"SUBTLE neon-blue energy accents
-(channels, seams, reactor) — accent, not a coating"*, and the builder
-instead shipped deep bronze-graphite with gold, writing the argument down
-at `main.rs:14288-14307` rather than hiding it.
-
-**Owner's ruling:** *"keep the royal mech, and keep the opposition royal
-mech colour red yellow and neon blue details."*
-
-1. **Player Royal: the GOLD STAYS.** No rework, no re-open. The builder's
-   call is ratified. SPEC15's neon-blue line is superseded and marked so
-   in `WHATS_MISSING.md`.
-2. **Opposition Royal palette is now RED + YELLOW + NEON-BLUE details** —
-   red primary, the other two as detail accents, not coatings. This
-   replaces the old "neon-red/dark-red primary with dark-blue
-   complements" in SPEC15 P3.
-3. **The consequence Task 4 and Task 5 must now carry:** the player Royal
-   is gold and the opposition Royal carries yellow, so *colour no longer
-   separates them*. "Must not read as a recoloured player Royal" now
-   rests entirely on body and silhouette. Apply the squint test — if the
-   two read alike as black silhouettes at 30 m, the fix is the chassis,
-   never the palette.
-
-Assumption flagged, since it steers two tasks: I read *"keep the royal
-mech"* as keeping the player Royal exactly as shipped. If you meant
-instead that the player Royal should keep the neon-blue it was originally
-specified, say so and Task 4 changes shape.
-
-### Q5 — `SCOUT_SCALE = 1.05` makes the medic 1.87 m. Is that the intent?
-`TRV-0059`
-
-Thor's note: *"If the owner's intent was 'reads as a machine, not a man',
-1.05 does not deliver it. Owner call, not a defect."* 1.05 × 1.78 m is a
-big man, not a machine. The constant's own history says it was once 1.42.
-
-### Q6 — The recoil envelope cost bot mechs about a third of their sustained output. Keep it?
-`TRV-0239`, `TRV-0240`
-
-Friday volunteered both: bot mech damage at 10 m fell 492 → 331 over 17 s,
-and braced turret fire is no longer perfectly accurate (0° → ~1.6°). The
-direction is what you asked for. The magnitude is a balance change nobody
-signed off. **These want a playtest, not an argument.**
-
-### Q7 — The scout's hitbox no longer shrinks when rolling or crouching.
-`TRV-0248`
-
-It is now the only fighter in the game whose height never changes in any
-stance. A dodge that does not duck the head band is a different verb.
-
-### Q8 — `armor_spec`'s flat values are unreachable for any piloted heavy chassis.
-`TRV-0236`
-
-`apply_armor` takes the hull/angle branch and returns before them. True of
-the Big Mech's row too, and long-standing. Friday's words: *"Worth someone
-deciding on deliberately."* Keep them scaled so the table stays
-consistent, or delete them?
+Each carries: the question in one line, both options, what it blocks, and
+my recommendation. **The recommendation is mine, not a fact. Overrule it
+freely — I only need the sentence.**
 
 ---
 
-# BAND 1 — SPEC15 **P1 / P2**: the only unfinished architecture and gameplay rows
+### D1 — Can the Agile Mech climb? Do you want mech climbing built at all?
+`TRV-0318`, `TRV-0326` · **blocks BRIEF XI §5 and its §19 checkbox** · gates a `sim.rs` feature
 
-P1 is complete. P2 is one row short.
+**The facts, re-derived from source today.** `climb_target`
+(`sim.rs:11940`) skips every candidate where `!m.in_mech()` — **the target
+must be a mech** — and then requires a **dropped plate** on it. The
+climber's gate is at the caller: `main.rs:23868`,
+`if !p.in_mech() && p.alive() && ...`. So hull-climbing is a verb for a
+pilot **on foot** against a stripped enemy hull. Something you do *to* a
+mech, not *in* one. BRIEF X §0 asserted the opposite and that row was
+struck as FALSE in `553c425`.
 
-## TASK 1 — Build the Royal ARROW LAUNCHER
-`TRV-0010` · **friday33** (+ friday22 for the numbers) · **1-2 sessions** · SPEC15 **P2**
+- **Option A —** "the Agile cannot climb; drop §5 and the §19 box." Free.
+- **Option B —** "build mech climbing." That is a **new `sim.rs` feature**,
+  not the polish pass §5 describes. Multi-session.
+
+BRIEF XI §0.1 already says the right thing and nobody may proceed past it:
+*"do not quietly animate a verb that never fires, and do not quietly skip
+it either."*
+
+**My recommendation: A.** The verb that exists — a dismounted pilot
+swarming a stripped hull — is a better and rarer idea than a mech climbing
+a wall, and it is already built and tested.
+
+---
+
+### D2 — Can the Agile Mech crouch? `sim.rs` currently forbids it.
+`TRV-0325`, `TRV-0034` · **blocks BRIEF XI §4** · gates `sim.rs` + `main.rs`
+
+`set_crouch` (`sim.rs:4134`):
+
+```rust
+if self.in_heavy_mech() { self.crouch = want && self.grounded }
+else                    { self.crouch = want && !self.in_mech() }
+```
+
+The scout chassis is not `in_heavy_mech`, so it falls to the else arm and
+**`!in_mech()` refuses the crouch outright.** BRIEF XI §4 — *"crouch with
+the whole lower body, do not simply lower the character vertically"* — is
+**not buildable as written.**
+
+- **Option A —** the Agile is not supposed to crouch. Drop §4.
+- **Option B —** let it. One `sim.rs` line plus a `MECH_CROUCH_HEIGHT_FRAC`
+  path for the scout, **plus** the client half — `MECH_CROUCH_HEIGHT_FRAC`
+  (`sim.rs:6386`) has **zero readers in `main.rs`**, so `gait_pose`
+  (`main.rs:2518`) would still bake the infantry ratio.
+
+**My recommendation: B, and it is cheap on the sim side.** But note that
+the hitbox moves with `height()`, so this is a gameplay change, not a pose.
+
+---
+
+### D3 — Do the Agile's pace gates matter? Both are `!in_mech`, so walk/run/sprint are unreachable in a mech.
+`TRV-0323`, BRIEF XI §2 · **blocks §2 and the movement half of §19**
+
+BRIEF XI §2 asks the three gaits to be differentiated and *"lighter and
+faster than the Big Mech"*. The recon found both pace gates are `!in_mech`.
+I did **not** re-derive this one myself and it is `UNVERIFIED` in the
+ledger — I will not guess at it.
+
+- **Option A —** ungate the paces for the scout chassis (`sim.rs`).
+- **Option B —** the Agile has one pace by design; rewrite §2 to say so.
+
+**My recommendation: get D1, D2 and D3 answered in one sentence each, in
+the same message.** They are three faces of one question — *is the Agile
+Mech a chassis with a full movement vocabulary, or a fast machine with a
+small one?* Answer that and all three fall out.
+
+---
+
+### D4 — Enemy Agile livery: orange, or blue?
+`TRV-0296`, `TRV-0320` · **CONTRADICTED since run 1** · gates BRIEF XI §16
+
+Two of your own instructions pull opposite ways. BRIEF X §2: *"Primary
+armour — orange. This becomes the Agile Mech's recognizable visual
+identity"*, with **no faction split stated**. SPEC15: opposition mechs keep
+red/blue. The build split it **by role** and said so:
+
+```rust
+pub const ARMOR_ALLY: [f32; 3] = [0.90, 0.42, 0.11];   // industrial orange
+pub const ARMOR_FOE:  [f32; 3] = [0.075, 0.125, 0.265]; // faction dark blue
+```
+
+BRIEF XI §16's *"do not change the established colour identity"*
+explicitly does **not** resolve it (§0.4 says so).
+
+- **Option A —** opposition Agile stays blue-primary. Zero work.
+- **Option B —** orange-primary both sides. `scout_hull_foe` and
+  `scout_plate_foe` are **the whole change** — the builder named them.
+
+**My recommendation: A.** The luminance guard already passes at 17× and
+the silhouette work has not been done yet; taking away the colour
+separator before the shape separator exists costs friend-or-foe reads.
+
+---
+
+### D5 — Does the arc preview's landing ring obstruct the sacred crosshair?
+`TRV-0294`, `TRV-0308`, `TRV-0355` · **blocks the client half of the input split** · **now photographed**
+
+**This one has become urgent and there is finally a picture.** Two briefs
+forbid the arc in bold, twice each — *"No trajectory arc. No landing
+marker. The arc is learned — that is the entire point"*. The game ships it
+gated on exactly the two weapons named (`arc_preview`, `main.rs:21657`:
+`cam_ctl.ads && spec.projectile.is_some()`; only Bow and Spear declare
+`projectile: Some(..)`).
+
+**And `cam_ctl.ads` is RMB, which your newest spec has just declared
+PRE-AIM.** So the forbidden arc is now bound to the exact button the
+newest spec elevates. Thor photographed it: `spear_fp/02-fp-spear-preaim.png`
+shows the ring **on the exact crosshair pixel** with a red range readout
+under it; `01-fp-spear-idle.png` at the same framing shows a clean `[ + ]`.
+
+- **Option A —** honour the briefs. friday33, ~1 hour: gate `arc_preview`
+  on the grenade-class throw only, and take an RMB-held beat so the
+  *absence* is photographed too.
+- **Option B —** retire the ban. Then the screen-intrusion sweep needs a
+  **second instrument** — it measures `weapon_parts` geometry only
+  (`weapon_bounded_corners`, `main.rs:3096`) and **cannot see a
+  world-space ring or a UI text node at all.**
+
+**My recommendation: A.** You stated "the crosshair is sacred" three times
+in the newest spec and the ring is the only thing on the crosshair in the
+shipped pre-aim frame. **Rule this before anyone builds the client half of
+the input split on top of it.**
+
+---
+
+### D6 — The 7-second charge was resolved onto a second axis. Is that your intent?
+`TRV-0304` · already shipped · **one sentence either way**
+
+Your spec says *"~3 s reaches the normal maximum, holding longer must not
+keep growing power"* **and** *"7 s grants a maximum-charge bonus"*. Those
+cannot both sit on one ramp, so the builder split them: **velocity caps at
+3 s, damage steps at 7 s** (`SPEAR_MAX_CHARGE_S` 7.00,
+`SPEAR_MAX_CHARGE_DMG` 1.10). It is argued in the comment, honestly.
+
+**That is a reading of your words, not a fact about them, and it is now
+live in the game.** Confirm it or redirect it.
+
+**My recommendation: confirm.** It is the only reading that satisfies both
+sentences, and it makes the 7 s hold a real risk/reward rather than a
+longer ramp.
+
+---
+
+### D7 — Re-supply eight owner images. Six have been missing for up to eleven days.
+`TRV-0260`, `0261`, `0309`..`0312`, `0361`, `0362` · **blocks 6+ rows and 3 completion criteria**
+
+`git ls-files handback/reference/` returns **two files and both are
+`NOTES.md`.**
+
+| Save into | Which |
+|---|---|
+| `handback/reference/` | mech concept art (`TRV-0260` — **11 days, the oldest live ask**), medic art (`TRV-0261`) |
+| `handback/reference/` | bow layout, bow design, spear design, **spear charging pose** (`TRV-0309`..`0312`) |
+| `handback/reference/hud/` | `img1-mech-pov.png`, `img2-human-pov.png` (`TRV-0361`, `0362`) |
+
+`BRIEF_VIII_B` §D opens *"The art is the spec"* and §D.7 makes the
+side-by-side the mech section's **stated completion criterion**.
+`TRV-0312` is the acceptance criterion for the javelin wind pose — **the
+pose cannot be built to a picture nobody has.**
+
+**Good news worth copying:** `8bbb954` wrote the two HUD images down in
+prose *while they were on screen*, declared that description the working
+reference until the PNGs land, and cited `TRV-0260` as the reason. **No
+builder is blocked on the HUD; only the acceptance check is.** Nobody has
+done that for the four bow/spear images. Somebody should.
+
+---
+
+### D8 — The ~⅓ bot mech output cut, and braced fire no longer perfectly accurate. Keep it?
+`TRV-0239`, `TRV-0240` · **unruled for six days** · wants a playtest, not an argument
+
+Bot mech damage at 10 m fell **492 → 331 over 17 s**; braced turret fire
+went **0° → ~1.6°**. The builder volunteered both and called one *"a nerf
+nobody asked for"*. The direction is what you asked for; the magnitude is
+a balance change nobody signed off.
+
+**My recommendation: play one match and say "fine" or "too far".** This is
+the oldest unruled decision in the file and it does not get better by
+being reasoned about.
+
+---
+
+### D9 — The 40 m sightline rule was retired by an agent's arithmetic. Ratify or replace.
+`TRV-0117`, `TRV-0377` · **blocks the map tier**
+
+Every shipped map fails, and the numbers were **re-measured** this week
+from the shipping validator, not quoted: Arena **102.9 m**, Bailey
+**120.2 m**, Gardens **115.0 m**, Cliffhold **577.1 m**, Battlefield
+**637.4 m**. The old baselines were pre-`MAP_SCALE` and wrong by 1.25×.
+The rule is unsatisfiable above ~15 m half-extent.
+
+**The arithmetic is right. The authority is wrong** — an agent retired an
+owner's rule.
+
+- **Option A —** ratify the retirement, one sentence.
+- **Option B —** name a replacement number. **Note the instrument's own
+  defect first** (`TRV-0374`): it is flat-map-only and grid-quantised at
+  ±35 m on Battlefield, ±42 m on Cliffhold. **Do not set a rule to 0.1 m
+  precision against an instrument with that error bar.**
+
+**My recommendation: A now, B later** — ratify the retirement so the map
+tier unblocks, and set a real number when someone fixes the validator.
+
+---
+
+### D10 — Traversal: adopt `DECISION.md`'s migration path, or leave the closed-form poser alone?
+`TRV-0376`, `TRV-0319`, `TRV-0322` · **gates BRIEF XI §1**
+
+`research/motion-architecture/DECISION.md` (775 lines, `632824a`) is the
+deliverable that was orphaned for weeks. §5 rejects five families on named
+axes (motion matching, learned/LMM, two Bevy crates, active ragdoll). §7
+gives a migration path. §0 gives the decision in one paragraph.
+
+BRIEF XI §0.2 already makes **item 3 binding** — generalise `solve_arm_ik`
+to the legs, **no second solver, no crate**. Verified today:
+`solve_arm_ik` (`main.rs:2585`) has **10 call sites and every one is an
+arm**; there is no `leg_ik`, `foot_place` or `solve_leg` anywhere in
+`src/`.
+
+- **Option A (Project A) —** do item 3 only. 1-2 sessions. Closes §1, most
+  of §2, and the foot half of §19.
+- **Option B (Project B) —** adopt §7's full migration path. Multi-session,
+  and §8.1 costs it honestly.
+
+**My recommendation: A.** It is the single highest-value BRIEF XI item, it
+is already binding, and §9's own benchmark (`TRV-0373`) has never been run
+— so nobody has the number that would justify B.
+
+---
+
+### D11 — Should the mech's first-person aim leave the visor, or the hull turret?
+`TRV-0053` · the plan itself files this as **"A DECISION FOR THE OWNER, not a task"**
+
+The camera sits at the visor (2.7234 m); every mech weapon fires from
+`EYE_REL` (1.62 m). The gap is **1.1034 m** — your "1.10 m", confirmed
+exactly by independent arithmetic. A hull turret genuinely *is* a metre
+below the visor, so this may be correct and merely unstated.
+
+Changing it moves **every mech engagement, hit test, cover line and tracer
+in the game.** Nobody should decide that quietly for you.
+
+**My recommendation: leave it and write the sentence down.** It is
+physically right; it only reads as a bug because nothing says so.
+
+---
+
+### D12 — Four single numbers, each one sentence.
+`TRV-0059`, `TRV-0248`, `TRV-0236`, `TRV-0370`
+
+| # | The question | Row |
+|---|---|---|
+| a | **`SCOUT_SCALE = 1.05`** makes the medic 1.87 m — a big man, not a machine. The constant was once 1.42. Intent? **Frozen in two briefs pending you.** | `TRV-0059` |
+| b | **The scout's hitbox no longer shrinks** when rolling or crouching. It is the only fighter in the game whose height never changes in any stance. A dodge that does not duck the head band is a different verb. | `TRV-0248` |
+| c | **`armor_spec`'s flat values are unreachable** for any piloted heavy chassis — `apply_armor` takes the hull/angle branch and returns first. Keep them scaled for table consistency, or delete them? | `TRV-0236` |
+| d | **The two Royals separate by 1.007×** (ally hull 0.0567, foe 0.0563) where the Agile's guard demands ≥ 8×. Do the two Royals separate **by value**, or do you accept a lamp-only read on 0.4% of the machine? | `TRV-0370` |
+
+**On (d), one build note that changes the shape of the fix:** the Royal
+colours are **inline `Color::srgb` literals inside a `materials.add`
+block** (`main.rs:15380`/`:15398`), not consts — so they **cannot be
+tested where they live**. Lifting the six literals out is the
+prerequisite, not the recolour. Whichever way you rule, that lift happens.
+
+---
+
+### D13 — Two specs still live only in a chat window. Paste them into `briefs/`.
+`TRV-0313`, `TRV-0281` · **archival, not build** · closes 14 invisible rows
+
+`git ls-files briefs/` returns 14 files. Neither the **bow-and-spear spec**
+(19 sections + acceptance checklist) nor the **FRONT END spec** is among
+them. **Thirteen of nineteen bow/spear sections are invisible to this
+ledger** (`TRV-0314`) and I cannot tell whether they were built, refused,
+or never read. That row is not a guess and must not be turned into one.
+
+`efe1428` said it best while writing BRIEF X to disk *before* building
+anything: *"a spec that lives only in a chat window is the exact failure
+Trevor exists to catch."* BRIEF X, XI, XII and XII-A all got that
+treatment. **Two specs did not.** One paste closes this forever.
+
+---
+
+### ✅ CLOSED — do not re-open
+
+**Q4, the Royal palette. Answered 2026-08-10.** *"Keep the royal mech, and
+keep the opposition royal mech colour red yellow and neon blue details."*
+Player Royal: **the GOLD STAYS**, the builder's call is ratified, SPEC15's
+neon-blue line is superseded. Opposition Royal: **RED + YELLOW +
+NEON-BLUE details** — red primary, the other two as accents.
+
+**The consequence that Tasks below must carry:** the player Royal is gold
+and the opposition Royal carries yellow, so **colour no longer separates
+them**. "Must not read as a recoloured player Royal" now rests **entirely
+on body and silhouette** — which is D12(d), measured at 1.007×.
+
+**Two live comments still argue against this ruling** and will mislead the
+next builder who reads them: `main.rs:15301` (*"asks for the player Royal
+to carry SUBTLE NEON-BLUE energy"*, present tense) and `main.rs:4005`.
+`TRV-0363` — delete both lines in whatever pass touches that file next.
+
+---
+
+# BAND 1 — THE THINGS BLOCKED BY NOBODY, WHICH IS WHY THEY ARE FIRST
+
+Nothing in this band needs a decision, a number, an image, or another
+lane. Every one has been open for three days or more.
+
+## TASK 1 — The first-person javelin does not move through a seven-second charge
+`TRV-0367`, `TRV-0306` · **friday33** · **half a session** · Thor's #1 finding
+
+**Status.** `main.rs:21536`:
+
+```rust
+let raw_wind = if p.gun == GunKind::Spear && p.spear_wind_t > 0.0 {
+    1.0 - p.spear_wind_t / SPEAR_WINDUP_S
+```
+
+`spear_wind_t` is the **RELEASE** clock and reads 0 for the entire charge.
+This is one of the exact three hand-written copies that
+`TdmSim::spear_plant_frac_of` was published to retire —
+`sim.rs:10118-10123` names them, *"currently in three separate places over
+there"*. **Two of the three survive.**
+
+**What the thread already knows — this is a fully specified handoff:**
+- `spear_wind_frac_of` has exactly **ONE** client reader in the whole
+  binary (`main.rs:18705`, the third-person rig). `spear_stance_of` and
+  `spear_max_charged_of` have **ZERO**.
+- The third-person half is **correct and was built from the sim's own
+  accessors**. The builder diagnosed this exact defect for the body and did
+  not fix it one function away in `fp_viewmodel`.
+- The second copy to retire in the same pass: `main.rs:1403`
+  (`torso_coil_yaw`).
+- **The commit message claims this is done.** It is true for third person
+  and false for first person, and the false half is the view your §6 is
+  written about. Thor recorded it as a wrong "verified", not as a gap.
+
+**Thor's own dispatch, quoted:** replace `raw_wind` with
+`game.sim.spear_wind_frac_of(player)` for the wind and
+`spear_plant_frac_of` for the release, **keeping the
+`SPEAR_WIND_RELEASE_S` tail on the release half only.**
+
+**Acceptance check:** the FP spear translation at charge 0.0 and charge 1.0
+must **differ**. Mutation-prove it by pinning `spear_wind_frac_of` to 0 —
+the test must go red.
+
+## TASK 2 — Run `spear_wind`, and add an RMB hold to the bow beats
+`TRV-0368`, `TRV-0317` · **friday33** · **one capture cycle (~6 min)** · Rule 8
+
+**The flagship pose of the whole bow/spear pass has never been
+photographed.** `SPEAR_WIND_BEATS` exists (`main.rs:6011`), is registered
+as `"spear_wind"` (`:6970`), and `handback/brief-vii/spear_wind/` **does
+not exist on disk** — I confirmed it against `git ls-files`.
+
+Eight named snaps were never taken, **including `02-preaim-not-a-wind`,
+which is the builder's own stated proof for half of input rule 2.** Not
+verified, not disproven — **never checked.**
+
+In the same cycle: `BOW_DRAW_FP_BEATS` (`main.rs:6294`) presses
+`MouseButton::Left` only, so **no bow pre-aim frame exists in this
+project.** The spear got one (`spear_fp/02-fp-spear-preaim.png`) and it is
+the frame that settled D5. The bow deserves the same.
+
+**Acceptance check:** `spear_wind/01..08` on disk, and a bow frame with RMB
+held at the snap beat.
+
+## TASK 3 — The mech-entry charge leak. Third time recorded.
+`TRV-0369` · **friday22** · **~1 hour**
+
+`sim.rs:8103` (ScoutArmor) and `sim.rs:8136` (Robot|Royal) clear
+`gatling_heat`, `gatling_vent_t`, `plasma_charge_t` and
+`mech_plates_dropped` on boarding — and never touch `bow_draw_t`,
+`spear_charge_t`, `spear_power`, `spear_max_charge`. The whole bow/spear
+dispatch sits in the `else` arm of the in-mech branch
+(`sim.rs:8859-8873`), so **the clocks freeze on boarding and the first
+tick after dismount reads as a release edge.**
+
+Board mid-draw, dismount, and **an arrow leaves** — or a javelin at 1.3×
+still carrying the +10% flag.
+
+**Fix it at the ENTRY, not the exit** — Thor is explicit: *"the entry is
+where the state stops being simulated."* The dismount teardown
+(`sim.rs:7563`) already clears `mech_jump_phase` **for precisely this
+argument, in a comment that says so.**
+
+**Acceptance check:** a test that boards mid-draw and dismounts, asserting
+nothing launches and no charge survives.
+
+## TASK 4 — Every explosion is silent
+`TRV-0030`, `TRV-0026` · **friday33 + `gen_sfx.py`** · **1 hour** · open 3 days, blocker named on day one
+
+Re-derived today: **25 `asset_server.load` calls — 21 `.wav` + 4 `.png`.**
+The wav list is bow · click · headshot · hit · hurt · jump · kill · pickup ·
+reload · roll · shield · shot_ak · shot_deagle · shot_glock · shot_mg ·
+shot_mp5 · shot_rifle · shot_shotgun · shot_sniper · spear · win.
+**No boom.** The sim publishes `Boom` and nothing plays.
+
+`gen_sfx.py` generates no explosion either, so this is 1 hour *including*
+writing the generator line. In the same sitting: `shot_handgun.wav` is
+written by `gen_sfx.py:73`, sits on disk, and is in **no** load list; and
+plasma / repair beam / barrier / precision charge all play `shot_mp5`,
+marked placeholder at the call site.
+
+*(Struck for the record: the old blocker "all 21 loads are `.wav`,
+unblocker is any image loading at all" is **false** — four `.png` loads
+ship in `branding.rs`. Corrected in `7719296`.)*
+
+**There has never been an owner blocker on any of this.**
+
+**Acceptance check:** an explosion is audible; `gen_sfx.py` writes
+`boom.wav`; the load list is 22 wavs.
+
+## TASK 5 — Armour damage states get a client half
+`TRV-0036`, `TRV-0137`, `TRV-0140` · **friday-hud or friday33** · **1 session**
+
+**Re-derived today:** `armor_stage_of` / `armor_wear_of` / `ArmorStage` →
+**`sim.rs`: 66. `main.rs`: 0. `hud.rs`: 0.** A brand-new 1,742-line HUD
+module shipped this week and did not pick this up either. Fresh, Scuffed
+and Cracked render identically; only Severed shows, and only because it
+removes the piece.
+
+**What the thread already knows — a fully specified handoff:**
+- The sim publishes everything you need: `armor_stage_of` (returns
+  `Option` — **`None` is a bare mount, and a client must not draw clean
+  steel on a naked shoulder**), `armor_wear_of`, `ArmorStage::label` /
+  `::tilts` / `::resist`, `ArmorPiece::struck`, `HitZone::band`,
+  `ArmorCondition::{hp,frac,stage,wear,repair}`.
+- **`ArmorStage::tilts` exists and nothing draws it.** "Piece tilts at
+  Cracked" is a brief requirement with a published accessor and no reader.
+- Detach is already the *unequipped* path — `armor_pieces.set(p, false)`,
+  the same bit the Forge switch clears — so **you need no second
+  visibility rule.** `a_shot_off_plate_is_indistinguishable_from_one_never_worn`
+  will notice if that ever grows a second flag.
+- Brief IX-C gives you the visual language: Fresh = clean plate; Scuffed =
+  light scratches, edge dulling; Cracked = deep gouges, fracture lines,
+  loose rivets; Severed = detached or hanging.
+- The 24 plate groups already exist as separate geometry and visibility
+  already follows the loadout — **you are changing materials, not building
+  meshes.**
+
+**Acceptance check:** a capture at 100% / 50% / 15% plate shows three
+different surfaces. `CapBeat.hull` already stages it. Right now that
+capture is *impossible*, not merely missing.
+
+## TASK 6 — The six honesty fixes, one sitting
+`TRV-0031`, `0032`, `0033`, `0024`, `0028`, `0055` · **friday33 + friday22** · **1 session** · BRIEF XII §8's own findings
+
+| Row | The defect, re-derived today at `46d6dbb` |
+|---|---|
+| `TRV-0031` | **NOT fixed, despite a report that it was.** `main.rs:25489` `let modes = format!(... TDM_TARGET, ...)` — the **constant**, not `game.sim.cfg.tdm_target`. The comment twelve lines above says *"Every number below is the LIVE constant, never a retyped copy"*; this line was missed. It prints 30 while `frontend::INTRO_TDM_TARGET` = 25 is what an intro match plays to. **The screen lies to the player.** |
+| `TRV-0024` | `TDM_TARGET_CHOICES` (`sim.rs:430`) — its only other mentions are two doc comments (`sim.rs:5389`, `frontend.rs:321`), one of which calls it a known mistake. **No executable reader.** Fixing this and `TRV-0031` together is one change. |
+| `TRV-0032` | `BIND_REGISTRY`'s only `U` row (`main.rs:5414`) is *"Dismount the mech (chassis is scrapped; the pad respawns)"*. The in-world prompt says **"U - GRAB THE HULL"**. Hull climbing is not in the full bind list. |
+| `TRV-0033` | The `Q` row (`main.rs:5397`) names roll and flip only. **The Agile's second flip charge and its mid-air jump appear nowhere a player can find them — and BRIEF X made them its mechanical identity.** Put them on Controls, **not** the equip hint; that line already overflowed once and was cut to two facts for exactly that reason. |
+| `TRV-0028` | `FORGE_SLOTS` (`main.rs:1520`) — declared, read by nothing; `forge_slot_path` and its callers all hardcode. |
+| `TRV-0055` | **Half fixed.** `hud.rs:190 fn heat_pct` now names the two-scale bug in its own doc comment and gives the HUD one policy. **Still live:** `main.rs:22825` prints `HEAT {:.0}%` from the **raw** value while `:22807`/`:22813`/`:22816` print `× 100` under the same `%`. The sim-side split is friday22's. |
+
+**Why these matter more than their size:** every one is the game telling
+the player something false. `ANTI_PATTERNS.md` has a name for the class —
+**"the confident narrator"** — and it was earned here.
+
+## TASK 7 — Capture scripts as DATA, not code
+`TRV-0040`, `TRV-0204`, `TRV-0251` · **friday33** · **1 session** · Thor's highest-leverage finding
+
+`struct CapBeat` (`main.rs:5531`) — every script is still a compile-time
+const array inside a 29,000-line file. A framing tweak costs a **full
+release rebuild: ~6 minutes, versus ~40 seconds if the beats were data.**
+
+Your own words, quoted in `THOR_LOG.md`: *"several tasks needed 3+
+iterations purely on camera framing."* Three iterations × 6 minutes = 18
+minutes of pure rebuild to move a camera, **and it recurs on every task in
+this file that owes a capture** — TASK 2, TASK 5, TASK 8, and every one of
+BRIEF XI §19's 33 proof boxes.
+
+**Three properties of the rig, learned the hard way, that must survive:**
+- The boom anchors on the **HEAD**, so closing distance magnifies the
+  offset between anchor and subject.
+- **Pitch orbits the CAMERA about the anchor** rather than tilting the
+  view, so positive pitch photographs the top of a hat.
+- `look` turns the PLAYER and the third-person boom is rigidly behind the
+  player, so **no yaw ever yields a profile.** `CapBeat.orbit` swings the
+  boom around a stationary subject **and re-aims at the anchor** — the
+  first attempt did not re-aim and photographed the scenery beside the
+  machine.
+- Beat times must not run backwards; every script's last beat must set
+  `end`. Both are pinned by tests.
+
+**Acceptance check:** a framing change to one beat requires no
+`cargo build`.
+
+## TASK 8 — Lift the Royal's six colour literals to consts
+`TRV-0370` · **friday-mech** · **~1 hour** · prerequisite for D12(d)
+
+Thor measured the two Royals at **1.007× hull luminance** (ally 0.0567,
+foe 0.0563) where the Agile's own guard demands ≥ 8×; the strict form
+fails 6.7× the wrong way. **There is no guard test on the Royal palette at
+all**, and there cannot be: the colours are inline `Color::srgb` literals
+inside a `materials.add` block (`main.rs:15380`/`:15398`).
+
+**Do the lift now regardless of how D12(d) is ruled** — it is the
+prerequisite either way, it is mechanical, and it converts an unmeasurable
+surface into a testable one. `agile_mech.rs` already shows the shape:
+`pub const` palette data with
+`the_enemy_agile_never_out_luminates_the_ally` (`:744`) plus a gamma-decode
+anchor test so the guard cannot pass on a broken formula.
+
+**Acceptance check:** the six literals are `pub const`s and one test pins
+ally/enemy Royal separation. **Do not recolour in the same commit.**
+
+---
+
+# BAND 2 — SPEC15 P2/P3: the owner's own priority order
+
+## TASK 9 — Build the Royal ARROW LAUNCHER
+`TRV-0010` · **friday33 + one toto number** · **1-2 sessions** · SPEC15 **P2 — the last open P1/P2 row**
 
 **Your words:** *"Royal ARROW LAUNCHER: minigun + 3 crossbows. Compact
 minigun silhouette, rotating mechanism, three crossbow assemblies around a
 central weapon, bolt ammunition, mechanical loading."*
 
-**Status: genuinely absent.** I grepped the whole `src/` tree for
-`crossbow`, `arrow_launcher` and `ArrowLauncher` — zero hits in any weapon
-path. Every "bolt" in the codebase is a rivet, a rifle bolt, or the
-medic's plasma bolt. `MechWeapon` carries Gatling / Rockets / Autocannon /
-Plasma / Repair and nothing else.
+**Re-derived today: `arrow_launcher` / `ArrowLauncher` / `crossbow` return
+two hits across all of `src/`, and both are prose comments about a bow
+reading like a crossbow in first person (`main.rs:396`, `:9648`). Zero in
+any weapon path.** `MechWeapon` = Gatling / Autocannon / Rockets / Plasma /
+Repair.
 
-**This is the last open P1/P2 row, and the only mech weapon the Royal tier
-has that the Big does not.** Right now a Royal is a Big Mech with more
-hull, which is exactly what P3 says it must not be.
+**This is the only mech weapon the Royal tier would have that the Big does
+not.** Right now a Royal is a Big Mech with more hull — exactly what P3
+says it must not be.
 
 **What the thread already knows:**
-- The Royal is a real `ArmorSet` with its own pad, hull pool and hitbox
-  (`sim.rs:4802`, `:4838`). The weapon slot is the missing half.
-- `MechWeapon::for_set` is the DATA row that decides which mounts a
-  chassis has — add there, not in a forked spawn function. SPEC15's own
-  trap 1 says the same thing.
-- `a_number_key_selects_the_mount_the_strip_labels_with_it` exists
-  specifically because a hardcoded `0 => Gatling, 1 => Rockets` once made
-  the medic's repair beam unreachable. **The strip and the key handler
-  must read one list.** That test will catch you if they drift.
-- The turret already proves the pattern for "rotating mechanism you can
-  see": `main.rs:10289` `§owner: IT HAS TO READ AS A MINIGUN`, and the
-  defect it records (a "half-cowl, open below" built from cylinders facing
-  down the barrel axis, i.e. **discs**, which capped the gun and hid all
-  six barrels) is the trap to avoid on the crossbow assemblies.
+- `MechWeapon::for_set` is the DATA row that decides which mounts a chassis
+  has. **Add there, not in a forked spawn function.** SPEC15 trap 1.
+- `a_number_key_selects_the_mount_the_strip_labels_with_it` exists because
+  a hardcoded `0 => Gatling, 1 => Rockets` once made the medic's repair
+  beam unreachable. **The strip and the key handler must read one list.**
+  That test will catch you if they drift.
+- The turret already proves "rotating mechanism you can see":
+  `main.rs:10289` `§owner: IT HAS TO READ AS A MINIGUN`. **The trap it
+  records is the one to avoid on the crossbow assemblies** — a "half-cowl,
+  open below" built from cylinders facing down the barrel axis, i.e.
+  **discs**, which capped the gun and hid all six barrels.
 - SPEC15 trap 3: **silhouette beats paint.** Three crossbows around a
-  central minigun is a silhouette element. Use it.
+  central minigun *is* a silhouette element. Use it — it is the cheapest
+  answer to D12(d) that exists.
 
-**The one number nobody has** (`TRV-0010` in §E.2): rate of fire, bolt
-velocity, and per-bolt damage against a mech hull. Nothing in the game
-fires a bolt from a mount, so there is no neighbouring value to
-interpolate from. If a `toto` dispatch is warranted anywhere, it is here —
-and the dispatch must name that number, not the topic.
+**The one number nobody has → toto:** rate of fire, bolt velocity, and
+per-bolt damage against a mech hull. Nothing in the game fires a bolt from
+a mount, so there is no neighbouring value to interpolate from. **The
+dispatch must name that number, not the topic.**
 
-**Done when:** a Royal pilot can select it from the strip by number, it
-fires bolts with their own physics, the barrels visibly rotate, and there
-is a capture of it firing.
+**Acceptance check:** a Royal pilot selects it from the strip by number; it
+fires bolts with their own physics; the barrels visibly rotate; there is a
+capture of it firing.
 
----
+## TASK 10 — BRIEF XI §1: generalise `solve_arm_ik` to the legs
+`TRV-0319`, `TRV-0322` · **friday33** · **1-2 sessions** · gated on **D10**
 
-# BAND 2 — SPEC15 **P3**: the visual block, in the owner's own order
+`solve_arm_ik` (`main.rs:2585`) has **10 call sites and every one is an
+arm** (`:18459`, `:18488`, `:18536`, `:18567`, `:18651`, `:18663`,
+`:20184`, `:20187`, `:25936`). There is no `leg_ik`, no `foot_place`, no
+`solve_leg` anywhere in `src/`.
 
-**This is the largest open block you named, and four of its five bullets
-asked for GEOMETRY and received PAINT.** Take one per session. Do not
-merge them.
+`DECISION.md` item 3 specifies this exactly and **BRIEF XI §0.2 makes it
+binding: do not write a second solver, do not add a crate.** This is the
+single highest-value BRIEF XI item and it closes §1, most of §2, and the
+foot half of §19.
 
-Hand every one of these three things from SPEC15's own trap list:
+**Acceptance check:** feet stay on a slope; **consecutive-frame** capture
+shows no sliding. BRIEF XI's proof standard names sliding and clipping as
+the two claims most likely to be ticked without evidence, and says
+*"capture consecutive frames, not one pose."*
+
+## TASK 11 — The Agile's double jump has no airborne pose
+`TRV-0321`, `TRV-0324` · **friday-mech** · **half a session** · BRIEF XI §0.4 calls it *"the highest-value single fix in this brief"*
+
+`try_mech_jump`'s compress/tuck is **heavy-only**, so the apex frame is
+indistinguishable from standing. Your Agile's signature mechanic is
+currently invisible. **The captures already exist to prove the fix**:
+`agile_moves/07-double-jump-kick.png`, `08-double-jump-apex.png`.
+
+Thor's note to carry: the apex frame was not shot at the actual peak —
+re-time the jump trio while you are there.
+
+**Acceptance check:** re-run `agile_moves`; frames 07/08 differ from
+`01-standing`.
+
+## TASK 12 — SPEC15 P3, one bullet per session, in your order
+`TRV-0011` Agile visual upgrade → `TRV-0012` Rocket Launcher → `TRV-0013`/`0015` Royal body → `TRV-0014` opposition body · **friday-mech** · **1-2 sessions each**
+
+**Four of these five bullets asked for GEOMETRY and received PAINT.** Take
+one per session. Do not merge them. Hand every one:
 - **Trap 3 — silhouette beats paint.** A variant identifiable only by
-  colour does not exist at range. Each variant needs one silhouette
-  element. That is why the Royal got a crown.
-- **Trap 4 — the luminance rule is unguarded.** Ally/enemy separation
-  rests on *value*, not hue, and the enemy's light blue is already
-  brighter than the ally's brightest tone. Only part coverage saves it.
-  Neon on dark is safe; neon over large areas is not.
+  colour does not exist at range.
+- **Trap 4 — the luminance rule is unguarded** *on the Royal*. The Agile's
+  is now guarded (`agile_mech.rs:744`) and that is the pattern; see TASK 8.
 - **Trap 5 — capture everything.** Five defects in one week were invisible
-  to the compiler and to 400 tests, and obvious in a screenshot.
+  to the compiler and to 478 tests and obvious in a screenshot.
 
-## TASK 2 — Agile Mech: the major visual upgrade
-`TRV-0011` · **friday33** · **1-2 sessions** · SPEC15 **P3, and you called it "the largest visual item"**
-
-**Your words:** *"Must read FASTER, LIGHTER, more advanced, more
-mechanically detailed, and clearly distinct from Big and Royal in
-silhouette. Plates, joints, legs, hydraulics, torso, shoulders,
-head/cockpit, weapon mounting, small components, surfaces, energy
-details."*
-
-**Status: NOT STARTED under SPEC15.** No `§P3` marker touches the scout
-chassis anywhere. The 2026-08-07 medic redesign (`72a93f3`) is a real,
-good pass — but it answered a *different* ask: your reference art of a
-squat utility robot. "Squat utility robot" and "faster, lighter, more
-advanced" are not the same brief, and nobody wrote down that the second
-one superseded the first.
-
-**What the thread already knows:**
-- The medic pass took ~90 exposed struts/pistons/louvres down to ~45
-  nameable masses, gave it one LENS eye at visor height, and replaced the
-  digitigrade frame with plantigrade thick legs — *because the digitigrade
-  frame read fast but also skittish, and half its hardware existed only to
-  explain itself*. **If you now want it to read FAST again, that decision
-  is the one to revisit deliberately, not delete.**
-- The ally shell went AMBER on the argument that the team read never rests
-  on the shell. Adding "energy details" is exactly the case trap 4 warns
-  about — accent, not coverage.
-- `SCOUT_SCALE` is 1.05 and is now live in `height()`. See Q5.
-- Captures already exist to compare against: `medic/01..09.png`.
-
-**Done when:** the scout reads as a different machine from the Big and the
-Royal *in black silhouette at 30 m*, and there is a capture proving it —
-the three tiers in one frame, which `mech_lineup.rs` can already produce.
-
-## TASK 3 — Rocket Launcher redesign
-`TRV-0012` · **friday33** · **1 session** · SPEC15 **P3**
-
-**Your words:** *"chambers, mounting, reload mechanism, barrel detail,
-materials, VFX, firing animation, recoil."*
-
-**Status: PARTIAL.** Shipped in the FLAGSHIP PASS (`aa14bcf`,
-`main.rs:10988`) and the electronics pass (`5e09907`): ribbed casing,
-mouth jaws, backblast vents, a feed arm mid-travel, a boxed seeker head,
-targeting electronics. **Absent:** the reload mechanism as a visible
-action, muzzle VFX, a firing animation, and the recoil answer.
-
-**What the thread already knows:**
-- `mech_recoil.rs` already exists and already reads the sim's own
-  `punch`/`punch_vel` rather than a client table. The launcher's recoil
-  answer belongs there, not in a new file. Read that module's header
-  first — it exists specifically to stop a second, drifting recoil model.
-- The turret got its detail pass by the same additive method (the module
-  ring: 2 tracking, 2 cooling, on the static housing). Reuse it.
-
-## TASK 4 — The Royal gets its own body
-`TRV-0013` (body half), `TRV-0015` · **friday33** · **1-2 sessions** · SPEC15 **P3**
-
-**Your words:** *"its own body and silhouette, NOT a scaled Big Mech."*
-
-**Status: not started.** `main.rs:11414` says it plainly: *"§22 THE ROYAL
-VARIANT. Same machine, same 53 plates, same [everything]."* The Royal is
-the Big × 1.10.
-
-**Blocked on Q4 for the accent colour — but not for the geometry.** Start
-the geometry now.
-
-**What the thread already knows:**
-- The paint half is done and was worth doing: `a0f67ae` split the two
-  Royals because *"ROYAL/ALLY and ROYAL/ENEMY differed only by a lamp"* —
-  the spec's own "must not read as a recoloured player Royal", failed in
-  the most literal way possible, caught in one frame.
-- `spawn_armor_rig(commands, kit, ally, elite)` already takes `elite` as a
-  parameter, so the fork point exists.
-- `MECH_LEGS_ROYAL` (`main.rs:2225`) already marks where the Royal's own
-  leg-armour pair starts — that is the pattern to extend, not replace.
-
-## TASK 5 — Opposition mechs stop being recolours
-`TRV-0014` · **friday33** · **1-2 sessions** · SPEC15 **P3**
-
-**Your words:** *"Own armour design, body structure, silhouette,
-mechanical detail, weapon styling — while keeping the faction colour
-language."*
-
-**Status: PARTIAL — the colour language shipped, the structure did not.**
-The enemy machines are the ally machines with a different material table.
-
-**What the thread already knows:**
-- The colour language is already DATA (`branding.rs` `Side::steel()` /
-  `Side::accent()`), so a structural change does not have to touch it.
-- Thor has already measured the separation: ally 0.239 vs enemy 0.0178 =
-  **13.4×** relative luminance; scout 0.380 vs 0.0158 = **24×**. You have
-  headroom. Spend it on shape.
-- **Do the guard test in the same session** (`TRV-0206`): Thor's finding
-  is that the luminance rule *is now false as stated* and **nothing tests
-  it**. One test pinning ally/enemy luminance separation costs almost
-  nothing and stops a future repaint silently breaking friend-or-foe.
+On `TRV-0011` specifically, the decision to revisit **deliberately, not
+delete**: the medic pass took ~90 exposed struts down to ~45 nameable
+masses and replaced the digitigrade frame with plantigrade thick legs —
+*because the digitigrade frame read fast but also skittish, and half its
+hardware existed only to explain itself.* If you now want FAST again, that
+is the trade to reopen on purpose.
 
 ---
 
-# BAND 3 — THE INVISIBLE SYSTEMS
+# BAND 3 — REAL, OPEN, NOT NOW
 
-Built, tested, and the player cannot see any of it. Highest felt value per
-session in the whole file after Band 2.
+Listed so nothing disappears. Do not start these while Bands 0-2 are open.
 
-## TASK 6 — Armour damage states get a client half
-`TRV-0036`, `TRV-0137`, `TRV-0140` · **friday33** · **1 session** · 0-QUEUE Tier 2 #15
-
-**Status, re-derived today: `main.rs` contains ZERO references to
-`armor_stage_of`, `armor_wear_of` or `ArmorStage`.** Fresh, Scuffed and
-Cracked render identically. Only Severed shows, and only because it
-removes the piece.
-
-**What the thread already knows — this is a fully-specified handoff:**
-- The sim publishes everything you need: `TdmSim::armor_stage_of`
-  (returns `Option` — **`None` is a bare mount, and a client must not draw
-  clean steel on a naked shoulder**), `TdmSim::armor_wear_of`,
-  `ArmorStage::label`, `ArmorStage::tilts`, `ArmorStage::resist`,
-  `ArmorPiece::struck`, `HitZone::band`, `ArmorCondition::{hp,frac,stage,wear,repair}`.
-- `ArmorStage::tilts` exists **and nothing draws it.** "Piece tilts at
-  Cracked" is a brief requirement with a published accessor and no reader.
-- Detach is already the *unequipped* path — `armor_pieces.set(p, false)`,
-  the same bit the Forge switch clears — so the client needs no second
-  visibility rule. The test
-  `a_shot_off_plate_is_indistinguishable_from_one_never_worn` will notice
-  if that ever grows a second flag.
-- Brief IX-C's own table gives you the visual language: Fresh = clean
-  plate; Scuffed = light surface scratches, edge dulling; Cracked = deep
-  gouges, fracture lines, loose rivets; Severed = detached or hanging.
-- The 24 plate groups already exist as separate geometry and visibility
-  already follows the loadout (`TRV-0186`) — so you are changing
-  materials, not building meshes.
-
-**Done when:** the four-frame damage progression capture that Brief IX-C
-asks for exists (`TRV-0141`), because right now that capture is
-*impossible*, not merely missing.
-
-## TASK 7 — Mech boarding: make seven of eight stages visible
-`TRV-0037`, `TRV-0174` · **friday33** · **1 session** · 0-QUEUE Tier 2 #16
-
-**Status: PARTIAL, and better than the plan says.** The client *does* read
-`mech_enter_stage_for` now (`main.rs:19191`), fires one rising `click` per
-beat, and drives `visor_ready`. But `main.rs:19243-19254` is eight
-`debug!` arms and nothing else.
-
-**What the thread already knows:**
-- **The strings already exist verbatim inside the `debug!` calls**:
-  "cockpit opens" / "pilot climbs in" / "harness closes" / "power-up, seam
-  lights" / "servo sync" / "gyro calibration" / "weapon diagnostics - both
-  hull mounts cycle" / "HUD boot - camera may cut to the visor". That is
-  the spec, already written, by the person who built the timer.
-- The system already fires **only on a stage CHANGE**, never every frame —
-  the plan's "one at a time" rule, which is what keeps it reading as a
-  machine waking up. Do not break that.
-- `visor_ready_after` is pure and tested, and its doc explains the trap:
-  `mech_enter_stage_for` returns `None` both when boarding has finished
-  *and* when the fighter is not a mech at all, so the naive
-  `matches!(stage, None | Some(HudBoot))` would snap the camera into a
-  visor that does not exist.
-- `visor_ready` is still a field of a `Local`, so nothing outside the
-  system can read it (`TRV-0057`). If the camera cut is meant to be real,
-  that flag has to leave the `Local`.
-- Cycle 1's research is on disk and argues *why* the sequence must be
-  committal: `research/mech-entry/CYCLE_1_REPORT.md`, grounded in aviation
-  checklist design and why interruptible sequences fail.
-
-## TASK 8 — Every explosion is silent
-`TRV-0030` · **friday33** + `gen_sfx.py` · **1 hour** · 0-QUEUE Tier 1 #9
-
-Re-derived today: `main.rs:14096-14116` is the complete `Sfx` load list —
-20 wavs, no explosion, no boom. The sim publishes `Boom` and nothing
-listens.
-
-**Do the four placeholders in the same sitting**, because they are the
-same file and the same hour:
-- plasma, repair beam, barrier deploy and precision charge all play
-  `shot_mp5`, marked as placeholders at the call site (`main.rs:21311`).
-- every boarding stage plays `click` (see TASK 7).
-- `shot_handgun.wav` is generated by `gen_sfx.py:73`, sits on disk, and is
-  loaded by nothing (`TRV-0026`).
-
-**There has never been an owner blocker on any of this.** The unblocker
-was named as `gen_sfx.py` and `gen_sfx.py` has been in the repo the whole
-time.
-
----
-
-# BAND 4 — THE HONESTY FIXES
-
-Six one-line defects where two screens in the same game disagree with each
-other. Cheapest rows in the ledger. **Bundle them into one session.**
-
-## TASK 9 — The screens that lie to the player
-**friday33** · **1 session for all six**
-
-| Row | The defect, re-derived today |
-|---|---|
-| `TRV-0031` | The Field Manual's MODES line prints the constant `TDM_TARGET` (`main.rs:24303`), not the target you chose. Every other number on that screen was correctly moved to live constants — this line was missed. |
-| `TRV-0024` | `TDM_TARGET_CHOICES` (`sim.rs:430`) is declared and its only other mention in the crate is a doc comment calling it a known mistake. The menu hand-types 30/60. Fixing `TRV-0031` and this together is one change. |
-| `TRV-0032` | `BIND_REGISTRY`'s only `U` row says "Dismount the mech". The in-world prompt says "U - GRAB THE HULL" (`main.rs:22802`). Hull climbing is not in the full bind list. |
-| `TRV-0033` | The `Q` row names roll and flip. The medic's **second flip charge** (`sim.rs:3427`) and its **single mid-air jump** (`sim.rs:3436`) appear nowhere a player can find them. Put them on Controls, **not** the equip hint — that line already overflowed once and was cut to two facts for exactly that reason. |
-| `TRV-0028` | `FORGE_SLOTS` (`main.rs:1372`) is declared and read by nothing; `forge_slot_path` and its callers all hardcode. |
-| `TRV-0055` | `gatling_heat` carries two scales in one sim field. `main.rs:21763`/`:21769`/`:21772` print `×100` under a `%`; `:21781` prints the **raw** value under the same `%`. Both branches are live. Split the field or document it — the sim side is friday22's. |
-
-**Why these matter more than their size:** every one of them is the game
-telling the player something false. `ANTI_PATTERNS.md` has a name for the
-class — **"the confident narrator"** — and it was earned here.
-
----
-
-# BAND 5 — THE LEVERAGE TASK
-
-## TASK 10 — Make capture scripts DATA, not code
-`TRV-0040`, `TRV-0204`, `TRV-0251` · **friday33** · **1 session** · 0-QUEUE Tier 2 #19
-
-**Thor ranked this his highest-leverage finding and he is right.**
-
-`main.rs:5203` `struct CapBeat`, and every script is a compile-time const
-array inside a 29,000-line file. A framing tweak therefore costs a full
-release rebuild: **~6 minutes, versus ~40 seconds if the beats were data.**
-
-Your own words, quoted in `THOR_LOG.md:2829`: *"several tasks needed 3+
-iterations purely on camera framing."* Three iterations × 6 minutes = 18
-minutes of pure rebuild to move a camera, and it recurs on every visual
-task in Band 2.
-
-**What the thread already knows — three properties of the rig, learned the
-hard way, that must survive the change:**
-- The boom anchors on the **HEAD**, so closing the distance magnifies the
-  offset between anchor and subject.
-- **Pitch orbits the CAMERA about the anchor** rather than tilting the
-  view, so positive pitch photographs the top of a hat.
-- `look` turns the PLAYER and the third-person boom is rigidly behind the
-  player, so no yaw ever yields a profile. `CapBeat.orbit` swings the boom
-  around a stationary subject **and re-aims at the anchor** — the first
-  attempt did not re-aim and photographed the scenery beside the machine.
-- Beat times must not run backwards; every script's last beat must set
-  `end`. Both are pinned by tests.
-
-**This task pays for Band 2, Band 3 and the four owed captures below. Do
-it early.**
-
-## TASK 11 — The four captures the ledger owes
-`TRV-0008`, `TRV-0005`, `TRV-0056`, `TRV-0243` · **friday33** · **1 session, after TASK 10**
-
-Rule 8: *a visual claim with no screenshot behind it is not a claim, it is
-a hope.* Four shipped systems have none.
-
-| Capture | Why |
-|---|---|
-| **The recoil envelope** | The single biggest feel change in the game — AUTO plateau 4.09° → 16.22° — and nobody has photographed the controlled window becoming chaotic. Beat it at 0.5 s / 1.5 s / 3 s / forced vent. |
-| **The weapon strip as four slots** | `Shield [4]` shipped as an interactive slot with a border, a fill and a quantity. No frame shows it. |
-| **Per-owner turret spinners + the world minigun spin** | Both claimed fixed, both listed as capture-verification owed since 2026-08-08, both still `UNVERIFIED` in this ledger for exactly that reason. |
-| **The kill-pop X** | Friday's own words: *"no capture script has a beat where the player gets a kill, so I have no PNG of the X... **this is the single thing I would most want checked.**"* If Bevy UI silently no-ops `Transform.rotation` on a UI node, the kill confirm degrades to a colour flash and nothing warns you. |
-
----
-
-# BAND 6 — TIER 3 AND BEYOND (real, open, not now)
-
-Listed so nothing disappears. Do not start these while Bands 1-5 are open.
-
-| Task | Rows | Lane | Note |
+| Task | Rows | Lane | What the ledger knows |
 |---|---|---|---|
-| Finish deleting Cliffhold | `TRV-0039` | **both — coordinate or the `match` breaks** | Client half went in `4152240`. `sim.rs` still holds **49** references including `build_cliffhold` and five reachability tests. Salvage first: the +25% scale trap, the flight-joint bug, and the reachability-test shape are all reusable — and the +25% trap in particular is written up in the root `FRIDAY_LOG.md` and is worth keeping. |
-| The three core maps: +10%, real elevation, randomised structures | `TRV-0041`, `0042` | both | **The trap, and hand it to whoever builds:** "randomised" must be seeded at map-BUILD time from the match seed. Drawing from the gameplay RNG stream shifts every later number and breaks replay for every other system. Also fix the two lying centrepieces. |
-| Bot navigation, properly | `TRV-0043` | friday22 | BOT ROUTING landed for Cliffhold with published up-links and a probe; `sim.rs:27649` states the flat maps were deliberately left alone. Whether `waypoint` is still a bare `[f32; 2]` is `UNVERIFIED` — re-derive before scoping. |
-| Ragdoll + hit-reaction impulse | `TRV-0046`, `0106` | both | The rig's mass, length and inertia are complete and tested. `derived_spring_k` is the only consumer. §B.5 names both of these as the payoff for the column. |
-| Soldier finger animation | `TRV-0044` | friday33 | The hand exists and poses from one `curl`. Driving it from weapon, reload, melee and grip is the remaining half. `afbe9d2` already built the instrument that can check it. |
-| Weapon crafting station + the Forge per-piece grid | `TRV-0045`, `0076`, `0136`, `0138`, `0139` | friday33 | Shares a front end. **Build both or neither.** |
-| Character creation L0-L4 | `TRV-0181`, `0146` | friday33 | **`BACKLOG.md` #9's stated blocker is known false.** It says "no class system and only 5 whole-body armour presets". Four classes shipped 2026-08-05; 24 per-piece plates shipped 2026-08-07. This row has been unblocked for five days and nobody noticed. |
-| Mech control scheme | `TRV-0047` | friday33 | Worth doing now that jump, crouch and the cockpit exist to be controlled. |
-| §16/§17 projectile origin audit | `TRV-0060` | friday33 | All five projectile types, both views, never checked together. Cheap, and it is the shared root of several "feels wrong" reports. |
-| §32 first/third-person consistency pass | `TRV-0065` | friday33 | Three separate instances of that defect were found in ONE session. |
-| §19 HUD redesign | `TRV-0061` | friday33 | **Deliberately last.** It must unify readouts still being added — TASK 6 and TASK 7 both add elements. Redesigning a growing HUD means doing it twice. |
-| Injury / fatigue / dynamic CoG | `TRV-0183` | friday22 | **`BACKLOG.md` #11's blocker is known false** — the armour-weight formula was wired in the 24-plate pass. |
-| Write the glTF loader for `jk_tdm` | `TRV-0048`, `0262` | friday33 | The blocker is **named and it is not the owner**: the shipping crate cannot load a mesh if pointed at one. Only `jk_bevy` can. This is the actual task behind "your uploaded gun assets". |
-| Close or feed `motion-architecture` | `TRV-0188`, `0189`, `0190` | — | 5 of 14 core sources read; `DECISION.md`, the entire deliverable, never written. **Leaving it at 5/14 forever is the worst of the three options.** Either write the one-page decision from what was read, or close the thread explicitly. |
-| Write `MAP_METRICS.md` | `TRV-0149` | — | Real cross-engine numbers are already extracted and READ in `research/maps/SOURCES.md`. Two rows (`TRV-0051` traversal, `TRV-0180` ledge bands) are blocked on a file that exists as research and not as a deliverable. |
+| Mech boarding: 7 of 8 stages made visible | `TRV-0037`, `0174` | friday33 | **The strings already exist verbatim inside the `debug!` calls** (`main.rs:19243-19254`) — that is the spec, already written by the person who built the timer. The system fires only on a stage CHANGE, never per frame; **do not break that.** `visor_ready` is still a field of a `Local`, so nothing outside its own system can read it (`TRV-0057`) — if the camera cut is meant to be real, that flag has to leave the `Local`. |
+| Traversal / ledge bands | `TRV-0051`, `0180` | friday22 | **UNBLOCKED THIS WEEK.** Their named blocker was `MAP_METRICS.md`; it exists, 1025 lines, with §4.3 "THE LEDGE BANDS". Nobody has been told. |
+| Bot navigation, properly | `TRV-0043` | friday22 | Also unblocked by `MAP_METRICS.md`. BOT ROUTING landed for Cliffhold with published up-links and `BOT_PROBE_Y`; `sim.rs:27649` states the flat maps were **deliberately** left alone. |
+| Arena + Gardens: the +10%/elevation/randomisation pass | `TRV-0041`, `0042`, `0379` | friday22 | The **Bailey got it** (`e7f408e`). **The trap, and hand it to whoever builds:** randomised structures must be seeded at map-BUILD time from the match seed. Drawing from the gameplay RNG stream shifts every later number and breaks replay for every other system. |
+| Finish deleting Cliffhold | `TRV-0039` | **both — coordinate or the `match` breaks** | Client half went in `4152240`; ~50 references survive in `sim.rs` including `build_cliffhold` and five reachability tests. **Salvage first:** the +25% scale trap, the flight-joint bug, and the reachability-test shape are all reusable. |
+| Fix the sightline validator | `TRV-0374` | friday22 | It is **flat-map-only** and samples at `half/10`, so Battlefield quantises at ±35.4 m and Cliffhold at ±42.4 m. `MAP_METRICS.md` §6.2 marks it *"a defect, not a caveat"*. Blocks a precise answer to D9. |
+| Run BM-1 / BM-2 | `TRV-0373` | friday22 | `DECISION.md` §9.2 specifies the pose-kernel microbenchmark **in full**; BM-2 is ~1 hour on the existing crowd bench. **The architecture decision was made without its own named instrument** and the document says so. |
+| The rest of BRIEF XI — §7-§14 limb/hand/grip families and the gun art pass | `TRV-0328`..`0335` | friday33 | §13 wants a shared `Weapon → Grip Point → Hand IK → Arm → Shoulder` chain to *"remove the need to hand-tune hand positions per weapon"*. **No `grip_point`/`GripPoint` symbol exists**, and `main.rs:20184-20187` drives both wrists from per-weapon offsets — the hand-tuning §13 wants to retire. See also `TRV-0372`: **whoever builds hands has no attachment point to build against** (`bow_nock_local()` is a function, not a socket). |
+| Two tests that cannot fail | `TRV-0371` | friday33 | `Vec3::new(0.050,0.020,0.050)` / `(0.020,0.010,0.060)` at `main.rs:21665-21668` are re-typed at `:26278` and `:26346`. **Two literals want to be one const.** OPERATION rule 12. |
+| Commit the `muzzle_flash` captures | `TRV-0375` | friday-fx | `handback/brief-vii/muzzle_flash/` is **untracked**. One bare `git stash` and it is gone. |
+| Delete the two comments that argue against Q4 | `TRV-0363` | friday33 | `main.rs:15301`, `main.rs:4005`, both present tense, both about a spec that no longer exists. |
+| Character creation L0-L4 · Forge per-piece grid · weapon crafting | `TRV-0181`, `0045`, `0076`, `0136`, `0138`, `0139` | friday-front | **`BACKLOG.md` #9's stated blocker is known FALSE.** It says "no class system and only 5 whole-body armour presets". Four classes shipped 2026-08-05; 24 per-piece plates shipped 2026-08-07. **Unblocked for six days and nobody noticed.** |
+| Injury / fatigue / dynamic CoG | `TRV-0183` | friday22 | **`BACKLOG.md` #11's blocker is known FALSE** — the armour-weight formula was wired in the 24-plate pass. |
+| Ragdoll + hit-reaction impulse | `TRV-0046`, `0106` | both | The rig's mass, length and inertia are complete and tested; `derived_spring_k` is the only consumer. |
+| glTF loader for `jk_tdm` | `TRV-0048`, `0262` | friday33 | **The blocker is named and it is not the owner:** the shipping crate cannot load a mesh if pointed at one. Only `jk_bevy` can. This is the real task behind "your uploaded gun assets". |
+| §19 HUD redesign remainder | `TRV-0358`, `0359`, `0360` | friday-hud | **Deliberately last.** TASK 5 and the boarding beats both add elements; redesigning a growing HUD means doing it twice. |
 
 ---
 
-# BAND 7 — BLOCKED. DO NOT START.
+# BAND 4 — BLOCKED. DO NOT START.
 
-Each has a named unblocker that is not difficulty and not effort.
+Each has a named unblocker that is neither difficulty nor effort.
 
 | Row | Blocked on |
 |---|---|
+| `TRV-0361`, `TRV-0362` | **Two HUD reference images.** But note: `handback/reference/hud/NOTES.md` describes both in prose and declares itself the working reference until the PNGs land. **A builder may proceed.** Only the acceptance check is blocked. |
+| `TRV-0309`..`0312`, `TRV-0260`, `TRV-0261` | Six owner images. **Nobody has written these four bow/spear ones down in prose the way the HUD ones were.** Somebody should, today — it costs ten minutes and it is the difference between blocked and merely unproven. |
+| `TRV-0318`, `TRV-0326` | D1. |
+| `TRV-0325` | D2. |
+| `TRV-0376` | D10. |
+| `TRV-0377`, `TRV-0117` | D9. |
 | `TRV-0050` Networking | A networking dependency, and a decision to have one. The deterministic sim and bit-identical replay are the right foundation; nothing else exists. The scoreboard deliberately omits a Ping column for this reason. |
-| `TRV-0051` Traversal | `MAP_METRICS.md` (see Band 6). |
 | `TRV-0125` Grenades in water | No water volume exists in any map. |
-| `TRV-0185` Mud / sand / snow / ice grenade surfaces | None of these exists as a `CoverKind` in any map. **Do not research the coefficients now** — they go stale before the blocker clears. |
+| `TRV-0185` Mud / sand / snow / ice grenade surfaces | None exists as a `CoverKind`. **Do not research the coefficients now** — they go stale before the blocker clears. |
 | `TRV-0182` Destruction | rapier supports some of it; there is still no *design reason*, which is the honest blocker. |
-| `TRV-0150` Powered armour | Research-only by your instruction, and Rule 13 retired the tier that would write it. Recording it so the want does not vanish: you said you want this **in the future**. |
-| `TRV-0163` In-game console + image import | Blocked upstream on the texture pipeline. **The console CORE — cvar registry, autocomplete, history, scrollback — is blocked by nothing** and could ship alone if you want it. |
+| `TRV-0150` Powered armour | Research-only by your instruction. **The "do not build" half was obeyed; the "produce the spec" half was never started** and `research/powered-armour/` does not exist. Recorded so the want does not vanish: you said you want this **in the future**. |
+| `TRV-0163` In-game console + image import | The image-import half is blocked upstream on the texture pipeline. **The console CORE — cvar registry, autocomplete, history, scrollback — is blocked by nothing** and could ship alone if you want it. |
 
 ---
 
 # LANE SHEETS
 
-## friday33 — `main.rs` + client modules (the busy lane)
+**friday33** (`main.rs` — dirty, coordinate first): TASK 1 → TASK 2 →
+TASK 6 → TASK 7 → TASK 4 → TASK 9 → TASK 10.
 
-In order: **TASK 10** (capture scripts as data — pays for everything
-below) → **TASK 1** (arrow launcher) → **TASK 6** (armour states visible)
-→ **TASK 7** (boarding beats) → **TASK 8** (explosion + placeholders) →
-**TASK 9** (the six honesty fixes) → **TASK 11** (the four owed captures)
-→ **TASK 2** (Agile) → **TASK 3** (launcher) → **TASK 4** (Royal body) →
-**TASK 5** (opposition body + the luminance guard test).
+**friday22** (`sim.rs` — free): TASK 3 → TASK 6's sim half (`TRV-0055`,
+`TRV-0024`) → `TRV-0029` (the `9000.0` spray literal, still bare at
+`sim.rs:4515`/`:5481` with the client keeping its own copy at
+`main.rs:308`) → `TRV-0235` (plate wear fires only on the zoned hitscan
+path — grenades, melee, claws and gas neither wear plate nor are reduced
+by it; **one gate, `in_mech`, for both, so they cannot drift**) →
+`TRV-0241` (the player/bot asymmetry in `punched_aim_stabilised`, which
+the builder calls *"the real root"* and which applies to every recoiling
+weapon) → `TRV-0242` (a bot chassis now never raises its barrier at all)
+→ `TRV-0316` (`step_plasma_precision`, `sim.rs:8859`, still charges on
+`cmd.ads` — **the one remaining RMB-charge in the file**; cross-lane,
+needs the client's mount router to move too, so it needs both Fridays or
+an owner "leave it").
 
-*Note where I would have re-ordered and did not: I would run TASK 10 and
-TASK 8 before TASK 1, because they are cheap and they unblock the
-evidence for everything else. Your order puts P2 first, so TASK 1 stands
-at the top of the priority list. Both readings are in the file; pick one.*
+**friday-hud** (`hud.rs` — free): TASK 5.
 
-## friday22 — `sim.rs`
+**friday-mech** (`agile_mech.rs`, `mech_lineup.rs`, `mech_recoil.rs`,
+`cockpit.rs` — free): TASK 8 → TASK 11 → TASK 12.
 
-`TRV-0026` (the audio side of the explosion, with `gen_sfx.py`) ·
-`TRV-0055` (split the `gatling_heat` scale at the source) ·
-`TRV-0235` (plate wear fires only on the zoned hitscan path — grenades,
-melee, claws and gas neither wear plate nor are reduced by it; one gate,
-`in_mech`, for both, so they cannot drift) ·
-`TRV-0241` (the player/bot asymmetry in `punched_aim_stabilised` — Friday
-calls it "the real root", and it applies to every recoiling weapon in the
-game) ·
-`TRV-0242` (a bot-piloted chassis now never raises its barrier at all) ·
-`TRV-0043` (bot navigation) · `TRV-0039` (the Cliffhold sim half —
-coordinate with friday33).
+**thor**: see `TREVOR_LEDGER.md` §E.1. Top of that list —
+`TRV-0345`..`0353` (nine HUD rows delivered on commit evidence, **and I
+opened no HUD PNG**) and `TRV-0379` (**does the Bailey's randomisation
+draw from the match seed or the gameplay RNG?** If the latter, replay is
+broken for every other system and nobody will notice for weeks).
 
-## thor — verify these, they are claimed and thin
-
-`TRV-0008` (recoil envelope, no capture) · `TRV-0005` (slot strip, no
-capture) · `TRV-0054` (does the rig key on `chassis_kneeling()` or raw
-`f.crouch`?) · `TRV-0035` (**the barrier test copies its alpha and span
-constants into the test body — if it is vacuous, `TRV-0207`'s evidence is
-vacuous too**) · `TRV-0057` (`visor_ready` inside a `Local` — does the
-camera cut actually happen?) · `TRV-0237` (did `fe07c19` close the
-`mech_visor_eye_y` free-function bug?) · `TRV-0252`, `TRV-0253` (turret
-spinners and world minigun spin) · `TRV-0250` (re-check the FP aim test
-still cannot pass by coincidence now a third chassis exists) ·
-`TRV-0134` (mutation-prove `armor_weight_movement_penalty` is wired).
-
-## toto — only two rows qualify under Rule 13
-
-Rule 13: `toto*` only when a specific unknown **NUMBER** blocks a build,
-and it must be named in the dispatch.
-
-- `TRV-0010` — the Royal arrow launcher's rate of fire, bolt velocity and
-  per-bolt damage against a mech hull. Nothing in the game fires a bolt
-  from a mount, so there is no neighbouring value to interpolate from.
-- `TRV-0126` — "how enclosed is this point". The **method** is the unknown,
-  not a coefficient. Ask for the method (ray fan? nearest-wall distance?
-  cell occupancy?) and its cost at 120 Hz. Do not ask for a percentage.
-
-Everything else that looks like a research need is a decision (Band 0) or
-a build.
+**toto** — **two rows, and only two.** `TRV-0010` (arrow launcher rate of
+fire, bolt velocity, per-bolt damage vs a mech hull) and `TRV-0126` ("how
+enclosed is this point" — **ask for the METHOD and its cost at 120 Hz, not
+a percentage**). Everything else that looks like a research need is a
+decision in Band 0 or a build in Bands 1-2.
 
 ---
 
@@ -556,32 +739,41 @@ a build.
 Not tasks. Facts about the record that will cost a session if nobody says
 them out loud.
 
-1. **`BACKLOG.md` has four entries that are known false**: melee depth
-   ("Not started" — shipped `a99af96`), AI retreat ("the remainder" —
-   shipped `e5431a4`), character creation's blocker, and the
-   armour-weight formula's "unwired". Index it; never rank from it.
-2. **`GAME_STATUS_REPORT.md` still lists Pyro** among the five armour
-   sets, and names the 20-segment rig, the 26-piece armour and the 4-class
-   system as unbuilt. All four are wrong now. It is dated 2026-08-01 and
-   reads as current.
-3. **`DESIGN_MAP.md` maps the wrong game.** `PROMPT_MASTER` §Read-first
-   sends every new session to it as "what is actually built versus
-   specified" — and every row in it is about `jk_wall`, the shieldwall
-   battle sim, not `jk_tdm`. A session following the prompt's reading
-   order gets a confident, detailed, irrelevant answer.
-4. **There are two `FRIDAY_LOG.md` files.** The root one holds three
-   entries and stops; `research/FRIDAY_LOG.md` holds the full history.
-   They do not contradict each other — they are disjoint — but a reader
-   who opens the root one gets 3 of ~20 entries and no signal that more
-   exist. The root one contains the CLIFFHOLD entry and the +25% scale
-   trap, which are not in the other.
-5. **`handback/brief-ix/REPORT.md`** is an honest snapshot of 2026-07-30
-   and a misleading document today: it says the class system, the 26-piece
-   armour and the damage states do not exist "in any form". All three
-   shipped.
-6. **The `§owner` doc-comment convention is the best archival practice in
-   this repo.** 44 chat asks in the ledger survive *only* because someone
-   wrote `§owner` next to the code. Keep doing it. The one failure mode
-   to watch: `TRV-0196` files *"put more effort in last 3 maps"* against a
-   camera beat rather than against the maps, so the ask is preserved but
-   pointed at the wrong thing.
+1. **`WHATS_MISSING.md` is still described as "the live plan" and has not
+   been touched in twenty commits** (last: `7719296`, 2026-08-10). It has
+   now gone stale for the **fifth** time and knows nothing of BRIEF XI,
+   BRIEF XII, BRIEF XII-A, the bow/spear spec, the front end, `hud.rs`,
+   `MAP_METRICS.md` or `DECISION.md`. **`OPERATION.md` still sends every
+   new session to it.**
+2. **Two commit subjects this week mark unbuilt briefs as done**
+   (`TRV-0366`). `dd4fced` — *"BRIEF XI: **finish** the Agile Mech"* —
+   adds one file and changes no code. `git log --oneline` is what every
+   new session reads and it is the cheapest status instrument in the repo.
+   **A brief being written to disk is a good thing; say "BRIEF XI: the
+   spec", not "finish".**
+3. **`BACKLOG.md` #4/#5/#9/#11 are known false** (melee depth, AI retreat,
+   the class system's blocker, the armour-weight wiring — all four
+   shipped). Index it; never rank from it.
+4. **Five documents describe a game that no longer exists**:
+   `GAME_STATUS_REPORT.md` (2026-08-01, still lists Pyro),
+   `handback/brief-ix/REPORT.md`, `DECISIONS.md` (every ADR is about
+   `jk_wall`/`jk_core`), `README.md:223-225` (the retired 8v8 cap), and
+   `briefs/README.md` (lists neither BRIEF XI, XII nor XII-A). None is
+   wrong on purpose; every one was true when written. **That is the whole
+   reason this ledger exists.**
+5. **`MAP_METRICS.md` set a new standard and the other ten `SOURCES.md`
+   should be held to it**: every row labelled MEASURED / DERIVED /
+   ASSUMED inline, the instrument's precision ceiling published, and the
+   instrument's own defect named rather than hidden. Cheap doc work for
+   anyone idle.
+6. **The `§owner` doc-comment convention is still the best archival
+   practice in this repo** — 44 chat asks survive *only* because someone
+   wrote `§owner` next to the code. One warning: the marker has
+   **collided** (`TRV-0315`). `§8/§9 (owner)` at `sim.rs:357`, `:388`,
+   `:6683`, `:21068` belongs to the 30-section gameplay spec of
+   2026-08-07; `§9/§10/§11 (owner, BOW & SPEAR)` belongs to a different
+   document. Same file, same marker, two specs. **Every `§N (owner)`
+   should name its spec.**
+7. **Writing an image down in prose before it arrives works** (`8bbb954`).
+   It converted two blocked rows into two unproven-but-workable ones. Do
+   it every time an image is mentioned and cannot be saved.
