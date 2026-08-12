@@ -5980,6 +5980,27 @@ const M4_MODEL_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(5.5) },
 ];
 
+// A dedicated AWM beat table was written here and DELETED, and the
+// reason is worth more than the table was.
+//
+// The AWM's thumbhole stock and cheek riser are the half of the rifle a
+// carbine has no equivalent for, and `M4_MODEL_BEATS`' three orbits all
+// put the torso in front of them. So two extra beats were added - a
+// rear quarter at orbit 1.75*PI, and the same with the pitch dropped -
+// on the theory that the stock is simply on a side nothing had faced.
+//
+// Both frames came back photographing the character's BACK, with the
+// weapon entirely behind him and about four pixels of receiver showing
+// at the shoulder. That is not a framing miss that a third value fixes:
+// a rifle carried AT THE SHOULDER has its butt against the torso, so in
+// third person there is no orbit that sees it, and in first person it is
+// behind the camera. The buttstock is not photographable on this carry,
+// full stop, and two beats that reliably photograph nothing are worse
+// than none - they imply a coverage the handback folder does not have.
+//
+// If the stock ever needs to be seen, the instrument is a NEW carry
+// (a low ready, or an inspect pose), not a new camera angle.
+
 /// BRIEF X: THE AGILE MECH'S PORTRAIT — four sides, then two close-ups.
 ///
 /// The existing `medic` script boards the same chassis and orbits it, and
@@ -9994,27 +10015,6 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
         }
         GunKind::Ak47 => {
             // the classic: long gas tube, big two-segment raked magazine
-            parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.06), 0.0, (0.05, 0.085, 0.38)));
-            parts.push(wp(false, Tone::Light, (0.0, 0.068, 0.0), 0.0, (0.048, 0.02, 0.22)));
-            // §owner GUN PASS: dust-cover seam, port, gas-block detail
-            push_panel_line(&mut parts, 0.040, -0.10, 0.16, 0.025);
-            push_ejection_port(&mut parts, 0.026, 0.042, 0.03, 0.080);
-            push_bolts(&mut parts, 0.024, 0.000, -0.08, 0.14, 4);
-            push_mag_detail(&mut parts, -0.145, 0.010, 0.024, 0.038);
-            parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.44), FRAC_PI_2, (0.026, 0.36, 0.026)));
-            // GAS TUBE - steel, so `Mid` not `Light`; the wood that
-            // covers its rear half is the Light part, below.
-            parts.push(wp(true, Tone::Mid, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
-            // LOWER HANDGUARD, now wood, with the finger swells cut
-            // across it the same way the carbine's rail slots are.
-            parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
-            for k in 0..3 {
-                parts.push(wp(
-                    false,
-                    Tone::Black,
-                    (0.0, -0.005, 0.255 + k as f32 * 0.045),
-                    0.0,
-                    (0.054, 0.030, 0.006),
             //
             // §owner GUN PASS (AK): the carbine got its pass first, and
             // doing this one straight after made the real problem
@@ -10038,6 +10038,27 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // structure - so the furniture goes Light and the gas tube,
             // which is steel, goes Mid to stop it merging with the
             // wood it sits under.
+            parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.06), 0.0, (0.05, 0.085, 0.38)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.068, 0.0), 0.0, (0.048, 0.02, 0.22)));
+            // §owner GUN PASS: dust-cover seam, port, gas-block detail
+            push_panel_line(&mut parts, 0.040, -0.10, 0.16, 0.025);
+            push_ejection_port(&mut parts, 0.026, 0.042, 0.03, 0.080);
+            push_bolts(&mut parts, 0.024, 0.000, -0.08, 0.14, 4);
+            push_mag_detail(&mut parts, -0.145, 0.010, 0.024, 0.038);
+            parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.44), FRAC_PI_2, (0.026, 0.36, 0.026)));
+            // GAS TUBE - steel, so `Mid` not `Light`; the wood that
+            // covers its rear half is the Light part, below.
+            parts.push(wp(true, Tone::Mid, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
+            // LOWER HANDGUARD, now wood, with the finger swells cut
+            // across it the same way the carbine's rail slots are.
+            parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
+            for k in 0..3 {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (0.0, -0.005, 0.255 + k as f32 * 0.045),
+                    0.0,
+                    (0.054, 0.030, 0.006),
                 ));
             }
             // UPPER HANDGUARD: the wood over the BACK half of the gas
@@ -10215,33 +10236,130 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
         GunKind::Awm => {
             // the AWM: long barrel, big scope block, solid cheek stock
             parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.05), 0.0, (0.045, 0.08, 0.46)));
-            // §owner GUN PASS: the tube's bands, the pump, the loading gate
+            // §owner GUN PASS: the chassis bands under the action, the
+            // receiver seam, the loading cut, and the forend's grip
+            // slots. (This comment read "the tube's bands, the pump,
+            // the loading gate" - a verbatim copy of the SHOTGUN's,
+            // three arms up. The AWM has no pump and no tube.)
             for k in 0..4 {
                 parts.push(wp(true, Tone::Black, (0.0, -0.035, -0.05 + k as f32 * 0.115), FRAC_PI_2, (0.040, 0.014, 0.040)));
             }
             push_panel_line(&mut parts, 0.030, -0.14, 0.10, 0.024);
-            parts.push(wp(false, Tone::Black, (0.024, 0.005, -0.02), 0.0, (0.006, 0.026, 0.075)));
+            // The loading/ejection cut, moved to NEGATIVE x. A
+            // bolt-action ejects out of the same side its handle is
+            // on, and this file's own note (below) establishes that
+            // negative model x is the screen RIGHT the handle belongs
+            // to - so the port was cut down the opposite flank from
+            // the bolt that works it.
+            parts.push(wp(false, Tone::Black, (-0.024, 0.005, -0.02), 0.0, (0.006, 0.026, 0.075)));
+            // The forend's grip slots, RAISED onto the surface they are
+            // supposed to be cut into. At y -0.062 they spanned
+            // -0.077..-0.047 and the receiver's underside is -0.030, so
+            // five slots were hanging 1.7 cm below the only part they
+            // could belong to - the side capture reads them as a row of
+            // loose tabs under the barrel. At -0.030 they straddle the
+            // underside and read as cuts.
             for k in 0..5 {
-                parts.push(wp(false, Tone::Black, (0.0, -0.062, 0.10 + k as f32 * 0.020), 0.0, (0.050, 0.030, 0.006)));
+                parts.push(wp(false, Tone::Black, (0.0, -0.030, 0.10 + k as f32 * 0.020), 0.0, (0.050, 0.030, 0.006)));
             }
+            // THE BARREL: 55 cm long on a 2.4 cm gauge, against the
+            // AK's 36 on 2.6 - longer and thinner is the whole read.
             parts.push(wp(true, Tone::Mid, (0.0, 0.03, 0.55), FRAC_PI_2, (0.024, 0.55, 0.024)));
-            push_muzzle(&mut parts, 0.03, 0.85, 0.036);
+            // FLUTES. A heavy magnum barrel is fluted, and two dark
+            // grooves down its flanks are what stop 55 cm of unbroken
+            // cylinder reading as a length of pipe.
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Black, (sx * 0.011, 0.030, 0.560), 0.0, (0.004, 0.014, 0.400)));
+            }
+            // OVERSIZED BRAKE. A magnum brake was 0.036 half-wide - the
+            // SMALLEST of the three rifles (AK 0.038, M4 0.040) on the
+            // gun with by far the biggest round, and only 1.5x the
+            // barrel's own radius. 0.050 makes it read as bolted ON to
+            // the barrel rather than as the barrel's last centimetre.
+            push_muzzle(&mut parts, 0.03, 0.85, 0.050);
             parts.push(wp(true, Tone::Dark, (0.0, 0.10, 0.08), FRAC_PI_2, (0.055, 0.20, 0.055)));
-            parts.push(wp(true, Tone::Black, (0.0, 0.10, 0.185), FRAC_PI_2, (0.045, 0.012, 0.045)));
-            parts.push(wp(false, Tone::Light, (0.0, -0.02, -0.22), 0.0, (0.045, 0.11, 0.30)));
+            // THE OBJECTIVE END. This was a bare 0.045 disc capping a
+            // 0.055 tube - a stub NARROWER than the tube it ends, which
+            // is the one shape a scope's front never is. It becomes the
+            // bell it should have been, with the glass inside it.
+            parts.push(wp(true, Tone::Dark, (0.0, 0.10, 0.196), FRAC_PI_2, (0.070, 0.042, 0.070)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.10, 0.218), FRAC_PI_2, (0.058, 0.010, 0.058)));
+            // and the OCULAR end, which did not exist at all: the tube
+            // simply stopped at z -0.02 with an open face toward the
+            // eye. A scope you cannot find the eyepiece of does not
+            // read as magnified, it reads as a pipe.
+            parts.push(wp(true, Tone::Dark, (0.0, 0.10, -0.044), FRAC_PI_2, (0.064, 0.048, 0.064)));
+            parts.push(wp(true, Tone::Black, (0.0, 0.10, -0.070), FRAC_PI_2, (0.052, 0.010, 0.052)));
+            // THE THUMBHOLE STOCK, as an outline with a real gap in it.
+            //
+            // It was a solid Light block 0.045 x 0.11 x 0.30 with a
+            // solid BLACK block buried in the middle of it, and a black
+            // box inside a pale box is not a hole - it is a stain. The
+            // one place this file already solved that problem is
+            // `push_stock`, whose own doc says a stock is "an OUTLINE
+            // of thin bars with a hole through it, never a solid
+            // block"; the AWM was the rifle that never got it.
+            //
+            // Four bars, all inside the block's former bounds so the
+            // silhouette budget can only shrink: the comb along the
+            // top, the pistol grip in front of the hole, the toe strap
+            // under it, and the solid section that carries the butt.
+            // The hole is z -0.245..-0.145 by y -0.053..-0.005, and it
+            // is daylight.
+            parts.push(wp(false, Tone::Light, (0.0, 0.015, -0.220), 0.0, (0.045, 0.040, 0.300)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.0375, -0.110), 0.0, (0.045, 0.075, 0.070)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.020, -0.3075), 0.0, (0.045, 0.110, 0.125)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.064, -0.195), 0.0, (0.045, 0.022, 0.100)));
+            // and the grip's checkering, where the firing hand actually
+            // closes - the same three grooves every other grip carries
+            push_grip_detail(&mut parts, 0.023, -0.020, -0.145, 0.0);
             // §owner GUN PASS: bolt handle, action seam, cheek riser,
             // and the thumbhole cut that makes a sniper stock read as one
             push_panel_line(&mut parts, 0.036, -0.16, 0.14, 0.023);
-            parts.push(wp(true, Tone::Mid, (0.038, 0.030, -0.02), 0.0, (0.014, 0.075, 0.014)));
-            parts.push(wp(false, Tone::Black, (0.052, 0.030, -0.055), 0.0, (0.024, 0.024, 0.024)));
+            // (The bolt handle that used to be here, at POSITIVE x, is
+            // gone - see the mirrored one further down. The §owner note
+            // below re-cut it onto negative x and left this one in
+            // place, so the rifle has been carrying TWO bolt handles,
+            // one down each flank, ever since.)
             parts.push(wp(false, Tone::Black, (0.0, 0.052, -0.20), 0.0, (0.047, 0.010, 0.16)));
-            parts.push(wp(false, Tone::Black, (0.0, -0.02, -0.20), 0.0, (0.026, 0.070, 0.070)));
             push_bolts(&mut parts, 0.023, -0.005, -0.10, 0.10, 3);
             parts.push(wp(false, Tone::Black, (0.0, -0.02, -0.375), 0.0, (0.048, 0.12, 0.02)));
-            parts.push(wp(false, Tone::Dark, (0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
-            parts.push(wp(false, Tone::Dark, (-0.045, -0.08, 0.42), 0.0, (0.012, 0.14, 0.012)));
-            parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.02), FRAC_PI_2, (0.060, 0.02, 0.060)));
-            parts.push(wd(true, Tone::Light, (0.0, 0.10, 0.14), FRAC_PI_2, (0.060, 0.02, 0.060)));
+            // THE BIPOD, folded. It was two straight vertical pins at
+            // y -0.08 spanning -0.15..-0.01, hung under a barrel whose
+            // underside is at y 0.018 - a 2.8 cm air gap with nothing
+            // crossing it, so the legs read as two rods floating below
+            // the rifle rather than as anything attached to it. And a
+            // DEPLOYED bipod on a rifle being carried at the shoulder
+            // is wrong anyway.
+            //
+            // It gets the yoke it was missing, and the legs are SHORT
+            // and STEEP rather than long and folded. That is a capture
+            // finding, not a preference: the first attempt raked them
+            // back at 1.30 rad, which `tilt` (about X only) turns into
+            // two near-horizontal bars lying under a bare barrel with
+            // nothing beside them - and the side profile showed exactly
+            // that, a pair of loose sticks in mid-air with daylight all
+            // round. A leg that hangs from the yoke it is bolted to has
+            // its root visible, and that is the whole difference.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.010, 0.42), 0.0, (0.070, 0.026, 0.045)));
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Dark, (sx * 0.030, -0.026, 0.395), 0.90, (0.012, 0.100, 0.012)));
+                // the foot, on the leg's lower end
+                parts.push(wp(false, Tone::Black, (sx * 0.030, -0.055, 0.358), 0.0, (0.018, 0.012, 0.022)));
+            }
+            // THE RINGS BECOME MOUNTS. Two things were wrong with them.
+            // They were `wd` - ADS-only - so in third person the scope
+            // had no rings at all, against the GUN PASS's own rule that
+            // the surface vocabulary is always-on because guns looked
+            // bad in BOTH views. And they were rings around the TUBE
+            // and nothing else: the scope's underside is y 0.0725, the
+            // receiver's top is y 0.050, and not one part crossed that
+            // 2.25 cm - so the sight sat in mid-air above the rifle.
+            // Each mount is now a ring plus the post it stands on.
+            for sz in [0.02_f32, 0.14] {
+                parts.push(wp(true, Tone::Light, (0.0, 0.10, sz), FRAC_PI_2, (0.062, 0.020, 0.062)));
+                parts.push(wp(false, Tone::Dark, (0.0, 0.061, sz), 0.0, (0.026, 0.030, 0.022)));
+            }
             // §owner: the parts that make a rifle read as a SNIPER rather
             // than a long tube - elevation and windage turrets, the bolt
             // you cycle between shots, a box magazine, a cheek riser, and
@@ -10258,18 +10376,39 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // whose own comment says which side it belongs on. Mirrored:
             // negative model x is screen right.
             parts.push(wp(true, Tone::Dark, (-0.052, 0.10, 0.10), FRAC_PI_2, (0.032, 0.028, 0.032)));
-            // bolt handle: a stub off the right of the receiver, angled
-            // down and back the way a turned-down bolt sits
-            parts.push(wp(true, Tone::Mid, (-0.046, 0.045, -0.05), FRAC_PI_2, (0.018, 0.075, 0.018)));
-            parts.push(wp(true, Tone::Black, (-0.082, 0.032, -0.05), FRAC_PI_2, (0.024, 0.030, 0.024)));
+            // BOLT HANDLE: a shaft out of the right flank with a ball
+            // knob on the end - the one part no other gun in this
+            // arsenal has, and the whole reason a sniper reads as a
+            // bolt-action at a glance.
+            //
+            // It was a CYLINDER, and that was the bug: `tilt` rotates
+            // about X, and a Bevy cylinder starts Y-aligned, so the
+            // only two axes a cylinder can point down here are Y and Z.
+            // A handle that comes OUT of the side needs +-X, which no
+            // tilt reaches - so the "stub off the right" was a rod
+            // lying fore-and-aft at x -0.046, with its knob 1.5 cm
+            // further out at x -0.082 and clear air in between. A box
+            // can point along X, so the shaft is a box now and the
+            // knob is on the end of it rather than beside it.
+            parts.push(wp(false, Tone::Mid, (-0.047, 0.030, -0.045), 0.0, (0.052, 0.014, 0.014)));
+            parts.push(wp(true, Tone::Black, (-0.080, 0.030, -0.045), FRAC_PI_2, (0.022, 0.020, 0.022)));
             // detachable box magazine under the action
             parts.push(wp(false, Tone::Dark, (0.0, -0.075, 0.03), 0.10, (0.038, 0.10, 0.10)));
             parts.push(wp(false, Tone::Black, (0.0, -0.128, 0.03), 0.10, (0.042, 0.012, 0.11)));
-            // raised cheek piece on the comb
-            parts.push(wp(false, Tone::Mid, (0.0, 0.055, -0.20), 0.0, (0.040, 0.030, 0.20)));
-            // slotted muzzle brake - three cuts, the sniper's own tell
-            for bz in [0.885_f32, 0.905, 0.925] {
-                parts.push(wp(false, Tone::Black, (0.0, 0.052, bz), 0.0, (0.050, 0.008, 0.006)));
+            // raised cheek piece, SEATED on the comb: at y 0.055 its
+            // underside was 0.040 and the comb's top is 0.035, so the
+            // riser was floating 5 mm clear of the stock it rests on.
+            parts.push(wp(false, Tone::Mid, (0.0, 0.050, -0.20), 0.0, (0.040, 0.030, 0.20)));
+            // The brake's CUTS. They were at z 0.885 / 0.905 / 0.925,
+            // and `push_muzzle` puts the brake body at z +-0.035 of
+            // 0.85 - so it ends at 0.885 and two of the three "cuts"
+            // were floating in clear air past the muzzle, in front of a
+            // gun that has nothing else out there. Same class of defect
+            // as the M4's front post hanging off its base. Re-seated
+            // inside the body (0.815..0.885) and turned into cuts that
+            // go THROUGH it rather than sitting on the roof.
+            for bz in [0.828_f32, 0.850, 0.872] {
+                parts.push(wp(false, Tone::Black, (0.0, 0.030, bz), 0.0, (0.056, 0.036, 0.007)));
             }
         }
         GunKind::M249 => {
