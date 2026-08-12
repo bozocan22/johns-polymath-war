@@ -10047,16 +10047,19 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // eye.
             parts.push(wp(false, Tone::Dark, (0.0, 0.030, 0.410), 0.0, (0.030, 0.040, 0.030)));
             parts.push(wp(false, Tone::Black, (0.0, 0.098, 0.410), 0.0, (0.008, 0.032, 0.010)));
-            parts.push(wp(false, Tone::Dark, (0.0, 0.090, -0.050), 0.0, (0.026, 0.016, 0.030)));
-            for sx in [-1.0_f32, 1.0] {
-                parts.push(wp(
-                    false,
-                    Tone::Black,
-                    (sx * 0.009, 0.104, -0.050),
-                    0.0,
-                    (0.008, 0.024, 0.012),
-                ));
-            }
+            // The rear sight is FOLDED, and that is a capture finding
+            // rather than a style choice: a standing notch was built
+            // first, two black uprights either side of the sight line at
+            // y 0.104, and the ADS frame showed them blacking out both
+            // halves of the optic's window - they sit between the EYE
+            // and the glass, so the thing you aim with covered what you
+            // were aiming at. There is no height that fixes it either:
+            // the window's lower edge is 0.0865 and the rail is 0.084,
+            // so a notch tall enough to see is a notch inside the
+            // window. A backup iron folded down under an optic is what
+            // the reference carbine actually carries anyway.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.087, -0.050), 0.0, (0.026, 0.008, 0.032)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.089, -0.066), 0.0, (0.022, 0.006, 0.008)));
             push_red_dot(&mut parts, 0.1120, 0.0, 0.084); // rail top 0.084
         }
         GunKind::Awm => {
