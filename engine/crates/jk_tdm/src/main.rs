@@ -4075,6 +4075,22 @@ struct ModelKit {
     cube: Handle<Mesh>,
     cyl: Handle<Mesh>, // unit cylinder: radius 0.5, height 1, axis Y
     ball: Handle<Mesh>, // unit sphere: radius 0.5
+    /// §owner RED DOT: the optic's TUBE RING, axis Y, overall radius 0.5.
+    ///
+    /// A purpose-proportioned mesh rather than a generic torus, and that
+    /// is deliberate: a ring has two radii, so a generic one would need
+    /// a non-uniform scale to reach the optic's proportions and a
+    /// non-uniform scale on a torus shears it into an oval. Baked at the
+    /// optic's own major:minor ratio it takes a UNIFORM scale, and the
+    /// one scale factor is the ring's overall diameter.
+    ///
+    /// It exists because the tube cannot be built from the box-and-
+    /// cylinder kit at all. A solid cylinder is a solid disc to aim
+    /// through, and an octagon of boxes is not constructible: `WPart`'s
+    /// `tilt` rotates about X only, so no box in this vocabulary can sit
+    /// on a 45 degree diagonal. That was tried first and photographed as
+    /// four bars with four detached dots floating at the corners.
+    optic_ring: Handle<Mesh>,
     gunmetal: Handle<StandardMaterial>,
     steel: Handle<StandardMaterial>,
     wood: Handle<StandardMaterial>,
@@ -4367,6 +4383,14 @@ impl ModelKit {
 /// (the bow stands along +Y with its string toward −Z).
 struct WPart {
     cyl: bool,
+    /// true → the optic's TUBE RING mesh instead of a box or a cylinder.
+    ///
+    /// A third flag rather than a `Prim` enum on purpose: `cyl: bool` is
+    /// threaded through a couple of hundred `wp()` calls and the spear
+    /// profile, and widening it to an enum would be a rename touching
+    /// every weapon in the file to add one mesh used in one place.
+    /// `ring` takes its size as the ring's overall DIAMETER, uniformly.
+    ring: bool,
     tone: Tone,
     pos: Vec3,
     /// radians about X - magazines and stocks are raked, never square
@@ -4411,7 +4435,14 @@ fn wp(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f
         size: Vec3::new(size.0, size.1, size.2),
         detail: false,
         spin: false,
+        ring: false,
     }
+}
+
+/// The optic's tube ring. `d` is the ring's OVERALL diameter and the
+/// scale is uniform, which is what keeps it circular.
+fn wo(tone: Tone, pos: (f32, f32, f32), tilt: f32, d: f32) -> WPart {
+    WPart { ring: true, ..wp(false, tone, pos, tilt, (d, d, d)) }
 }
 
 fn wd(cyl: bool, tone: Tone, pos: (f32, f32, f32), tilt: f32, size: (f32, f32, f32)) -> WPart {
@@ -4891,6 +4922,16 @@ const OPTIC_DOT_M: f32 = 0.0062;
 /// every firearm's screen profile (`weapon_bounded_corners` measures
 /// it), so a tall turret would spend the whole remaining headroom of
 /// eight guns on decoration.
+/// The tube RING: centreline radius, wall radius, and the two summed.
+///
+/// The centreline is placed so the ring's inner face is exactly
+/// `OPTIC_HALF` - the clear aperture is preserved to the millimetre -
+/// and its outer face is exactly where the old flat frame's outer face
+/// was, so the eight guns' screen profiles measure the same reach they
+/// always did.
+const OPTIC_RING_MAJOR: f32 = OPTIC_HALF + OPTIC_FRAME * 0.5;
+const OPTIC_RING_MINOR: f32 = OPTIC_FRAME * 0.5;
+const OPTIC_RING_OUTER: f32 = OPTIC_RING_MAJOR + OPTIC_RING_MINOR;
 const OPTIC_TURRET_D: f32 = 0.010;
 const OPTIC_TURRET_H: f32 = 0.004;
 /// The mount FOOT - the flat clamp plate that sits on the rail, wider
@@ -4923,13 +4964,7 @@ const RETICLE_DRIFT_M: f32 = 0.0075;
 /// The cross is 1x - it moves the AIM POINT nowhere. It is a sight
 /// picture, not a zoom: magnification stays whatever `zoom_deg` says.
 fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
-    // `outer` is the ring's CENTRELINE radius, and the whole housing is
-    // built on it: bars sit at it, corner rounds are centred on it, so
-    // every point of the ring is `outer +/- OPTIC_FRAME/2` from centre.
-    // That keeps the outermost reach identical to the flat frame this
-    // replaced - which matters, because eight guns' screen profiles are
-    // measured off this geometry.
-    let outer = OPTIC_HALF + OPTIC_FRAME * 0.5;
+    let outer = OPTIC_RING_MAJOR;
     // The check the flat frame carried compared `y - outer` - the lower
     // BAR'S CENTRELINE - against the receiver, so it was quietly
     // permitting half a bar of overlap. The real lower face is half a
@@ -4950,36 +4985,35 @@ fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
     );
     // ---- THE TUBE ----------------------------------------------------
     //
-    // §owner "more realistic": a reflex optic is a round TUBE with a
-    // coated lens, not the flat open square this was. It cannot be an
-    // actual cylinder - a solid cylinder is a solid disc to look at, and
-    // this is a sight you aim through - so the tube is an OCTAGONAL
-    // RING: four straight walls with four cylindrical corner rounds
-    // filling the diagonals. From the shooter's eye that silhouette
-    // reads round; the window through it stays fully open.
+    // §owner "more realistic": a reflex optic is a round TUBE you look
+    // through a coated lens of, not the flat open square this was.
     //
-    // The corners must be cylinders and the walls must be boxes because
-    // `tilt` rotates about X only: there is no way to place a box on a
-    // 45 degree diagonal in this kit, and a Bevy cylinder tilted a
-    // quarter turn is exactly the Z-aligned rod a corner needs.
-    const DIAG: f32 = std::f32::consts::FRAC_1_SQRT_2;
-    let corner = outer * DIAG; // centre of each corner round
-    let wall = corner * 2.0; // straight run between two corners
-    for (x, yy, sx, sy) in [
-        (-outer, 0.0, OPTIC_FRAME, wall),
-        (outer, 0.0, OPTIC_FRAME, wall),
-        (0.0, outer, wall, OPTIC_FRAME),
-        (0.0, -outer, wall, OPTIC_FRAME),
-    ] {
-        parts.push(wp(false, Tone::Black, (x, y + yy, z), 0.0, (sx, sy, OPTIC_DEPTH)));
-    }
-    for (sx, sy) in [(-1.0_f32, -1.0_f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
-        parts.push(wp(
-            true,
+    // Two RINGS - an objective bezel at the muzzle end and an ocular
+    // bezel at the eye end - joined by four flush struts. That is a
+    // skeletal tube rather than a shell, and it has to be: the shell of
+    // a real tube is opaque, and an opaque shell in a 1x sight is a
+    // sight you cannot aim through. The rings carry the whole read.
+    // Front-on you see one circle; from the side, two circles and the
+    // struts between them, which is a tube.
+    //
+    // The struts sit at the four cardinal points with exactly the wall's
+    // own square section, so each one hides inside its ring's silhouette
+    // instead of breaking the circle.
+    for zz in [-1.0_f32, 1.0] {
+        parts.push(wo(
             Tone::Black,
-            (corner * sx, y + corner * sy, z),
+            (0.0, y, z + zz * OPTIC_DEPTH * 0.45),
             FRAC_PI_2,
-            (OPTIC_FRAME, OPTIC_DEPTH, OPTIC_FRAME),
+            OPTIC_RING_OUTER * 2.0,
+        ));
+    }
+    for (x, yy) in [(-outer, 0.0), (outer, 0.0), (0.0, outer), (0.0, -outer)] {
+        parts.push(wp(
+            false,
+            Tone::Black,
+            (x, y + yy, z),
+            0.0,
+            (OPTIC_FRAME, OPTIC_FRAME, OPTIC_DEPTH),
         ));
     }
     // ---- THE LENS ----------------------------------------------------
@@ -10794,7 +10828,13 @@ fn spawn_weapon_model(
         if p.detail && !with_detail {
             continue; // bots carry the plain silhouette - the LOD working
         }
-        let mesh = if p.cyl { kit.cyl.clone() } else { kit.cube.clone() };
+        let mesh = if p.ring {
+            kit.optic_ring.clone()
+        } else if p.cyl {
+            kit.cyl.clone()
+        } else {
+            kit.cube.clone()
+        };
         let mut e = commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(kit.tone(p.tone)),
@@ -16087,6 +16127,13 @@ fn setup(
     let kit = ModelKit {
         cube: meshes.add(with_tangents(Cuboid::new(1.0, 1.0, 1.0).into())),
         cyl: meshes.add(with_tangents(Cylinder::new(0.5, 1.0).into())),
+        optic_ring: meshes.add(with_tangents(
+            Torus {
+                minor_radius: 0.5 * OPTIC_RING_MINOR / OPTIC_RING_OUTER,
+                major_radius: 0.5 * OPTIC_RING_MAJOR / OPTIC_RING_OUTER,
+            }
+            .into(),
+        )),
         ball: meshes.add(with_tangents(Sphere::new(0.5).mesh().uv(24, 12))),
         grey_light: materials.add(tex_metal(Color::srgb_u8(0xC8, 0xC9, 0xCB), 0.05, 0.60, 3.0)),
         grey_mid: materials.add(tex_metal(Color::srgb_u8(0x8A, 0x8C, 0x8F), 0.05, 0.60, 3.0)),
@@ -16635,7 +16682,10 @@ fn setup(
             // a cool blue-violet coating sheen at 14% - enough to catch
             // the eye as GLASS at the edges, not enough to colour the
             // world seen through it.
-            base_color: Color::srgba(0.42, 0.60, 0.95, 0.14),
+            // 9%, down from the 14% first tried: at 14% the disc
+            // photographed as a solid blue puck filling the window
+            // rather than as a sheen on glass. See the sights_a frames.
+            base_color: Color::srgba(0.46, 0.62, 0.95, 0.09),
             unlit: true,
             alpha_mode: AlphaMode::Blend,
             double_sided: true,

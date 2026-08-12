@@ -1038,18 +1038,26 @@ mod band_tests {
         // aperture by construction, yet clear in NEITHER axis alone.
         //
         // Each primitive is measured as the primitive it is. A box
-        // contributes the nearest point of its footprint; a cylinder
-        // contributes its axis distance minus its radius, because a
-        // corner round's AABB is meaningfully fatter than the round
-        // itself and bounding it by that box would reject geometry
-        // that never enters the window.
-        let mut saw_round = false;
+        // contributes the nearest point of its footprint; a RING
+        // contributes its own inner bore, because bounding a ring by
+        // its box would say the tube fills the very window it opens.
+        let mut rings = 0;
         for b in parts.iter().filter(|p| p.tone == Tone::Black) {
             let (cx, cy) = (b.pos.x, b.pos.y - 0.10);
-            let near = if b.cyl {
-                saw_round = true;
-                // a Z-aligned round: radius is half its X extent
-                (cx * cx + cy * cy).sqrt() - b.size.x * 0.5
+            let near = if b.ring {
+                rings += 1;
+                assert!(
+                    (b.size.x - b.size.y).abs() < 1e-6
+                        && (b.size.x - b.size.z).abs() < 1e-6,
+                    "the ring's scale must be uniform or it is an oval, not a tube"
+                );
+                assert!(
+                    cx.abs() < 1e-6 && cy.abs() < 1e-6,
+                    "a bezel off the sight axis would crop the window from one side"
+                );
+                // overall diameter back to the bore it leaves open
+                b.size.x * 0.5 * (OPTIC_RING_MAJOR - OPTIC_RING_MINOR)
+                    / OPTIC_RING_OUTER
             } else {
                 let dx = (cx.abs() - b.size.x * 0.5).max(0.0);
                 let dy = (cy.abs() - b.size.y * 0.5).max(0.0);
@@ -1060,10 +1068,11 @@ mod band_tests {
                 "the tube intrudes into the clear window: {near} vs the {OPTIC_HALF} aperture"
             );
         }
-        // and the tube really is a ROUND one - four straight walls with
-        // the diagonals filled. Without this the check above is happy
-        // with the flat square frame it replaced.
-        assert!(saw_round, "the optic body must be a tube, not a flat frame");
+        // and the body really is a TUBE: two bezels, so it has depth and
+        // reads round from the side as well as down the bore. Without
+        // this the check above is perfectly happy with the flat square
+        // frame this replaced.
+        assert_eq!(rings, 2, "the optic body is two bezels joined into a tube");
         // the objective LENS: present, translucent, and filling the
         // window rather than blocking it.
         let glass: Vec<&WPart> = parts.iter().filter(|p| p.tone == Tone::Glass).collect();
