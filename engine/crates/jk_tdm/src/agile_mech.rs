@@ -482,6 +482,56 @@ pub fn spawn_agile_chassis(
         part(cyl(), lv.steel.clone(), Vec3::new(sd * MOUNT_X, 0.228, 0.048), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.088, 0.062, 0.088));
         part(cube(), lv.graphite.clone(), Vec3::new(sd * MOUNT_X, 0.160, 0.062), Quat::from_rotation_x(0.18), Vec3::new(0.092, 0.100, 0.112));
         part(cube(), lv.graphite.clone(), Vec3::new(sd * MOUNT_X, 0.098, 0.088), Quat::from_rotation_x(0.32), Vec3::new(0.082, 0.072, 0.092));
+        // =============================================================
+        // §owner THE MACHINE'S HAND. "segmented plate fingers, visible
+        // knuckle pivots, a wrist that reads as driven" - a MACHINE's
+        // hand, not a human one with armour on.
+        // =============================================================
+        //
+        // What was here stopped at the two blocks above: a wrist disc
+        // and a mitt, which is a fist-shaped lump on the end of an arm.
+        // Everything below GROWS FROM those blocks rather than replacing
+        // them - the upper one is the weapon-mount fairing (`MOUNT_X`,
+        // `MOUNT_Y`) and the plasma and the repair dish hang off it, so
+        // it is not a piece to be re-modelled casually.
+        //
+        // The vocabulary is deliberately NOT the soldier's hand:
+        //   * THREE fingers, not four. Industrial manipulators do not
+        //     have a little finger, and three plus an opposed thumb is
+        //     the shape that reads "built" at a glance.
+        //   * every joint is an EXPOSED PIN that protrudes past the
+        //     plate it drives, so the pivot is visible hardware rather
+        //     than a hidden crease.
+        //   * flat armour PLATES with a hard edge, not tapered pads.
+        //
+        // The fingers hang down and forward from a knuckle shaft that
+        // runs front-to-back, which is the axis a hand at the side of a
+        // body actually folds on.
+        let hx = sd * MOUNT_X;
+        // the knuckle SHAFT: one bar carrying all three pivots
+        part(cyl(), lv.graphite.clone(), Vec3::new(hx, 0.058, 0.096), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.034, 0.108, 0.034));
+        for fz in [0.052_f32, 0.096, 0.140] {
+            // the knuckle PIN, protruding both sides of the plate
+            part(cyl(), lv.steel.clone(), Vec3::new(hx, 0.058, fz), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.017, 0.092, 0.017));
+            // proximal plate
+            part(cube(), lv.armor.clone(), Vec3::new(hx, 0.020, fz + 0.010), Quat::from_rotation_x(0.26), Vec3::new(0.068, 0.076, 0.036));
+            // the second pivot, same hardware, one size down
+            part(cyl(), lv.steel.clone(), Vec3::new(hx, -0.018, fz + 0.020), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.014, 0.078, 0.014));
+            // distal plate, folded further in - a machine's finger
+            // closes in flat facets, not a curve
+            part(cube(), lv.plate.clone(), Vec3::new(hx, -0.044, fz + 0.032), Quat::from_rotation_x(0.55), Vec3::new(0.058, 0.058, 0.030));
+        }
+        // THE OPPOSED THUMB, inboard, on an axis across the palm - the
+        // one digit that faces the other three, which is what makes a
+        // manipulator read as a hand rather than as a fork.
+        part(cyl(), lv.steel.clone(), Vec3::new(hx - sd * 0.044, 0.075, 0.060), Quat::from_rotation_x(FRAC_PI_2), Vec3::new(0.016, 0.062, 0.016));
+        part(cube(), lv.armor.clone(), Vec3::new(hx - sd * 0.062, 0.040, 0.072), Quat::from_rotation_z(sd * 0.50), Vec3::new(0.038, 0.072, 0.058));
+        part(cube(), lv.plate.clone(), Vec3::new(hx - sd * 0.058, -0.006, 0.092), Quat::from_rotation_z(sd * 0.28) * Quat::from_rotation_x(0.30), Vec3::new(0.032, 0.058, 0.046));
+        // THE WRIST, DRIVEN: a collar band around the axle and a short
+        // actuator rod running back into the forearm. The disc above was
+        // an axle with nothing turning it.
+        part(cyl(), lv.graphite.clone(), Vec3::new(hx, 0.228, 0.048), Quat::from_rotation_z(FRAC_PI_2), Vec3::new(0.070, 0.086, 0.070));
+        part(cube(), lv.steel.clone(), Vec3::new(hx - sd * 0.036, 0.262, 0.012), Quat::from_rotation_x(0.12), Vec3::new(0.022, 0.098, 0.022));
     }
 
     // =================================================================

@@ -6956,7 +6956,11 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "shield_fp" => SHIELD_FP_BEATS,
         "grenade_hold" => GRENADE_HOLD_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
-        "m4_model" => M4_MODEL_BEATS,
+        // The AK reuses the carbine's beats verbatim. They are not
+        // M4-specific - they are "a rifle, from both flanks, then a
+        // front quarter, then hip-held" - and a second copy of the same
+        // six numbers would be a second thing to keep in step.
+        "m4_model" | "ak_model" | "awm_model" => M4_MODEL_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
         "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
@@ -6996,7 +7000,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 42] = [
+const CAPTURE_SCRIPTS: [&str; 44] = [
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7058,6 +7062,16 @@ const CAPTURE_SCRIPTS: [&str; 42] = [
     "sights_c",
     // §owner GUN PASS: the carbine's own side profile - see M4_MODEL_BEATS
     "m4_model",
+    // §owner GUN PASS: the same side profile for the AK - see the
+    // `ak_model` loadout arm. Without it the rifle is only ever framed
+    // down the barrel by `sights_c`, which is the one angle its
+    // magazine, gas tube and selector are all edge-on in.
+    "ak_model",
+    // §owner GUN PASS: the sniper's side profile. `muzzle_flash` is the
+    // only script that carries an AWM at all and it frames the BARREL
+    // TIP - so the bolt handle, the scope, the bipod and the thumbhole
+    // stock have never been in a single frame this machine has taken.
+    "awm_model",
     "arrow_flight",
     "spear_flight",
     "class_line",
@@ -7193,6 +7207,14 @@ fn capture_quick_deploy(
         // press a digit to reach it
         Some("m4_model") => {
             sel.loadout = [GunKind::M4, GunKind::Glock, GunKind::Mp5];
+        }
+        // the same, with the rifle in the primary slot
+        Some("ak_model") => {
+            sel.loadout = [GunKind::Ak47, GunKind::Glock, GunKind::Mp5];
+        }
+        // and the sniper, likewise in the primary slot
+        Some("awm_model") => {
+            sel.loadout = [GunKind::Awm, GunKind::Glock, GunKind::Mp5];
         }
         // the ONLY script that leaves Arena. `capture_quick_deploy` runs
         // before `start_match` reads `Selected`, so setting the map here
