@@ -57,7 +57,7 @@
 
 use bevy::prelude::*;
 
-use crate::frontend::{palette, T_MICRO};
+use crate::frontend::palette;
 use crate::{sim, Game, GameState, GunKind, HudRoot, ThrowKind, HUD_ANCHORS};
 
 // ---- geometry -------------------------------------------------------------
@@ -74,10 +74,31 @@ const ICON: f32 = 34.0;
 /// work.
 const ICON_LG: f32 = 34.0;
 /// A secondary item's icon.
-const ICON_SM: f32 = 20.0;
+const ICON_SM: f32 = 22.0;
 
-const CELL_LG_W: f32 = 44.0;
-const CELL_SM_W: f32 = 28.0;
+const CELL_LG_W: f32 = 54.0;
+/// Wide enough for the WIDEST count a secondary cell can print.
+///
+/// This was 28, and the capture caught it: `count_text` returns strings
+/// like `17/68` and `READY`, `TextLayout::new_with_no_wrap()` refuses to
+/// break them, and a centred 34px string in a 28px box overflows BOTH
+/// sides into its neighbours. The result was a single illegible run
+/// reading `17/68 5/10 READY x1` straight through the icons above it.
+/// This is why the strip gets photographed rather than reasoned about.
+///
+/// 38 was the first fix and it was still too narrow — the guard-rail
+/// test below caught what the capture could not, because the loadout in
+/// the capture happened not to contain the widest case. An M249 holds a
+/// 100 round belt, so `100/200` is SEVEN characters (~39px), not the
+/// five that `17/68` suggested. That is the whole argument for having
+/// the estimate test as well as the screenshot: the frame only proves
+/// the loadout it photographed.
+const CELL_SM_W: f32 = 44.0;
+
+/// The count line. Smaller than `frontend::T_MICRO` (11) because eight of these
+/// sit in a row and they are the least important text on the screen —
+/// the numbers that matter are the 76px pair directly below.
+const T_COUNT: f32 = 9.0;
 /// Row height, sized off the large cell plus its count line.
 const ROW_H: f32 = ICON_LG + 16.0;
 
@@ -342,6 +363,16 @@ fn strip_order(inv: &[GunKind; 3], is_selected: impl Fn(Item) -> bool) -> Vec<It
 /// The index of the large "active" cell: the last one.
 const ACTIVE_SLOT: usize = CELLS - 1;
 
+/// The strip's plate, a strengthened `hud.rs::scrim()`.
+///
+/// Expressed as a multiple of the shared value rather than as a fresh
+/// literal: retuning the human HUD's scrim still moves this with it,
+/// which is the whole reason the strip borrows it at all.
+fn strip_plate() -> Color {
+    let s = crate::hud::scrim();
+    s.with_alpha((s.alpha() * 1.85).min(1.0))
+}
+
 /// The key that selects a cell.
 ///
 /// `main.rs` binds Digit1/2/3 to the three gun slots, Digit4 to the
@@ -530,11 +561,16 @@ fn spawn_strip(mut commands: Commands) {
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 ..default()
             },
-            // The reference's dark translucent rounded panel. This is
-            // `hud.rs::scrim()` itself, not a copy of its numbers — the
-            // strip and the ammo cluster below it are one visual group
-            // and must not drift apart when that value is retuned.
-            BackgroundColor(crate::hud::scrim()),
+            // The reference's dark translucent rounded panel.
+            //
+            // DERIVED from `hud.rs::scrim()` rather than equal to it, so
+            // the two still move together if that value is retuned. The
+            // strip needs more backing than the numerals do and the
+            // capture is why: `scrim()` is tuned for 76px white glyphs,
+            // which carry themselves over pale sand. These icons are
+            // 2-3px line-art strokes at INK_SOFT, and at 0.30 alpha over
+            // a bright desert floor they washed out to faint smudges.
+            BackgroundColor(strip_plate()),
             BorderRadius::all(Val::Px(6.0)),
             // Starts hidden for the same reason the XII root does: the
             // initial state is Title and `hud_visibility` only fires on
@@ -621,7 +657,7 @@ fn spawn_cell(b: &mut ChildBuilder, index: usize) {
         c.spawn((
             Text::new(""),
             TextFont {
-                font_size: T_MICRO,
+                font_size: T_COUNT,
                 ..default()
             },
             TextColor(palette::INK_SOFT),
@@ -931,7 +967,7 @@ fn paint_strip(
     // scrim stayed at full strength around dimmed icons, which is the
     // desync in miniature.
     for mut bg in q.p7().iter_mut() {
-        *bg = BackgroundColor(dim(crate::hud::scrim()));
+        *bg = BackgroundColor(dim(strip_plate()));
     }
 }
 
@@ -1187,6 +1223,43 @@ mod tests {
         assert!(cell_px(ACTIVE_SLOT) > cell_px(0));
         for s in 0..ACTIVE_SLOT {
             assert_eq!(icon_px(s), ICON_SM, "slot {s} should be a secondary");
+        }
+    }
+
+    /// THE OVERFLOW BUG, caught by looking at a capture.
+    ///
+    /// `TextLayout::new_with_no_wrap()` will not break these strings, so
+    /// a count wider than its cell overflows both sides and runs
+    /// straight through its neighbours. At `CELL_SM_W = 28` the frame
+    /// read `17/68 5/10 READY x1` as one illegible line.
+    ///
+    /// The glyph metric is an ESTIMATE, deliberately generous: this is a
+    /// guard rail against a future `count_text` arm returning something
+    /// long (`"RELOADING"`), not a substitute for the capture.
+    #[test]
+    fn every_count_a_cell_can_print_fits_inside_that_cell() {
+        // The bundled font is monospace; ~0.62 em per glyph is a safe
+        // upper bound for it at these sizes.
+        let width = |s: &str| s.chars().count() as f32 * T_COUNT * 0.62;
+
+        let mut samples: Vec<String> = Vec::new();
+        for k in [GunKind::M4, GunKind::Awm, GunKind::Fists, GunKind::M249] {
+            // the widest a mag/reserve pair gets in this build
+            samples.push(count_text(Item::Gun(0, k), 200, 999, 0, false, false));
+        }
+        samples.push(count_text(Item::Shield, 0, 0, 0, false, false));
+        samples.push(count_text(Item::Shield, 0, 0, 0, true, false));
+        for k in ThrowKind::ALL {
+            samples.push(count_text(Item::Throw(k), 0, 0, 9, false, false));
+        }
+
+        for s in samples {
+            assert!(
+                width(&s) <= CELL_SM_W,
+                "count {s:?} is ~{:.0}px wide and will overflow a {CELL_SM_W}px cell \
+                 into its neighbours - no_wrap does not clip",
+                width(&s)
+            );
         }
     }
 
