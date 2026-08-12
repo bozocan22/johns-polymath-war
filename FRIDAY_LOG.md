@@ -309,3 +309,82 @@ ignored** after. Four are mine; the other delta is the concurrent
 `main.rs` session's.
 
 — **FRIDAY22**
+
+---
+
+## 2026-08-12 — BRIEF XIII §1: Battlefield and Cliffhold are gone
+
+Owner: *"completely remove Battlefield and Cliffhold from the game... they
+must not appear in any menu, map selector, customization screen, game-mode
+selection, rotation, matchmaking list, or other UI."*
+
+**One commit across three files, on purpose.** `sim.rs`, `main.rs` and
+`map_look.rs` (`e3dff4b`). Deleting the `MapKind` variants without the
+match arms breaks the build for every concurrent lane, so this crossed my
+normal lane by design and had to land atomically. It nearly did not: my
+first `git commit --only` took two of the three files and left `HEAD`
+referencing a variant that no longer existed. Amended within the minute.
+**`--only` is not the tool for an atomic multi-file commit** — stage the
+paths, then commit with no path arguments.
+
+**What went.** Two enum variants, their `name()` arms, `MapKind::ALL`
+5 → 3, both layout blocks, `build_cliffhold` and its ten `CH_*`
+constants, both map-specific loot re-sitings, the Battlefield's palette,
+and the menu's PvP-rotation filter. Source-wide grep afterwards: 32
+occurrences left, **all prose, zero identifiers, zero user-facing
+strings.**
+
+**Extraction moved to Gardens** and I own that call. It was pinned to the
+Battlefield because a horde mode wants an adventure map; Gardens is the
+only survivor that can be one, and BRIEF XIII §2 rebuilds it at the scale
+the mode was tuned for. The Battlefield's Extraction loot layout died with
+it, so Extraction now runs on Gardens' default 40 m pickup lanes — right
+today, and the first thing to revisit when §2 enlarges the map.
+
+**Six tests died and I am not going to pretend otherwise.** The keep you
+walk into, every altitude band reachable on foot, eighteen flights each
+walkable, a bot routing onto a stair, bots reaching an 18 m plateau, and
+the infill keep-out list. Nothing left in the game can carry those claims.
+**The `NoInfill` mechanism is now unexercised AND unreachable** — the
+`blocked` closure returns false for every point on every map — and there
+is a tombstone comment at the site saying so.
+
+**Three survived, re-pointed at all three maps, all mutation-proven.**
+Spawn rows holding a chassis; the route planner's ground and the body's
+ground being the same ground; and a new
+`a_stair_riser_stays_under_both_the_step_up_and_the_bot_whisker`, the
+salvaged relationship half of the flights-are-not-walls test.
+
+**I weakened one assertion and I am flagging it rather than burying it.**
+The spawn test demanded a clear 6 m walk along the spawn *facing*. That
+held on a 600 m map with authored-empty spawn plains; on Gardens it fails
+against ordinary infill 5.8 m out — and a crate in front of you is not a
+stranding. It now asserts ≥6 of 16 headings are walkable by a chassis.
+Because that is weaker it carries an **instrument check**: the same finder
+on a closed ring of boxes must report zero exits, then must find the gap
+when one box is lifted out. The instrument caught its own first fixture
+being wrong, which is the only reason I trust it.
+
+**Least sure about:** the `MAP` menu-row relabel. The gutter label was the
+literal string `"BATTLEFIELD"` sitting directly above the map pills, which
+after this change reads as a leftover selector entry — exactly what §1
+forbids. It is a shorter string in a fixed-width `ROW_LABEL_W` gutter so
+layout cannot move, but **I did not capture it.** If the owner wants the
+row heading to stay, it is a one-word revert.
+
+**Hazard I did not touch and someone should.** Mid-task this working tree
+showed `cockpit.rs` and `inventory_strip.rs` as ~500 lines of *deletions*
+against `HEAD` — i.e. the working copy is older than the commits that
+added them. I staged explicit paths and left them strictly alone, but that
+is the stale-working-copy failure and it is live right now.
+
+`cargo test --release -p jk_tdm` — 566 before, **564 passed, 0 failed, 2
+ignored** after. That total is contaminated: three other lanes landed work
+in this tree while I worked. The clean measurement is the `sim.rs` test
+roster, which nothing else touched: **250 → 244, −6, by name.**
+
+**Not built:** Gardens gains none of the scale or verticality it now has
+to carry. The altitude ladder is preserved in
+`research/maps/VERTICAL_BANDS.md`, not in code.
+
+— **FRIDAY22**
