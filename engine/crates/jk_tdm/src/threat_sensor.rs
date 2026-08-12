@@ -135,6 +135,58 @@ pub(crate) const ALPHA_MAX: f32 = 0.95;
 /// caps a match at 16.
 pub(crate) const MAX_TRACKS: usize = 16;
 
+// --- §3A: the CLEAR SHOT arc -----------------------------------------
+//
+// In a still, `Aiming` and `ClearShot` were near-indistinguishable: both
+// light three pips and differ only by head size, alpha and pulse RATE —
+// and a pulse rate is invisible in a photograph. The owner's fix is a
+// curved arc segment drawn on the ring behind the marker, for
+// `ClearShot` and nothing else. It is a shape that is either there or
+// not, which is the only kind of difference a single frame can carry.
+
+/// Angular width of the arc, degrees, centred on the marker's bearing.
+pub(crate) const ARC_SPAN_DEG: f32 = 34.0;
+/// How many blocks the arc is drawn from. A UI `Node` cannot be rotated
+/// without a `Transform` fight (the same reason the pips are a march of
+/// positions, not one glyph), so the curve is stepped. Enough segments
+/// that consecutive blocks OVERLAP at the ring's radius, or the arc
+/// reads as a dotted line instead of a bar.
+pub(crate) const ARC_SEGMENTS: usize = 25;
+/// Side of one arc block, UI px.
+pub(crate) const ARC_THICK_PX: f32 = 8.0;
+/// How far INSIDE the ring the arc sits. The pips march outward from the
+/// ring, so an arc on the ring itself would be hidden under the head
+/// pip; this pushes it under and behind them.
+pub(crate) const ARC_INSET_PX: f32 = 11.0;
+/// The arc's alpha at full presence. Deliberately NOT pulsed and
+/// deliberately near the top of the scale: it is the one element that
+/// has to survive being looked at for a sixtieth of a second.
+pub(crate) const ARC_ALPHA: f32 = 0.92;
+
+// --- §3B: clustering --------------------------------------------------
+
+/// Two threats closer together than this in BEARING are one marker.
+///
+/// The owner's spec is explicit that a merged marker communicates the
+/// STRONGEST threat from that direction, not an average and not the
+/// nearest. Sized against the marker's own drawn width: the pip stack is
+/// ~16 px on a ~259 px ring radius, and the arc spans `ARC_SPAN_DEG`, so
+/// anything under roughly a dozen degrees is already drawing on top of
+/// itself. Merging is what stops that overlap reading as one smeared
+/// blob of unknown strength.
+pub(crate) const MERGE_SEPARATION_DEG: f32 = 14.0;
+
+/// The most tally dots drawn beside a merged marker. A merged marker of
+/// five enemies shows the cap, not five dots — the count is a hint, not
+/// a readout, and the owner's standing rule is "do not be intrusive".
+pub(crate) const TALLY_MAX_DOTS: usize = 3;
+/// Tally dot size, UI px. Tiny on purpose.
+pub(crate) const TALLY_DOT_PX: f32 = 4.0;
+/// How far OUTSIDE the last pip the tally row sits, UI px.
+pub(crate) const TALLY_OUTSET_PX: f32 = 10.0;
+/// Spacing between tally dots along the ring's tangent, UI px.
+pub(crate) const TALLY_SPACING_PX: f32 = 6.0;
+
 // ---------------------------------------------------------------------
 // The state machine — pure, and therefore testable without a World.
 // ---------------------------------------------------------------------
@@ -295,6 +347,143 @@ pub(crate) fn marker_alpha(fade: f32, value: f32, elapsed: f32) -> f32 {
     let wave = 0.5 + 0.5 * (elapsed * hz * std::f32::consts::TAU).sin();
     let pulse = 1.0 - PULSE_DEPTH + PULSE_DEPTH * wave;
     (fade.clamp(0.0, 1.0) * base * pulse).clamp(0.0, 1.0)
+}
+
+// ---------------------------------------------------------------------
+// §3B — CLUSTERING. Pure, allocation-free, and therefore testable
+// without a World. The merge/separate decision is the whole feature, so
+// it lives here rather than inside the painter where nothing could call
+// it.
+// ---------------------------------------------------------------------
+
+/// Signed shortest angular difference `a - b`, wrapped to (-pi, pi].
+///
+/// This wrap is load-bearing and is the obvious thing to forget: two
+/// enemies at bearings +179 deg and -179 deg are two degrees apart and
+/// must merge, but a naive subtraction calls them 358 degrees apart and
+/// draws two markers on top of each other at the bottom of the ring.
+pub(crate) fn ang_delta(a: f32, b: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let mut d = (a - b) % TAU;
+    if d > PI {
+        d -= TAU;
+    } else if d <= -PI {
+        d += TAU;
+    }
+    d
+}
+
+/// One track's contribution to the ring, already reduced to what the
+/// clusterer needs. Deliberately NOT the track: clustering has no
+/// business knowing about world positions or grace timers.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Blip {
+    pub(crate) bearing: f32,
+    pub(crate) value: f32,
+    pub(crate) state: ThreatState,
+    pub(crate) fade: f32,
+}
+
+/// One drawn marker. `count` is how many enemies it stands for; the
+/// bearing, value and state are the LEADER's — the strongest threat from
+/// that direction, which is what the owner's spec asks a merged marker
+/// to communicate.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Cluster {
+    pub(crate) bearing: f32,
+    pub(crate) value: f32,
+    pub(crate) state: ThreatState,
+    pub(crate) fade: f32,
+    pub(crate) count: usize,
+}
+
+/// Sort key: strongest first. `value` is the smoothed threat; `fade`
+/// breaks the tie so that between two equally-threatening contacts the
+/// one that is actually drawn brighter leads.
+fn blip_key(b: &Blip) -> (f32, f32) {
+    (b.value, b.fade)
+}
+
+/// Cluster blips into markers. Returns how many of `out` are valid.
+///
+/// Greedy, over a list sorted strongest-first. That order is what makes
+/// "the merged marker shows the strongest" fall out for free rather than
+/// needing a second pass: the first blip to claim a direction is by
+/// construction the worst threat in it, and it keeps its own bearing,
+/// value and state while the others only bump the count.
+///
+/// Allocation-free — a fixed index array and an insertion sort, the same
+/// discipline as the `[ThreatTrack; 16]` it feeds from. This runs every
+/// frame in the painter; a `Vec` here would be a per-frame heap churn on
+/// the render path.
+pub(crate) fn cluster_blips(blips: &[Blip], out: &mut [Cluster; MAX_TRACKS]) -> usize {
+    let n = blips.len().min(MAX_TRACKS);
+    let mut order = [0usize; MAX_TRACKS];
+    for (i, o) in order.iter_mut().enumerate().take(n) {
+        *o = i;
+    }
+    // insertion sort, descending. n <= 16.
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 && blip_key(&blips[order[j]]) > blip_key(&blips[order[j - 1]]) {
+            order.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+
+    let thr = MERGE_SEPARATION_DEG.to_radians();
+    let mut count = 0usize;
+    for &idx in order.iter().take(n) {
+        let b = &blips[idx];
+        let mut merged = false;
+        for c in out.iter_mut().take(count) {
+            if ang_delta(c.bearing, b.bearing).abs() <= thr {
+                c.count += 1;
+                // presence is the loudest member's: a marker standing
+                // for three men must not fade because two of them are
+                // half gone.
+                c.fade = c.fade.max(b.fade);
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            out[count] = Cluster {
+                bearing: b.bearing,
+                value: b.value,
+                state: b.state,
+                fade: b.fade,
+                count: 1,
+            };
+            count += 1;
+        }
+    }
+    count
+}
+
+/// How many tally dots a marker draws. One per enemy BEYOND the first —
+/// a lone contact draws none, which is the common case and must stay
+/// clean.
+pub(crate) fn tally_dots(count: usize) -> usize {
+    count.saturating_sub(1).min(TALLY_MAX_DOTS)
+}
+
+/// Whether this marker gets the clear-shot arc.
+pub(crate) fn wants_arc(state: ThreatState) -> bool {
+    state == ThreatState::ClearShot
+}
+
+/// Offset of the j-th arc block from the MARKER's own position, in UI
+/// px, for a marker at `bearing` on a ring of `radius`.
+pub(crate) fn arc_offset(j: usize, bearing: f32, radius: f32) -> Vec2 {
+    let span = ARC_SPAN_DEG.to_radians();
+    let t = if ARC_SEGMENTS <= 1 {
+        0.5
+    } else {
+        j as f32 / (ARC_SEGMENTS - 1) as f32
+    };
+    let a = bearing - span * 0.5 + span * t;
+    ring_offset(a, radius - ARC_INSET_PX) - ring_offset(bearing, radius)
 }
 
 /// Pip size in UI px for the k-th pip out from the ring at a given threat.
@@ -465,10 +654,18 @@ fn detect_threats(
 
 #[derive(Component)]
 struct SensorRoot;
+/// Marker slot. Since §3 this indexes a CLUSTER, not a track: several
+/// enemies on one bearing share one marker.
 #[derive(Component)]
 struct ThreatMarker(usize);
 #[derive(Component)]
 struct ThreatPip(usize, usize);
+/// One block of the clear-shot arc: (marker slot, block index).
+#[derive(Component)]
+struct ThreatArc(usize, usize);
+/// One "and another" dot: (marker slot, dot index).
+#[derive(Component)]
+struct ThreatTally(usize, usize);
 
 fn spawn_sensor(mut commands: Commands) {
     commands
@@ -499,6 +696,21 @@ fn spawn_sensor(mut commands: Commands) {
                     ThreatMarker(i),
                 ))
                 .with_children(|m| {
+                    // The arc is spawned FIRST so it sits behind the
+                    // pips: Bevy's UI stacks later siblings on top, and
+                    // "behind the pips" is the owner's word for it.
+                    for j in 0..ARC_SEGMENTS {
+                        m.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderRadius::all(Val::Px(ARC_THICK_PX * 0.5)),
+                            Visibility::Hidden,
+                            ThreatArc(i, j),
+                        ));
+                    }
                     for k in 0..MAX_PIPS {
                         m.spawn((
                             Node {
@@ -512,32 +724,80 @@ fn spawn_sensor(mut commands: Commands) {
                             ThreatPip(i, k),
                         ));
                     }
+                    for d in 0..TALLY_MAX_DOTS {
+                        m.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderRadius::all(Val::Px(TALLY_DOT_PX * 0.5)),
+                            Visibility::Hidden,
+                            ThreatTally(i, d),
+                        ));
+                    }
                 });
             }
         });
 }
 
-#[allow(clippy::type_complexity)]
-fn paint_sensor(
+/// What the painters draw, resolved once per frame.
+///
+/// §3 split `paint_sensor` into a RESOLVER and four one-query painters.
+/// The four-way `ParamSet` the arc and the tally would have needed took
+/// rustc's monomorphisation collector past its recursion limit on this
+/// machine and killed the RELEASE build outright
+/// (STATUS_STACK_BUFFER_OVERRUN inside
+/// `collect_and_partition_mono_items`, the same crash class the debug
+/// profile is already known for here). Passing the answer through a
+/// plain resource is both the fix and the clearer shape: exactly one
+/// place computes geometry, and four dumb systems move `Node`s.
+#[derive(Resource)]
+pub(crate) struct RingLayout {
+    pub(crate) clusters: [Cluster; MAX_TRACKS],
+    pub(crate) n: usize,
+    /// Screen position of each cluster's marker, UI px.
+    pub(crate) pos: [Vec2; MAX_TRACKS],
+    /// Outward radial unit vector for each cluster.
+    pub(crate) dir: [Vec2; MAX_TRACKS],
+    /// Pulsed alpha for each cluster's pips.
+    pub(crate) alpha: [f32; MAX_TRACKS],
+    pub(crate) radius: f32,
+}
+
+impl Default for RingLayout {
+    fn default() -> Self {
+        RingLayout {
+            clusters: [Cluster::default(); MAX_TRACKS],
+            n: 0,
+            pos: [Vec2::ZERO; MAX_TRACKS],
+            dir: [Vec2::ZERO; MAX_TRACKS],
+            alpha: [0.0; MAX_TRACKS],
+            radius: 0.0,
+        }
+    }
+}
+
+impl RingLayout {
+    /// Is slot `i` drawn at all? Every painter gates on this, so a
+    /// marker's parts can never disagree about whether it exists.
+    pub(crate) fn shown(&self, i: usize) -> bool {
+        i < self.n && self.clusters[i].count > 0 && self.clusters[i].fade > 0.0
+    }
+}
+
+fn resolve_ring(
     sensor: Res<ThreatSensor>,
     time: Res<Time>,
     ui_scale: Res<UiScale>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cam_q: Query<&GlobalTransform, With<MainCam>>,
+    mut out: ResMut<RingLayout>,
     mut dbg: Local<Option<bool>>,
     mut dbg_t: Local<f32>,
-    mut q: ParamSet<(
-        Query<(&ThreatMarker, &mut Node, &mut Visibility)>,
-        Query<(
-            &ThreatPip,
-            &mut Node,
-            &mut BackgroundColor,
-            &mut BorderRadius,
-            &mut Visibility,
-        )>,
-    )>,
 ) {
     let (Ok(win), Ok(cam_tf)) = (windows.get_single(), cam_q.get_single()) else {
+        out.n = 0;
         return;
     };
     // UI space, not physical: `sync_ui_scale` drives `UiScale` off the
@@ -561,60 +821,143 @@ fn paint_sensor(
     let cam_xz = Vec2::new(cam_tf.translation().x, cam_tf.translation().z);
     let elapsed = time.elapsed_secs();
 
-    let (er, eg, eb) = branding::signal::Side::Enemy.accent_rgb();
-
-    // resolve each track once; the two passes below share the answer
-    let mut place = [(Vec2::ZERO, Vec2::ZERO, 0.0_f32, 0.0_f32); MAX_TRACKS];
-    for (i, t) in sensor.tracks.iter().enumerate() {
+    // §3B — reduce every live track to a bearing, then CLUSTER. From
+    // here down a "marker" is a cluster, and several enemies on one
+    // bearing share one.
+    let mut blips = [Blip::default(); MAX_TRACKS];
+    let mut nb = 0usize;
+    for t in sensor.tracks.iter() {
         if !t.live || t.fade <= 0.0 {
             continue;
         }
-        let bearing = screen_bearing(fwd, right, Vec2::new(t.pos.x, t.pos.z) - cam_xz);
-        place[i] = (
-            centre + ring_offset(bearing, radius),
-            radial_dir(bearing),
-            t.value,
-            marker_alpha(t.fade, t.value, elapsed),
-        );
+        blips[nb] = Blip {
+            bearing: screen_bearing(fwd, right, Vec2::new(t.pos.x, t.pos.z) - cam_xz),
+            value: t.value,
+            state: t.state,
+            fade: t.fade,
+        };
+        nb += 1;
+    }
+    let mut clusters = [Cluster::default(); MAX_TRACKS];
+    let n = cluster_blips(&blips[..nb], &mut clusters);
+
+    out.radius = radius;
+    out.n = n;
+    out.clusters = clusters;
+    for i in 0..n {
+        let c = clusters[i];
+        out.pos[i] = centre + ring_offset(c.bearing, radius);
+        out.dir[i] = radial_dir(c.bearing);
+        out.alpha[i] = marker_alpha(c.fade, c.value, elapsed);
     }
 
     if debug_on(&mut dbg) {
         *dbg_t += time.delta_secs();
         if *dbg_t > 0.5 {
             *dbg_t = 0.0;
-            let shown: Vec<String> = sensor
-                .tracks
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.live && t.fade > 0.0)
-                .map(|(i, _)| format!("{i}@{:?}", place[i].0))
+            let list: Vec<String> = (0..n)
+                .map(|i| {
+                    format!(
+                        "{:?}x{}@{:.0},{:.0}",
+                        clusters[i].state, clusters[i].count, out.pos[i].x, out.pos[i].y
+                    )
+                })
                 .collect();
             eprintln!(
-                "[threat/paint] ui={w:.0}x{h:.0} scale={scale:.2} r={radius:.0} markers=[{}]",
-                shown.join(", ")
+                "[threat/paint] ui={w:.0}x{h:.0} scale={scale:.2} r={radius:.0} \
+                 blips={nb} clusters=[{}]",
+                list.join(", ")
             );
         }
     }
+}
 
-    for (m, mut node, mut v) in q.p0().iter_mut() {
-        let t = &sensor.tracks[m.0];
-        if t.live && t.fade > 0.0 {
-            let (p, _, _, _) = place[m.0];
-            node.left = Val::Px(p.x);
-            node.top = Val::Px(p.y);
+fn paint_markers(lay: Res<RingLayout>, mut q: Query<(&ThreatMarker, &mut Node, &mut Visibility)>) {
+    for (m, mut node, mut v) in q.iter_mut() {
+        if lay.shown(m.0) {
+            node.left = Val::Px(lay.pos[m.0].x);
+            node.top = Val::Px(lay.pos[m.0].y);
             *v = Visibility::Inherited;
         } else {
             *v = Visibility::Hidden;
         }
     }
+}
 
-    for (pip, mut node, mut bg, mut radius_c, mut v) in q.p1().iter_mut() {
-        let t = &sensor.tracks[pip.0];
-        let (_, dir, value, alpha) = place[pip.0];
-        if !(t.live && t.fade > 0.0) || pip.1 >= lit_pips(value) {
+/// §3A — the CLEAR SHOT arc, and nothing below a clear shot.
+fn paint_arcs(
+    lay: Res<RingLayout>,
+    mut q: Query<(&ThreatArc, &mut Node, &mut BackgroundColor, &mut Visibility)>,
+) {
+    let (er, eg, eb) = branding::signal::Side::Enemy.accent_rgb();
+    for (arc, mut node, mut bg, mut v) in q.iter_mut() {
+        if !lay.shown(arc.0) || !wants_arc(lay.clusters[arc.0].state) {
             *v = Visibility::Hidden;
             continue;
         }
+        let off = arc_offset(arc.1, lay.clusters[arc.0].bearing, lay.radius);
+        node.left = Val::Px(off.x - ARC_THICK_PX * 0.5);
+        node.top = Val::Px(off.y - ARC_THICK_PX * 0.5);
+        node.width = Val::Px(ARC_THICK_PX);
+        node.height = Val::Px(ARC_THICK_PX);
+        // NOT pulsed. The arc is a shape, not a brightness: a pulse
+        // would put it back into the class of differences a single frame
+        // cannot carry, which is the entire reason it exists.
+        let a = lay.clusters[arc.0].fade.clamp(0.0, 1.0) * ARC_ALPHA;
+        *bg = BackgroundColor(Color::srgba(er, eg, eb, a));
+        *v = Visibility::Inherited;
+    }
+}
+
+/// §3B — "and this many more from the same direction".
+fn paint_tally(
+    lay: Res<RingLayout>,
+    mut q: Query<(&ThreatTally, &mut Node, &mut BackgroundColor, &mut Visibility)>,
+) {
+    let (er, eg, eb) = branding::signal::Side::Enemy.accent_rgb();
+    for (tal, mut node, mut bg, mut v) in q.iter_mut() {
+        let dots = if lay.shown(tal.0) {
+            tally_dots(lay.clusters[tal.0].count)
+        } else {
+            0
+        };
+        if tal.1 >= dots {
+            *v = Visibility::Hidden;
+            continue;
+        }
+        let dir = lay.dir[tal.0];
+        let tangent = Vec2::new(dir.y, -dir.x);
+        let outset = PIP_GAP_PX * (MAX_PIPS - 1) as f32 + TALLY_OUTSET_PX;
+        let spread = (tal.1 as f32 - (dots as f32 - 1.0) * 0.5) * TALLY_SPACING_PX;
+        let off = dir * outset + tangent * spread;
+        node.left = Val::Px(off.x - TALLY_DOT_PX * 0.5);
+        node.top = Val::Px(off.y - TALLY_DOT_PX * 0.5);
+        node.width = Val::Px(TALLY_DOT_PX);
+        node.height = Val::Px(TALLY_DOT_PX);
+        *bg = BackgroundColor(Color::srgba(er, eg, eb, lay.alpha[tal.0]));
+        *v = Visibility::Inherited;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_pips(
+    lay: Res<RingLayout>,
+    mut q: Query<(
+        &ThreatPip,
+        &mut Node,
+        &mut BackgroundColor,
+        &mut BorderRadius,
+        &mut Visibility,
+    )>,
+) {
+    let (er, eg, eb) = branding::signal::Side::Enemy.accent_rgb();
+    for (pip, mut node, mut bg, mut radius_c, mut v) in q.iter_mut() {
+        let value = lay.clusters[pip.0].value;
+        if !lay.shown(pip.0) || pip.1 >= lit_pips(value) {
+            *v = Visibility::Hidden;
+            continue;
+        }
+        let (dir, alpha) = (lay.dir[pip.0], lay.alpha[pip.0]);
         let size = pip_size(pip.1, value);
         // The pips march OUTWARD along the radial axis. That march is the
         // whole directional cue: a UI `Node` cannot be rotated without a
@@ -644,10 +987,18 @@ pub struct ThreatSensorPlugin;
 impl Plugin for ThreatSensorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ThreatSensor>()
+            .init_resource::<RingLayout>()
             .add_systems(Startup, spawn_sensor)
             .add_systems(
                 Update,
-                (detect_threats, paint_sensor)
+                (
+                    detect_threats,
+                    resolve_ring,
+                    paint_markers,
+                    paint_arcs,
+                    paint_tally,
+                    paint_pips,
+                )
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             );
@@ -712,7 +1063,24 @@ pub mod capture {
         /// line to the player is blocked by real cover. A literal cannot
         /// express that on a randomised map.
         BehindCover,
+        /// The spec's "enemy strafing behind a post": he alternates
+        /// between the open spot and the cover spot at `FLICKER_HZ`.
+        ///
+        /// The first attempt at this was ONE deterministic 0.6 s duck
+        /// with the snapshot aimed at its middle. It never landed: the
+        /// screenshot writer stalls the app for whole seconds, and a
+        /// single frame's delta-time can leap the entire window, so
+        /// frame 07 photographed an empty ring taken after he had
+        /// already come back. A sustained square wave removes the
+        /// timing problem entirely — the marker must be lit at EVERY
+        /// instant of the window, so any frame inside it is evidence.
+        Flicker,
     }
+
+    /// How fast the strafing enemy crosses the post. Each half-cycle is
+    /// far shorter than `GRACE_S`, which is exactly the condition the
+    /// grace exists to survive.
+    const FLICKER_HZ: f32 = 5.0;
 
     /// Distances tried, in order, when searching for an open line.
     const OPEN_RANGES_M: [f32; 7] = [14.0, 11.0, 17.0, 9.0, 20.0, 7.0, 23.0];
@@ -729,6 +1097,29 @@ pub mod capture {
     /// for no reason to do with detection at all.
     const OPEN_CLEAR_M: f32 = 1.2;
 
+    /// What the OTHER staged enemies are doing. §3 needs three bodies,
+    /// not one: the merge rule cannot be photographed with a single
+    /// subject.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Extra {
+        /// Parked in the far corner, out of `DETECT_RADIUS_M`.
+        Parked,
+        /// One extra enemy off to the side, well beyond
+        /// `MERGE_SEPARATION_DEG` — two markers must appear.
+        Separated,
+        /// Two extra enemies shoulder-to-shoulder with the subject, a
+        /// few degrees apart — one marker must appear, and it must show
+        /// the strongest of the three.
+        CoBearing,
+    }
+
+    /// Lateral offsets, metres, tried in order when tucking a co-bearing
+    /// enemy in beside the subject. A metre or two at ~14 m is only a
+    /// few degrees of bearing, comfortably inside the merge threshold,
+    /// while still being two distinct bodies the sim will not shove
+    /// through each other.
+    const SIDE_OFFSETS_M: [f32; 6] = [1.6, -1.6, 2.6, -2.6, 0.9, -0.9];
+
     const AHEAD: &[f32] = &[0.0];
     const BEHIND: &[f32] = &[std::f32::consts::PI];
     /// Right if the map allows it, left if it does not.
@@ -741,26 +1132,57 @@ pub mod capture {
         (4.4, Where::Open(AHEAD), Face::AtPlayerEngaged),
         (5.8, Where::Open(BEHIND), Face::AtPlayerEngaged),
         (7.2, Where::Open(LATERAL), Face::AtPlayerEngaged),
+        // --- §3: reacquire dead ahead, then DUCK. Times below are on
+        // the BEAT clock, which `drive` now shares.
+        (8.6, Where::Open(AHEAD), Face::AtPlayerEngaged),
+        // He strafes in and out of cover at FLICKER_HZ for a second and
+        // a half. The marker must be lit at every instant of it.
+        (9.8, Where::Flicker, Face::AtPlayerEngaged),
+        (11.3, Where::Open(AHEAD), Face::AtPlayerEngaged),
+        // --- §3: two separated threats. The subject stays dead ahead on
+        // a CLEAR SHOT; the extra goes lateral, merely Aiming. One frame
+        // then carries the arc and the no-arc marker side by side.
+        (11.4, Where::Open(AHEAD), Face::AtPlayerEngaged),
+        // --- §3: co-bearing. The subject is only AIMING; one of the two
+        // men beside him has the clear shot, so the merged marker must
+        // show HIS state, not the subject's.
+        (13.0, Where::Open(AHEAD), Face::AtPlayer),
+    ];
+
+    const EXTRAS: &[(f32, Extra)] = &[
+        (0.0, Extra::Parked),
+        (11.4, Extra::Separated),
+        (13.0, Extra::CoBearing),
     ];
 
     pub const BEATS: &[CapBeat] = &[
         CapBeat { look: Some((0.0, 0.0)), ..beat(0.2) },
         CapBeat { snap: Some("01-behind-cover-no-indicator"), ..beat(1.4) },
         CapBeat { snap: Some("02-open-looking-away"), ..beat(2.8) },
-        CapBeat { snap: Some("03-looking-at-me"), ..beat(4.2) },
+        CapBeat { snap: Some("03-aimed-at-me-no-clear-shot"), ..beat(4.2) },
         CapBeat { snap: Some("04-aimed-clear-shot"), ..beat(5.6) },
         CapBeat { snap: Some("05-behind-me-offscreen"), ..beat(7.0) },
         CapBeat { snap: Some("06-hard-right"), ..beat(8.4) },
-        CapBeat { end: true, ..beat(9.0) },
+        CapBeat { snap: Some("07-strafing-behind-post-grace-holds"), ..beat(10.6) },
+        CapBeat { snap: Some("08-two-separated-two-markers"), ..beat(12.6) },
+        CapBeat { snap: Some("09-co-bearing-one-merged-marker"), ..beat(14.2) },
+        CapBeat { end: true, ..beat(14.8) },
     ];
 
     /// Which enemy the script drives, and where the player stands.
     #[derive(Resource, Default)]
     struct Stage {
         subject: Option<usize>,
+        /// Two more enemies from the same team, for the §3 multi-threat
+        /// frames. `None` if the roster is too small — which is a
+        /// reported inconclusive, not a silent blank frame.
+        extras: [Option<usize>; 2],
         home: Option<[f32; 3]>,
         cover_spot: Option<[f32; 3]>,
         t: f32,
+        /// Last time the "no open line" warning fired, so a staging
+        /// failure reports once a second rather than 144 times.
+        warn_t: f32,
     }
 
     pub(super) fn register(app: &mut App) {
@@ -832,16 +1254,19 @@ pub mod capture {
     /// exactly what `capture_quick_deploy` already does for hull, ammo
     /// and position — and like that code it is gated on `JK_CAPTURE`
     /// naming THIS script, so it can never run for a human.
-    fn drive(
-        cap: Res<CaptureMode>,
-        time: Res<Time>,
-        mut game: ResMut<Game>,
-        mut st: ResMut<Stage>,
-    ) {
+    fn drive(cap: Res<CaptureMode>, mut game: ResMut<Game>, mut st: ResMut<Stage>) {
         if cap.script.as_deref() != Some(SCRIPT) {
             return;
         }
-        st.t += time.delta_secs();
+        // THE SAME CLOCK THE BEATS USE. §3's first run drove this off an
+        // accumulator that started when `drive` first ran in `Playing`,
+        // while `CapBeat` times are measured from `CaptureMode::t` —
+        // which starts about a second earlier, during load. Every frame
+        // therefore photographed the stage phase BEFORE the one it named,
+        // and the 0.6 s duck (frame 07) is far shorter than the skew, so
+        // it landed in the reacquire instead and photographed an empty
+        // ring that read exactly like a broken grace period. One clock.
+        st.t = cap.t;
         let s = &mut game.sim;
         let player = s.player;
 
@@ -851,12 +1276,20 @@ pub mod capture {
             let stage = crate::capture_stage_pos(s);
             st.home = Some(stage);
             let my_team = s.fighters[player].team;
-            st.subject = s
+            let mut enemies = s
                 .fighters
                 .iter()
                 .enumerate()
-                .find(|(i, f)| *i != player && f.team != my_team)
+                .filter(|(i, f)| *i != player && f.team != my_team)
                 .map(|(i, _)| i);
+            st.subject = enemies.next();
+            st.extras = [enemies.next(), enemies.next()];
+            if st.extras[1].is_none() {
+                eprintln!(
+                    "[threat_sensor capture] fewer than three enemies on the roster - \
+                     frames 08 and 09 (multi-threat) are INCONCLUSIVE"
+                );
+            }
             // A point at 8-18 m whose line to the player's chest is
             // genuinely blocked. Searched, not asserted: a literal would
             // be a claim about a randomised map. Same two helpers the
@@ -902,8 +1335,13 @@ pub mod capture {
             if home[2] > 0.0 { -far } else { far },
         ];
         let subject = st.subject;
+        let extras = st.extras;
         for (i, f) in s.fighters.iter_mut().enumerate() {
-            if i == player || f.team == my_team || Some(i) == subject {
+            if i == player
+                || f.team == my_team
+                || Some(i) == subject
+                || extras.contains(&Some(i))
+            {
                 continue;
             }
             f.pos = park;
@@ -924,11 +1362,39 @@ pub mod capture {
         let pos = match cur.1 {
             Where::BehindCover => st.cover_spot.unwrap_or(park),
             Where::Open(bearing) => open_spot(s, home, bearing, subject_h, chest),
+            // half the square wave behind the post, half in the open
+            Where::Flicker => {
+                if ((st.t * FLICKER_HZ) as i32) % 2 == 0 {
+                    st.cover_spot.unwrap_or(park)
+                } else {
+                    open_spot(s, home, AHEAD, subject_h, chest)
+                }
+            }
         };
         let to_player = (home[0] - pos[0], home[2] - pos[2]);
         let at_player = to_player.0.atan2(to_player.1);
+        // A frame that MEANT to show a reading and cannot must say so.
+        // `open_spot` verifies the CANDIDATE point, but the sim's
+        // collision push-out then moves the body, and from where he
+        // actually ended up last frame the line can be blocked. The
+        // sensor is right to draw nothing; the STAGE is what failed, and
+        // an empty ring photographs identically either way — so it is
+        // announced rather than left to be read as a bug in the feature.
+        let actual = s.fighters[j].pos;
+        if !matches!(cur.1, Where::BehindCover | Where::Flicker)
+            && !s.los_clear(eye_point(actual, subject_h), chest)
+            && st.t - st.warn_t > 1.0
+        {
+            st.warn_t = st.t;
+            eprintln!(
+                "[threat_sensor capture] t={:.1}: the staged subject has NO open line \
+                 from where the sim actually left him - any frame here is INCONCLUSIVE, \
+                 not a negative result",
+                st.t
+            );
+        }
         if std::env::var("JK_THREAT_DEBUG").is_ok() {
-            let was = s.fighters[j].pos;
+            let was = actual;
             eprintln!(
                 "[threat/stage] t={:.1} want={pos:?} actual={was:?} los={} alive={}",
                 st.t,
@@ -951,6 +1417,87 @@ pub mod capture {
             Face::AtPlayerEngaged => player as i32,
             _ => -1,
         };
+
+        // ---- §3: the other two bodies.
+        let mut mode = EXTRAS[0].1;
+        for e in EXTRAS {
+            if st.t >= e.0 {
+                mode = e.1;
+            }
+        }
+        for (k, ex) in extras.iter().enumerate() {
+            let Some(x) = *ex else { continue };
+            let xh = s.fighters[x].height();
+            // `Separated` only wants ONE extra on the ring; the second
+            // stays parked so frame 08 is unambiguously two markers.
+            let active = match mode {
+                Extra::Parked => false,
+                Extra::Separated => k == 0,
+                Extra::CoBearing => true,
+            };
+            if !active {
+                let f = &mut s.fighters[x];
+                f.pos = park;
+                f.vel = [0.0, 0.0];
+                f.engaging = -1;
+                continue;
+            }
+            let xpos = match mode {
+                // far enough round the ring that no merge threshold
+                // could swallow it
+                Extra::Separated => open_spot(s, home, LATERAL, xh, chest),
+                // shoulder to shoulder with the subject
+                Extra::CoBearing => beside(s, pos, home, SIDE_OFFSETS_M[k * 2], xh, chest),
+                Extra::Parked => park,
+            };
+            let to_p = (home[0] - xpos[0], home[2] - xpos[2]);
+            let f = &mut s.fighters[x];
+            f.pos = xpos;
+            f.vel = [0.0, 0.0];
+            f.health = f.health.max(100.0);
+            f.yaw = to_p.0.atan2(to_p.1);
+            // Frame 08: the subject has the clear shot, the lateral man
+            // is merely aiming — the arc and the no-arc marker in one
+            // photograph. Frame 09: the SUBJECT is only aiming and the
+            // first man beside him has the clear shot, so a merged
+            // marker that showed the subject's state would show the
+            // wrong one. That is the assertion the frame makes.
+            f.engaging = match (mode, k) {
+                (Extra::CoBearing, 0) => player as i32,
+                _ => -1,
+            };
+        }
+    }
+
+    /// A body tucked in beside `pos`, `off` metres along the tangent, on
+    /// a line that is still open. Falls back through `SIDE_OFFSETS_M`
+    /// and finally onto `pos` itself — a co-bearing frame with two
+    /// bodies at one point still photographs a merge.
+    fn beside(
+        s: &sim::TdmSim,
+        pos: [f32; 3],
+        home: [f32; 3],
+        first: f32,
+        h: f32,
+        chest: [f32; 3],
+    ) -> [f32; 3] {
+        let (dx, dz) = (pos[0] - home[0], pos[2] - home[2]);
+        let len = (dx * dx + dz * dz).sqrt().max(1e-3);
+        // tangent to the player->subject line, so the offset moves
+        // BEARING and not range
+        let (tx, tz) = (-dz / len, dx / len);
+        let mut order = [first; SIDE_OFFSETS_M.len()];
+        order[1..].copy_from_slice(&SIDE_OFFSETS_M[..SIDE_OFFSETS_M.len() - 1]);
+        for o in order {
+            let p = [pos[0] + tx * o, pos[1], pos[2] + tz * o];
+            if p[0].abs() < s.half - 2.0
+                && p[2].abs() < s.half - 2.0
+                && s.los_clear(eye_point(p, h), chest)
+            {
+                return p;
+            }
+        }
+        pos
     }
 }
 
@@ -1037,6 +1584,41 @@ mod tests {
             hold = r.1;
         }
         assert!(fade < 1.0 && fade > 0.0, "fade {fade} is a toggle, not a fade");
+    }
+
+    #[test]
+    fn an_enemy_strafing_behind_a_post_never_flickers_the_marker() {
+        // The spec's hardest case, and the one most likely to be broken:
+        // he ducks in and out of cover at 5 Hz for two seconds. Presence
+        // must sit at 1.0 the whole time — not "mostly", not "recovers
+        // quickly". Every 0.1 s duck is far inside GRACE_S, so every
+        // re-acquisition recharges the hold before it can drain.
+        let dt = 1.0 / 60.0;
+        let (mut fade, mut hold) = (1.0_f32, GRACE_S);
+        let mut worst = 1.0_f32;
+        for k in 0..120 {
+            let t = k as f32 * dt;
+            // 5 Hz square wave: visible for half of every 0.2 s
+            let visible = ((t * 5.0) as i32) % 2 == 0;
+            if visible {
+                hold = GRACE_S;
+            }
+            let r = fade_step(fade, hold, dt);
+            fade = r.0;
+            hold = r.1;
+            worst = worst.min(fade);
+        }
+        assert_eq!(worst, 1.0, "a 5 Hz strafe behind cover dimmed the marker to {worst}");
+        // sanity that the wave really did break the line: with NO
+        // re-acquisition over the same two seconds the marker does die,
+        // so the test above is not passing because nothing was tested.
+        let (mut f2, mut h2) = (1.0_f32, GRACE_S);
+        for _ in 0..120 {
+            let r = fade_step(f2, h2, dt);
+            f2 = r.0;
+            h2 = r.1;
+        }
+        assert_eq!(f2, 0.0);
     }
 
     #[test]
@@ -1171,6 +1753,197 @@ mod tests {
             }
             assert!(pip_size(MAX_PIPS - 1, v) > 0.0);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // §3B — clustering
+    // -----------------------------------------------------------------
+
+    fn blip(deg: f32, st: ThreatState) -> Blip {
+        Blip {
+            bearing: deg.to_radians(),
+            value: st.value(),
+            state: st,
+            fade: 1.0,
+        }
+    }
+
+    #[test]
+    fn well_separated_threats_stay_separate_markers() {
+        let b = [
+            blip(0.0, ThreatState::ClearShot),
+            blip(90.0, ThreatState::Aiming),
+            blip(-140.0, ThreatState::Visible),
+        ];
+        let mut out = [Cluster::default(); MAX_TRACKS];
+        let n = cluster_blips(&b, &mut out);
+        assert_eq!(n, 3, "three bearings a quadrant apart collapsed into {n}");
+        for c in out.iter().take(n) {
+            assert_eq!(c.count, 1);
+        }
+    }
+
+    #[test]
+    fn co_bearing_threats_merge_into_one_marker_showing_the_strongest() {
+        // three men within a few degrees; the WEAKEST is listed first,
+        // so a clusterer that simply kept the first arrival would show
+        // "possible contact" while a rifle was on the player.
+        let b = [
+            blip(2.0, ThreatState::Visible),
+            blip(-3.0, ThreatState::ClearShot),
+            blip(5.0, ThreatState::Tracking),
+        ];
+        let mut out = [Cluster::default(); MAX_TRACKS];
+        let n = cluster_blips(&b, &mut out);
+        assert_eq!(n, 1, "{n} markers for one direction");
+        assert_eq!(out[0].count, 3);
+        assert_eq!(
+            out[0].state,
+            ThreatState::ClearShot,
+            "the merged marker must speak for the worst man in the group"
+        );
+        assert_eq!(out[0].value, ThreatState::ClearShot.value());
+        // and it points at HIM, not at the mean of the three
+        assert!(
+            (out[0].bearing - (-3.0_f32).to_radians()).abs() < 1e-5,
+            "the merged marker drifted off the leader's bearing"
+        );
+    }
+
+    #[test]
+    fn the_merge_threshold_is_the_named_const_and_nothing_else() {
+        let mut out = [Cluster::default(); MAX_TRACKS];
+        // just inside: one marker
+        let inside = [
+            blip(0.0, ThreatState::Aiming),
+            blip(MERGE_SEPARATION_DEG - 1.0, ThreatState::Visible),
+        ];
+        assert_eq!(cluster_blips(&inside, &mut out), 1);
+        // just outside: two
+        let outside = [
+            blip(0.0, ThreatState::Aiming),
+            blip(MERGE_SEPARATION_DEG + 1.0, ThreatState::Visible),
+        ];
+        assert_eq!(cluster_blips(&outside, &mut out), 2);
+    }
+
+    #[test]
+    fn two_men_either_side_of_dead_astern_are_one_marker_not_two() {
+        // the wrap case: +179 and -179 are two degrees apart. A naive
+        // subtraction calls them 358 apart and draws two markers on top
+        // of each other at the bottom of the ring.
+        assert!(ang_delta(179.0_f32.to_radians(), (-179.0_f32).to_radians()).abs() < 0.05);
+        let b = [
+            blip(179.0, ThreatState::Tracking),
+            blip(-179.0, ThreatState::ClearShot),
+        ];
+        let mut out = [Cluster::default(); MAX_TRACKS];
+        assert_eq!(cluster_blips(&b, &mut out), 1, "the bearing wrap is unhandled");
+        assert_eq!(out[0].state, ThreatState::ClearShot);
+    }
+
+    #[test]
+    fn a_crowd_never_spams_more_markers_than_there_are_slots() {
+        // sixteen enemies spread evenly: every gap is 22.5 deg, wider
+        // than the threshold, so this is the worst case for marker
+        // count - and it must still fit the slot table.
+        let mut b = [Blip::default(); MAX_TRACKS];
+        for (k, x) in b.iter_mut().enumerate() {
+            *x = blip(k as f32 * 360.0 / MAX_TRACKS as f32 - 180.0, ThreatState::Tracking);
+        }
+        let mut out = [Cluster::default(); MAX_TRACKS];
+        let n = cluster_blips(&b, &mut out);
+        assert!(n <= MAX_TRACKS, "{n} markers for {MAX_TRACKS} slots");
+        assert_eq!(out.iter().take(n).map(|c| c.count).sum::<usize>(), MAX_TRACKS,
+            "clustering lost or invented an enemy");
+        // and sixteen men in ONE doorway are one light, not sixteen
+        let same = [blip(30.0, ThreatState::Visible); MAX_TRACKS];
+        assert_eq!(cluster_blips(&same, &mut out), 1);
+        assert_eq!(out[0].count, MAX_TRACKS);
+    }
+
+    #[test]
+    fn the_tally_is_a_hint_and_stays_capped() {
+        assert_eq!(tally_dots(1), 0, "a lone contact drew a tally dot");
+        assert_eq!(tally_dots(2), 1);
+        assert_eq!(tally_dots(0), 0);
+        assert_eq!(tally_dots(99), TALLY_MAX_DOTS);
+        assert!(TALLY_DOT_PX < PIP_MIN_PX, "the tally is louder than the marker");
+    }
+
+    // -----------------------------------------------------------------
+    // §3A — the clear-shot arc
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_arc_is_a_clear_shot_and_nothing_below_it() {
+        assert!(wants_arc(ThreatState::ClearShot));
+        for s in [
+            ThreatState::NotDetected,
+            ThreatState::Visible,
+            ThreatState::Tracking,
+            ThreatState::Aiming,
+        ] {
+            assert!(!wants_arc(s), "{s:?} drew the clear-shot arc");
+        }
+    }
+
+    #[test]
+    fn the_arc_is_a_continuous_bar_on_the_ring_behind_the_marker() {
+        let radius = 259.0_f32; // the 1280x720 ring
+        let bearing = 0.7_f32;
+        let marker = ring_offset(bearing, radius);
+        let mut prev: Option<Vec2> = None;
+        let mut span_lo = f32::INFINITY;
+        let mut span_hi = f32::NEG_INFINITY;
+        for j in 0..ARC_SEGMENTS {
+            let p = arc_offset(j, bearing, radius) + marker;
+            // every block sits on a ring INSIDE the marker's own, so it
+            // cannot cover the pips that march outward from it
+            let r = p.length();
+            assert!(
+                (r - (radius - ARC_INSET_PX)).abs() < 1e-2,
+                "arc block {j} is at radius {r}, not on the inner ring"
+            );
+            // and the blocks OVERLAP: a gap turns the bar into a dotted
+            // line, which is exactly the kind of faint difference the
+            // arc exists to avoid.
+            if let Some(q) = prev {
+                let step = (p - q).length();
+                assert!(
+                    step < ARC_THICK_PX,
+                    "arc blocks are {step:.1} px apart but only {ARC_THICK_PX} px wide - dotted"
+                );
+            }
+            prev = Some(p);
+            let a = ang_delta(p.x.atan2(-p.y), bearing);
+            span_lo = span_lo.min(a);
+            span_hi = span_hi.max(a);
+        }
+        let span = (span_hi - span_lo).to_degrees();
+        assert!(
+            (span - ARC_SPAN_DEG).abs() < 1.0,
+            "the arc spans {span} deg, not the {ARC_SPAN_DEG} the const asks for"
+        );
+        // it is centred on the marker
+        assert!((span_hi + span_lo).abs() < 1e-3, "the arc is not centred on its marker");
+    }
+
+    #[test]
+    fn the_arc_is_a_bigger_signal_than_the_step_from_aiming_to_clear_shot_ever_was() {
+        // The whole reason §3A exists: in a STILL, `Aiming` and
+        // `ClearShot` differed only by alpha, head size and a pulse RATE
+        // that a photograph cannot show. Pin how small that difference
+        // is, so nobody deletes the arc believing the old cues were
+        // enough.
+        let (a, c) = (ThreatState::Aiming.value(), ThreatState::ClearShot.value());
+        assert_eq!(lit_pips(a), lit_pips(c), "this test's premise has changed");
+        let d_size = pip_size(0, c) - pip_size(0, a);
+        assert!(d_size < 3.0, "pip size alone now separates them ({d_size} px)");
+        // the arc, by contrast, is either a solid bar or nothing
+        assert!(wants_arc(ThreatState::ClearShot) && !wants_arc(ThreatState::Aiming));
+        assert!(ARC_SEGMENTS >= 8 && ARC_THICK_PX >= 4.0);
+        assert!(ARC_ALPHA > ALPHA_MAX * (1.0 - PULSE_DEPTH), "the arc can be dimmer than a pip");
     }
 
     #[test]
