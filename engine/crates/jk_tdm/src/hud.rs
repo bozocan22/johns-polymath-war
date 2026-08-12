@@ -215,6 +215,59 @@ fn mount_name(w: sim::MechWeapon) -> &'static str {
     }
 }
 
+/// The one-line plate-condition reading, from the stages the SIM already
+/// computed.
+///
+/// This takes `Option<ArmorStage>` per mount because that is exactly what
+/// `Sim::armor_stage_of` returns, and the `None` case carries real
+/// meaning: no plate on that mount at all, either never fitted or shot
+/// off. A missing plate is NOT a fresh one, so `None` is counted out of
+/// the denominator rather than folded into `Fresh`.
+///
+/// Nothing here re-derives a threshold. `PLATE_SCUFFED_FRAC` and friends
+/// live in `sim.rs` and stay there — this only reports the worst stage
+/// currently on the body and how many mounts are below `Fresh`.
+///
+/// `None` return = no plates equipped at all, and the caller prints
+/// nothing rather than a row of zeroes.
+fn plate_condition(stages: &[Option<sim::ArmorStage>]) -> Option<(sim::ArmorStage, usize, usize)> {
+    let equipped: Vec<sim::ArmorStage> = stages.iter().flatten().copied().collect();
+    // `ArmorStage`'s `Ord` derive is worst-last by construction (the sim
+    // documents the variant order as the order they are REACHED in), so
+    // `max` IS "the worst plate on the body" and not a coincidence.
+    let worst = *equipped.iter().max()?;
+    let worn = equipped
+        .iter()
+        .filter(|s| **s != sim::ArmorStage::Fresh)
+        .count();
+    Some((worst, worn, equipped.len()))
+}
+
+/// The text for that reading. Split from the colour so both are testable
+/// without a `World`.
+fn plate_condition_text(worst: sim::ArmorStage, worn: usize, total: usize) -> String {
+    if worst == sim::ArmorStage::Fresh {
+        format!("PLATES {}", worst.label())
+    } else {
+        // `label` is the sim's string, never a retyped copy — same rule
+        // the manual screen's weapon table follows.
+        format!("PLATES {} {worn}/{total}", worst.label())
+    }
+}
+
+/// One hue for threat, one for systems — reference rule 6. A cracked or
+/// severed plate is the only plate state that is a THREAT; scuffed is a
+/// systems reading that has merely dimmed.
+fn plate_condition_color(worst: sim::ArmorStage) -> Color {
+    if worst.tilts() {
+        THREAT
+    } else if worst == sim::ArmorStage::Fresh {
+        SYSTEMS
+    } else {
+        palette::GOLD_DIM
+    }
+}
+
 /// The mech systems column — BRIEF XII-A: this IS the folded weapon
 /// strip, and it carries ONLY what is not already on the screen.
 ///
@@ -450,6 +503,11 @@ struct HpNumber;
 struct HpSeg(usize);
 #[derive(Component)]
 struct ArmourPip(usize);
+/// The plate damage-state line under the pip row. HUMAN mode only — a
+/// chassis has no plates, it has a power core, and the pips already say
+/// so.
+#[derive(Component)]
+struct PlateCondText;
 #[derive(Component)]
 struct AmmoNumber;
 #[derive(Component)]
@@ -636,6 +694,18 @@ fn spawn_vitals(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
                 ));
             }
         });
+        // XII: the plate CONDITION line. The pip row above it is fed by
+        // `armor_spec(set).flat_torso`, which is a property of the SET
+        // and never changes once a match starts — so before this line
+        // the on-foot HUD had no way at all to say a plate had been
+        // shot. `armor_stage_of` had 66 call sites in the sim and zero
+        // readers anywhere in the client.
+        p.spawn((
+            text(T_MICRO, SYSTEMS),
+            TextLayout::new_with_no_wrap(),
+            PlateCondText,
+            XiiFade,
+        ));
     });
 }
 
@@ -1023,6 +1093,7 @@ fn paint_vitals(
         Query<(&mut Text, &mut TextColor), With<HpNumber>>,
         Query<(&HpSeg, &mut BackgroundColor)>,
         Query<(&ArmourPip, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&mut Text, &mut TextColor), With<PlateCondText>>,
     )>,
 ) {
     let simr = &game.sim;
@@ -1092,6 +1163,26 @@ fn paint_vitals(
         } else {
             palette::GOLD_DIM
         };
+    }
+    // plate condition, HUMAN mode only. Every stage comes from the sim;
+    // this side owns the string layout and the hue, nothing else.
+    let cond = (!mech && p.alive()).then(|| {
+        let stages: Vec<Option<sim::ArmorStage>> = sim::ArmorPiece::ALL
+            .iter()
+            .map(|piece| simr.armor_stage_of(simr.player, *piece))
+            .collect();
+        plate_condition(&stages)
+    });
+    if let Ok((mut t, mut c)) = q.p3().get_single_mut() {
+        match cond.flatten() {
+            Some((worst, worn, total)) => {
+                **t = plate_condition_text(worst, worn, total);
+                *c = TextColor(plate_condition_color(worst));
+            }
+            // no plates on, or in a chassis, or dead: print nothing
+            // rather than a reading that means nothing.
+            None => **t = String::new(),
+        }
     }
 }
 
@@ -1461,6 +1552,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The plate line reports the WORST plate on the body, not the first
+    /// one, not the average. A player with seven fresh plates and one
+    /// severed pauldron is in trouble at the pauldron.
+    #[test]
+    fn plate_line_reports_the_worst_plate() {
+        use sim::ArmorStage::*;
+        let stages = [Some(Fresh), Some(Scuffed), Some(Severed), Some(Fresh)];
+        let (worst, worn, total) = plate_condition(&stages).expect("four plates equipped");
+        assert_eq!(worst, Severed);
+        assert_eq!(worn, 2, "scuffed and severed are both below fresh");
+        assert_eq!(total, 4);
+        assert_eq!(plate_condition_text(worst, worn, total), "PLATES SEVERED 2/4");
+
+        // ...and the worst plate being LAST in the array must give the
+        // same answer as it being first. If `plate_condition` returned
+        // `stages[0]` — which reads plausibly — the assert above would
+        // still pass on a Severed-first array, so this is the pair that
+        // gives it teeth.
+        let reordered = [Some(Severed), Some(Fresh), Some(Scuffed), Some(Fresh)];
+        assert_eq!(plate_condition(&reordered), plate_condition(&stages));
+    }
+
+    /// `None` is "no plate on this mount", and it must not be counted as
+    /// a fresh one — that would put clean steel on a bare shoulder, the
+    /// exact failure `armor_stage_of`'s own doc comment warns about.
+    #[test]
+    fn a_missing_plate_is_not_a_fresh_plate() {
+        use sim::ArmorStage::*;
+        let (worst, worn, total) =
+            plate_condition(&[None, Some(Fresh), None, Some(Cracked)]).expect("two equipped");
+        assert_eq!(total, 2, "the two empty mounts are not plates");
+        assert_eq!(worst, Cracked);
+        assert_eq!(worn, 1);
+        // nothing equipped at all prints nothing at all
+        assert_eq!(plate_condition(&[None; 24]), None);
+        assert_eq!(plate_condition(&[]), None);
+    }
+
+    /// An all-fresh set omits the count — "PLATES FRESH 0/8" reads like a
+    /// warning. And only CRACKED/SEVERED are allowed the threat hue;
+    /// reference rule 6 keeps one red for one meaning.
+    #[test]
+    fn fresh_is_quiet_and_only_broken_plates_are_red() {
+        use sim::ArmorStage::*;
+        assert_eq!(plate_condition_text(Fresh, 0, 8), "PLATES FRESH");
+        assert_eq!(plate_condition_color(Fresh), SYSTEMS);
+        assert_eq!(plate_condition_color(Scuffed), palette::GOLD_DIM);
+        assert_eq!(plate_condition_color(Cracked), THREAT);
+        assert_eq!(plate_condition_color(Severed), THREAT);
+        // teeth: SYSTEMS and THREAT must not be the same colour, or the
+        // three asserts above are vacuous.
+        assert_ne!(SYSTEMS, THREAT);
+        assert_ne!(palette::GOLD_DIM, THREAT);
     }
 
     /// MUTATION PROOF for the test above: the predicate must actually
