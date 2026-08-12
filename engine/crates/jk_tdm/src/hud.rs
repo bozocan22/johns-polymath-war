@@ -98,8 +98,15 @@ pub const T_NUMERAL_SM: f32 = 26.0;
 /// This is the existing `vitals_color` red, promoted to a name.
 const THREAT: Color = Color::srgb(1.0, 0.18, 0.15);
 
-/// THE systems hue is `palette::GOLD`. Mech framing, bars, borders and
-/// systems labels are all gold or `GOLD_DIM`; nothing else is.
+/// THE systems hue is `palette::GOLD`. Mech framing and the SELECTED
+/// systems row are gold or `GOLD_DIM`; nothing else is.
+///
+/// It used to be every systems label. That is what "sparingly" was
+/// supposed to prevent: four gold rows inside a gold-bordered plate
+/// under a gold frame is not an accent, it is a colour scheme, and the
+/// selected mount — the one row the pilot actually needs to find — had
+/// no way left to stand out. Unselected rows are `INK_SOFT` now, so
+/// gold marks exactly one thing again.
 const SYSTEMS: Color = palette::GOLD;
 
 /// Panel fill for a PERMANENT reading in MECH mode — reference rule 4.
@@ -119,7 +126,7 @@ fn plate() -> Color {
 /// This is a scrim, not a panel: less than half the mech plate's opacity
 /// and no border at all, so the human HUD keeps its "flat on the world"
 /// density (reference img2) while the numerals stop competing with sand.
-fn scrim() -> Color {
+pub(crate) fn scrim() -> Color {
     palette::PANEL.with_alpha(0.30)
 }
 
@@ -296,7 +303,11 @@ fn systems_lines(
         // ASCII only — no font asset ships, so every ornament is a drawn
         // node or a plain character. '>' is the marker the old strip used.
         let is_sel = *w == selected;
-        let label = format!("{} {}", if is_sel { ">" } else { " " }, mount_name(*w));
+        let label = format!(
+            "{} {}",
+            if is_sel { SELECTED_MARK } else { " " },
+            mount_name(*w)
+        );
         // THE SELECTED MOUNT NEVER PRINTS ITS QUANTITY. Whatever resource
         // it spends — rounds, pods or heat — is already the bottom-right
         // numeral, directly below this row and eight times the size.
@@ -332,6 +343,14 @@ fn systems_lines(
     }
     v
 }
+
+/// The ASCII marker on the selected mount's row. No font asset ships, so
+/// every ornament is a drawn node or a plain character — `main.rs`
+/// documents U+271A rendering as a tofu box in the bundled font.
+///
+/// `paint_systems` matches on this to decide which single row gets the
+/// gold, so the marker and the colour cannot disagree.
+const SELECTED_MARK: &str = ">";
 
 /// How many rows the systems column can ever need: two mounts, `LOCK`,
 /// and a shield line.
@@ -495,7 +514,7 @@ struct MechOnly;
 /// Every text this module fades. (The crosshair is deliberately not in
 /// this set — rule from Brief III: the crosshair never fades.)
 #[derive(Component)]
-struct XiiFade;
+pub(crate) struct XiiFade;
 
 #[derive(Component)]
 struct HpNumber;
@@ -542,6 +561,7 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HudMode>()
+            .init_resource::<XiiFadeAlpha>()
             .add_systems(Startup, spawn_layer)
             .add_systems(
                 Update,
@@ -907,7 +927,12 @@ fn spawn_systems(r: &mut ChildBuilder) {
             ..default()
         },
         BackgroundColor(plate()),
-        BorderColor(palette::GOLD_DIM),
+        // XII-C: was `GOLD_DIM`. The mech frame is already gold and
+        // already surrounds this column; a second gold rectangle inside
+        // it was the loudest of the "competing elements" the owner asked
+        // to lose. A hairline of INK_FAINT still separates the plate
+        // from the world, which is all a border owes anyone.
+        BorderColor(palette::INK_FAINT.with_alpha(0.30)),
         Visibility::Hidden,
         MechOnly,
     ))
@@ -1411,7 +1436,7 @@ fn paint_systems(
     mode: Res<HudMode>,
     bracket: Query<&BackgroundColor, With<MechTargetBracket>>,
     mut q: ParamSet<(
-        Query<(&SystemsLabel, &mut Text)>,
+        Query<(&SystemsLabel, &mut Text, &mut TextColor)>,
         Query<(&SystemsValue, &mut Text)>,
     )>,
 ) {
@@ -1451,8 +1476,21 @@ fn paint_systems(
         locked,
         shield,
     );
-    for (slot, mut t) in &mut q.p0() {
-        **t = rows.get(slot.0).map(|r| r.0.clone()).unwrap_or_default();
+    for (slot, mut t, mut c) in &mut q.p0() {
+        let label = rows.get(slot.0).map(|r| r.0.clone()).unwrap_or_default();
+        // The selection marker is read off the row's OWN label, which
+        // `systems_lines` wrote eleven lines up in this same file. That
+        // is not the split brain the module docs warn about — nothing
+        // here re-derives `p.mech_weapon` from the sim, it just asks the
+        // row it was handed which one it is. Alternatives were widening
+        // the tuple (five test call sites) while another lane holds
+        // `main.rs`; this stays inside the function pair that owns it.
+        *c = TextColor(if label.starts_with(SELECTED_MARK) {
+            SYSTEMS
+        } else {
+            palette::INK_SOFT
+        });
+        **t = label;
     }
     for (slot, mut t) in &mut q.p1() {
         **t = rows.get(slot.0).map(|r| r.1.clone()).unwrap_or_default();
@@ -1466,11 +1504,53 @@ fn paint_systems(
 /// `Or<(...)>` query keep finding exactly the entities they expect.
 /// This is the same rule over this layer's text, with heat added — a
 /// pilot holding a hot mount is not idle.
-fn layer_fade(
+/// The seconds of no-change after which this layer dims.
+const IDLE_FADE_AFTER: f32 = 4.0;
+/// What it dims TO. Not zero: a HUD that vanishes is a HUD you cannot
+/// plan off between fights.
+const IDLE_FADE_ALPHA: f32 = 0.45;
+
+/// The idle fade curve, pulled out of `layer_fade` so it is callable.
+///
+/// It is a step, not a ramp, and that is the pre-existing behaviour —
+/// this function only gives it a name and a test. A 47-degree camera bug
+/// once survived for months in this repo purely because its arithmetic
+/// lived inside a Bevy system nothing could call.
+fn idle_alpha(idle_t: f32) -> f32 {
+    if idle_t > IDLE_FADE_AFTER {
+        IDLE_FADE_ALPHA
+    } else {
+        1.0
+    }
+}
+
+/// THE fade clock's current output, published for layers that cannot
+/// carry `XiiFade`.
+///
+/// `XiiFade` works by rewriting `TextColor`, which is exactly right for
+/// text and useless for `inventory_strip`, whose cells are `Node`s with
+/// `BackgroundColor`/`BorderColor`. That module shipped with no fade
+/// participation at all and correctly refused to start a SECOND four
+/// second clock to get one — two clocks drifting apart is how a HUD ends
+/// up half dimmed.
+///
+/// So there is still exactly one clock, in `layer_fade`, and this
+/// resource is its reading. Consumers multiply, they never re-time.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct XiiFadeAlpha(pub f32);
+
+impl Default for XiiFadeAlpha {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+pub(crate) fn layer_fade(
     time: Res<Time>,
     game: Res<Game>,
     mut last: Local<[i32; 9]>,
     mut idle_t: Local<f32>,
+    mut out: ResMut<XiiFadeAlpha>,
     mut q: Query<&mut TextColor, With<XiiFade>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
@@ -1491,7 +1571,10 @@ fn layer_fade(
     } else {
         *idle_t += time.delta_secs();
     }
-    let alpha = if *idle_t > 4.0 { 0.45 } else { 1.0 };
+    let alpha = idle_alpha(*idle_t);
+    // Published BEFORE the text pass so a consumer scheduled after this
+    // system sees this frame's value, not the previous one's.
+    out.0 = alpha;
     for mut tc in &mut q {
         tc.0 = tc.0.with_alpha(alpha);
     }
@@ -1534,6 +1617,52 @@ fn fade_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle fade is now a named, callable function AND a published
+    /// resource, so `inventory_strip` can dim in step with the numerals
+    /// instead of running a second four-second clock beside them.
+    ///
+    /// Fails on the pre-change code, where `idle_alpha` did not exist
+    /// and the step lived inline in `layer_fade`.
+    #[test]
+    fn the_idle_fade_is_one_clock_that_other_layers_can_read() {
+        // Lit while anything is changing, and lit right up to the edge.
+        assert_eq!(idle_alpha(0.0), 1.0);
+        assert_eq!(idle_alpha(IDLE_FADE_AFTER), 1.0, "must not dim early");
+        // Dimmed once idle, and DIMMED, not gone.
+        assert_eq!(idle_alpha(IDLE_FADE_AFTER + 0.01), IDLE_FADE_ALPHA);
+        assert_eq!(idle_alpha(60.0), IDLE_FADE_ALPHA);
+        assert!(
+            IDLE_FADE_ALPHA > 0.0 && IDLE_FADE_ALPHA < 1.0,
+            "a HUD that vanishes is a HUD you cannot plan off between fights"
+        );
+        // A layer that spawns before the clock has ever ticked must
+        // start LIT, not invisible.
+        assert_eq!(XiiFadeAlpha::default().0, 1.0);
+    }
+
+    /// Gold marks the selected mount and nothing else. The column used
+    /// to print all four labels in `SYSTEMS`, which left the one row the
+    /// pilot needs to find with no way to stand out.
+    #[test]
+    fn only_the_selected_mount_row_wears_the_systems_hue() {
+        let mounts = sim::MechWeapon::for_set(sim::ArmorSet::RobotSuit);
+        assert!(mounts.len() >= 2, "this test needs a multi-mount chassis");
+        let rows = systems_lines(mounts, mounts[0], 240, 4, true, None);
+        let gold: Vec<&String> = rows
+            .iter()
+            .map(|r| &r.0)
+            .filter(|l| l.starts_with(SELECTED_MARK))
+            .collect();
+        assert_eq!(gold.len(), 1, "exactly one row may take the accent");
+        assert!(gold[0].contains(mount_name(mounts[0])));
+        // the LOCK row is a reading, not a selection, and must not
+        // accidentally match the marker
+        assert!(rows.iter().any(|r| r.0 == "LOCK"));
+        assert!(!"LOCK".starts_with(SELECTED_MARK));
+        // an unselected mount is padded with a space, never the marker
+        assert!(rows[1].0.starts_with(' '));
+    }
 
     /// Every widget this module owns is outside the centre third, at
     /// every aspect. Reference rule 1, which the old HUD broke with
