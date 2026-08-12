@@ -10045,8 +10045,14 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             // 0.114 / 0.116 either side of `sight_line_y` 0.1120, so the
             // two really do line up on the height focus brings to the
             // eye.
+            // The post REACHES its base. First attempt hung it at y
+            // 0.098 with a 0.032 height, which put its underside at
+            // 0.082 and the base's top at 0.050 - a 3 cm gap that the
+            // side capture showed as a black chip floating in the air
+            // beside the barrel. Sized from the two heights it has to
+            // join instead of picked: base top 0.050 to tip 0.114.
             parts.push(wp(false, Tone::Dark, (0.0, 0.030, 0.410), 0.0, (0.030, 0.040, 0.030)));
-            parts.push(wp(false, Tone::Black, (0.0, 0.098, 0.410), 0.0, (0.008, 0.032, 0.010)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.082, 0.410), 0.0, (0.008, 0.064, 0.010)));
             // The rear sight is FOLDED, and that is a capture finding
             // rather than a style choice: a standing notch was built
             // first, two black uprights either side of the sight line at
