@@ -431,9 +431,13 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
         // wide does read: it is a profile no other pocket item has
         // (the molotov is narrow-then-wide, the frag is round, the
         // shield tapers one way only).
+        // The rims are DIFFERENT widths, narrow shoulder over wide base.
+        // The first cut made them equal and the capture read as a
+        // dumbbell — a symmetric object has no up, and a canister is a
+        // thing that stands on something.
         Item::Throw(ThrowKind::Smoke) => vec![
-            part(4.0, 3.0, 14.0, 3.0, 1.0, Body),
-            part(7.0, 6.0, 8.0, 12.0, 1.0, Body),
+            part(5.5, 3.0, 11.0, 3.0, 1.0, Body),
+            part(7.5, 6.0, 7.0, 12.0, 1.0, Body),
             part(4.0, 18.0, 14.0, 3.0, 1.0, Body),
             part(9.0, 0.0, 4.0, 3.0, 1.0, Accent),
         ],
@@ -467,11 +471,22 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
         // over it. §5's own verdict on this cell was "plausibly a
         // shield, not instantly one"; a groove that reads as a stem is
         // why.
+        //
+        // FIVE bands, not four, and that came out of looking at the
+        // four-band version rendered. 18-14-8-4 is arithmetically a
+        // taper and photographs as a funnel: the first step is 2 px a
+        // side and invisible, so the top two bands merge into one broad
+        // head and the eye sees head-then-stem-then-dot. Sides read as
+        // CONVERGING only if they converge on every band, so this is
+        // 18-14-11-8-4 in five equal 4 px courses — the most even
+        // convergence five axis-aligned rectangles can make in a 22 px
+        // box, and it is the whole part budget.
         Item::Shield => vec![
-            part(2.0, 1.0, 18.0, 6.0, 1.0, Body),
-            part(4.0, 7.0, 14.0, 6.0, 1.0, Body),
-            part(7.0, 13.0, 8.0, 5.0, 1.0, Body),
-            part(9.0, 18.0, 4.0, 3.0, 1.0, Body),
+            part(2.0, 1.0, 18.0, 4.0, 1.0, Body),
+            part(4.0, 5.0, 14.0, 4.0, 1.0, Body),
+            part(5.5, 9.0, 11.0, 4.0, 1.0, Body),
+            part(7.0, 13.0, 8.0, 4.0, 1.0, Body),
+            part(9.0, 17.0, 4.0, 4.0, 1.0, Body),
         ],
         Item::Gun(_, k) => small_gun_parts(k),
     }
