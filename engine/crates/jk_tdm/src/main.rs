@@ -4951,18 +4951,25 @@ const RETICLE_DRIFT_M: f32 = 0.0075;
 
 /// §owner: the 1x RED DOT every firearm carries.
 ///
-/// An open square housing you look THROUGH - four bars around a window,
-/// never a solid block - with a thin emissive red CROSS floating at the
-/// exact centre. This replaced the goalpost irons, which asked the
-/// player to line up two pieces of dark grey against a dark grey world.
+/// A round reflex TUBE you look through: two bezels joined by four
+/// struts, a coated objective lens across the front, a windage and an
+/// elevation turret, a clamp foot on the rail, and one emissive DOT at
+/// the exact centre. Never a solid block - this is a sight, and the
+/// whole point of it is that the world stays visible through it.
+///
+/// EIGHT guns call this, and it is the only optic design in the game.
+/// A change here lands on every firearm at once, which is the reason
+/// it is worth spending detail on and the reason to capture more than
+/// one gun after touching it - `sights_a`, `sights_b` and `sights_c`
+/// between them frame six of the eight in ADS.
 ///
 /// `y` is the reticle centre and MUST equal the gun's `sight_line_y`:
 /// focus aligns that height to the eye, so any disagreement puts the
-/// cross off the crosshair and the optic becomes decoration. The pairing
+/// dot off the crosshair and the optic becomes decoration. The pairing
 /// is asserted for every gun in `every_firearm_carries_an_aligned_optic`.
 ///
-/// The cross is 1x - it moves the AIM POINT nowhere. It is a sight
-/// picture, not a zoom: magnification stays whatever `zoom_deg` says.
+/// It is 1x - it moves the AIM POINT nowhere. A sight picture, not a
+/// zoom: magnification stays whatever `zoom_deg` says.
 fn push_red_dot(parts: &mut Vec<WPart>, y: f32, z: f32, mount_top: f32) {
     let outer = OPTIC_RING_MAJOR;
     // The check the flat frame carried compared `y - outer` - the lower
