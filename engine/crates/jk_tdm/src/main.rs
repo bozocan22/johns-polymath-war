@@ -81,6 +81,11 @@ mod menu_ui;
 /// shot clock every other fresh-shot effect reads and owns nothing else.
 mod muzzle_flash;
 mod sim;
+/// THE THREAT SENSOR (§HUD rework section 2): "who can see ME", derived
+/// client-side from the sim's own `los_clear` and drawn on a compass
+/// ring. Same two-line wiring as `inventory_strip`. Read-only on the sim
+/// outside its own `JK_CAPTURE`-gated staging.
+mod threat_sensor;
 /// §owner: the bow's and the spear's published hand anchors. Read
 /// `weapon_anchors.rs` for the attach contract - it is the thing a hand
 /// system binds to.
@@ -6962,6 +6967,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
         bailey_capture::SCRIPT => bailey_capture::BEATS,
+        threat_sensor::capture::SCRIPT => threat_sensor::capture::BEATS,
         _ => &[],
     }
 }
@@ -6990,7 +6996,12 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 41] = [
+const CAPTURE_SCRIPTS: [&str; 42] = [
+    // §HUD rework section 2: the threat ring. Its own module owns the
+    // beats AND the staging - no script before it had ever pointed an
+    // enemy at the subject on purpose, which is why "who can see me"
+    // was unphotographable.
+    threat_sensor::capture::SCRIPT,
     // The CASTLE BAILEY. Every other script here deploys onto
     // `Selected::default().map` (Arena), so the 130 m castle map had
     // never appeared in a single frame this project has taken.
@@ -8549,6 +8560,7 @@ fn main() {
         .add_plugins(muzzle_flash::MuzzleFlashPlugin)
         .add_plugins(hud::HudPlugin)
         .add_plugins(inventory_strip::InventoryStripPlugin)
+        .add_plugins(threat_sensor::ThreatSensorPlugin)
         .init_resource::<IntroPage>()
         .init_resource::<IntroEntryPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
