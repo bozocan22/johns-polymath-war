@@ -360,15 +360,31 @@ fn gun_parts(k: GunKind) -> Vec<IconPart> {
 /// * a SNIPER is the same full-width bar, thinner, under a scope so long
 ///   it is the widest thing above the bore line;
 /// * a SHOTGUN is TWO parallel bars, barrel over pump;
-/// * a SHIELD is a slab that gets narrower every band on the way down,
-///   which nothing else in the row does;
+/// * a SHIELD is a slab that gets narrower every band on the way down
+///   until it ends in a point, which nothing else in the row does;
 /// * a BOW is two vertical limbs with a vertical string beside them;
-/// * the four throwables stay vertical canisters and are told apart by
-///   what sits on top — a lever, a cap, a band pair, a flame.
+/// * the four throwables each have their OWN outline — a round frag with
+///   a lever, a BURST for the flash, a rimmed SPOOL for the smoke, a
+///   bottom-heavy bottle for the molotov.
 ///
-/// `every_small_glyph_states_its_own_silhouette` asserts those tells as
+/// ## Why the throwables stopped being four canisters
+///
+/// §5 drew all four as vertical canisters and told them apart by what
+/// sat on top. Its own handback admitted that flash and smoke were
+/// indistinguishable, and the measurement agrees: their 22x22 rasters
+/// overlapped 87%, because a 3 px cap is a detail and this size has no
+/// room for details. Two glyphs that differ only above the shoulder
+/// are one glyph.
+///
+/// So the tell moved from the marking to the OUTLINE, which is the same
+/// correction `ICON_SM_BOX` describes making for the whole table, applied
+/// to the pair that survived it. Worst overlap in this group is now 60%.
+///
+/// `every_small_glyph_states_its_own_silhouette` asserts the tells as
 /// properties rather than as coordinates, so a future retune is free to
-/// move a rectangle but not free to make a rifle stop reading as one.
+/// move a rectangle but not free to make a rifle stop reading as one;
+/// `no_two_pocket_glyphs_are_the_same_picture` holds the overlap bound
+/// that the property asserts cannot see.
 fn small_icon_parts(item: Item) -> Vec<IconPart> {
     use Tone::{Accent, Body, Detail};
     match item {
@@ -380,18 +396,46 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
             part(9.0, 3.0, 4.0, 5.0, 1.0, Detail),
             part(12.0, 2.0, 6.0, 3.0, 1.0, Accent),
         ],
-        // a canister with one bright port in the middle of it
+        // THE BURST. Not a canister at all, and that is the point.
+        //
+        // §5 authored flash and smoke as the same canister with a
+        // different mark on top, and its own handback called them
+        // indistinguishable at 22 px. It was right, and the reason is
+        // measurable: the two rasters overlapped 87% (see
+        // `no_two_pocket_glyphs_are_the_same_picture`). A 3 px cap on a
+        // 13 px body is a DETAIL difference, and detail is exactly what
+        // 22 px destroys - which is the lesson `ICON_SM_BOX` was written
+        // to record, applied here to the pair it missed.
+        //
+        // So the difference is moved into the OUTLINE. Two rays out to
+        // the edges of the box and a bright round core: the only glyph
+        // in the row that is not convex, the only one that touches all
+        // four sides, and the only one you can identify from its shape
+        // alone with the colour thrown away. Overlap with smoke is now
+        // 53%.
+        //
+        // The core carries the accent because a flashbang IS the light -
+        // and it is one highlight, which is the table's standing rule.
         Item::Throw(ThrowKind::Flash) => vec![
-            part(6.0, 7.0, 10.0, 13.0, 3.0, Body),
-            part(8.0, 11.0, 6.0, 6.0, 3.0, Accent),
-            part(8.0, 3.0, 6.0, 5.0, 1.5, Detail),
+            part(0.0, 8.0, 22.0, 4.0, 0.5, Body),
+            part(9.0, 0.0, 4.0, 20.0, 0.5, Body),
+            part(6.0, 5.0, 10.0, 10.0, 4.0, Accent),
         ],
-        // the TALLEST canister, wearing two bands
+        // THE SPOOL: a rolled rim top and bottom with a narrow waist
+        // between them, and a nozzle above.
+        //
+        // Also an outline change rather than a marking. The old smoke
+        // was a plain 10x16 cylinder wearing two `Detail` bands, and a
+        // tone step inside an 8 px body does not survive this size - the
+        // bands are in the capture and they do not read. Wide-narrow-
+        // wide does read: it is a profile no other pocket item has
+        // (the molotov is narrow-then-wide, the frag is round, the
+        // shield tapers one way only).
         Item::Throw(ThrowKind::Smoke) => vec![
-            part(6.0, 4.0, 10.0, 16.0, 2.0, Body),
-            part(6.0, 8.0, 10.0, 3.0, 1.0, Detail),
-            part(6.0, 13.0, 10.0, 3.0, 1.0, Detail),
-            part(9.0, 1.0, 5.0, 3.0, 1.0, Accent),
+            part(4.0, 3.0, 14.0, 3.0, 1.0, Body),
+            part(7.0, 6.0, 8.0, 12.0, 1.0, Body),
+            part(4.0, 18.0, 14.0, 3.0, 1.0, Body),
+            part(9.0, 0.0, 4.0, 3.0, 1.0, Accent),
         ],
         // a squat bottle, a neck, and a rag alight on top
         Item::Throw(ThrowKind::Molotov) => vec![
@@ -399,24 +443,35 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
             part(9.0, 5.0, 4.0, 5.0, 1.0, Detail),
             part(7.0, 0.0, 8.0, 5.0, 2.0, Accent),
         ],
-        // THE TAPER. Broad shoulders at the top, narrower every band on
-        // the way down to a foot. §4's shield was three bands of nearly
+        // THE TAPER. Broad flat shoulders, then narrower every band on
+        // the way down to a POINT. §4's shield was three bands of nearly
         // equal width scaled to 22, and the capture shows it as a `T`.
         //
-        // ALL THREE BANDS ARE `Body`, and that is the second capture's
+        // ALL BANDS ARE `Body`, and that is the second capture's
         // correction. The first cut of this glyph made the shoulder band
         // `Accent`, which on a `Ready` cell resolves to `INK` — the
         // BRIGHTEST tone in the table. The frame came back as a bright
         // plate balanced on a dimmer block, which reads as an anvil, not
         // as a shield: the eye took the brightest band for the subject
         // and the taper never registered. One tone for the whole slab
-        // lets the OUTLINE do the talking, and the boss is a `Detail`
-        // groove drawn over it rather than a highlight sitting on it.
+        // lets the OUTLINE do the talking.
+        //
+        // §6: THE GROOVE IS GONE AND THERE IS A FOURTH BAND. §5's
+        // version stopped tapering at an 8 px foot and drew a 3 px
+        // `Detail` boss down the middle of the slab, and the zoomed
+        // capture is unambiguous about the result: the dark groove
+        // out-read the outline and the glyph photographed as a plug —
+        // broad head, straight stem, flat bottom. A shield is recognised
+        // by ONE thing, which is that its sides converge on a point, so
+        // 18 -> 14 -> 8 -> 4 is the whole glyph and nothing is drawn
+        // over it. §5's own verdict on this cell was "plausibly a
+        // shield, not instantly one"; a groove that reads as a stem is
+        // why.
         Item::Shield => vec![
-            part(2.0, 2.0, 18.0, 5.0, 1.0, Body),
-            part(4.0, 7.0, 14.0, 7.0, 1.0, Body),
-            part(7.0, 14.0, 8.0, 6.0, 2.0, Body),
-            part(9.0, 3.0, 3.0, 15.0, 1.0, Detail),
+            part(2.0, 1.0, 18.0, 6.0, 1.0, Body),
+            part(4.0, 7.0, 14.0, 6.0, 1.0, Body),
+            part(7.0, 13.0, 8.0, 5.0, 1.0, Body),
+            part(9.0, 18.0, 4.0, 3.0, 1.0, Body),
         ],
         Item::Gun(_, k) => small_gun_parts(k),
     }
@@ -1522,18 +1577,102 @@ mod tests {
             "the bow has no full-height string"
         );
 
-        // SHIELD: it gets NARROWER on the way down. Nothing else in the
-        // row tapers, which is the whole tell — §4's shield was three
-        // near-equal bands and photographed as a `T`.
-        // Only the BODY bands carry the outline; the boss is a groove
-        // drawn over them and does not participate in the taper.
+    }
+
+    /// THE PAIR §5 COULD NOT TELL APART, each stated as its own outline.
+    ///
+    /// Split out of `every_small_glyph_states_its_own_silhouette` rather
+    /// than added to it, and so is the shield below: an assert only ever
+    /// reports the FIRST failure in its test, so three glyph rules in
+    /// one function means a broken flash hides a broken smoke. One test
+    /// per claim is also one mutation per test, which is the only way to
+    /// show each of these can fail.
+    #[test]
+    fn the_flash_is_a_burst_and_the_smoke_is_a_spool() {
+        let b = ICON_SM_BOX;
+        // FLASH: rays that reach the sides of the box in BOTH axes — the
+        // only glyph in the row that does — and a core they radiate
+        // from. §5's flash and smoke were the same canister with
+        // different caps and could not be told apart.
+        let fl = small_icon_parts(Item::Throw(ThrowKind::Flash));
+        let ray_h = fl
+            .iter()
+            .max_by(|a, c| a.w.partial_cmp(&c.w).unwrap())
+            .copied()
+            .unwrap();
+        let ray_v = fl
+            .iter()
+            .max_by(|a, c| a.h.partial_cmp(&c.h).unwrap())
+            .copied()
+            .unwrap();
+        assert!(
+            ray_h.w >= 0.95 * b && ray_v.h >= 0.85 * b,
+            "the flash has no burst: widest {:.0}, tallest {:.0} of {b}",
+            ray_h.w,
+            ray_v.h
+        );
+        assert!(
+            fl.iter().any(|p| p.t == Tone::Accent && p.w >= 8.0 && p.h >= 8.0),
+            "the flash has no bright core for its rays to come out of"
+        );
+
+        // SMOKE: a SPOOL. Wide rim, narrow waist, wide rim — read off
+        // the row profile, because that is the thing the eye has at this
+        // size. A plain cylinder (§5's version) has a flat profile and
+        // is a molotov with the flame filed off.
+        let sm = small_icon_parts(Item::Throw(ThrowKind::Smoke));
+        let width_at = |ps: &Vec<IconPart>, y: f32| {
+            ps.iter()
+                .filter(|p| p.y <= y && p.y + p.h > y)
+                .map(|p| p.w)
+                .fold(0.0_f32, f32::max)
+        };
+        let (top, waist, foot) = (width_at(&sm, 4.0), width_at(&sm, 12.0), width_at(&sm, 19.0));
+        assert!(
+            top >= waist * 1.5 && foot >= waist * 1.5,
+            "the smoke is not a spool: rim {top:.0}, waist {waist:.0}, rim {foot:.0}"
+        );
+        // and it must not out-grow the flash, or the burst stops being
+        // the widest thing in the pocket group
+        assert!(
+            ray_h.w > top * 1.4,
+            "the flash's rays no longer out-reach the smoke's rim"
+        );
+    }
+
+    /// SHIELD: it gets NARROWER on the way down, all the way to a POINT.
+    ///
+    /// Nothing else in the row tapers, which is the whole tell. §4's
+    /// shield was three near-equal bands and photographed as a `T`; §5's
+    /// stopped at an 8 px foot with a `Detail` groove down the middle
+    /// and photographed as a PLUG — broad head, straight stem. Both are
+    /// the same mistake, which is putting something in the glyph that
+    /// out-reads its outline.
+    #[test]
+    fn the_shield_tapers_to_a_point() {
+        let b = ICON_SM_BOX;
         let mut sh: Vec<IconPart> = small_icon_parts(Item::Shield)
             .into_iter()
             .filter(|p| p.t == Tone::Body)
             .collect();
         sh.sort_by(|a, c| a.y.partial_cmp(&c.y).unwrap());
-        assert!(sh.len() >= 3, "a two-band shield cannot show a taper");
+        assert!(sh.len() >= 4, "a three-band shield stops short of a point");
         assert!(sh[0].w >= 0.75 * b, "the shield has no broad shoulders");
+        assert!(
+            sh[sh.len() - 1].w <= 0.3 * sh[0].w,
+            "the shield's foot is {:.0} against {:.0} shoulders — that is a \
+             stem, not a point, and it photographs as a plug",
+            sh[sh.len() - 1].w,
+            sh[0].w
+        );
+        // NOTHING is drawn over the taper. The groove §5 put down the
+        // middle read as the stem of a plug and beat the outline.
+        assert!(
+            small_icon_parts(Item::Shield)
+                .iter()
+                .all(|p| p.t == Tone::Body),
+            "something is drawn over the shield's outline again"
+        );
         // ...and the slab is ONE tone. A brighter band on top made the
         // eye read the band as the subject and the shield as an anvil —
         // photographed, then corrected.
@@ -1552,6 +1691,89 @@ mod tests {
                 w[1].w
             );
         }
+    }
+
+    /// The glyph as the screen actually has it: a 22x22 bitmap, tone
+    /// thrown away.
+    ///
+    /// Corner radii are ignored, which OVERSTATES how similar two glyphs
+    /// are (rounding only ever removes shared pixels), so a bound that
+    /// holds here holds on the drawn art too. That is the right
+    /// direction for a guard rail to be wrong in.
+    fn silhouette(item: Item) -> Vec<bool> {
+        let (parts, box_px) = icon_art(item, true);
+        let n = box_px.round() as usize;
+        let mut bits = vec![false; n * n];
+        for p in parts {
+            let x0 = p.x.round().max(0.0) as usize;
+            let y0 = p.y.round().max(0.0) as usize;
+            let x1 = ((p.x + p.w).round() as usize).min(n);
+            let y1 = ((p.y + p.h).round() as usize).min(n);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    bits[y * n + x] = true;
+                }
+            }
+        }
+        bits
+    }
+
+    /// THE FLASH/SMOKE DEFECT, as a number.
+    ///
+    /// `every_small_glyph_states_its_own_silhouette` checks that each
+    /// glyph HAS its tell. It cannot check that two glyphs are different
+    /// pictures, and that is exactly the hole §5 shipped through: flash
+    /// and smoke each satisfied "a canister with a mark on top", and
+    /// were the same canister.
+    ///
+    /// So: intersection over union of the rasters, over every pair of
+    /// the five POCKET items — the four throwables and the shield, which
+    /// are the cells that sit side by side and are least alike in what
+    /// they do. On §5's table the worst pair (flash, smoke) scores 0.87
+    /// and four more pairs are over this bound; on this one the worst
+    /// (smoke, molotov) is 0.60.
+    ///
+    /// Deliberately NOT applied to the guns. A sniper is supposed to
+    /// look like a rifle with a scope — the doc on `small_gun_parts`
+    /// says so — and a bound that forbade that would be describing a
+    /// different design.
+    #[test]
+    fn no_two_pocket_glyphs_are_the_same_picture() {
+        /// Above this, two 22 px glyphs are one glyph drawn twice.
+        const MAX_OVERLAP: f32 = 0.66;
+        let pocket = [
+            ("frag", Item::Throw(ThrowKind::Frag)),
+            ("flash", Item::Throw(ThrowKind::Flash)),
+            ("smoke", Item::Throw(ThrowKind::Smoke)),
+            ("molotov", Item::Throw(ThrowKind::Molotov)),
+            ("shield", Item::Shield),
+        ];
+        let mut worst = (0.0_f32, "", "");
+        for (i, (an, a)) in pocket.iter().enumerate() {
+            for (bn, c) in pocket.iter().skip(i + 1) {
+                let (ra, rc) = (silhouette(*a), silhouette(*c));
+                let inter = ra.iter().zip(&rc).filter(|(x, y)| **x && **y).count() as f32;
+                let union = ra.iter().zip(&rc).filter(|(x, y)| **x || **y).count() as f32;
+                assert!(union > 0.0, "{an}/{bn} draw nothing");
+                let iou = inter / union;
+                if iou > worst.0 {
+                    worst = (iou, an, bn);
+                }
+                assert!(
+                    iou <= MAX_OVERLAP,
+                    "{an} and {bn} cover the same {:.0}% of their box. At 22 px \
+                     that is one icon printed twice — the difference has to be \
+                     in the OUTLINE, not in a 3 px mark on top of it.",
+                    iou * 100.0
+                );
+            }
+        }
+        // a floor as well, so a future change cannot quietly satisfy the
+        // bound by making every glyph a different-sized blob of nothing
+        assert!(
+            worst.0 > 0.2,
+            "no two pocket glyphs overlap at all - are they drawing?"
+        );
     }
 
     #[test]

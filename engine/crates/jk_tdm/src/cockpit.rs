@@ -84,6 +84,49 @@ pub const MAX_LEAN_M: f32 = 0.034;
 const Z_SHELL: f32 = 0.44;
 const Z_EDGE: f32 = 0.415;
 
+/// How DEEP a lit trim strip is, and the number that made the whole cab
+/// read as one flat orange.
+///
+/// A `Panel` is a BOX declared at its far face and extruded toward the
+/// eye, so its near face projects `z / (z - d)` times further from the
+/// screen centre than its far face - and the side wall between them is
+/// drawn too. The trim strips run at |u| ~ 0.86-0.93, right out at the
+/// screen edge, where that magnification bites hardest.
+///
+/// At the old `d = 0.02` the pillar's 0.020-wide accent line covered
+/// 0.064 of the screen - THREE TIMES its authored width, 51 px of the
+/// most saturated colour in the palette, and four of them ringing the
+/// view in a closed rectangle. Measured off
+/// `handback/brief-vii/cockpit/01-cockpit-level.png`, scanline y=300:
+/// a solid `(0.803, 0.502, 0.207)` run from x=77 to x=127.
+///
+/// This is the same failure the palette note below describes - "you
+/// could not tell the lamp from the wall" - arriving through geometry
+/// rather than through colour, which is why fixing the palette did not
+/// fix it. `no_lit_trim_renders_far_wider_than_it_was_authored` holds
+/// the bound now.
+///
+/// 4 mm and not zero: a zero-depth box has no thickness to catch the
+/// canopy lamp, and these are meant to be a seam in a machine rather
+/// than a decal on it.
+const EDGE_D: f32 = 0.004;
+
+/// The most a lit trim strip may cover, as a multiple of the width it
+/// was authored with. See `EDGE_D` - the old geometry ran at 3.2x.
+pub const EDGE_MAX_SPREAD: f32 = 1.7;
+
+/// How hard the lit trim burns, against a gauge segment reading full.
+///
+/// Not 1.0, and that is the other half of "tell the lamp from the wall".
+/// The trim and the gauges were the SAME material value, so a seam in
+/// the structure and a readout at maximum were the same colour on the
+/// screen - and there is far more seam than readout. A trim line is
+/// evidence that the frame is powered; a gauge is a number. The number
+/// gets the top of the range.
+///
+/// `lit_trim_never_burns_as_hard_as_a_gauge` is the test.
+const EDGE_LEVEL: f32 = 0.5;
+
 /// THE INSTRUMENT STACK, front to back. Five layers, each one thin, and
 /// each one's NEAR face behind the next one's FAR face.
 ///
@@ -233,10 +276,12 @@ pub const HEAVY_SHELL: &[Panel] = &[
     // console it is supposed to be cut into.
     pn(0.02, 0.70, -0.98, -0.87, 0.380, 0.010, Role::Fascia),
     // --- lit edges: the amber lines that say the frame is powered -----
-    pn(-1.02, 1.02, -0.848, -0.822, Z_EDGE, 0.02, Role::Edge),
-    pn(-0.862, -0.842, -0.84, 0.80, Z_EDGE, 0.02, Role::Edge),
-    pn(0.842, 0.862, -0.84, 0.80, Z_EDGE, 0.02, Role::Edge),
-    pn(-1.02, 1.02, 0.872, 0.894, Z_EDGE + 0.01, 0.02, Role::Edge),
+    // `EDGE_D` deep, not 0.02 - see its note. These four ring the whole
+    // view, so any width they gain to parallax is multiplied by four.
+    pn(-1.02, 1.02, -0.848, -0.822, Z_EDGE, EDGE_D, Role::Edge),
+    pn(-0.862, -0.842, -0.84, 0.80, Z_EDGE, EDGE_D, Role::Edge),
+    pn(0.842, 0.862, -0.84, 0.80, Z_EDGE, EDGE_D, Role::Edge),
+    pn(-1.02, 1.02, 0.872, 0.894, Z_EDGE + 0.01, EDGE_D, Role::Edge),
     // --- bolt heads down the pillars ----------------------------------
     pn(-0.985, -0.945, -0.66, -0.62, Z_EDGE, 0.03, Role::Stud),
     pn(-0.985, -0.945, -0.28, -0.24, Z_EDGE, 0.03, Role::Stud),
@@ -280,19 +325,19 @@ pub const MEDIC_SHELL: &[Panel] = &[
     pn(0.80, 0.99, 0.20, 0.245, Z_SHELL - 0.01, 0.04, Role::Deep),
     pn(0.80, 0.99, -0.34, -0.295, Z_SHELL - 0.01, 0.04, Role::Deep),
     // --- cool-white light down the inboard edge of everything ---------
-    pn(-0.928, -0.912, -1.02, 0.66, Z_EDGE, 0.02, Role::Edge),
-    pn(0.912, 0.928, -1.02, 0.66, Z_EDGE, 0.02, Role::Edge),
-    pn(-1.02, -0.86, 0.652, 0.668, Z_EDGE + 0.01, 0.02, Role::Edge),
-    pn(-0.90, -0.62, 0.772, 0.788, Z_EDGE + 0.01, 0.02, Role::Edge),
-    pn(-0.66, 0.66, 0.872, 0.888, Z_EDGE + 0.01, 0.02, Role::Edge),
-    pn(0.62, 0.90, 0.772, 0.788, Z_EDGE + 0.01, 0.02, Role::Edge),
-    pn(0.86, 1.02, 0.652, 0.668, Z_EDGE + 0.01, 0.02, Role::Edge),
+    pn(-0.928, -0.912, -1.02, 0.66, Z_EDGE, EDGE_D, Role::Edge),
+    pn(0.912, 0.928, -1.02, 0.66, Z_EDGE, EDGE_D, Role::Edge),
+    pn(-1.02, -0.86, 0.652, 0.668, Z_EDGE + 0.01, EDGE_D, Role::Edge),
+    pn(-0.90, -0.62, 0.772, 0.788, Z_EDGE + 0.01, EDGE_D, Role::Edge),
+    pn(-0.66, 0.66, 0.872, 0.888, Z_EDGE + 0.01, EDGE_D, Role::Edge),
+    pn(0.62, 0.90, 0.772, 0.788, Z_EDGE + 0.01, EDGE_D, Role::Edge),
+    pn(0.86, 1.02, 0.652, 0.668, Z_EDGE + 0.01, EDGE_D, Role::Edge),
     // --- the dash bar: a slab hung low and left, not a wall -----------
     // All three are INSTRUMENT parts: the medic's dash is not structure,
     // it is the readout, and it stays through the V toggle.
     pi(-0.94, -0.16, -1.02, -0.85, Z_BEZEL, Z_BEZEL_D, Role::Frame),
     pi(-0.92, -0.18, -1.00, -0.865, Z_FASCIA, Z_FASCIA_D, Role::Fascia),
-    pi(-0.94, -0.16, -0.862, -0.846, Z_EDGE, 0.02, Role::Edge),
+    pi(-0.94, -0.16, -0.862, -0.846, Z_EDGE, EDGE_D, Role::Edge),
 ];
 
 /// Which live value a ladder shows.
@@ -432,6 +477,54 @@ pub fn rect_transform(u0: f32, u1: f32, v0: f32, v1: f32, z: f32, d: f32) -> Tra
 
 fn panel_transform(p: &Panel) -> Transform {
     rect_transform(p.u0, p.u1, p.v0, p.v1, p.z, p.d)
+}
+
+/// The screen-fraction rectangle a panel actually COVERS - which is not
+/// the rectangle it was authored with, and that gap is what made the
+/// heavy cab read as one flat orange.
+///
+/// A panel's world extent is fixed at its FAR face. Its NEAR face sits
+/// `d` closer to the eye, so under a perspective camera that face
+/// projects `z / (z - d)` times further from the screen centre, and the
+/// side wall joining the two is drawn as well. The silhouette is
+/// therefore the convex hull of both faces, and for a strip out at the
+/// screen edge the hull can be several times the declared width.
+///
+/// Pure, and takes only the declared numbers, so the property can be
+/// asserted over the whole table without launching the game - which is
+/// the only reason this defect is now catchable. It was invisible in the
+/// source (`0.02` looks like a hairline) and only measurable in a PNG.
+pub fn panel_silhouette(p: &Panel) -> (f32, f32, f32, f32) {
+    // guard the degenerate case rather than dividing by ~0: a panel as
+    // deep as it is distant is a bug the extrude test already catches.
+    let near = (p.z - p.d).max(1e-3);
+    let m = p.z / near;
+    let hull = |a: f32, b: f32| (a.min(a * m).min(b.min(b * m)), a.max(a * m).max(b.max(b * m)));
+    let (u0, u1) = hull(p.u0, p.u1);
+    let (v0, v1) = hull(p.v0, p.v1);
+    (u0, u1, v0, v1)
+}
+
+/// How much wider than authored a panel renders, per axis. 1.0 is a
+/// panel that covers exactly what it declared.
+pub fn panel_spread(p: &Panel) -> (f32, f32) {
+    let (u0, u1, v0, v1) = panel_silhouette(p);
+    (
+        (u1 - u0) / (p.u1 - p.u0).abs().max(1e-4),
+        (v1 - v0) / (p.v1 - p.v0).abs().max(1e-4),
+    )
+}
+
+/// The lit trim's colour at a given flicker level.
+///
+/// ONE function, called from both the spawn and `cockpit_sync`, because
+/// those two have to agree about the trim and a bare literal in each is
+/// exactly how they would stop agreeing - the spawn value would be the
+/// one a still capture photographs and the sync value the one the game
+/// actually runs at, which is a difference no screenshot could ever
+/// show.
+pub fn edge_color(tint: [f32; 3], stutter: f32) -> Color {
+    srgb(tint, stutter * EDGE_LEVEL)
 }
 
 /// `MAX_SHAKE_M` expressed in the screen fractions the tables use, at
@@ -711,6 +804,19 @@ pub fn spawn_cockpit(
     // from the wall. A grey frame lets the light BE the colour, which is
     // also the only way the medic's cool white reads as a different
     // machine rather than a different filter.
+    //
+    // THAT FIX HELD AND THE CAB WENT ORANGE ANYWAY, twice over, and the
+    // reason it took a capture to find is that neither cause was in this
+    // table. Measured off the level frame of `cockpit`: the structural
+    // Frame renders `(0.107, 0.092, 0.077)` - dark, barely warm, exactly
+    // what the paragraph above asks for. The orange was
+    //   1. `EDGE_D`: the trim strips are BOXES, and at 2 cm deep out by
+    //      the screen edge each drew at three times its authored width,
+    //      four of them ringing the view; and
+    //   2. `EDGE_LEVEL`: that trim burned at full tint, the same value
+    //      as a gauge segment reading maximum.
+    // A palette can be right and still lose to the geometry that spends
+    // it. This is why the two constants exist and why they are asserted.
     let mk = |c: Color, m: f32, r: f32| StandardMaterial {
         base_color: c,
         metallic: m,
@@ -719,17 +825,24 @@ pub fn spawn_cockpit(
     };
     let (heavy_amber, medic_cyan) = (HEAVY_TINT, MEDIC_TINT);
 
+    // The Edge entries go in through `edge_color`, at `EDGE_LEVEL`
+    // rather than at full tint: the trim is a seam, not a readout.
+    let trim = |c: [f32; 3]| StandardMaterial {
+        base_color: edge_color(c, 1.0),
+        unlit: true,
+        ..default()
+    };
     let heavy_mats = [
         materials.add(mk(Color::srgb(0.155, 0.155, 0.152), 0.30, 0.70)), // Frame
         materials.add(mk(Color::srgb(0.052, 0.052, 0.052), 0.10, 0.85)), // Deep
-        materials.add(lit(heavy_amber, 1.0)),                            // Edge
+        materials.add(trim(heavy_amber)),                                // Edge
         materials.add(mk(Color::srgb(0.032, 0.032, 0.030), 0.05, 0.35)), // Fascia
         materials.add(mk(Color::srgb(0.105, 0.105, 0.102), 0.85, 0.38)), // Stud
     ];
     let medic_mats = [
         materials.add(mk(Color::srgb(0.470, 0.492, 0.520), 0.20, 0.50)),
         materials.add(mk(Color::srgb(0.088, 0.098, 0.115), 0.35, 0.60)),
-        materials.add(lit(medic_cyan, 1.0)),
+        materials.add(trim(medic_cyan)),
         materials.add(mk(Color::srgb(0.036, 0.042, 0.052), 0.05, 0.35)),
         materials.add(mk(Color::srgb(0.245, 0.265, 0.298), 0.80, 0.36)),
     ];
@@ -1123,7 +1236,7 @@ pub fn cockpit_sync(
     };
     let base = if heavy { HEAVY_TINT } else { MEDIC_TINT };
     if let Some(m) = mats.get_mut(&rig.edge[if heavy { 0 } else { 1 }]) {
-        m.base_color = srgb(base, stutter);
+        m.base_color = edge_color(base, stutter);
     }
     if let Ok(mut l) = lights.get_mut(rig.light) {
         l.color = if heavy {
@@ -1327,6 +1440,98 @@ mod tests {
                 "{name}: nothing reaches the bottom edge"
             );
         }
+    }
+
+    /// THE FLAT-ORANGE DEFECT, as a property.
+    ///
+    /// A lit trim strip is the loudest material in the cab and it is
+    /// supposed to be an accent - a line. What it actually covers is the
+    /// convex hull of its far and near faces (`panel_silhouette`), and
+    /// out at |u| ~ 0.9 a 2 cm deep box triples its own width. Four of
+    /// those ring the view, so the "accent" became the wall.
+    ///
+    /// Asserted per axis, because a strip is thin in exactly one of them
+    /// and that is the axis that can run away: the top rail is 1.02 wide
+    /// (spread 1.03, harmless) and 0.022 tall (spread 2.9 at the old
+    /// depth, which is the whole bug).
+    #[test]
+    fn no_lit_trim_renders_far_wider_than_it_was_authored() {
+        let mut checked = 0;
+        for (name, ps) in [("heavy", HEAVY_SHELL), ("medic", MEDIC_SHELL)] {
+            for p in ps.iter().filter(|p| p.role == Role::Edge) {
+                checked += 1;
+                let (su, sv) = panel_spread(p);
+                assert!(
+                    su <= EDGE_MAX_SPREAD && sv <= EDGE_MAX_SPREAD,
+                    "{name} trim ({},{})x({},{}) at depth {} covers {su:.2}x its \
+                     authored width and {sv:.2}x its height (limit \
+                     {EDGE_MAX_SPREAD}). A trim strip that draws three times \
+                     its own width is not an accent, it is the wall.",
+                    p.u0,
+                    p.u1,
+                    p.v0,
+                    p.v1,
+                    p.d
+                );
+            }
+        }
+        assert!(checked >= 12, "expected both shells' trim, saw {checked}");
+    }
+
+    /// `panel_silhouette` has to describe the picture, not the table.
+    ///
+    /// Pinned against numbers taken off a PNG rather than off this
+    /// function: `handback/brief-vii/cockpit/01-cockpit-level.png`,
+    /// scanline y=300, showed the heavy's left pillar accent as a solid
+    /// amber run from x=77 to x=127 of 1600 - u -0.904 to -0.841. The
+    /// old panel was `(-0.862, -0.842)` at z 0.415, d 0.02.
+    #[test]
+    fn panel_silhouette_matches_what_the_capture_measured() {
+        let old = pn(-0.862, -0.842, -0.84, 0.80, 0.415, 0.02, Role::Edge);
+        let (u0, u1, _, _) = panel_silhouette(&old);
+        assert!(
+            (u0 - -0.9056).abs() < 0.002,
+            "outer edge should land where the capture found it: {u0}"
+        );
+        assert!((u1 - -0.842).abs() < 0.002, "inner edge is the far face: {u1}");
+        let (su, _) = panel_spread(&old);
+        assert!(su > 3.0, "the old trim covered >3x its width, got {su:.2}");
+        // and a zero-depth panel covers exactly what it declared
+        let flat = pn(-0.862, -0.842, -0.84, 0.80, 0.415, 0.0, Role::Edge);
+        let (fu, _) = panel_spread(&flat);
+        assert!((fu - 1.0).abs() < 1e-3, "a flat panel cannot spread: {fu}");
+    }
+
+    /// The second half of "tell the lamp from the wall".
+    ///
+    /// The trim and a gauge segment at maximum were the same material
+    /// value, and there is an order of magnitude more trim than gauge on
+    /// the screen. A seam in the structure must sit clearly below a
+    /// readout at full, or the readout is not reading anything.
+    #[test]
+    fn lit_trim_never_burns_as_hard_as_a_gauge() {
+        for tint in [HEAVY_TINT, MEDIC_TINT] {
+            let trim = edge_color(tint, 1.0).to_srgba();
+            let gauge = srgb(tint, 1.0).to_srgba();
+            let lum = |c: bevy::color::Srgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+            assert!(
+                lum(trim) <= 0.7 * lum(gauge),
+                "trim {:?} is not clearly below a full gauge {:?}",
+                trim,
+                gauge
+            );
+            // ...but it is still LIT. A trim line dimmed into the frame
+            // is a cab that reads dead, which is the other way to fail.
+            assert!(
+                lum(trim) >= 0.2 * lum(gauge),
+                "trim {trim:?} has been dimmed out of existence"
+            );
+        }
+        // the flicker still owns the whole range - a hit must be able to
+        // brown the trim out and bring it back
+        let dark = edge_color(HEAVY_TINT, 0.18).to_srgba();
+        let bright = edge_color(HEAVY_TINT, 1.05).to_srgba();
+        assert!(bright.red > dark.red * 3.0, "the hit flicker got flattened");
     }
 
     /// A box declared at its FAR face and extruded toward the camera has
