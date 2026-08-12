@@ -197,11 +197,15 @@ pub const BOT_PROBE_Y: f32 = 0.75;
 /// and a 600 m map would otherwise cost a 600 m walk per re-roll.
 pub const BOT_ROUTE_PROBE_M: f32 = 44.0;
 /// The sample spacing of that check. Has to be short enough that a
-/// FLIGHT never reads as a step it cannot take: the steepest run on
-/// Cliffhold gains `STAIR_RISE_M` per 1.2 m of tread, so a sample can
-/// never straddle two risers here and the biggest gain the probe ever
-/// sees on a stair is one `STAIR_RISE_M` — which is under `STEP_UP` by
-/// the same contract the map itself is built on.
+/// FLIGHT never reads as a step it cannot take: the steepest run any map
+/// here has ever laid gained `STAIR_RISE_M` per 1.2 m of tread, so a
+/// sample at this spacing can never straddle two risers and the biggest
+/// gain the probe ever sees on a stair is one `STAIR_RISE_M` — which is
+/// under `STEP_UP` by the same contract a flight is built on. (The map
+/// that measured 1.2 m of tread was Cliffhold, removed by BRIEF XIII §1;
+/// the 1.2 m is the constraint on the NEXT map that lays a stair, which
+/// is why it is stated here as a bound rather than as a fact about a
+/// layout.)
 pub const BOT_ROUTE_STEP_M: f32 = 0.75;
 /// A blocker THIS far above a bot's feet is TERRAIN; anything lower is
 /// FURNITURE and gets left to the 1.2 m whisker in `bot_act`, which
@@ -209,8 +213,10 @@ pub const BOT_ROUTE_STEP_M: f32 = 0.75;
 ///
 /// Not a taste call: the shared infill's tallest "hard cover" tops out
 /// at 3.4 m and so does its tallest tree, so this line sits immediately
-/// above everything any map calls cover and immediately below every
-/// building, cliff and curtain wall on Cliffhold (5 m and up). Routing
+/// above everything any map calls cover and immediately below the lowest
+/// course any map calls ARCHITECTURE — buildings, cliffs and curtain
+/// walls started at 5 m on Cliffhold (removed, BRIEF XIII §1) and the
+/// 5 m floor is the constraint the next such map inherits. Routing
 /// around furniture would turn a roam into a string of two-metre hops
 /// between boxes; NOT routing around a cliff is the bug this exists for.
 pub const BOT_TERRAIN_M: f32 = 3.5;
@@ -957,8 +963,20 @@ impl CoverGrid {
 
 // ------------------------------------------------------------------- maps
 
-/// v5: three battlefields. Same arena bounds, same pickup lanes, different
-/// architecture — the sim owns the layout so every map stays deterministic.
+/// The three maps. Each owns its own bounds and its own architecture; the
+/// sim owns the layout so every map stays deterministic.
+///
+/// §owner (BRIEF XIII §1): there were five. **BATTLEFIELD (400×400 m) and
+/// CLIFFHOLD (600×600 m) were removed entirely** — *"they must not appear
+/// in any menu, map selector, customization screen, game-mode selection,
+/// rotation, matchmaking list, or other UI"* — and Castle Gardens is being
+/// rebuilt as the large showcase map that has to carry the scale and the
+/// verticality both of them held. The numbers they encoded are not lost
+/// with the code: Cliffhold's occupied altitude ladder
+/// (0 / 5-6 / 7 / 12 / 18 / 24 / 32 m) is written down in
+/// `research/maps/VERTICAL_BANDS.md`, and the ledge-band arithmetic that
+/// makes a band a PLACE rather than a shelf is in
+/// `research/maps/MAP_METRICS.md` §4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKind {
     /// The original dusty range: plateaus, stairs, center tower.
@@ -966,18 +984,8 @@ pub enum MapKind {
     /// A castle courtyard: central keep, corner drum towers, bailey walls.
     Bailey,
     /// Castle gardens: hedge lanes, ruined walls, trees, a stone gazebo.
+    /// The showcase map, and the one Extraction runs on.
     Gardens,
-    /// §9.2 Battle tier (400×400 m): keep, forge district, cathedral
-    /// ruin, river field with bridges, corner watchtowers to 36 m —
-    /// verticality for the Robot Suit, ground routes for everyone else.
-    Battlefield,
-    /// §owner CLIFFHOLD (600×600 m): a castle on a cliff over half a
-    /// city. Built for the flight that is coming — real OCCUPIED
-    /// altitude bands (0 / 5-6 / 11-12 / 18 / 24-25 / 32 m) rather than
-    /// a flat map with tall walls, so rooftops, benches and parapets are
-    /// places rather than scenery. Every band is also reachable on foot,
-    /// because the map has to play today.
-    Cliffhold,
 }
 
 impl MapKind {
@@ -986,22 +994,21 @@ impl MapKind {
             MapKind::Arena => "DUST ARENA",
             MapKind::Bailey => "CASTLE BAILEY",
             MapKind::Gardens => "CASTLE GARDENS",
-            MapKind::Battlefield => "BATTLEFIELD",
-            MapKind::Cliffhold => "CLIFFHOLD",
         }
     }
-    pub const ALL: [MapKind; 5] = [
-        MapKind::Arena,
-        MapKind::Bailey,
-        MapKind::Gardens,
-        MapKind::Battlefield,
-        MapKind::Cliffhold,
-    ];
+    pub const ALL: [MapKind; 3] = [MapKind::Arena, MapKind::Bailey, MapKind::Gardens];
 }
 
-/// §owner CLIFFHOLD: the height of every riser on the map, and the one
-/// number that makes an eighteen-metre cliff walkable by BOTH a player
-/// and a bot.
+/// The height of a stair riser, and the one number that makes a tall
+/// climb walkable by BOTH a player and a bot.
+///
+/// NO MAP LAYS A FLIGHT TODAY. It was written for Cliffhold, which BRIEF
+/// XIII §1 removed, and it is deliberately kept rather than deleted with
+/// it: the ceiling arithmetic below is the whole reason a vertical map
+/// can be climbed by the AI, it cost a routing rewrite to find, and
+/// Castle Gardens is being rebuilt to need it again (§4, "make
+/// verticality useful"). `a_stair_riser_stays_under_both_the_step_up_and_
+/// the_bot_whisker` keeps the two relationships honest in the meantime.
 ///
 /// It has to clear two independent ceilings, and it is the lower of the
 /// two that binds:
@@ -1533,12 +1540,14 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
             //
             // A RING OF WALLS AROUND AN OPEN COURT, with a doorway, not a
             // solid block. That is deliberate and it is this file's own
-            // criticism of itself: `cliffholds_keep_is_a_building_you_
-            // walk_into_not_a_block` records that the Gardens' gazebo and
-            // this map's keep are both centrepieces you can only walk
-            // AROUND — "scenery with a name on it". A randomiser is
-            // exactly the wrong place to make that mistake eight more
-            // times, because it would make it identically every seed.
+            // criticism of itself: the SOLID-GAZEBO DEFECT, where a
+            // centrepiece is a thing you can only walk AROUND — "scenery
+            // with a name on it". The Gardens' gazebo is still exactly
+            // that. A randomiser is the worst possible place to make that
+            // mistake, because it makes it identically on every seed.
+            // (The test that named the defect went with Cliffhold under
+            // BRIEF XIII §1; the defect did not, and Castle Gardens is
+            // where it has to be fixed next.)
             //
             // The doorway is `BAILEY_APERTURE` wide, and the mirrored
             // twin puts its doorway on the OPPOSITE side, so the pair is
@@ -1835,153 +1844,6 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
                 }, CoverKind::Tree);
             }
         }
-        MapKind::Battlefield => {
-            // §9.2 the Battle tier: 400×400 m. Set pieces give the map
-            // its shape (§9.4); the §9.1 grid keeps rays cheap at this
-            // scale; ground routes stay viable everywhere (§9.3).
-            half = 200.0;
-            checkpoints = [[150.0, 0.0], [-150.0, 0.0]];
-            // THE KEEP: an 8 m block crowned by the armor pad/hill, with
-            // a long climbable stair running south
-            push(&mut cover, &mut kind, Aabb {
-                min: [-8.0, 0.0, -8.0],
-                max: [8.0, 8.0, 8.0],
-            }, CoverKind::Stone);
-            for s in 0..16 {
-                let h = 8.0 - s as f32 * 0.5;
-                let z0 = 8.0 + s as f32 * 1.2;
-                push(&mut cover, &mut kind, Aabb {
-                    min: [-2.5, 0.0, z0],
-                    max: [2.5, h, z0 + 1.2],
-                }, CoverKind::Stone);
-            }
-            top = 8.0;
-            // corner WATCHTOWERS to 36 m — flight targets with rooftops;
-            // ground fighters use them as landmarks, not ladders
-            for sx in [-1.0_f32, 1.0] {
-                for sz in [-1.0_f32, 1.0] {
-                    let (cx, cz) = (sx * 170.0, sz * 170.0);
-                    push(&mut cover, &mut kind, Aabb {
-                        min: [cx - 3.5, 0.0, cz - 3.5],
-                        max: [cx + 3.5, 36.0, cz + 3.5],
-                    }, CoverKind::Stone);
-                }
-            }
-            // FORGE DISTRICT (southwest): a work-yard grid of shops with
-            // chimneys — the blacksmith hook from the project brief
-            for gx in 0..4 {
-                for gz in 0..4 {
-                    let (bx, bz) = (-130.0 + gx as f32 * 20.0, -130.0 + gz as f32 * 20.0);
-                    push(&mut cover, &mut kind, Aabb {
-                        min: [bx, 0.0, bz],
-                        max: [bx + 9.0, 4.0, bz + 9.0],
-                    }, CoverKind::Stone);
-                    if (gx + gz) % 2 == 0 {
-                        push(&mut cover, &mut kind, Aabb {
-                            min: [bx + 6.5, 0.0, bz + 6.5],
-                            max: [bx + 8.5, 9.0, bz + 8.5],
-                        }, CoverKind::Stone);
-                    }
-                }
-            }
-            // CATHEDRAL RUIN (northeast): two long walls + a column line
-            push(&mut cover, &mut kind, Aabb {
-                min: [70.0, 0.0, 70.0],
-                max: [72.0, 10.0, 130.0],
-            }, CoverKind::Stone);
-            push(&mut cover, &mut kind, Aabb {
-                min: [98.0, 0.0, 70.0],
-                max: [100.0, 10.0, 130.0],
-            }, CoverKind::Stone);
-            for c in 0..6 {
-                let cz = 74.0 + c as f32 * 10.0;
-                push(&mut cover, &mut kind, Aabb {
-                    min: [84.0, 0.0, cz],
-                    max: [86.5, 12.0, cz + 2.5],
-                }, CoverKind::Stone);
-            }
-            // RIVER FIELD: the |x| band around z=±? — an open crossing
-            // lane |z|<14 kept clear of clutter, with three low bridges
-            for bx in [-120.0_f32, 0.0, 120.0] {
-                if bx == 0.0 {
-                    continue; // the keep stair owns the center crossing
-                }
-                push(&mut cover, &mut kind, Aabb {
-                    min: [bx - 6.0, 0.0, -16.0],
-                    max: [bx + 6.0, 1.2, 16.0],
-                }, CoverKind::Stone);
-            }
-            // §12.2 adventure landmarks: a RUINED SETTLEMENT to navigate
-            // by (northwest), a FOREST stretch (southeast), and the MINE
-            // MOUTH framing the extraction corner — the map teaches its
-            // own route
-            for (rx, rz) in [
-                (-70.0_f32, 50.0_f32),
-                (-52.0, 64.0),
-                (-66.0, 76.0),
-                (-46.0, 44.0),
-                (-80.0, 62.0),
-            ] {
-                push(&mut cover, &mut kind, Aabb {
-                    min: [rx, 0.0, rz],
-                    max: [rx + 7.0, 2.6, rz + 1.2],
-                }, CoverKind::Stone);
-                push(&mut cover, &mut kind, Aabb {
-                    min: [rx, 0.0, rz + 4.0],
-                    max: [rx + 1.2, 3.2, rz + 8.0],
-                }, CoverKind::Stone);
-            }
-            for k in 0..14 {
-                let tx = 44.0 + (k % 5) as f32 * 18.0 + ((k * 37) % 7) as f32;
-                let tz = -128.0 + (k / 5) as f32 * 22.0 + ((k * 53) % 9) as f32;
-                push(&mut cover, &mut kind, Aabb {
-                    min: [tx - 0.4, 0.0, tz - 0.4],
-                    max: [tx + 0.4, 3.4, tz + 0.4],
-                }, CoverKind::Tree);
-            }
-            // the mine mouth: two jambs + a lintel at the extraction corner
-            push(&mut cover, &mut kind, Aabb {
-                min: [158.0, 0.0, 174.0],
-                max: [162.0, 6.0, 186.0],
-            }, CoverKind::Stone);
-            push(&mut cover, &mut kind, Aabb {
-                min: [174.0, 0.0, 158.0],
-                max: [186.0, 6.0, 162.0],
-            }, CoverKind::Stone);
-            // scattered crate clutter, never in the river band and never
-            // on the pickup lanes
-            for _ in 0..60 {
-                let x = rng.range(-190.0, 190.0);
-                let z = rng.range(-190.0, 190.0);
-                if z.abs() < 16.0 {
-                    continue; // river field stays open
-                }
-                if x.abs() < 32.0 && z.abs() < 34.0 {
-                    continue; // keep + stair + pads stay clear
-                }
-                if x > 145.0 && z > 140.0 {
-                    continue; // the extraction corner stays readable
-                }
-                let w = rng.range(1.0, 2.6);
-                let h = rng.range(1.1, 2.4);
-                let d = rng.range(1.0, 2.6);
-                push(&mut cover, &mut kind, Aabb {
-                    min: [x - w, 0.0, z - d],
-                    max: [x + w, h, z + d],
-                }, CoverKind::Crate);
-            }
-        }
-        MapKind::Cliffhold => {
-            build_cliffhold(&mut cover, &mut kind, &mut no_infill, &mut climbs);
-            half = CLIFFHOLD_HALF_M / MAP_SCALE;
-            checkpoints = [
-                // the city street crossing, on the floor of the low band
-                [CH_CHECKPOINT_CITY[0] / MAP_SCALE, CH_CHECKPOINT_CITY[1] / MAP_SCALE],
-                // the castle courtyard, eighteen metres up
-                [CH_CHECKPOINT_KEEP[0] / MAP_SCALE, CH_CHECKPOINT_KEEP[1] / MAP_SCALE],
-            ];
-            top = CH_PLAZA_TOP;
-        }
     }
     // ---- §owner MAP EXPANSION: every map, 25% bigger -------------------
     //
@@ -2129,482 +1991,6 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
         checkpoints,
         climbs,
     }
-}
-
-// ------------------------------------------------------ §owner CLIFFHOLD
-
-/// Cliffhold's playable half-extent, in FINAL metres: a 600 x 600 m
-/// field, half again the Arena and a fifth bigger than the Battlefield.
-pub const CLIFFHOLD_HALF_M: f32 = 300.0;
-/// The muster plaza at the map origin — the KOTH hill and the contested
-/// chassis pad both crown it, so it has to be a real, climbable place.
-pub const CH_PLAZA_TOP: f32 = 7.0;
-/// The cliff top, the castle courtyard floor, and the top of every
-/// approach: Cliffhold's headline band.
-pub const CH_PLATEAU: f32 = 18.0;
-/// The curtain wall-walk, six metres above its own courtyard.
-pub const CH_RAMPART: f32 = 24.0;
-/// The keep parapet — the highest surface a man can stand on unaided.
-pub const CH_KEEP_TOP: f32 = 32.0;
-/// The city's low roof course and the aqueduct deck.
-pub const CH_ROOF_LOW: f32 = 5.0;
-/// The mesa's eastern apron, the gentle side.
-pub const CH_BENCH_EAST: f32 = 6.0;
-/// The middle shelf, west and east alike.
-pub const CH_SHELF: f32 = 12.0;
-/// The two capture rings, in FINAL metres (x, z): one on the city floor,
-/// one in the castle courtyard eighteen metres up. Deliberately NOT
-/// mirrored across the origin the way the older maps' are — a map about
-/// height whose two objectives sit at the same altitude would be lying.
-pub const CH_CHECKPOINT_CITY: [f32; 2] = [-132.0, -134.0];
-pub const CH_CHECKPOINT_KEEP: [f32; 2] = [0.0, 175.0];
-/// Where the keep's own floor is measured, for the tests that prove the
-/// centrepiece is a building rather than a block.
-pub const CH_KEEP_INNER: [f32; 4] = [-31.0, 164.0, -9.0, 186.0];
-/// The keep's doorway gap, in x, on the z = 160..164 south wall.
-pub const CH_KEEP_DOOR_X: [f32; 2] = [-27.0, -13.0];
-
-/// §owner CLIFFHOLD — a castle on a cliff above half a city.
-///
-/// THE ASK was a bigger, messier map built around VERTICAL difference,
-/// because flight is coming. So the thing that had to be got right is
-/// not the silhouette, it is that the altitude bands are OCCUPIED:
-/// rooftops with floors on them, benches you can hold, a cliff with a
-/// playable top and a playable bottom, a keep you walk into. A flat map
-/// with tall walls looks the same from the ground and has to be thrown
-/// away the day thrusters land.
-///
-/// The bands, and what is on them:
-///
-/// ```text
-///   32 m  keep parapet         highest unaided surface
-///   24 m  curtain wall-walk    ring route round the courtyard
-///   18 m  THE PLATEAU          cliff top + castle courtyard
-///   12 m  west bench / east shelf
-///  5-6 m  city roofs, aqueduct deck, mesa apron
-///    7 m  the muster plaza     the KOTH hill, at the map origin
-///    0 m  city streets, commons, ravine floor, both spawn plains
-/// ```
-///
-/// LAID OUT IN FINAL METRES and divided back out by `MAP_SCALE` on the
-/// way into the box list. That is not a convenience. The central +25%
-/// pass moves box CENTRES and leaves EXTENTS alone — correct, and the
-/// whole point of doing it centrally — but the corollary is that two
-/// slabs which abut before it are a quarter of their centre distance
-/// APART after it. On furniture that is a slightly wider gap; on a
-/// mountain assembled from overlapping slabs it is a crack you fall
-/// eighteen metres down. Designing in the output space removes the
-/// class of bug rather than paying attention to it.
-///
-/// WHAT THE BOTS CAN AND CANNOT DO WITH IT. There is no pathfinder in
-/// this project — `Fighter::waypoint` is `[f32; 2]`, x and z, with no
-/// height component at all; `bot_think` samples it uniformly from a
-/// square of half-extent `self.half` and never checks it for
-/// reachability; `bot_act` steers straight at it behind a single 1.2 m
-/// whisker at `BOT_PROBE_Y`. So a bot cannot CHOOSE to go up, ever, and
-/// a good share of its sampled waypoints land inside this mountain.
-///
-/// The map is built anyway, and deliberately not shaped down to what the
-/// AI copes with today — that answer is "nothing vertical", which is the
-/// map this one exists to replace. What IS shaped for it is cheap and
-/// worth having: the two long flights are aimed down the x = 0 line, the
-/// same line the castle capture ring sits on and the same line both
-/// spawn rows straddle, so a bot walking straight at the objective walks
-/// onto a flight rather than into a wall; and every riser clears
-/// `BOT_PROBE_Y`, so a bot that lands on one climbs instead of veering.
-/// Real navigation is WORK TO BE BUDGETED, not a constraint that got
-/// designed around here.
-///
-/// WHAT IT DOES NOT DO: there are no overhangs, arches, tunnels or
-/// bridge spans anywhere on this map, and there cannot be. The support
-/// rule in the integrate loop stands a body on the tallest box top
-/// within its step-up and pushes it out of everything else — a box has
-/// a top and no underside, so a deck at 18 m is a solid mass from the
-/// ground up. Every "building" here is therefore a solid mass or a ring
-/// of walls around an open court. The keep is the second kind, on
-/// purpose.
-fn build_cliffhold(
-    cover: &mut Vec<Aabb>,
-    kind: &mut Vec<CoverKind>,
-    no_infill: &mut Vec<NoInfill>,
-    climbs: &mut Vec<Climb>,
-) {
-    // a box given in FINAL metres — see the note above on why
-    let slab = |cover: &mut Vec<Aabb>,
-                kind: &mut Vec<CoverKind>,
-                x0: f32,
-                z0: f32,
-                x1: f32,
-                z1: f32,
-                h: f32,
-                ck: CoverKind| {
-        let (ex, ez) = ((x1 - x0) * 0.5, (z1 - z0) * 0.5);
-        let (cx, cz) = ((x0 + x1) * 0.5 / MAP_SCALE, (z0 + z1) * 0.5 / MAP_SCALE);
-        cover.push(Aabb {
-            min: [cx - ex, 0.0, cz - ez],
-            max: [cx + ex, h, cz + ez],
-        });
-        kind.push(ck);
-    };
-    // A CLIMBABLE RUN. `x0..x1, z0..z1` is the LOWEST tread; each
-    // following one is offset by (dx, dz) — so |dx| or |dz| is the tread
-    // depth and the other is zero — and stands `STAIR_RISE_M` higher.
-    //
-    // Treads are solid to the ground rather than floating, because they
-    // have to be: see the no-overhangs note. A flight up a 12 m shelf is
-    // a row of pillars whose tops happen to form a ramp.
-    //
-    // §owner BOT ROUTING: every flight also PUBLISHES itself as a
-    // `Climb`. Derived from the same eight numbers that lay the treads,
-    // in the same call, so the link list cannot go stale against the
-    // geometry — the failure mode of every hand-maintained nav graph.
-    // The `slab` round trip (÷ MAP_SCALE here, × MAP_SCALE in the
-    // expansion pass) is the identity on CENTRES, so a tread centre in
-    // authored metres IS its final sim coordinate and needs no scaling.
-    let flight = |cover: &mut Vec<Aabb>,
-                  kind: &mut Vec<CoverKind>,
-                  climbs: &mut Vec<Climb>,
-                  x0: f32,
-                  z0: f32,
-                  x1: f32,
-                  z1: f32,
-                  dx: f32,
-                  dz: f32,
-                  base: f32,
-                  n: usize| {
-        for s in 0..n {
-            let k = s as f32;
-            slab(
-                cover,
-                kind,
-                x0 + dx * k,
-                z0 + dz * k,
-                x1 + dx * k,
-                z1 + dz * k,
-                base + STAIR_RISE_M * (s + 1) as f32,
-                CoverKind::Stone,
-            );
-        }
-        if n > 0 {
-            let (cx, cz) = ((x0 + x1) * 0.5, (z0 + z1) * 0.5);
-            let last = (n - 1) as f32;
-            climbs.push(Climb {
-                foot: [cx, cz],
-                // the TOP TREAD, not a point past it: the map already
-                // sinks the top tread INSIDE the slab it climbs onto
-                // (see the note above the flight table), so this is
-                // already a point on the destination band. Overshooting
-                // by a tread would step off the keep stair's head into
-                // the courtyard eighteen metres below.
-                head: [cx + dx * last, cz + dz * last],
-                base,
-                top: base + STAIR_RISE_M * n as f32,
-            });
-        }
-    };
-
-    // ---- THE MOUNTAIN ------------------------------------------------
-    // One massif, assembled from nine overlapping slabs with staggered
-    // edges so the cliff line reads as broken rock rather than a wall.
-    // The bite out of its south face is THE RAVINE (x -18..14, open from
-    // the plaza north to z = 94), and the ravine is where the frontal
-    // route up lives.
-    for (x0, z0, x1, z1, h) in [
-        (-110.0_f32, 30.0_f32, -18.0_f32, 216.0_f32, CH_PLATEAU), // west massif, the great cliff
-        (14.0, 44.0, 96.0, 216.0, CH_PLATEAU),                    // east massif, cliff line stepped back
-        (-18.0, 94.0, 14.0, 216.0, CH_PLATEAU),                   // the head block: closes the ravine, joins both
-        (-152.0, 70.0, -100.0, 160.0, CH_PLATEAU),                // west spur over the quarry
-        (90.0, 150.0, 150.0, 200.0, CH_PLATEAU),                  // east spur
-        (-62.0, 190.0, 62.0, 232.0, CH_PLATEAU),                  // the north shoulder — the mountain's back
-        (-205.0, 84.0, -142.0, 176.0, CH_SHELF),                  // west bench
-        (70.0, 16.0, 205.0, 150.0, CH_BENCH_EAST),                // east apron, the gentle side
-        (94.0, 46.0, 178.0, 142.0, CH_SHELF),                     // east shelf
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, h, CoverKind::Stone);
-    }
-
-    // ---- THE WAYS UP -------------------------------------------------
-    // Six flights, every riser `STAIR_RISE_M`. Two of them are aimed
-    // deliberately down the x = 0 line — THE BREACH out of the ravine and
-    // THE NORTH ROAD off Red's plain — because a roaming bot walks a
-    // STRAIGHT LINE at its waypoint and the castle checkpoint sits at
-    // x = 0. A flight a bot never crosses is a flight only the player
-    // uses, and that is the parity split this codebase keeps shipping.
-    //
-    // Every one of these is positioned so its TOP TREAD lands INSIDE the
-    // slab it is climbing onto rather than flush against its face. That
-    // is not tidiness. A flight that merely touches a taller neighbour
-    // leaves a one-tread band of open ground between the two, and the
-    // support rule drops you the whole way to zero in it — after which
-    // the thing you were climbing onto is an unclimbable wall in your
-    // face. The `every_cliffhold_band_is_reachable_on_foot` walker found
-    // exactly this on the North Road, and it is invisible by inspection.
-    for (x0, z0, x1, z1, dx, dz, base, n) in [
-        // THE BREACH: 0 -> 18 up the ravine floor, 36 treads, fully
-        // exposed from both rims. The frontal assault.
-        (-4.0_f32, 52.0_f32, 4.0_f32, 53.2_f32, 0.0_f32, 1.2_f32, 0.0_f32, 36usize),
-        // THE NORTH ROAD: 0 -> 18 up the mountain's back, off Red's plain
-        (-8.0, 280.0, 8.0, 281.4, 0.0, -1.4, 0.0, 36),
-        // THE GREAT STAIR: 0 -> 6 onto the east apron, twelve metres wide
-        (104.0, 0.6, 116.0, 2.0, 0.0, 1.4, 0.0, 12),
-        // the BENCH STAIR: 6 -> 12 onto the east shelf
-        (120.0, 30.6, 130.0, 32.0, 0.0, 1.4, CH_BENCH_EAST, 12),
-        // the SHOULDER STAIR: 12 -> 18, climbing west onto the plateau
-        (111.0, 64.0, 112.5, 76.0, -1.5, 0.0, CH_SHELF, 12),
-        // the WEST RAMP: 0 -> 12 out of the quarry onto the west bench
-        (-239.5, 120.0, -238.0, 132.0, 1.5, 0.0, 0.0, 24),
-        // the QUARRY STEPS: 12 -> 18, west bench onto the west spur
-        (-168.5, 118.0, -167.0, 130.0, 1.5, 0.0, CH_SHELF, 12),
-    ] {
-        flight(cover, kind, climbs, x0, z0, x1, z1, dx, dz, base, n);
-    }
-
-    // ---- THE MUSTER PLAZA (the map origin, the KOTH hill) ------------
-    // Stairs on BOTH z faces, which is the one thing the old shared
-    // `center` helper got right and is worth keeping: a hill with one
-    // stair is a hill one team owns, and a bot approaching the blank
-    // face just slides along it.
-    slab(cover, kind, -10.0, -10.0, 10.0, 10.0, CH_PLAZA_TOP, CoverKind::Stone);
-    flight(cover, kind, climbs, -5.0, -25.6, 5.0, -24.4, 0.0, 1.2, 0.0, 14);
-    flight(cover, kind, climbs, -5.0, 24.4, 5.0, 25.6, 0.0, -1.2, 0.0, 14);
-    // corner merlons: hard cover ON the hill, clear of the 4.5 m capture
-    // ring so they never wall the objective off from itself
-    for (x0, z0, x1, z1) in [
-        (6.0_f32, 6.0_f32, 10.0_f32, 10.0_f32),
-        (-10.0, 6.0, -6.0, 10.0),
-        (6.0, -10.0, 10.0, -6.0),
-        (-10.0, -10.0, -6.0, -6.0),
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, CH_PLAZA_TOP + 1.6, CoverKind::Stone);
-    }
-
-    // ---- THE CASTLE, on the plateau ----------------------------------
-    // Curtain wall with a 24 m gate gap; the wall-walk is a real band at
-    // 24 reached by a mural stair inside the courtyard.
-    for (x0, z0, x1, z1, h) in [
-        (-72.0_f32, 132.0_f32, -18.0_f32, 135.0_f32, CH_RAMPART), // south wall, west of the gate
-        (6.0, 132.0, 32.0, 135.0, CH_RAMPART),                    // south wall, east of the gate
-        (-72.0, 132.0, -69.0, 214.0, CH_RAMPART),                 // west wall
-        (29.0, 132.0, 32.0, 214.0, CH_RAMPART),                   // east wall
-        // north wall, with a POSTERN on the x = 0 line. A castle wants
-        // one gate; this one gets two, because the landward face is
-        // where the North Road arrives and a solid wall there would put
-        // an 18 m plateau, a 36-tread climb and Red's entire approach on
-        // the wrong side of it. It also happens to be the one line a
-        // bot steering at the courtyard capture ring actually walks.
-        (-72.0, 211.0, -6.0, 214.0, CH_RAMPART),
-        (6.0, 211.0, 32.0, 214.0, CH_RAMPART),
-        (-26.0, 127.0, -16.0, 141.0, 28.0),                       // gatehouse tower, west
-        (4.0, 127.0, 14.0, 141.0, 28.0),                          // gatehouse tower, east
-        // corner turrets: half a metre over the walk, so you can STEP on
-        // them rather than admire them
-        (-72.0, 132.0, -66.0, 138.0, CH_RAMPART + 0.5),
-        (26.0, 132.0, 32.0, 138.0, CH_RAMPART + 0.5),
-        (-72.0, 208.0, -66.0, 214.0, CH_RAMPART + 0.5),
-        (26.0, 208.0, 32.0, 214.0, CH_RAMPART + 0.5),
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, h, CoverKind::Stone);
-    }
-    // the mural stair, 18 -> 24, against the inside of the west wall
-    flight(cover, kind, climbs, -69.0, 180.1, -62.0, 181.4, 0.0, 1.3, CH_PLATEAU, 12);
-
-    // ---- THE KEEP ----------------------------------------------------
-    // The centrepiece, and the one piece of this map with a named
-    // failure to avoid: the Gardens' "stone gazebo" and the Bailey's
-    // "keep" are both solid blocks nobody can enter, the second of them
-    // byte-identical to the Arena's centre tower. A centrepiece you can
-    // only walk AROUND is scenery with a name on it.
-    //
-    // So this one is FOUR WALLS AND A DOORWAY. The courtyard floor is
-    // the plateau itself at 18; the gap in the south wall is fourteen
-    // metres, which admits a 1.16 m-wide chassis with room to spare; and
-    // a two-flight stair inside climbs 18 -> 25 -> 32 to the parapet,
-    // which is the highest place on the map a man can stand.
-    for (x0, z0, x1, z1) in [
-        (-35.0_f32, 160.0_f32, CH_KEEP_DOOR_X[0], 164.0_f32), // south wall, west of the door
-        (CH_KEEP_DOOR_X[1], 160.0, -5.0, 164.0),              // south wall, east of the door
-        (-35.0, 160.0, -31.0, 190.0),                         // west wall
-        (-9.0, 160.0, -5.0, 190.0),                           // east wall
-        (-35.0, 186.0, -5.0, 190.0),                          // north wall
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, CH_KEEP_TOP, CoverKind::Stone);
-    }
-    // first flight, 18 -> 25, north up the inside of the west wall
-    flight(cover, kind, climbs, -31.0, 166.5, -26.0, 167.8, 0.0, 1.3, CH_PLATEAU, 14);
-    // the half-landing that turns the stair back on itself
-    slab(cover, kind, -26.0, 184.0, -14.0, 186.0, 25.0, CoverKind::Stone);
-    // second flight, 25 -> 32, south up the inside of the east wall
-    flight(cover, kind, climbs, -14.0, 183.4, -9.0, 184.7, 0.0, -1.3, 25.0, 14);
-
-    // ---- THE LOWER CITY (south-west) ---------------------------------
-    // "Half a city": built out to the west and centre, and simply NOT
-    // built to the east, which is what leaves the commons open. The
-    // grid is irregular by construction — heights come off a six-entry
-    // course and a seventh of the plots are rubble — so it reads as a
-    // town that grew rather than a lattice.
-    const CITY_COURSE: [f32; 6] = [5.0, 8.0, 5.4, 11.0, 14.0, 7.6];
-    for gx in 0..5usize {
-        for gz in 0..5usize {
-            let x0 = -250.0 + gx as f32 * 42.0;
-            let z0 = -240.0 + gz as f32 * 38.0;
-            if (gx * 5 + gz * 11) % 7 == 0 {
-                // a burnt-out plot: a rubble stub, and a hole in the skyline
-                slab(cover, kind, x0 + 3.0, z0 + 3.0, x0 + 20.0, z0 + 16.0, 2.4, CoverKind::Stone);
-            } else {
-                let h = CITY_COURSE[(gx * 7 + gz * 3) % 6];
-                slab(cover, kind, x0, z0, x0 + 26.0, z0 + 22.0, h, CoverKind::Stone);
-            }
-        }
-    }
-    // a ragged sixth column, so the city does not end on a straight line
-    for gz in 1..4usize {
-        let z0 = -240.0 + gz as f32 * 38.0;
-        let h = CITY_COURSE[(5 * 7 + gz * 3) % 6];
-        slab(cover, kind, -40.0, z0, -16.0, z0 + 20.0, h, CoverKind::Stone);
-    }
-    // THE AQUEDUCT: a 5 m deck running the width of the city, overlapping
-    // the north faces of the middle terrace by a metre so the roofs it
-    // touches are one step off it — this is what makes the low roof
-    // course a BAND and not five separate islands.
-    // (the deck STOPS where its top tread begins — the same-height joint
-    // is safe, but running the deck out over the lower treads would bury
-    // half the flight under it)
-    slab(cover, kind, -262.0, -143.0, -40.0, -138.0, CH_ROOF_LOW, CoverKind::Stone);
-    flight(cover, kind, climbs, -29.6, -143.0, -28.3, -138.0, -1.3, 0.0, 0.0, 10);
-    // and a six-tread stub off the deck onto the 8 m course. Kept to
-    // 2.5 m of the deck's 5 m width so the deck stays a through route
-    // under it (2.5 m still passes a 1.16 m chassis).
-    //
-    // §owner "what you see is what you get": with flight coming, a roof
-    // that LOOKS landable had better be landable, and that call is free
-    // now and expensive after an art pass. So every roof course on this
-    // map is decided, not left to chance — 5.0, 5.4, 8.0 and 11.0 have
-    // grounded routes; 7.6 and 14.0 are deliberately air-only and are
-    // the tallest things in the city, which is how they read as such.
-    flight(cover, kind, climbs, -173.0, -143.0, -171.0, -140.5, -2.0, 0.0, CH_ROOF_LOW, 6);
-    // the BELL TOWER: the grounded way onto the 11 m course. Its head is
-    // FLUSH with a real eleven-metre roof rather than a lonely platform
-    // of its own, and it stands south of the aqueduct so the two routes
-    // cross nowhere.
-    slab(cover, kind, -98.0, -236.0, -84.0, -224.0, 11.0, CoverKind::Stone);
-    flight(cover, kind, climbs, -95.0, -198.8, -87.0, -197.6, 0.0, -1.2, 0.0, 22);
-    // two rubble ramps onto low roofs, mid-city
-    flight(cover, kind, climbs, -118.0, -93.3, -110.0, -92.0, 0.0, -1.3, 0.0, 10);
-    flight(cover, kind, climbs, -160.0, -100.0, -152.0, -98.7, 0.0, 1.3, 0.0, 10);
-
-    // ---- THE COMMONS (south-east) ------------------------------------
-    // The open half. Field walls, hedgerows and orchard, at heights that
-    // read as cover and never as architecture — plus one earthwork
-    // redoubt so the openness has a thing in it worth taking.
-    for (x0, z0, x1, z1, h) in [
-        (60.0_f32, -120.0_f32, 96.0_f32, -118.0_f32, 2.4_f32),
-        (110.0, -96.0, 112.0, -60.0, 1.8),
-        (150.0, -210.0, 186.0, -208.0, 2.8),
-        (70.0, -240.0, 72.0, -206.0, 1.2),
-        (196.0, -140.0, 230.0, -138.0, 2.0),
-        (44.0, -180.0, 46.0, -148.0, 1.6),
-        (130.0, -60.0, 166.0, -58.0, 1.4),
-        (210.0, -80.0, 212.0, -46.0, 2.6),
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, h, CoverKind::Stone);
-    }
-    for (x0, z0, x1, z1) in [
-        (88.0_f32, -160.0_f32, 120.0_f32, -158.5_f32),
-        (88.0, -160.0, 89.5, -128.0),
-        (170.0, -110.0, 202.0, -108.5),
-        (240.0, -170.0, 241.5, -138.0),
-        (56.0, -100.0, 88.0, -98.5),
-        (200.0, -230.0, 232.0, -228.5),
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, 1.5, CoverKind::Hedge);
-    }
-    for (tx, tz) in [
-        (50.0_f32, -70.0_f32),
-        (78.0, -88.0),
-        (104.0, -132.0),
-        (136.0, -170.0),
-        (162.0, -118.0),
-        (190.0, -96.0),
-        (216.0, -150.0),
-        (240.0, -200.0),
-        (66.0, -196.0),
-        (120.0, -224.0),
-        (180.0, -244.0),
-        (250.0, -110.0),
-    ] {
-        slab(cover, kind, tx - 0.4, tz - 0.4, tx + 0.4, tz + 0.4, 3.4, CoverKind::Tree);
-    }
-    for (x0, z0, h) in [
-        (96.0_f32, -72.0_f32, 1.6_f32),
-        (102.0, -76.0, 2.2),
-        (146.0, -100.0, 1.3),
-        (152.0, -104.0, 2.4),
-        (174.0, -62.0, 1.8),
-        (58.0, -134.0, 1.4),
-        (64.0, -138.0, 2.0),
-        (206.0, -176.0, 1.6),
-        (212.0, -180.0, 1.2),
-        (128.0, -206.0, 2.2),
-    ] {
-        slab(cover, kind, x0, z0, x0 + 3.0, z0 + 3.0, h, CoverKind::Crate);
-    }
-    slab(cover, kind, 150.0, -170.0, 180.0, -140.0, 4.0, CoverKind::Stone);
-    flight(cover, kind, climbs, 158.0, -180.4, 168.0, -179.1, 0.0, 1.3, 0.0, 8);
-
-    // ---- THE CLIFF FOOT and THE QUARRY -------------------------------
-    // Talus below the cliff line, so the eighteen-metre face meets the
-    // ground in broken rock rather than a mitre joint; and the quarry
-    // the castle was cut from, which is the west approach's low ground.
-    for (x0, z0, x1, z1, h) in [
-        (-104.0_f32, 20.0_f32, -96.0_f32, 28.0_f32, 3.4_f32),
-        (-88.0, 16.0, -80.0, 25.0, 2.2),
-        (-70.0, 22.0, -60.0, 31.0, 4.5),
-        (-52.0, 14.0, -45.0, 22.0, 2.6),
-        (-38.0, 20.0, -30.0, 27.0, 3.8),
-        (-26.0, 12.0, -20.0, 19.0, 2.0),
-        (18.0, 30.0, 26.0, 38.0, 3.2),
-        (32.0, 22.0, 41.0, 30.0, 4.0),
-        (46.0, 34.0, 53.0, 41.0, 2.4),
-        (-14.0, 62.0, -8.0, 69.0, 2.8),
-        (6.0, 74.0, 12.0, 80.0, 3.6),
-        (-16.0, 40.0, -10.0, 47.0, 2.2),
-        // quarry spoil
-        (-248.0, -12.0, -232.0, 6.0, 6.0),
-        (-226.0, 18.0, -212.0, 34.0, 4.2),
-        (-250.0, 44.0, -236.0, 58.0, 7.0),
-        (-206.0, -4.0, -194.0, 10.0, 3.4),
-        (-190.0, 30.0, -178.0, 44.0, 5.2),
-        (-232.0, 62.0, -220.0, 74.0, 3.0),
-    ] {
-        slab(cover, kind, x0, z0, x1, z1, h, CoverKind::Stone);
-    }
-    // cut blocks waiting on the quarry floor — timber-crated, so a
-    // grenade behaves differently off them than off the rock they came
-    // out of
-    for (x0, z0, h) in [
-        (-240.0_f32, 70.0_f32, 1.6_f32),
-        (-228.0, 84.0, 2.2),
-        (-216.0, 60.0, 1.2),
-        (-244.0, 96.0, 1.8),
-        (-200.0, 74.0, 1.4),
-        (-186.0, 58.0, 2.6),
-        (-214.0, 100.0, 1.2),
-        (-232.0, 108.0, 2.0),
-    ] {
-        slab(cover, kind, x0, z0, x0 + 6.0, z0 + 6.0, h, CoverKind::Crate);
-    }
-
-    // ---- what the shared infill may not touch ------------------------
-    // The commons is deliberately NOT listed: scattering low cover over
-    // the open half is exactly what the infill is for.
-    no_infill.extend_from_slice(&[
-        [-245.0, 10.0, 215.0, 250.0],   // the mountain, its flights and the castle
-        [-32.0, -32.0, 32.0, 12.0],     // the plaza and its south stair
-        [-268.0, -252.0, -14.0, -58.0], // the lower city
-        [100.0, -6.0, 122.0, 20.0],     // the Great Stair's foot
-        [-255.0, -35.0, -170.0, 15.0],  // the quarry floor
-        [145.0, -185.0, 185.0, -135.0], // the redoubt
-    ]);
 }
 
 // --------------------------------------------------------------- fighters
@@ -7610,85 +6996,6 @@ impl TdmSim {
                 pos: [x, 0.0, z],
                 respawn_t: 0.0,
             });
-        }
-        // §12.2: on the Battlefield the loot TEACHES the route — armor
-        // along the landmarks, the Mech deep by the mine, consumables
-        // spread down the long axis
-        if cfg.map == MapKind::Battlefield {
-            // the three chassis pads spread across the landmarks rather
-            // than stacking on one point - a `match` alone would have
-            // sent all three to the mine
-            let mut robot_i = 0usize;
-            for pk in &mut pickups {
-                pk.pos = match pk.kind {
-                    PickupKind::FolkArmor => [-58.0, 0.0, 56.0], // settlement
-                    PickupKind::ReconWeave => [86.0, 0.0, 100.0], // cathedral
-                    PickupKind::RobotArmor => {
-                        let spots = [
-                            [166.0, 0.0, 152.0],  // by the mine
-                            [-96.0, 0.0, -72.0],  // forge district edge
-                            [52.0, 0.0, 44.0],    // mid-field ruin
-                        ];
-                        let p = spots[robot_i.min(spots.len() - 1)];
-                        robot_i += 1;
-                        p
-                    }
-                    _ => [pk.pos[0] * 3.0, 0.0, pk.pos[2] * 3.0],
-                };
-            }
-        }
-        // §owner CLIFFHOLD: the default lanes sit inside a 40 m box round
-        // the origin, which on a 600 m map is one pile in the middle of
-        // the plaza. Re-sited by hand instead of multiplied out, because
-        // this map's loot is doing a job the older ones' is not: it is
-        // the reason to LEAVE the floor. One chassis on the hill, one
-        // deep in the city, one on the east shelf; the light chassis
-        // inside the keep at 18 m; the minigun in the courtyard. The
-        // y-snap below puts each on whatever it is standing on.
-        if cfg.map == MapKind::Cliffhold {
-            let mut robot_i = 0usize;
-            let mut scout_i = 0usize;
-            let mut health_i = 0usize;
-            let mut ammo_i = 0usize;
-            for pk in &mut pickups {
-                let pick = |i: &mut usize, spots: &[[f32; 3]]| -> [f32; 3] {
-                    let p = spots[(*i).min(spots.len() - 1)];
-                    *i += 1;
-                    p
-                };
-                pk.pos = match pk.kind {
-                    PickupKind::RobotArmor => pick(
-                        &mut robot_i,
-                        &[
-                            [0.0, CH_PLAZA_TOP, 0.0], // the hill: contested from the first minute
-                            [-132.0, 0.0, -196.0],    // deep in the city
-                            [150.0, 0.0, 60.0],       // the east shelf
-                        ],
-                    ),
-                    PickupKind::ScoutArmor => pick(
-                        &mut scout_i,
-                        &[
-                            [-20.0, 0.0, 175.0], // INSIDE the keep — the climb has to pay
-                            [-210.0, 0.0, -20.0], // the quarry floor
-                            [120.0, 0.0, -150.0], // the commons
-                        ],
-                    ),
-                    PickupKind::Health => pick(
-                        &mut health_i,
-                        &[[-50.0, 0.0, -96.0], [180.0, 0.0, -60.0]],
-                    ),
-                    PickupKind::Ammo => pick(
-                        &mut ammo_i,
-                        &[[6.0, 0.0, 60.0], [-180.0, 0.0, 120.0]],
-                    ),
-                    PickupKind::FolkArmor => [-90.0, 0.0, -58.0],
-                    PickupKind::ReconWeave => [110.0, 0.0, 30.0], // head of the Great Stair
-                    PickupKind::Minigun => [16.0, 0.0, 200.0],    // the castle courtyard
-                    // the top tier sits at the head of the Great Stair's
-                    // opposite approach - the longest walk on the map
-                    PickupKind::RoyalArmor => [-150.0, 0.0, 150.0],
-                };
-            }
         }
         // snap pickups AND checkpoints onto the terrain under them — a
         // lane that crosses a plateau must sit ON it, not inside it
@@ -14519,11 +13826,23 @@ impl TdmSim {
     ///
     /// The problem this exists for: `waypoint` is `[f32; 2]` with no
     /// height, sampled from a square and never checked, and `bot_act`
-    /// steers straight at it. On a flat arena that reads as roaming. On
-    /// CLIFFHOLD — 32 m of relief, an objective eighteen metres up — the
-    /// sample lands on top of the mountain, the bot presses into rock
-    /// until the 15%/tick re-roll fires, and no bot has ever chosen to
-    /// go UP because the waypoint has nowhere to put the intention.
+    /// steers straight at it. On a flat arena that reads as roaming. On a
+    /// map with real relief — 32 m of it, with an objective eighteen
+    /// metres up — the sample lands on top of the mountain, the bot
+    /// presses into rock until the 15%/tick re-roll fires, and no bot has
+    /// ever chosen to go UP because the waypoint has nowhere to put the
+    /// intention.
+    ///
+    /// **RULE 2 IS DORMANT AS SHIPPED, AND IS NOT DEAD CODE.** The map
+    /// that had the relief was Cliffhold, removed by BRIEF XIII §1, and
+    /// no surviving map publishes a `Climb` — so rule 2 finds an empty
+    /// list and falls through to rule 3 on all three. Rules 0, 1 and 3
+    /// still run on every map and are what
+    /// `bot_routing_leaves_the_flat_maps_where_it_found_them` guards.
+    /// Castle Gardens is being rebuilt to have the verticality back
+    /// (BRIEF XIII §4), at which point rule 2 wakes up on its own the
+    /// moment the map publishes flights — which is why this is kept
+    /// rather than stripped.
     ///
     /// Four rules, in order, and none of them is a pathfinder:
     ///
@@ -18207,10 +17526,13 @@ mod tests {
             // height claim.
             //
             // The first version of this asserted a ceiling on the TALLEST
-            // piece, which was the wrong end to measure: Battlefield's
-            // perimeter is 36 m and is stored as cover like everything
-            // else, so the assertion failed on geometry that is supposed
-            // to be that tall. Whether the scale touched Y shows up at
+            // piece, which was the wrong end to measure: a 36 m watchtower
+            // is stored as cover like everything else, so the assertion
+            // failed on geometry that is SUPPOSED to be that tall. (The
+            // 36 m towers were the Battlefield's, removed by BRIEF XIII
+            // §1 - but the reasoning outlives the map, and Castle Gardens
+            // is being rebuilt with towers, so do not "simplify" this
+            // back to a ceiling.) Whether the scale touched Y shows up at
             // the BOTTOM of the range - vaultable cover is the band that
             // crouch, the step-up and the hit bands are all tuned
             // against, and 25% would have lifted it out from under all
@@ -20643,7 +19965,11 @@ mod tests {
     /// as a threat or the co-op mode has no allies in it.
     #[test]
     fn ai_teammates_actually_shoot_the_horde_in_extraction() {
-        let mut s = TdmSim::new(cfg(85, 3, Mode::Extraction, MapKind::Battlefield));
+        // Gardens: the map Extraction runs on now that the Battlefield is
+        // gone (BRIEF XIII §1, and see `match_config` in main.rs). The
+        // cover is cleared two lines down anyway, so this only has to be
+        // the map the mode really ships on.
+        let mut s = TdmSim::new(cfg(85, 3, Mode::Extraction, MapKind::Gardens));
         s.cover.clear();
         s.cover_kind.clear();
         s.rebuild_grid();
@@ -23155,7 +22481,8 @@ mod tests {
             (Mode::Koth, MapKind::Arena, 5, true, 0xA110),
             (Mode::Tdm, MapKind::Bailey, 3, true, 0xA110),
             (Mode::Koth, MapKind::Gardens, 3, true, 0xA110),
-            (Mode::Extraction, MapKind::Battlefield, 6, true, 0xA110),
+            // Extraction moved to Gardens with the Battlefield's removal
+            (Mode::Extraction, MapKind::Gardens, 6, true, 0xA110),
             // bots-only KOTH bias probes: is the Red tilt systemic, or an
             // artifact of the scripted player feeding on Blue?
             (Mode::Koth, MapKind::Arena, 4, false, 0xBEE5),
@@ -28854,7 +28181,23 @@ mod tests {
         assert_eq!(s.fighters[1].mech_plates_dropped, 0, "a fresh chassis starts fully plated");
     }
 
-    // ------------------------------------------------ §owner CLIFFHOLD
+    // -------------------------------- §owner VERTICALITY, what survived
+    //
+    // BRIEF XIII §1 removed CLIFFHOLD, and with it eight tests. Five of
+    // them died honestly, because they asserted things only that map had:
+    // a keep you walk into, eighteen published flights, every altitude
+    // band reachable on foot, the Breach not reading as a wall to a bot,
+    // and bots actually reaching an 18 m plateau. There is no map left
+    // that can carry those claims, and re-pointing them at a flat map
+    // would have produced five tests that pass because there is nothing
+    // to test. What went with them is written down in
+    // `research/maps/VERTICAL_BANDS.md`, and Castle Gardens is where they
+    // have to come back (BRIEF XIII §4).
+    //
+    // THREE survived, because their claims were never about that map:
+    // the support rule having exactly one meaning, a spawn row holding a
+    // chassis, and a stair riser clearing both of its ceilings. Those are
+    // below, re-pointed at every map that still exists.
 
     /// What a body at (x, z) would be standing on, given `step_up` of
     /// envelope and a current height of `y`.
@@ -28862,9 +28205,9 @@ mod tests {
     /// This mirrors the support rule in the integrate loop — the tallest
     /// reachable top under your feet, XZ-padded exactly as the sim pads
     /// it — and is applied to geometry the rule knows nothing about. The
-    /// two are independent: the rule lives in `step`, the map lives in
-    /// `build_cliffhold`, and a test that walks one over the other can
-    /// fail. (Re-deriving the MAP's numbers would be the self-referential
+    /// two are independent: the rule lives in `step`, the geometry lives
+    /// in `build_map`, and a test that walks one over the other can fail.
+    /// (Re-deriving the MAP's numbers would be the self-referential
     /// version, and is what these deliberately do not do.)
     fn ch_support(cover: &[Aabb], x: f32, z: f32, y: f32, step_up: f32) -> f32 {
         let mut s = 0.0_f32;
@@ -28900,7 +28243,7 @@ mod tests {
     /// time, obeying those two rules. `Err` names the metre it died at.
     ///
     /// Falling is allowed and free — this project has no fall damage, so
-    /// stepping off an eighteen-metre cliff is a legal (one-way) route.
+    /// stepping off a ledge is a legal (one-way) route.
     fn ch_walk(
         cover: &[Aabb],
         from: [f32; 2],
@@ -28923,271 +28266,214 @@ mod tests {
         Ok(y)
     }
 
-    fn cliffhold(seed: u64, per_team: usize) -> TdmSim {
-        TdmSim::new(cfg(seed, per_team, Mode::Tdm, MapKind::Cliffhold))
-    }
-
-    /// §owner CLIFFHOLD: both spawn rows are open ground that will hold
-    /// a CHASSIS, not merely a man, and stay open for the first six
-    /// metres of the walk out.
+    /// Both spawn rows, on every map, are open ground that will hold a
+    /// CHASSIS and not merely a man, and have a way OUT for one.
     ///
     /// The mech is the strict test and the reason this exists separately
-    /// from the all-maps checkpoint sweep: it is 1.7x a soldier in every
-    /// direction, so a gap a man strolls through stops it dead, and a
-    /// spawn that strands the machine is a spawn that deletes a whole
-    /// chassis from the map for its owner. It also guards the one thing
-    /// a 600 m map makes easy to get wrong — `spawn_point` puts both
-    /// teams at z = ±(half − 2.5), which on this map is 297.5 m out, well
-    /// past where any of the geometry was authored.
+    /// from `all_maps_are_valid_battlefields`, which asks the weaker
+    /// question "is this spawn point inside a box": a mech is 1.7x a
+    /// soldier in every direction, so a gap a man strolls through stops
+    /// it dead, and a spawn that strands the machine is a spawn that
+    /// deletes a whole chassis from the map for its owner.
+    ///
+    /// WRITTEN FOR CLIFFHOLD, AND ONE CLAUSE HAD TO CHANGE TO SURVIVE THE
+    /// MOVE, which is worth stating plainly rather than quietly. The
+    /// original walked six metres along the spawn FACING and demanded a
+    /// clear straight line. That held on a 600 m map whose spawn plains
+    /// were authored empty; on the three surviving maps — 100-130 m, with
+    /// the shared infill scattering cover across all of them — it fails on
+    /// Gardens against a piece of ordinary furniture 5.8 m in front of a
+    /// Blue spawn. A crate in front of you is not a stranding, it is a
+    /// map. So the claim is stated as what "stranded" actually means: a
+    /// chassis is stranded if there is NO heading it can leave on, not if
+    /// the first one it tries is occupied.
+    ///
+    /// That is a weaker assertion, so it comes with an INSTRUMENT CHECK:
+    /// the same finder is run against a spawn deliberately walled in, and
+    /// has to report no exit. Without it, "some heading works" is the kind
+    /// of claim that passes because the search is broken.
     #[test]
-    fn cliffhold_spawn_rows_hold_a_chassis_and_not_just_a_man() {
-        let s = cliffhold(0xC11E, 8); // the v6 cap: sixteen bodies, eight per row
+    fn spawn_rows_hold_a_chassis_and_not_just_a_man() {
         let chassis_h = BODY_HEIGHT * MECH_SCALE;
-        assert_eq!(s.fighters.len(), 16, "both rows at full strength");
-        for f in &s.fighters {
-            let (x, z) = (f.pos[0], f.pos[2]);
-            // standing on the FLOOR: not perched on furniture, not sunk
-            let sup = ch_support(&s.cover, x, z, 0.0, STEP_UP * MECH_SCALE);
+        // Can a chassis at (x, z) walk six metres out on ANY heading?
+        // Sixteen headings, starting from the one it is facing.
+        let exits = |cover: &[Aabb], x: f32, z: f32, yaw: f32| -> usize {
+            (0..16)
+                .filter(|k| {
+                    let a = yaw + *k as f32 / 16.0 * std::f32::consts::TAU;
+                    let to = [x + a.sin() * 6.0, z + a.cos() * 6.0];
+                    ch_walk(cover, [x, z], to, 0.0, STEP_UP * MECH_SCALE, MECH_RADIUS)
+                        .is_ok()
+                })
+                .count()
+        };
+
+        // INSTRUMENT CHECK, before any map is trusted: wall a spawn in on
+        // all sides with boxes a chassis cannot step over, and the finder
+        // must report zero ways out. If this ever passes, every "the mech
+        // can leave" below is worthless.
+        {
+            // Twelve 2.6 m boxes on a 5 m ring: spacing 2.62 m, so they
+            // meet edge to edge and the ring is closed to anything wider
+            // than 2 cm. Lifting one out opens a 2.6 m gap, which is
+            // nearly twice a chassis' 1.4 m width - so "closed" and "open"
+            // are both unambiguous rather than borderline.
+            let ring = |skip: usize| -> Vec<Aabb> {
+                (0..12)
+                    .filter(|k| *k != skip)
+                    .map(|k| {
+                        let a = k as f32 / 12.0 * std::f32::consts::TAU;
+                        let (wx, wz) = (a.cos() * 5.0, a.sin() * 5.0);
+                        Aabb {
+                            min: [wx - 1.3, 0.0, wz - 1.3],
+                            max: [wx + 1.3, 6.0, wz + 1.3],
+                        }
+                    })
+                    .collect()
+            };
             assert_eq!(
-                sup, 0.0,
-                "{:?} spawns on something {sup:.2} m tall at ({x:.1}, {z:.1})",
-                f.team
+                exits(&ring(99), 0.0, 0.0, 0.0),
+                0,
+                "the exit finder says a chassis can walk out of a closed ring - \
+                 it is not measuring anything"
             );
-            // and nothing intersects the chassis cylinder
-            for c in &s.cover {
-                let cx = x.clamp(c.min[0], c.max[0]);
-                let cz = z.clamp(c.min[2], c.max[2]);
-                let (dx, dz) = (x - cx, z - cz);
-                let overlaps_xz = dx * dx + dz * dz < MECH_RADIUS * MECH_RADIUS;
+            // ...and with one box lifted out, the gap is found
+            assert!(
+                exits(&ring(0), 0.0, 0.0, 0.0) > 0,
+                "the exit finder cannot find a gap it was handed"
+            );
+        }
+
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(0xC11E, 8, Mode::Tdm, map));
+            assert_eq!(s.fighters.len(), 16, "{map:?}: both rows at full strength");
+            for f in &s.fighters {
+                let (x, z) = (f.pos[0], f.pos[2]);
+                // standing on the FLOOR: not perched on furniture, not sunk
+                let sup = ch_support(&s.cover, x, z, 0.0, STEP_UP * MECH_SCALE);
+                assert_eq!(
+                    sup, 0.0,
+                    "{map:?}: {:?} spawns on something {sup:.2} m tall at \
+                     ({x:.1}, {z:.1})",
+                    f.team
+                );
+                // and nothing intersects the chassis cylinder
+                for c in &s.cover {
+                    let cx = x.clamp(c.min[0], c.max[0]);
+                    let cz = z.clamp(c.min[2], c.max[2]);
+                    let (dx, dz) = (x - cx, z - cz);
+                    let overlaps_xz = dx * dx + dz * dz < MECH_RADIUS * MECH_RADIUS;
+                    assert!(
+                        !(overlaps_xz && c.max[1] > 0.0 && c.min[1] < chassis_h),
+                        "{map:?}: {:?} spawn ({x:.1}, {z:.1}) is inside {c:?}",
+                        f.team
+                    );
+                }
+                // and it has a way out. `ch_walk` and not a hand-rolled
+                // sweep, and the difference is not cosmetic: the walker
+                // carries a RUNNING HEIGHT, so a chassis that steps up
+                // onto a 0.9 m crate is then measured from 0.9 m and the
+                // next box is judged against the envelope it actually
+                // has.
+                //
+                // Six of sixteen rather than one, because "exactly one
+                // way out" is a mech-sized rathole and would pass a spawn
+                // wedged in a doorway. Measured at this seed across all
+                // 48 spawns: forty-six have all sixteen, and the two
+                // worst - both on Gardens, both against the same piece of
+                // infill - have fifteen. The floor is therefore nowhere
+                // near what ships, which is deliberate: it is a stranding
+                // alarm, not a layout spec.
+                let ways = exits(&s.cover, x, z, f.yaw);
                 assert!(
-                    !(overlaps_xz && c.max[1] > 0.0 && c.min[1] < chassis_h),
-                    "{:?} spawn ({x:.1}, {z:.1}) is inside {c:?}",
+                    ways >= 6,
+                    "{map:?}: {:?} spawn ({x:.1}, {z:.1}) has only {ways} of 16 \
+                     headings a chassis can leave on",
                     f.team
                 );
             }
-            // six metres out along the spawn facing, still walkable
-            let ahead = [x + f.yaw.sin() * 6.0, z + f.yaw.cos() * 6.0];
-            ch_walk(
-                &s.cover,
-                [x, z],
-                ahead,
-                0.0,
-                STEP_UP * MECH_SCALE,
-                MECH_RADIUS,
-            )
-            .unwrap_or_else(|e| panic!("{:?} cannot walk out of its spawn: {e}", f.team));
         }
     }
 
-    /// §owner CLIFFHOLD: the centrepiece is a BUILDING, and the specific
-    /// failure it is guarded against is a named one in this codebase.
+    /// §owner BOT ROUTING: the planner and the BODY agree about where the
+    /// ground is — on every map, at every height a fighter can occupy.
     ///
-    /// The Gardens' "stone gazebo" is a solid 8x8x2.4 m block nobody can
-    /// enter, and the Bailey's "keep" is byte-identical to the Arena's
-    /// centre tower — the same helper, the same two arguments. Both are
-    /// centrepieces you can only walk AROUND, which is scenery with a
-    /// name on it. (Neither is fixed here; that is somebody's task and
-    /// not this one. This test only makes sure the new map did not make
-    /// it three.)
+    /// `support_top` is the integrate loop's own vertical rule, pulled out
+    /// so the route planner asks the same question the body answers. An
+    /// extraction is exactly the change that can silently alter a
+    /// comparison, so it is checked against `ch_support` — a SEPARATE
+    /// statement of the same rule, written for a walker before any of the
+    /// routing work existed, and never refactored alongside it.
     ///
-    /// The independent anchor is the PLATEAU: the interior floor has to
-    /// be the same surface a man standing outside the keep is on. That
-    /// number is measured from the map, not read off the keep's own
-    /// constants, so a keep quietly filled in solid cannot satisfy it.
+    /// It used to run on Cliffhold alone, because that was the map with
+    /// something to disagree about. With Cliffhold removed (BRIEF XIII §1)
+    /// it sweeps all three survivors instead — a weaker exercise, and said
+    /// plainly rather than papered over: the `landed` floor below is what
+    /// stops it degenerating into a sweep of empty air.
     #[test]
-    fn cliffholds_keep_is_a_building_you_walk_into_not_a_block() {
-        let s = cliffhold(0xC11F, 2);
-        // the courtyard OUTSIDE the keep — the anchor
-        let outside = ch_support(&s.cover, 0.0, 175.0, CH_PLATEAU, STEP_UP);
-        assert!(outside > 10.0, "the castle should be up a mountain, got {outside}");
-        assert_eq!(outside, CH_PLATEAU, "and the plateau band is what it says");
-
-        // 1. THE FLOOR. Every interior sample is somewhere a body can
-        //    actually STAND: on the courtyard, and not jammed inside
-        //    anything.
-        //
-        //    The `!ch_blocked` half is not decoration, and this test did
-        //    not have it until a mutation ran. `ch_support` is gated on
-        //    your step-up, so masonry ABOVE your head is invisible to
-        //    it — fill the keep in solid and every interior sample still
-        //    reports the plateau it is sitting on, and a floor test built
-        //    on support alone waves the solid block straight through. It
-        //    is the push-out rule, not the support rule, that knows the
-        //    difference between a room and a rock.
-        let (x0, z0, x1, z1) = (
-            CH_KEEP_INNER[0], CH_KEEP_INNER[1], CH_KEEP_INNER[2], CH_KEEP_INNER[3],
-        );
-        let standable = |x: f32, z: f32| {
-            !ch_blocked(&s.cover, x, z, outside, STEP_UP, BODY_RADIUS)
-                && ch_support(&s.cover, x, z, outside, STEP_UP) == outside
-        };
-        let mut floor = 0usize;
-        let mut samples = 0usize;
-        let mut x = x0 + 0.5;
-        while x < x1 - 0.5 {
-            let mut z = z0 + 0.5;
-            while z < z1 - 0.5 {
-                samples += 1;
-                if standable(x, z) {
-                    floor += 1;
+    fn the_route_planners_ground_and_the_bodys_ground_are_the_same_ground() {
+        for map in MapKind::ALL {
+            let s = TdmSim::new(cfg(0xC131, 2, Mode::Tdm, map));
+            // sample the map's OWN extent rather than a fixed box, so this
+            // does not quietly stop covering a map that grows
+            let h = s.half;
+            let mut sampled = 0u32;
+            let mut landed = 0u32;
+            for gx in 0..41 {
+                for gz in 0..41 {
+                    let x = -h + gx as f32 * h / 20.0;
+                    let z = -h + gz as f32 * h / 20.0;
+                    for y in [0.0_f32, 1.0, 2.5, 5.0, 9.0] {
+                        let mine = support_top(&s.cover, x, z, y, STEP_UP);
+                        let theirs = ch_support(&s.cover, x, z, y, STEP_UP);
+                        assert_eq!(
+                            mine.to_bits(),
+                            theirs.to_bits(),
+                            "{map:?}: support disagreement at ({x:.0}, {z:.0}) \
+                             standing at {y:.0} m"
+                        );
+                        sampled += 1;
+                        if mine > 0.0 {
+                            landed += 1;
+                        }
+                    }
+                    // and the planner's "how high is the ground here",
+                    // which is the same rule with the reachability ceiling
+                    // removed
+                    let dropped = terrain_top(&s.cover, x, z);
+                    assert_eq!(
+                        dropped.to_bits(),
+                        ch_support(&s.cover, x, z, 1.0e6, 0.0).to_bits(),
+                        "{map:?}: terrain disagreement at ({x:.0}, {z:.0})"
+                    );
                 }
-                z += 0.5;
             }
-            x += 0.5;
-        }
-        assert!(
-            floor * 3 > samples,
-            "the keep is mostly filled in: only {floor} of {samples} interior \
-             samples are floor — that is the solid-gazebo defect again"
-        );
-
-        // 2. IT IS A ROOM. The walls stand well over a step above that
-        //    floor, or it is a rug with a border, not a building.
-        let wall = ch_support(&s.cover, x0 - 2.0, (z0 + z1) * 0.5, 100.0, 100.0);
-        assert!(
-            wall > outside + STEP_UP * 2.0,
-            "keep wall {wall:.1} m barely clears its own floor {outside:.1} m"
-        );
-
-        // 3. YOU WALK IN, and so does a chassis. Measured as the widest
-        //    continuous passable run across the south wall line.
-        let mut best = 0.0_f32;
-        let mut run = 0.0_f32;
-        let mut px = x0 - 4.0;
-        while px < x1 + 4.0 {
-            // same lesson as above: "passable" is the push-out rule's
-            // business, not the support rule's
-            run = if standable(px, (z0 + z1) * 0.5 - 12.0) { run + 0.1 } else { 0.0 };
-            best = best.max(run);
-            px += 0.1;
-        }
-        assert!(
-            best > MECH_RADIUS * 2.0 + 2.0,
-            "the doorway is {best:.1} m — a {:.1} m chassis needs more",
-            MECH_RADIUS * 2.0
-        );
-
-        // 4. AND IT GOES UP. The parapet is strictly the highest thing a
-        //    man can stand on, reached from inside — asserted as a
-        //    relationship against the courtyard and the wall-walk, so a
-        //    retune of the castle moves this test with it.
-        let parapet = ch_walk(&s.cover, [-28.5, 164.5], [-28.5, 184.0], outside, STEP_UP, BODY_RADIUS)
-            .and_then(|y| ch_walk(&s.cover, [-28.5, 184.5], [-11.5, 184.5], y, STEP_UP, BODY_RADIUS))
-            .and_then(|y| ch_walk(&s.cover, [-11.5, 184.0], [-11.5, 167.0], y, STEP_UP, BODY_RADIUS))
-            .expect("the keep stair must be walkable from its own floor");
-        assert!(
-            parapet > CH_RAMPART && parapet > outside + 12.0,
-            "the keep parapet {parapet:.1} m must top the wall-walk {CH_RAMPART} m \
-             and stand clear of its courtyard {outside:.1} m"
-        );
-    }
-
-    /// §owner CLIFFHOLD: every altitude band on the map is reachable ON
-    /// FOOT, today, with no flight and no mech.
-    ///
-    /// This is the promise that stops "designed for fliers" turning into
-    /// "unplayable until fliers ship". Each route is walked with the
-    /// sim's own two movement rules — stand on the tallest top within
-    /// your step-up, get pushed out of anything else — applied to
-    /// geometry those rules have never seen.
-    #[test]
-    fn every_cliffhold_band_is_reachable_on_foot() {
-        let s = cliffhold(0xC120, 2);
-        let cover = &s.cover;
-        // (name, legs, the band it must arrive on)
-        let routes: [(&str, &[[f32; 2]], f32); 8] = [
-            // the spine: city floor -> the muster hill -> the ravine ->
-            // THE BREACH -> the plateau -> the castle courtyard, in ONE
-            // straight line down x = 0. Straight because a bot steers
-            // straight; see `build_cliffhold`.
-            ("the x=0 spine, plaza to courtyard", &[[0.0, -40.0], [0.0, 175.0]], CH_PLATEAU),
-            // Red's side of the same climb, off the north plain
-            ("the North Road", &[[0.0, 290.0], [0.0, 175.0]], CH_PLATEAU),
-            // the eastern approach, three flights: 0 -> 6 -> 12 -> 18
-            (
-                "the Great Stair chain",
-                &[
-                    [110.0, -20.0],  // the commons floor
-                    [110.0, 31.3],   // up the Great Stair, onto the east apron
-                    [125.0, 31.3],   // sidestep to the foot of the Bench Stair
-                    [125.0, 50.0],   // up it, onto the east shelf
-                    [120.0, 70.0],   // across to the foot of the Shoulder Stair
-                    [80.0, 70.0],    // up it, onto the plateau
-                ],
-                CH_PLATEAU,
-            ),
-            // the western approach, two flights out of the quarry
-            (
-                "the quarry side",
-                &[[-250.0, 126.0], [-190.0, 126.0], [-190.0, 124.0], [-130.0, 124.0]],
-                CH_PLATEAU,
-            ),
-            // the city's low roof course, off the aqueduct. Note the
-            // deck is walked down its NORTH half: it oversails the
-            // housefronts by a metre, and the taller ones are walls to
-            // anyone hugging its south edge.
-            ("the aqueduct deck", &[[-20.0, -139.5], [-60.0, -139.5]], CH_ROOF_LOW),
-            // ...and the six-tread stub off it onto the 8 m course
-            (
-                "the 8 m roof course",
-                &[
-                    [-20.0, -139.5],   // the street, at the foot of the deck stair
-                    [-172.0, -139.5],  // up and along the deck
-                    [-172.0, -141.5],  // step south onto the stub
-                    [-182.0, -141.5],  // up it
-                    [-190.0, -150.0],  // and out onto the roof itself
-                ],
-                8.0,
-            ),
-            // the bell tower onto an 11 m roof
-            (
-                "the bell tower",
-                &[[-91.0, -190.0], [-91.0, -230.0], [-110.0, -230.0]],
-                11.0,
-            ),
-            // and the curtain wall-walk — from the CITY, the whole way,
-            // because a route that begins standing on the plateau has
-            // assumed the only interesting part of the journey
-            (
-                "the mural stair",
-                &[[0.0, -40.0], [0.0, 150.0], [-65.0, 150.0], [-65.0, 195.0], [-70.5, 195.0]],
-                CH_RAMPART,
-            ),
-        ];
-        for (name, legs, want) in routes {
-            let mut y = 0.0_f32;
-            for pair in legs.windows(2) {
-                y = ch_walk(cover, pair[0], pair[1], y, STEP_UP, BODY_RADIUS)
-                    .unwrap_or_else(|e| panic!("{name}: {e}"));
-            }
+            // a sweep that never touched geometry would agree about
+            // nothing. Measured at this seed, of 8405 samples: Arena
+            // 1008, Bailey 723, Gardens 687. The floor sits below the
+            // thinnest of the three with room for a retune, and two
+            // orders of magnitude above the ~0 a sweep that had drifted
+            // off the map would report.
             assert!(
-                (y - want).abs() < 0.01,
-                "{name}: arrived at {y:.2} m, wanted the {want:.1} m band"
+                landed > 500,
+                "{map:?}: only {landed} of {sampled} samples landed on \
+                 anything — this sweep is not testing the map"
             );
         }
-        // and the bands really are distinct occupied surfaces, not one
-        // slope with names on it
-        let bands = [0.0, CH_ROOF_LOW, CH_BENCH_EAST, CH_PLAZA_TOP, CH_SHELF, CH_PLATEAU, CH_RAMPART, CH_KEEP_TOP];
-        for w in bands.windows(2) {
-            assert!(w[1] > w[0] + STEP_UP, "bands {} and {} are one surface", w[0], w[1]);
-        }
     }
 
-    /// §owner CLIFFHOLD: the map's flights do not read as WALLS to a
-    /// bot, which is the difference between a vertical map the AI uses
-    /// and one it only ever slides along the bottom of.
+    /// A stair riser clears BOTH of its ceilings — the legs and the eyes.
     ///
-    /// There is no pathfinder in this project — `waypoint` is `[f32; 2]`
-    /// with no height, sampled without a reachability check — so a bot
-    /// climbs only what it blunders onto. `bot_act` fires ONE 1.2 m
-    /// whisker at `BOT_PROBE_Y` and veers hard perpendicular when it is
-    /// blocked, so a tread poking above that line throws the bot off the
-    /// flight sideways. Asserted twice: as the relationship, and by
-    /// walking the Breach with the sim's OWN `los_clear`.
+    /// No map lays a flight today; Cliffhold was the only one that ever
+    /// did and BRIEF XIII §1 removed it. This is deliberately kept anyway,
+    /// as the surviving half of `cliffholds_flights_do_not_read_as_walls_
+    /// to_a_bot`: it is the contract the NEXT vertical map has to be built
+    /// to, it is not obvious from either constant on its own, and it cost
+    /// a routing rewrite to establish. Asserted as RELATIONSHIPS, which
+    /// survive a retune of any of the three numbers in a way `== 0.5`
+    /// would not.
     #[test]
-    fn cliffholds_flights_do_not_read_as_walls_to_a_bot() {
-        // the contract, as relationships — these survive a retune of any
-        // of the three numbers, which a `== 0.5` would not
+    fn a_stair_riser_stays_under_both_the_step_up_and_the_bot_whisker() {
         assert!(
             STAIR_RISE_M < STEP_UP,
             "a riser over the step-up is a mech-only route: {STAIR_RISE_M} vs {STEP_UP}"
@@ -29196,366 +28482,45 @@ mod tests {
             STAIR_RISE_M < BOT_PROBE_Y,
             "a riser over the whisker reads as a wall: {STAIR_RISE_M} vs {BOT_PROBE_Y}"
         );
-
-        let s = cliffhold(0xC121, 2);
-        // up the Breach, one metre at a time, exactly as a bot walking
-        // at a waypoint on the far side of the mountain would
-        let mut y = 0.0_f32;
-        let mut climbed = 0usize;
-        let mut z = 45.0_f32;
-        while z < 96.0 {
-            let here = ch_support(&s.cover, 0.0, z, y, STEP_UP);
-            if here > y {
-                climbed += 1;
-            }
-            y = here;
-            assert!(
-                s.los_clear([0.0, y + BOT_PROBE_Y, z], [0.0, y + BOT_PROBE_Y, z + 1.2]),
-                "the Breach reads as a wall to a bot at z={z:.1}, standing at {y:.2} m"
-            );
-            z += 1.0;
-        }
+        // and the route probe's sample spacing has to be fine enough that
+        // a flight never reads as one un-takeable step: at the 1.2 m tread
+        // the flights were laid on, a 0.75 m sample cannot straddle two
+        // risers, so the worst gain it ever sees is one riser.
         assert!(
-            y > CH_PLATEAU - 0.01,
-            "walking straight up the Breach must reach the plateau, stopped at {y:.2} m"
+            BOT_ROUTE_STEP_M < 1.2,
+            "a {BOT_ROUTE_STEP_M} m sample can straddle two risers on a 1.2 m tread"
         );
-        assert!(climbed > 20, "only {climbed} risers — that is not a flight");
-    }
-
-    // ------------------------------------------- §owner BOT ROUTING
-
-    /// Roam a single team from `from` for `secs`, with nobody to shoot
-    /// at, and report (peak height per fighter, % of live ticks with the
-    /// obstacle whisker blocked, % of live ticks above 12 m).
-    ///
-    /// ONE TEAM on purpose: with two, `bot_act` takes the combat branch
-    /// and the waypoint is never read at all, so a mixed drop measures a
-    /// firefight and calls it navigation. (It measured exactly that
-    /// once, and the numbers were noise.)
-    ///
-    /// The whisker count is the honest "is it grinding into rock"
-    /// measure: it is `bot_act`'s OWN 1.2 m probe, re-evaluated here
-    /// with the sim's own `los_clear`, and it knows nothing whatever
-    /// about the route planner under test.
-    fn ch_roam(seed: u64, from: [f32; 3], secs: usize) -> (Vec<f32>, f32, f32) {
-        let mut s = cliffhold(seed, 4);
-        for (k, f) in s.fighters.iter_mut().enumerate() {
-            f.team = Team::Blue;
-            f.pos = [from[0] + (k as f32 - 3.5) * 3.0, from[1], from[2]];
-            f.protect_t = 0.0;
-        }
-        let n = s.fighters.len();
-        let mut peak = vec![0.0f32; n];
-        let (mut high, mut veer, mut total) = (0u32, 0u32, 0u32);
-        for _ in 0..(secs * SIM_HZ as usize) {
-            s.step(PlayerCmd::default());
-            for i in 1..n {
-                let f = &s.fighters[i];
-                if !f.alive() {
-                    continue;
-                }
-                if f.pos[1] > peak[i] {
-                    peak[i] = f.pos[1];
-                }
-                total += 1;
-                if f.pos[1] > 12.0 {
-                    high += 1;
-                }
-                let (dx, dz) = (f.waypoint[0] - f.pos[0], f.waypoint[1] - f.pos[2]);
-                let d = (dx * dx + dz * dz).sqrt().max(0.01);
-                let eye = [f.pos[0], f.pos[1] + BOT_PROBE_Y, f.pos[2]];
-                let ahead = [
-                    f.pos[0] + dx / d * 1.2,
-                    f.pos[1] + BOT_PROBE_Y,
-                    f.pos[2] + dz / d * 1.2,
-                ];
-                if !s.los_clear(eye, ahead) {
-                    veer += 1;
-                }
-            }
-        }
-        let pct = |v: u32| 100.0 * v as f32 / total.max(1) as f32;
-        (peak, pct(veer), pct(high))
-    }
-
-    /// §owner BOT ROUTING: every link the map publishes is a flight a
-    /// BODY can walk up, arriving on the band it advertises.
-    ///
-    /// The link list is generated inside the `flight` helper from the
-    /// same eight numbers that lay the treads, which makes it cheap and
-    /// makes it possible to be quietly, systematically wrong — an
-    /// off-by-one on the head puts every route on the map one tread
-    /// short of its landing, and nothing else would notice.
-    ///
-    /// So each one is WALKED, with `ch_walk`: 0.25 m at a time, with a
-    /// body radius, obeying the support and push-out rules, over
-    /// geometry those rules have never seen. `ch_walk` predates this
-    /// work and knows nothing about `Climb`, so agreeing with it is a
-    /// real check and not a restatement.
-    #[test]
-    fn every_cliffhold_climb_is_a_flight_a_body_can_walk_up() {
-        let s = cliffhold(0xC130, 2);
-        assert!(
-            s.climbs.len() >= 15,
-            "Cliffhold lays eighteen flights; only {} links published",
-            s.climbs.len()
-        );
-        for c in &s.climbs {
-            assert!(
-                c.top > c.base + STEP_UP,
-                "a link from {:.1} m to {:.1} m is not a way UP",
-                c.base,
-                c.top
-            );
-            // the foot is reachable from the band it claims to start on
-            let at_foot = terrain_top(&s.cover, c.foot[0], c.foot[1]);
-            assert!(
-                at_foot <= c.base + STEP_UP + 0.01,
-                "the foot of the {:.0}->{:.0} m flight stands {at_foot:.2} m up, \
-                 out of reach of its own base",
-                c.base,
-                c.top
-            );
-            // ...and walking it lands on the band it claims to end on.
-            //
-            // A WINDOW rather than an equality, and the window is one
-            // step-up wide on the high side for a reason the aqueduct
-            // stair found: its head abuts a 5.4 m roof, so a body
-            // walking the last tread of a "0 -> 5" flight is standing on
-            // 5.4. That is the flight doing its job — it delivered you
-            // onto the band and the band has a kerb — and pinning it to
-            // 5.00 would be a test that only fits the geometry it was
-            // written against.
-            let y = ch_walk(&s.cover, c.foot, c.head, c.base, STEP_UP, BODY_RADIUS)
-                .unwrap_or_else(|e| {
-                    panic!("the {:.0}->{:.0} m flight is not walkable: {e}", c.base, c.top)
-                });
-            assert!(
-                y >= c.top - 0.01 && y <= c.top + STEP_UP,
-                "the {:.0}->{:.0} m flight arrives at {y:.2} m, not the {:.1} m band \
-                 it advertises",
-                c.base,
-                c.top,
-                c.top
-            );
-            // and standing on the head really is standing on that band,
-            // not on a ledge with the band still in your face
-            let at_head = terrain_top(&s.cover, c.head[0], c.head[1]);
-            assert!(
-                at_head >= c.top - 0.01 && at_head <= c.top + STEP_UP,
-                "the head of the {:.0}->{:.0} m flight sits on {at_head:.2} m",
-                c.base,
-                c.top
-            );
-        }
-    }
-
-    /// §owner BOT ROUTING: the planner and the BODY agree about where
-    /// the ground is.
-    ///
-    /// `support_top` is the integrate loop's own vertical rule, pulled
-    /// out so the route planner asks the same question the body answers.
-    /// An extraction is exactly the change that can silently alter a
-    /// comparison, so it is checked against `ch_support` — a separate
-    /// statement of the same rule, written for the Cliffhold walker
-    /// before any of this existed — over the map with the most vertical
-    /// geometry in the game.
-    #[test]
-    fn the_route_planners_ground_and_the_bodys_ground_are_the_same_ground() {
-        let s = cliffhold(0xC131, 2);
-        let mut sampled = 0u32;
-        let mut nonzero = 0u32;
-        for gx in 0..41 {
-            for gz in 0..41 {
-                let x = -260.0 + gx as f32 * 13.0;
-                let z = -260.0 + gz as f32 * 13.0;
-                for y in [0.0_f32, 5.0, 12.0, 18.0, 24.0] {
-                    let mine = support_top(&s.cover, x, z, y, STEP_UP);
-                    let theirs = ch_support(&s.cover, x, z, y, STEP_UP);
-                    assert_eq!(
-                        mine.to_bits(),
-                        theirs.to_bits(),
-                        "support disagreement at ({x:.0}, {z:.0}) standing at {y:.0} m"
-                    );
-                    sampled += 1;
-                    if mine > 0.0 {
-                        nonzero += 1;
-                    }
-                }
-                // and the planner's "how high is the ground here", which
-                // is the same rule with the reachability ceiling removed
-                let dropped = terrain_top(&s.cover, x, z);
-                assert_eq!(
-                    dropped.to_bits(),
-                    ch_support(&s.cover, x, z, 1.0e6, 0.0).to_bits(),
-                    "terrain disagreement at ({x:.0}, {z:.0})"
-                );
-            }
-        }
-        // a sweep that never touched geometry would agree about nothing.
-        // Measured: 1370 of 8405 land on something, which is what a
-        // 600 m map with a mountain in one corner looks like.
-        assert!(
-            nonzero > 800,
-            "only {nonzero} of {sampled} samples landed on anything — \
-             this sweep is not testing the map"
-        );
-    }
-
-    /// §owner BOT ROUTING: a bot that wants the castle takes a STAIR.
-    ///
-    /// Four cases, and the second is the one it would be easy to break
-    /// by being clever: the map deliberately aims two flights down the
-    /// x = 0 line so a bot steering at the courtyard capture ring climbs
-    /// by accident, and a planner that "helpfully" re-routed that bot to
-    /// a staircase it was already on would undo the one piece of
-    /// AI-shaping the map already had.
-    #[test]
-    fn a_bot_that_wants_the_castle_routes_onto_a_flight() {
-        let mut s = cliffhold(0xC132, 2);
-        let castle = [CH_CHECKPOINT_KEEP[0], CH_CHECKPOINT_KEEP[1]];
-        // THE BREACH, found by what it does rather than by index: the
-        // ground-level flight up the ravine, south of the head block.
-        let breach = s
-            .climbs
-            .iter()
-            .find(|c| c.base == 0.0 && c.top == CH_PLATEAU && c.foot[1] < 100.0)
-            .copied()
-            .expect("the Breach must be published");
-
-        // 1. OFF the spine, at the foot of the east massif: the straight
-        //    line is eighteen metres of rock, so the route must bend to
-        //    a flight rather than press into it.
-        s.fighters[1].pos = [60.0, 0.0, 20.0];
-        let wp = s.route_waypoint(1, castle);
-        assert!(
-            wp != castle,
-            "a bot at the foot of the cliff still steers straight at the courtyard"
-        );
-        // The raw sample is a point EIGHTEEN METRES UP A CLIFF; the
-        // routed one is on ground this bot can stand on. Measured with
-        // `ch_support`, which is the walker's own independent statement
-        // of the support rule and knows nothing about the planner.
-        assert!(
-            ch_support(&s.cover, castle[0], castle[1], 1.0e6, 0.0) > 12.0,
-            "this test assumes the castle ring is high ground; it is not"
-        );
-        assert!(
-            ch_support(&s.cover, wp[0], wp[1], 1.0e6, 0.0) <= BOT_TERRAIN_M,
-            "routed onto ({:.0}, {:.0}), which is still up a cliff",
-            wp[0],
-            wp[1]
-        );
-        assert!(
-            TdmSim::seg_dist(wp, breach.foot, breach.head) < BOT_CLIMB_LANE_M * 2.0,
-            "routed to ({:.0}, {:.0}), which is not on the way to any flight",
-            wp[0],
-            wp[1]
-        );
-
-        // 2. ON the spine: the line already climbs the Breach, so leave
-        //    it alone. This is the map's own design working.
-        s.fighters[1].pos = [0.0, 0.0, 20.0];
-        assert_eq!(
-            s.route_waypoint(1, castle),
-            castle,
-            "the x = 0 spine already climbs; diverting it wastes the map's shaping"
-        );
-
-        // 3. PART WAY UP, wanting somewhere far to the south: finish the
-        //    flight. Without this the plan dies to the next re-roll and
-        //    the bot walks back down — measured at 0 of 35 bots ever
-        //    reaching the plateau off the ravine floor.
-        s.fighters[1].pos = [0.0, 6.0, 65.0];
-        assert_eq!(
-            s.route_waypoint(1, [-200.0, -200.0]),
-            breach.head,
-            "a bot six metres up a flight abandoned it for a southern waypoint"
-        );
-
-        // 4. and once it is UP, the plateau is ordinary ground again
-        s.fighters[1].pos = [0.0, CH_PLATEAU, 120.0];
-        assert_eq!(
-            s.route_waypoint(1, castle),
-            castle,
-            "a bot on the plateau should walk at the courtyard, not at a stair"
-        );
-    }
-
-    /// §owner BOT ROUTING, the end-to-end claim: bots on Cliffhold reach
-    /// the plateau, and stop grinding into the mountain on the way.
-    ///
-    /// Both halves are measured with instruments that know nothing about
-    /// the planner — peak height off the fighters' own positions, and
-    /// the grinding rate off `bot_act`'s own whisker. Measured on the
-    /// pre-change code, same seeds, same fixtures:
-    ///
-    /// ```text
-    ///                  bots reaching 18 m   ticks with the whisker blocked
-    ///   ravine floor      0 / 35 -> 14 / 35        14.3%  ->  7.2%
-    ///   north plain       2 / 35 -> 27 / 35        36.2%  ->  8.5%
-    /// ```
-    ///
-    /// The thresholds sit between the two columns in every case, so this
-    /// fails loudly on the old behaviour and still has room for the AI
-    /// to be retuned without going red.
-    #[test]
-    fn cliffhold_bots_reach_the_plateau_and_stop_grinding_into_it() {
-        let seeds = [0xC301u64, 0xC302, 0xC303, 0xC304, 0xC305];
-        for (name, from, want_plateau, veer_cap) in [
-            ("the ravine floor", [0.0_f32, 0.0, 20.0], 5usize, 11.0_f32),
-            ("Red's north plain", [0.0_f32, 0.0, 285.0], 12, 20.0),
-        ] {
-            let mut reached = 0usize;
-            let mut veer_sum = 0.0_f32;
-            let mut best = 0.0_f32;
-            for seed in seeds {
-                let (peak, veer, _) = ch_roam(seed, from, 90);
-                reached += peak.iter().skip(1).filter(|p| **p > CH_PLATEAU - 0.5).count();
-                veer_sum += veer;
-                best = best.max(peak.iter().skip(1).cloned().fold(0.0, f32::max));
-            }
-            let veer = veer_sum / seeds.len() as f32;
-            assert!(
-                (best - CH_PLATEAU).abs() < 0.01,
-                "{name}: the highest a bot ever got was {best:.1} m, not the \
-                 {CH_PLATEAU} m plateau"
-            );
-            assert!(
-                reached >= want_plateau,
-                "{name}: only {reached} bots of 35 reached the plateau in 90 s"
-            );
-            assert!(
-                veer < veer_cap,
-                "{name}: bots spent {veer:.1}% of their time with the obstacle \
-                 whisker blocked — that is grinding, not roaming"
-            );
-        }
     }
 
     /// §owner BOT ROUTING: and the FLAT maps are left where they were.
     ///
     /// A navigation change is exactly the kind that quietly re-tunes
-    /// every other map's AI as a side effect. This is the guard: the old
+    /// every other map's AI as a side effect. This is the guard: the flat
     /// layouts publish no flights, and their waypoints come back BITWISE
-    /// unchanged, so a bot on the Arena roams exactly as far as it
-    /// always did.
+    /// unchanged, so a bot on the Arena roams exactly as far as it always
+    /// did.
     ///
-    /// The Battlefield gets a floor rather than an equality, and should:
-    /// it has 6 m structures on it, which are over `BOT_TERRAIN_M` and
-    /// are meant to be routed around. Measured at 92.9% untouched.
+    /// SINCE BRIEF XIII §1 this covers every map there is, and the
+    /// `climbs.is_empty()` line is therefore now trivially true rather
+    /// than a discriminating check — it used to separate these three from
+    /// Cliffhold, which published eighteen. It stays because it is the
+    /// tripwire that says "a map started publishing flights again", which
+    /// is exactly what Castle Gardens is being rebuilt to do, and at that
+    /// point this test has to be split rather than deleted.
+    ///
+    /// (The fourth row was the Battlefield, on a 85% floor rather than an
+    /// equality because its 6 m structures are over `BOT_TERRAIN_M` and
+    /// are MEANT to be routed around. Measured at 92.9% untouched. It went
+    /// with the map.)
     #[test]
-    fn bot_routing_leaves_the_older_maps_where_it_found_them() {
-        for (map, floor) in [
-            (MapKind::Arena, 100.0_f32),
-            (MapKind::Bailey, 100.0),
-            (MapKind::Gardens, 100.0),
-            (MapKind::Battlefield, 85.0),
-        ] {
+    fn bot_routing_leaves_the_flat_maps_where_it_found_them() {
+        for map in MapKind::ALL {
+            let floor = 100.0_f32;
             let mut s = TdmSim::new(cfg(0xF00D, 2, Mode::Tdm, map));
             assert!(
                 s.climbs.is_empty(),
-                "{map:?} predates published flights and must publish none"
+                "{map:?} publishes no flights today - if this fires, a map has \
+                 grown verticality and this test needs splitting, not relaxing"
             );
             let h = s.half;
             let (mut same, mut n) = (0u32, 0u32);
@@ -29976,44 +28941,14 @@ mod tests {
         }
     }
 
-    /// §owner CLIFFHOLD: the shared infill keeps OUT of the set pieces,
-    /// and — the half that actually matters — it still runs everywhere
-    /// else, including the open commons the map depends on it to furnish.
-    ///
-    /// A keep-out list is the kind of change that silently turns into a
-    /// keep-everything-out, and an empty commons is the exact failure
-    /// ("ground with nothing on it is ground nobody crosses") the infill
-    /// was written to prevent.
-    #[test]
-    fn cliffholds_infill_dodges_the_mountain_and_still_fills_the_commons() {
-        let s = cliffhold(0xC122, 4);
-        // nothing at ground level is buried inside the mountain: any box
-        // whose top is under 4 m and whose centre sits inside the 18 m
-        // massif is furniture nobody will ever see
-        for c in &s.cover {
-            let (cx, cz) = ((c.min[0] + c.max[0]) * 0.5, (c.min[2] + c.max[2]) * 0.5);
-            let inside_massif = cx > -110.0 && cx < 96.0 && cz > 100.0 && cz < 200.0;
-            assert!(
-                !(inside_massif && c.max[1] < 4.0),
-                "a {:.1} m box is buried in the mountain at ({cx:.0}, {cz:.0})",
-                c.max[1]
-            );
-        }
-        // and the open half really did get furnished
-        let commons = s
-            .cover
-            .iter()
-            .filter(|c| {
-                let (cx, cz) = ((c.min[0] + c.max[0]) * 0.5, (c.min[2] + c.max[2]) * 0.5);
-                cx > 40.0 && cz < -40.0 && c.max[1] < 4.0
-            })
-            .count();
-        assert!(commons > 20, "only {commons} pieces of cover in the commons");
-        // the older maps' infill is untouched: they publish no keep-outs,
-        // so their box counts are what they always were
-        assert!(
-            TdmSim::new(cfg(0xC122, 4, Mode::Tdm, MapKind::Arena)).cover.len() > 60,
-            "the Arena's infill must be unaffected by the keep-out list"
-        );
-    }
+    // (`cliffholds_infill_dodges_the_mountain_and_still_fills_the_commons`
+    //  stood here. It proved the shared infill honours a map's `NoInfill`
+    //  keep-out list without turning into a keep-EVERYTHING-out. Cliffhold
+    //  was the only map that ever published a keep-out, so BRIEF XIII §1
+    //  took the only fixture the test had. THE MECHANISM IS STILL IN
+    //  `build_map` AND IS NOW UNEXERCISED - the `blocked` closure returns
+    //  false for every point on every map. Anything that publishes a
+    //  `NoInfill` again must bring this test back with it; the "still
+    //  fills the commons" half is the half that matters and the half a
+    //  reimplementation will forget.)
 }

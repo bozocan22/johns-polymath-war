@@ -25778,14 +25778,23 @@ fn open_intro(
 
             // ---- MATCH page --------------------------------------------
             let mtch = OnIntroPage(IntroPage::MATCH);
+            // BRIEF XIII §1: no filter any more. The row used to hide
+            // Battlefield from the PvP rotation while leaving it in
+            // `MapKind::ALL` for Extraction; the map is gone from the sim
+            // entirely now, so the selector is simply everything there is.
+            // Nothing here may re-introduce a hidden or locked map - the
+            // owner's wording is "do not reference them as selectable or
+            // hidden/locked maps anywhere".
             let maps: Vec<(&str, MapButton)> = MapKind::ALL
                 .iter()
-                // §12: Battlefield left the PvP rotation - it is the
-                // zombie-extraction adventure map now
-                .filter(|m| **m != MapKind::Battlefield)
                 .map(|m| (m.name(), MapButton(*m)))
                 .collect();
-            menu_ui::pill_row(b, "BATTLEFIELD", &maps, mtch);
+            // The gutter label was "BATTLEFIELD" - the row heading, but
+            // also the exact name of a map that used to sit in this list,
+            // directly above the map pills. With that map removed it reads
+            // as a leftover selector entry, which is the one thing §1 asks
+            // for. "MAP" says what the row is.
+            menu_ui::pill_row(b, "MAP", &maps, mtch);
             let diffs: Vec<(&str, DiffButton)> = Difficulty::ALL
                 .iter()
                 .map(|d| (d.name(), DiffButton(*d)))
@@ -26018,10 +26027,30 @@ fn match_config(sel: &Selected, mode: Mode) -> MatchConfig {
     if mode == Mode::Training {
         return training_config();
     }
-    // §12: extraction ALWAYS runs on the Battlefield - the adventure map;
-    // PvP always runs on the tight maps
+    // Extraction ALWAYS runs on Gardens, and the player's map choice is
+    // ignored for it.
+    //
+    // THIS IS A CHANGED DECISION, NOT AN INHERITED ONE, so it is written
+    // down rather than left to be re-derived. It used to be the
+    // Battlefield: a 400 x 400 m map with landmarks, a mine mouth and its
+    // own re-sited loot, pinned here because Extraction is an ADVENTURE
+    // mode and the other maps were tight PvP arenas. BRIEF XIII §1 removed
+    // the Battlefield, which left this line with no map to name.
+    //
+    // Gardens is the successor because it is the only surviving map that
+    // can be one. BRIEF XIII §2 rebuilds it as the showcase map - a 200 m
+    // bailey inside a much larger playable field - so it inherits the
+    // scale the mode was tuned around. Bailey (~130 m) and Arena are the
+    // tight maps that sentence was contrasting against; putting a horde
+    // mode on either is the thing the original comment existed to prevent.
+    //
+    // WHAT IS NOT INHERITED: the Battlefield's Extraction loot layout went
+    // with it, so Extraction now runs on Gardens' default 40 m pickup
+    // lanes. That is correct for Gardens TODAY, at its current size, and
+    // it is the first thing that has to be revisited when §2 enlarges it -
+    // a 40 m loot box on a 600 m field is one pile in the middle.
     let map = if mode == Mode::Extraction {
-        MapKind::Battlefield
+        MapKind::Gardens
     } else {
         sel.map
     };

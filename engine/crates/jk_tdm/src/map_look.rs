@@ -27,10 +27,12 @@
 //! ## What is kept, and what changed to keep it
 //!
 //! * **The air** (`MapLook`, `look`, `sun_dir`, `sun_euler`) — live, and
-//!   always was for every map. `look` no longer names a fifth map and now
-//!   has a DEFAULT arm, deliberately, so that removing a `MapKind` variant
-//!   from sim.rs cannot break this file's exhaustiveness in the window
-//!   between the two edits landing.
+//!   always was for every map. `look` has a DEFAULT arm, deliberately, so
+//!   that removing a `MapKind` variant from sim.rs cannot break this
+//!   file's exhaustiveness in the window between the two edits landing.
+//!   That window has since been used twice: Cliffhold's arm went first,
+//!   and BRIEF XIII §1 then removed BOTH `Cliffhold` and `Battlefield`
+//!   from the enum. Keep the arm.
 //!
 //! * **`sun_euler`** — kept whole, comment and all. It encodes three
 //!   capture cycles' worth of a bug that had nothing to do with terrain:
@@ -54,8 +56,10 @@
 //! * The landmark-silhouette half — `find`, `spawn_landmarks`, the keep
 //!   crown, the gatehouse arch, the bell tower, the cliff crest — is
 //!   **gone**, and honestly so: every one of its rules keyed off
-//!   `CH_KEEP_TOP`, `CH_RAMPART`, `CH_SHELF` and friends, which are being
-//!   deleted from sim.rs with the map. What was worth keeping from it is
+//!   `CH_KEEP_TOP`, `CH_RAMPART`, `CH_SHELF` and friends, which were
+//!   deleted from sim.rs with the map under BRIEF XIII §1 (the heights
+//!   themselves survive in `research/maps/VERTICAL_BANDS.md`). What was
+//!   worth keeping from it is
 //!   the discipline, recorded here rather than pretended at: **every anchor
 //!   was FOUND in the sim's published cover list by a geometric rule, never
 //!   restated as a coordinate**, so a test failed loudly if the map builder
@@ -194,11 +198,12 @@ pub fn look(map: MapKind) -> MapLook {
             Color::srgb(0.27, 0.48, 0.24),
             Color::srgb(0.58, 0.56, 0.50),
         ),
-        MapKind::Battlefield => base(
-            Color::srgb(0.60, 0.62, 0.68),
-            Color::srgb(0.36, 0.40, 0.28),
-            Color::srgb(0.50, 0.50, 0.48),
-        ),
+        // (The Battlefield's cold grey-blue sky over olive ground stood
+        // here. It went with the map under BRIEF XIII §1. It is not
+        // re-homed onto a survivor: a palette is a statement about a
+        // PLACE, and handing Gardens the Battlefield's sky would be the
+        // VM-01 failure above - the art changing under a play space that
+        // did not.)
         // Arena, and anything added later.
         _ => base(
             Color::srgb(0.58, 0.63, 0.72),
@@ -445,9 +450,14 @@ mod tests {
     /// The salvage that had to change to survive: banding is RELATIVE, so
     /// the same nine tints describe a 3 m arena wall and a 32 m keep.
     ///
-    /// Fails on the pre-change code, which read five absolute Cliffhold
-    /// heights — on a map whose tallest stone is 3 m, every box on it
-    /// classified as `Street` and the whole ramp collapsed to one tone.
+    /// Failed on the pre-change code, which read five absolute Cliffhold
+    /// heights (5 / 12 / 18 / 24 / 32 m) — on a map whose tallest stone is
+    /// 3 m, every box on it classified as `Street` and the whole ramp
+    /// collapsed to one tone. Cliffhold is gone (BRIEF XIII §1) and the
+    /// pre-change code is unreachable, so this is now a forward guard
+    /// rather than a regression test: the failure it describes is what
+    /// re-introducing ANY absolute height into `stone_of` would cause, and
+    /// the 3 m column is the one that catches it.
     #[test]
     fn the_bands_scale_to_whatever_map_they_are_given() {
         for tallest in [3.0_f32, 12.0, 32.0] {
