@@ -62,11 +62,38 @@ use crate::{sim, Game, GameState, GunKind, HudRoot, ThrowKind, HUD_ANCHORS};
 
 // ---- geometry -------------------------------------------------------------
 
-/// The icon AUTHORING box, in the 720p space the rest of the type ramp
-/// uses. `UiScale` handles resolution. Every `IconPart` is written in
-/// this box and scaled to whichever cell size it lands in, so the icon
-/// table never has to know how big it is being drawn.
+/// The LARGE icon's authoring box, in the 720p space the rest of the
+/// type ramp uses. `UiScale` handles resolution.
 const ICON: f32 = 34.0;
+
+/// The SMALL icon's own authoring box — and the whole point of §5's
+/// first task.
+///
+/// ## Why a second table exists at all
+///
+/// §4 authored one glyph per item in the 34px box and drew the
+/// secondaries by scaling it to 22. Its own handback said the result
+/// "don't read as weapons... at 22px, 3-4 rectangles are pale marks, not
+/// silhouettes", and the zoomed capture agrees: the scale factor is
+/// 22/34 = 0.647, so the rifle's 3px barrel became 1.9px, its 4px optic
+/// became 2.6px, and the shield's three bands became one grey lump.
+/// A 2px stroke of `INK_SOFT` over sand is not a line, it is a smudge.
+///
+/// Detail that helps at 44px turns to mush at 22px, so the fix is not a
+/// better scale — it is FEWER, FATTER, more characteristic shapes. This
+/// box is authored at the size it is actually drawn (`ICON_SM`), so
+/// every number below is a real pixel and `SM_MIN_STROKE` is enforceable
+/// rather than aspirational.
+const ICON_SM_BOX: f32 = ICON_SM;
+
+/// The thinnest a small glyph's stroke may be, in real pixels.
+///
+/// Three, because two is the smudge above and one is a hairline the
+/// scrim eats. Asserted over the whole small table by
+/// `no_small_glyph_has_a_stroke_thin_enough_to_smudge`, which fails on
+/// the §4 code precisely because that code had no small table and the
+/// scaled large one violates it everywhere.
+const SM_MIN_STROKE: f32 = 3.0;
 
 /// The active item's icon, at the right end of the row. Nearly double
 /// the secondaries — the reference's size contrast between its subject
@@ -318,6 +345,146 @@ fn gun_parts(k: GunKind) -> Vec<IconPart> {
     }
 }
 
+/// THE SMALL ICON TABLE, authored in real pixels (`ICON_SM_BOX`).
+///
+/// ## What a 22px silhouette can and cannot say
+///
+/// It cannot be a faithful miniature. It gets roughly four strokes and
+/// each has to be at least `SM_MIN_STROKE` thick, so every glyph here is
+/// built from ONE characteristic outline plus at most three marks that
+/// disambiguate it from its neighbours in the row:
+///
+/// * a RIFLE is a bar running the full width of the box, a magazine
+///   hanging under it and a fat butt at the rear;
+/// * a PISTOL is an L — a short slide with a grip dropping off its rear;
+/// * a SNIPER is the same full-width bar, thinner, under a scope so long
+///   it is the widest thing above the bore line;
+/// * a SHOTGUN is TWO parallel bars, barrel over pump;
+/// * a SHIELD is a slab that gets narrower every band on the way down,
+///   which nothing else in the row does;
+/// * a BOW is two vertical limbs with a vertical string beside them;
+/// * the four throwables stay vertical canisters and are told apart by
+///   what sits on top — a lever, a cap, a band pair, a flame.
+///
+/// `every_small_glyph_states_its_own_silhouette` asserts those tells as
+/// properties rather than as coordinates, so a future retune is free to
+/// move a rectangle but not free to make a rifle stop reading as one.
+fn small_icon_parts(item: Item) -> Vec<IconPart> {
+    use Tone::{Accent, Body, Detail};
+    match item {
+        // round body, equator band, and a LEVER off the shoulder — the
+        // one mark that separates a frag from the three canisters
+        Item::Throw(ThrowKind::Frag) => vec![
+            part(5.0, 7.0, 12.0, 12.0, 5.0, Body),
+            part(5.0, 11.0, 12.0, 3.0, 1.0, Detail),
+            part(9.0, 3.0, 4.0, 5.0, 1.0, Detail),
+            part(12.0, 2.0, 6.0, 3.0, 1.0, Accent),
+        ],
+        // a canister with one bright port in the middle of it
+        Item::Throw(ThrowKind::Flash) => vec![
+            part(6.0, 7.0, 10.0, 13.0, 3.0, Body),
+            part(8.0, 11.0, 6.0, 6.0, 3.0, Accent),
+            part(8.0, 3.0, 6.0, 5.0, 1.5, Detail),
+        ],
+        // the TALLEST canister, wearing two bands
+        Item::Throw(ThrowKind::Smoke) => vec![
+            part(6.0, 4.0, 10.0, 16.0, 2.0, Body),
+            part(6.0, 8.0, 10.0, 3.0, 1.0, Detail),
+            part(6.0, 13.0, 10.0, 3.0, 1.0, Detail),
+            part(9.0, 1.0, 5.0, 3.0, 1.0, Accent),
+        ],
+        // a squat bottle, a neck, and a rag alight on top
+        Item::Throw(ThrowKind::Molotov) => vec![
+            part(6.0, 10.0, 10.0, 10.0, 3.0, Body),
+            part(9.0, 5.0, 4.0, 5.0, 1.0, Detail),
+            part(7.0, 0.0, 8.0, 5.0, 2.0, Accent),
+        ],
+        // THE TAPER. Broad shoulders at the top, narrower every band on
+        // the way down to a foot. §4's shield was three bands of nearly
+        // equal width scaled to 22, and the capture shows it as a `T`.
+        //
+        // ALL THREE BANDS ARE `Body`, and that is the second capture's
+        // correction. The first cut of this glyph made the shoulder band
+        // `Accent`, which on a `Ready` cell resolves to `INK` — the
+        // BRIGHTEST tone in the table. The frame came back as a bright
+        // plate balanced on a dimmer block, which reads as an anvil, not
+        // as a shield: the eye took the brightest band for the subject
+        // and the taper never registered. One tone for the whole slab
+        // lets the OUTLINE do the talking, and the boss is a `Detail`
+        // groove drawn over it rather than a highlight sitting on it.
+        Item::Shield => vec![
+            part(2.0, 2.0, 18.0, 5.0, 1.0, Body),
+            part(4.0, 7.0, 14.0, 7.0, 1.0, Body),
+            part(7.0, 14.0, 8.0, 6.0, 2.0, Body),
+            part(9.0, 3.0, 3.0, 15.0, 1.0, Detail),
+        ],
+        Item::Gun(_, k) => small_gun_parts(k),
+    }
+}
+
+fn small_gun_parts(k: GunKind) -> Vec<IconPart> {
+    use Tone::{Accent, Body, Detail};
+    match k {
+        GunKind::Fists => vec![
+            part(3.0, 7.0, 13.0, 9.0, 3.0, Body),
+            part(15.0, 9.0, 5.0, 5.0, 2.0, Body),
+            part(5.0, 10.0, 9.0, 3.0, 1.0, Detail),
+        ],
+        // the L
+        GunKind::Glock | GunKind::Deagle => vec![
+            part(4.0, 7.0, 14.0, 4.0, 1.0, Body),
+            part(5.0, 11.0, 5.0, 8.0, 1.0, Detail),
+            part(14.0, 4.0, 4.0, 3.0, 1.0, Accent),
+        ],
+        // two parallel bars
+        GunKind::Shotgun => vec![
+            part(1.0, 8.0, 20.0, 3.0, 1.0, Body),
+            part(5.0, 11.0, 10.0, 3.0, 1.0, Detail),
+            part(0.0, 11.0, 5.0, 6.0, 1.0, Detail),
+            part(16.0, 4.0, 4.0, 3.0, 1.0, Accent),
+        ],
+        // full-width THIN bore under a long scope
+        GunKind::Awm => vec![
+            part(0.0, 10.0, 22.0, 3.0, 1.0, Body),
+            part(5.0, 4.0, 12.0, 5.0, 1.0, Accent),
+            part(0.0, 13.0, 6.0, 5.0, 1.0, Detail),
+            part(9.0, 13.0, 4.0, 6.0, 1.0, Detail),
+        ],
+        GunKind::Bow => vec![
+            part(7.0, 0.0, 4.0, 8.0, 2.0, Body),
+            part(7.0, 14.0, 4.0, 8.0, 2.0, Body),
+            part(6.0, 8.0, 6.0, 6.0, 2.0, Detail),
+            part(14.0, 1.0, 3.0, 20.0, 1.0, Accent),
+        ],
+        GunKind::Spear => vec![
+            part(6.0, 10.0, 16.0, 3.0, 1.0, Body),
+            part(0.0, 7.0, 7.0, 8.0, 2.0, Accent),
+            part(9.0, 9.0, 4.0, 5.0, 1.0, Detail),
+        ],
+        // THE RIFLE. Full-width bar, magazine hanging under it, fat butt
+        // at the rear, rail on top. This is the glyph the reference's
+        // `SCAR-L` is, and the one §4 called the biggest remaining gap.
+        GunKind::Mp5 | GunKind::Ak47 | GunKind::M4 | GunKind::M249 | GunKind::Minigun => vec![
+            part(0.0, 9.0, 22.0, 4.0, 1.0, Body),
+            part(0.0, 8.0, 6.0, 7.0, 1.0, Detail),
+            part(9.0, 13.0, 5.0, 7.0, 1.0, Detail),
+            part(7.0, 5.0, 8.0, 3.0, 1.0, Accent),
+        ],
+    }
+}
+
+/// The art for one cell: the parts, and the BOX they were authored in.
+///
+/// Two tables, one lookup. The caller never has to know which box a
+/// glyph came from — it divides by whatever this returns.
+fn icon_art(item: Item, small: bool) -> (Vec<IconPart>, f32) {
+    if small {
+        (small_icon_parts(item), ICON_SM_BOX)
+    } else {
+        (icon_parts(item), ICON)
+    }
+}
+
 // ---- pure formatters ------------------------------------------------------
 
 /// The carried inventory in READING order, before selection moves
@@ -363,14 +530,15 @@ fn strip_order(inv: &[GunKind; 3], is_selected: impl Fn(Item) -> bool) -> Vec<It
 /// The index of the large "active" cell: the last one.
 const ACTIVE_SLOT: usize = CELLS - 1;
 
-/// The strip's plate, a strengthened `hud.rs::scrim()`.
+/// The plate behind the FALLBACK root only.
 ///
-/// Expressed as a multiple of the shared value rather than as a fresh
-/// literal: retuning the human HUD's scrim still moves this with it,
-/// which is the whole reason the strip borrows it at all.
+/// §5 moved this value to `hud::group_plate`, because after §5 the strip
+/// normally has no plate at all: it is a child of the bottom-right group
+/// panel, which owns the one rectangle. This wrapper survives for the
+/// standalone path — a harness that builds `InventoryStripPlugin`
+/// without `HudPlugin` still needs something behind the icons.
 fn strip_plate() -> Color {
-    let s = crate::hud::scrim();
-    s.with_alpha((s.alpha() * 1.85).min(1.0))
+    crate::hud::group_plate()
 }
 
 /// The key that selects a cell.
@@ -529,7 +697,16 @@ pub struct InventoryStripPlugin;
 
 impl Plugin for InventoryStripPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_strip).add_systems(
+        app.add_systems(
+            Startup,
+            // AFTER `hud::spawn_layer`, which creates the host slot this
+            // row adopts. Bevy inserts the sync point automatically for
+            // an explicit ordering, so the host's `Commands` are applied
+            // before this runs. If `HudPlugin` is absent the ordering is
+            // a no-op and `spawn_strip` takes its standalone path.
+            spawn_strip.after(crate::hud::spawn_layer),
+        )
+        .add_systems(
             Update,
             // AFTER `layer_fade`, which is the single owner of the idle
             // clock. Reading `XiiFadeAlpha` in the same frame it is
@@ -544,50 +721,92 @@ impl Plugin for InventoryStripPlugin {
     }
 }
 
-fn spawn_strip(mut commands: Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Percent(strip_right_frac() * 100.0),
-                bottom: Val::Percent(strip_bottom_frac() * 100.0),
-                // ONE row now, not a 2x4 grid. See `strip_order`.
-                flex_direction: FlexDirection::Row,
-                // Bottom-aligned: the small cells hang off the same
-                // baseline as the large one, so the row has a floor even
-                // though its cells are two different heights.
-                align_items: AlignItems::FlexEnd,
-                height: Val::Px(ROW_H),
-                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                ..default()
-            },
-            // The reference's dark translucent rounded panel.
-            //
-            // DERIVED from `hud.rs::scrim()` rather than equal to it, so
-            // the two still move together if that value is retuned. The
-            // strip needs more backing than the numerals do and the
-            // capture is why: `scrim()` is tuned for 76px white glyphs,
-            // which carry themselves over pale sand. These icons are
-            // 2-3px line-art strokes at INK_SOFT, and at 0.30 alpha over
-            // a bright desert floor they washed out to faint smudges.
-            BackgroundColor(strip_plate()),
-            BorderRadius::all(Val::Px(6.0)),
-            // Starts hidden for the same reason the XII root does: the
-            // initial state is Title and `hud_visibility` only fires on
-            // Playing's enter/exit, so a root that spawned visible would
-            // sit on top of the title screen until the first match.
-            Visibility::Hidden,
-            HudRoot,
-            StripRoot,
-        ))
-        .with_children(|r| {
-            for slot in 0..CELLS {
-                if slot > 0 {
-                    spawn_rule(r, slot);
-                }
-                spawn_cell(r, slot);
+/// The row itself: one line of cells, bottom-aligned.
+///
+/// `padding` differs between the two paths because the group panel
+/// already supplies its own — a hosted row that padded again would push
+/// the icons off the panel's right edge and leave a channel between the
+/// icon row and the numeral under it.
+fn strip_row_node(hosted: bool) -> Node {
+    Node {
+        // ONE row now, not a 2x4 grid. See `strip_order`.
+        flex_direction: FlexDirection::Row,
+        // Bottom-aligned: the small cells hang off the same baseline as
+        // the large one, so the row has a floor even though its cells
+        // are two different heights.
+        align_items: AlignItems::FlexEnd,
+        height: Val::Px(ROW_H),
+        padding: if hosted {
+            UiRect::bottom(Val::Px(2.0))
+        } else {
+            UiRect::axes(Val::Px(8.0), Val::Px(4.0))
+        },
+        ..default()
+    }
+}
+
+/// §5: THE ROW JOINS THE GROUP.
+///
+/// The reference puts the weapon icon, the big numeral, the dim reserve
+/// and the weapon name inside ONE dark rounded panel. §4 had the strip's
+/// plate above the ammo cluster's — two rectangles, two widths, two
+/// alphas and a seam, which its own handback listed as the second
+/// remaining gap and deferred as risky because `hud.rs`'s ammo cluster
+/// also serves MECH mode.
+///
+/// The risk is real and is why this is an ADOPTION rather than a merge.
+/// `hud.rs` spawns an empty `AmmoStripHost` slot inside the group panel,
+/// directly above the numeral; this row moves into it and becomes it.
+/// Nothing about the mech path changes — in a mech the row simply sets
+/// `Display::None` (see `paint_strip`) and the panel closes up around
+/// the systems column and the numeral instead.
+///
+/// If the host is not there — a test harness with no `HudPlugin` — the
+/// old absolute-positioned, self-plated root is still built, so this
+/// module remains standalone.
+fn spawn_strip(mut commands: Commands, host: Query<Entity, With<crate::hud::AmmoStripHost>>) {
+    let root = match host.get_single() {
+        Ok(e) => {
+            commands.entity(e).insert((
+                strip_row_node(true),
+                // No plate: the group panel behind it is the only
+                // rectangle, and a second translucent black one stacked
+                // on it would print the seam this change removes.
+                BackgroundColor(Color::NONE),
+                StripRoot,
+            ));
+            e
+        }
+        Err(_) => commands
+            .spawn((
+                {
+                    let mut n = strip_row_node(false);
+                    n.position_type = PositionType::Absolute;
+                    n.right = Val::Percent(strip_right_frac() * 100.0);
+                    n.bottom = Val::Percent(strip_bottom_frac() * 100.0);
+                    n
+                },
+                BackgroundColor(strip_plate()),
+                BorderRadius::all(Val::Px(6.0)),
+                // Starts hidden for the same reason the XII root does:
+                // the initial state is Title and `hud_visibility` only
+                // fires on Playing's enter/exit, so a root that spawned
+                // visible would sit on top of the title screen until the
+                // first match.
+                Visibility::Hidden,
+                HudRoot,
+                StripRoot,
+            ))
+            .id(),
+    };
+    commands.entity(root).with_children(|r| {
+        for slot in 0..CELLS {
+            if slot > 0 {
+                spawn_rule(r, slot);
             }
-        });
+            spawn_cell(r, slot);
+        }
+    });
 }
 
 /// A hairline between two cells. Height and alpha are fixed at spawn —
@@ -815,7 +1034,7 @@ fn paint_strip(
     // system's behaviour is unchanged, since no StripRoot entity has
     // ever carried CellIconPart or CellKeyBadge.)
     mut root: Query<
-        &mut Visibility,
+        (&mut Visibility, &mut Node),
         (With<StripRoot>, Without<CellIconPart>, Without<CellKeyBadge>),
     >,
     // The ONE fade clock, owned by `hud.rs::layer_fade`. `Option` so
@@ -842,7 +1061,13 @@ fn paint_strip(
         Query<(&CellKeyBadge, &mut BackgroundColor, &mut Visibility)>,
         Query<(&CellKeyText, &mut Text, &mut TextColor)>,
         Query<(&CellRule, &mut BackgroundColor)>,
-        Query<&mut BackgroundColor, With<StripRoot>>,
+        // The FALLBACK root's plate only. When the row has been adopted
+        // by `hud::AmmoStripHost` it carries no plate of its own — the
+        // group panel behind it is the one rectangle, and `mode_sync`
+        // fades that one off the same `XiiFadeAlpha` this function reads.
+        // The filter is what makes "hosted rows have no plate" a
+        // structural fact rather than a rule someone has to remember.
+        Query<&mut BackgroundColor, (With<StripRoot>, Without<crate::hud::AmmoStripHost>)>,
     )>,
 ) {
     let simr = &game.sim;
@@ -859,12 +1084,20 @@ fn paint_strip(
     // would put two readings in one place, the exact fault BRIEF XII-A
     // was pulled together to remove.
     let show = p.alive() && !p.in_mech();
-    if let Ok(mut v) = root.get_single_mut() {
+    if let Ok((mut v, mut node)) = root.get_single_mut() {
         *v = if show {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
+        // §5: DISPLAY too, not just visibility. The row is a child of the
+        // bottom-right group panel now, and a merely hidden child still
+        // occupies its box — a mech would have carried a 50 px empty band
+        // above its numeral for the whole of every match.
+        let want = if show { Display::Flex } else { Display::None };
+        if node.display != want {
+            node.display = want;
+        }
     }
     if !show {
         return;
@@ -876,11 +1109,12 @@ fn paint_strip(
         let Some(s) = states.get(part_id.0) else {
             continue;
         };
-        let parts = icon_parts(s.item);
-        // The icon table is authored in a 34x34 box; a secondary cell
-        // draws it at 20. Scaling here rather than in the table is what
-        // lets one set of coordinates serve both sizes.
-        let k = icon_px(part_id.0) / ICON;
+        // §5: TWO tables. The active cell gets the detailed 34px glyph;
+        // a secondary gets the four-stroke 22px one authored for that
+        // size. Scaling a 34px glyph down to 22 was what made the
+        // secondaries unreadable — see `ICON_SM_BOX`.
+        let (parts, box_px) = icon_art(s.item, part_id.0 != ACTIVE_SLOT);
+        let k = icon_px(part_id.0) / box_px;
         match parts.get(part_id.1) {
             Some(ip) => {
                 node.left = Val::Px(ip.x * k);
@@ -1090,6 +1324,233 @@ mod tests {
                     "{it:?} part {p:?} leaves the {ICON}px icon box"
                 );
             }
+        }
+    }
+
+    /// Every item, as a secondary cell actually draws it.
+    fn all_items() -> Vec<Item> {
+        let mut items: Vec<Item> = ThrowKind::ALL.iter().copied().map(Item::Throw).collect();
+        items.push(Item::Shield);
+        for k in [
+            GunKind::Fists,
+            GunKind::Glock,
+            GunKind::Deagle,
+            GunKind::Mp5,
+            GunKind::Shotgun,
+            GunKind::Ak47,
+            GunKind::M4,
+            GunKind::Awm,
+            GunKind::M249,
+            GunKind::Bow,
+            GunKind::Spear,
+            GunKind::Minigun,
+        ] {
+            items.push(Item::Gun(0, k));
+        }
+        items
+    }
+
+    /// THE §5 READABILITY FLOOR.
+    ///
+    /// §4's own handback: "at 22px, 3-4 rectangles are pale marks, not
+    /// silhouettes". This is why, in one assertion: the large table was
+    /// drawn at 22/34 = 0.647, so its 3px strokes landed at 1.9px and
+    /// its 4px optic at 2.6px, and a sub-3px `INK_SOFT` line over sand
+    /// is a smudge.
+    ///
+    /// It fails on the pre-change code by construction — there was no
+    /// small table, `icon_art(_, true)` did not exist, and the scaled
+    /// large table breaks the floor for eleven of the fourteen glyphs.
+    #[test]
+    fn no_small_glyph_has_a_stroke_thin_enough_to_smudge() {
+        for it in all_items() {
+            let (parts, box_px) = icon_art(it, true);
+            assert_eq!(box_px, ICON_SM_BOX, "{it:?} came from the wrong table");
+            assert!(!parts.is_empty(), "{it:?} draws nothing when small");
+            assert!(
+                parts.len() <= MAX_PARTS,
+                "{it:?} needs {} parts, cells only spawn {MAX_PARTS}",
+                parts.len()
+            );
+            // the box is authored at the size it is DRAWN, so this is 1.0
+            // and every number below is a real pixel
+            let k = ICON_SM / box_px;
+            for p in parts {
+                assert!(
+                    p.x >= 0.0
+                        && p.y >= 0.0
+                        && p.x + p.w <= box_px + 0.001
+                        && p.y + p.h <= box_px + 0.001,
+                    "{it:?} small part {p:?} leaves its {box_px}px box"
+                );
+                assert!(
+                    p.w.min(p.h) * k >= SM_MIN_STROKE - 0.001,
+                    "{it:?} small part {p:?} is {:.1}px on its thin axis; \
+                     anything under {SM_MIN_STROKE} reads as a smudge, not a line",
+                    p.w.min(p.h) * k
+                );
+            }
+        }
+    }
+
+    /// The secondaries must have their OWN geometry, not the large
+    /// glyph's coordinates.
+    ///
+    /// Stated as an inequality rather than by listing shapes: the point
+    /// of §5's first task is that the two sizes are drawn from two
+    /// tables, and the cheapest way to regress it is for someone to make
+    /// `small_icon_parts` delegate back to `icon_parts`.
+    #[test]
+    fn the_secondaries_are_drawn_from_their_own_table() {
+        for it in all_items() {
+            let (small, sbox) = icon_art(it, true);
+            let (large, lbox) = icon_art(it, false);
+            assert_ne!(sbox, lbox, "{it:?}: the two boxes must differ");
+            let same = small.len() == large.len()
+                && small.iter().zip(large.iter()).all(|(a, b)| {
+                    (a.x - b.x).abs() < 0.001
+                        && (a.y - b.y).abs() < 0.001
+                        && (a.w - b.w).abs() < 0.001
+                        && (a.h - b.h).abs() < 0.001
+                });
+            assert!(!same, "{it:?} small glyph is the large one, unchanged");
+        }
+    }
+
+    /// THE TELLS, as properties rather than as coordinates.
+    ///
+    /// The owner's reference is readable because its rifle glyph has a
+    /// characteristic OUTLINE, not because it is accurate. Each assert
+    /// below names the one thing that makes its silhouette identifiable
+    /// at 22 px and distinguishes it from its neighbours in the row, so
+    /// a future retune may move any rectangle but may not stop a rifle
+    /// reading as a rifle.
+    #[test]
+    fn every_small_glyph_states_its_own_silhouette() {
+        let b = ICON_SM_BOX;
+        let g = |k: GunKind| small_gun_parts(k);
+        let widest = |ps: &Vec<IconPart>| {
+            ps.iter()
+                .max_by(|a, c| a.w.partial_cmp(&c.w).unwrap())
+                .copied()
+                .unwrap()
+        };
+
+        // RIFLE: a bar across nearly the whole box, with a magazine
+        // hanging under it. Both halves matter — a bare bar is a stick.
+        for k in [GunKind::M4, GunKind::Ak47, GunKind::Mp5, GunKind::M249] {
+            let ps = g(k);
+            let bar = widest(&ps);
+            assert!(
+                bar.w >= 0.9 * b,
+                "{k:?}: the receiver+barrel bar is only {:.0}px of {b}",
+                bar.w
+            );
+            assert!(
+                ps.iter()
+                    .any(|p| p.y >= bar.y + bar.h - 0.001 && p.h > p.w),
+                "{k:?}: nothing hangs below the bar, so it has no magazine"
+            );
+        }
+
+        // PISTOL: the L. A SHORT slide, and a grip dropping off it.
+        for k in [GunKind::Glock, GunKind::Deagle] {
+            let ps = g(k);
+            let slide = widest(&ps);
+            assert!(
+                slide.w < 0.8 * b,
+                "{k:?}: a slide {:.0}px wide reads as a rifle, not a pistol",
+                slide.w
+            );
+            assert!(
+                ps.iter()
+                    .any(|p| p.y >= slide.y + slide.h - 0.001 && p.h > p.w),
+                "{k:?}: no grip below the slide, so there is no L"
+            );
+        }
+
+        // SNIPER: the same full-width bore as a rifle, under a scope so
+        // long it is what tells the two apart at a glance.
+        let awm = g(GunKind::Awm);
+        let bore = awm
+            .iter()
+            .filter(|p| p.w > p.h)
+            .max_by(|a, c| a.w.partial_cmp(&c.w).unwrap())
+            .copied()
+            .unwrap();
+        assert!(bore.w >= 0.95 * b, "the AWM's bore is not full-width");
+        let scope = awm
+            .iter()
+            .find(|p| p.y + p.h <= bore.y + 0.001)
+            .copied()
+            .expect("the AWM has nothing above its bore line");
+        assert!(
+            scope.w > widest(&g(GunKind::M4)).w * 0.0 + 9.0,
+            "the AWM's scope is too short to separate it from a rifle"
+        );
+        assert!(
+            scope.w
+                > g(GunKind::M4)
+                    .iter()
+                    .filter(|p| p.y + p.h <= 9.0)
+                    .map(|p| p.w)
+                    .fold(0.0, f32::max),
+            "the sniper's scope must out-read the rifle's rail"
+        );
+
+        // SHOTGUN: two parallel bars, barrel over pump.
+        let sg = g(GunKind::Shotgun);
+        let bars: Vec<_> = sg.iter().filter(|p| p.w >= 8.0 && p.h <= 4.0).collect();
+        assert!(
+            bars.len() >= 2,
+            "the shotgun needs two stacked bars, found {}",
+            bars.len()
+        );
+        assert!(
+            bars.iter().any(|p| p.y != bars[0].y),
+            "the shotgun's two bars are at the same height"
+        );
+
+        // BOW: two vertical limbs and a vertical string.
+        let bow = g(GunKind::Bow);
+        assert!(
+            bow.iter().filter(|p| p.h > p.w * 1.5).count() >= 3,
+            "the bow needs two limbs and a string, all vertical"
+        );
+        assert!(
+            bow.iter().any(|p| p.h >= 0.8 * b && p.w <= 4.0),
+            "the bow has no full-height string"
+        );
+
+        // SHIELD: it gets NARROWER on the way down. Nothing else in the
+        // row tapers, which is the whole tell — §4's shield was three
+        // near-equal bands and photographed as a `T`.
+        // Only the BODY bands carry the outline; the boss is a groove
+        // drawn over them and does not participate in the taper.
+        let mut sh: Vec<IconPart> = small_icon_parts(Item::Shield)
+            .into_iter()
+            .filter(|p| p.t == Tone::Body)
+            .collect();
+        sh.sort_by(|a, c| a.y.partial_cmp(&c.y).unwrap());
+        assert!(sh.len() >= 3, "a two-band shield cannot show a taper");
+        assert!(sh[0].w >= 0.75 * b, "the shield has no broad shoulders");
+        // ...and the slab is ONE tone. A brighter band on top made the
+        // eye read the band as the subject and the shield as an anvil —
+        // photographed, then corrected.
+        assert!(
+            !small_icon_parts(Item::Shield)
+                .iter()
+                .any(|p| p.t == Tone::Accent),
+            "the shield's shoulder is spending the accent again"
+        );
+        for w in sh.windows(2) {
+            assert!(
+                w[1].w < w[0].w,
+                "the shield stops tapering at y={}: {} then {}",
+                w[1].y,
+                w[0].w,
+                w[1].w
+            );
         }
     }
 

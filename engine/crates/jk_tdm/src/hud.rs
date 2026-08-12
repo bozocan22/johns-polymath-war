@@ -130,6 +130,26 @@ pub(crate) fn scrim() -> Color {
     palette::PANEL.with_alpha(0.30)
 }
 
+/// §5: THE HUMAN PANEL, shared by the bottom-left vitals cluster and the
+/// bottom-right icon/numeral/name group.
+///
+/// This was `inventory_strip::strip_plate` and it has moved here for one
+/// reason: after §5 the strip and the ammo numeral are children of a
+/// single panel, so there is only one rectangle left to colour, and the
+/// module that owns that rectangle is this one. It is still expressed as
+/// a MULTIPLE of `scrim()` rather than as a fresh literal, so retuning
+/// the HUD's one scrim value still moves it.
+///
+/// Why the stronger value won: `scrim()` is tuned for 76 px white
+/// glyphs, which carry themselves over pale sand. §4 photographed the
+/// strip's 3 px `INK_SOFT` strokes at that alpha and they washed out to
+/// smudges. One panel means one alpha, and the icons are the thing that
+/// needs it.
+pub(crate) fn group_plate() -> Color {
+    let s = scrim();
+    s.with_alpha((s.alpha() * 1.85).min(1.0))
+}
+
 // ---- anchors --------------------------------------------------------------
 //
 // `HUD_ANCHORS` in `main.rs` is right and is already data-driven:
@@ -148,12 +168,30 @@ const XII_ANCHORS: &[(&str, [f32; 2], [f32; 2])] = &[
     ("urgent", [0.5, 0.0], [0.0, 0.075]),
     // the kill/hit feed, moved out of the middle of the screen
     ("transient", [0.0, 1.0], [0.06, -0.28]),
-    // mech systems readouts, stacked above the ammo corner
-    ("mech-systems", [1.0, 1.0], [-0.06, -0.24]),
     // equipment state, top-left — the slot the reference gives it, and
     // the slot K/D was squatting in (K/D lives on the scoreboard)
     ("equip", [0.0, 0.0], [0.06, 0.06]),
 ];
+
+/// §5 THE MECH-SYSTEMS ANCHOR IS GONE, and its absence is the change.
+///
+/// It used to place a floating panel at `[-0.06, -0.24]` — a fourth
+/// competing cluster hanging in space above the ammo corner, with its
+/// own plate, its own border and its own alignment. The systems rows now
+/// live INSIDE the bottom-right group panel, stacked over the numeral
+/// exactly where the inventory strip sits on foot, so mech and infantry
+/// read as the same instrument in two states rather than two designs.
+///
+/// Look XII anchors up BY NAME. `spawn_top`/`spawn_equip` indexed this
+/// table (`XII_ANCHORS[3].2`), which meant deleting the row above would
+/// have silently moved the top-left panel to the bottom-right corner.
+fn xii(name: &str) -> [f32; 2] {
+    XII_ANCHORS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, o)| *o)
+        .unwrap_or([HUD_SAFE_FRAC, HUD_SAFE_FRAC])
+}
 
 /// Resolve an anchor to a pixel point. Pure; the layout tests use it.
 fn anchor_px(anchor: [f32; 2], off: [f32; 2], w: f32, h: f32) -> (f32, f32) {
@@ -434,7 +472,25 @@ fn score_line(mode: Mode, blue: f32, red: f32, horde: usize) -> (String, String)
 /// Arm length of one bracket stroke, 720p px.
 const FRAME_ARM_PX: f32 = 92.0;
 /// Stroke thickness, 720p px.
-const FRAME_THICK_PX: f32 = 3.0;
+///
+/// §5: 3 px of near-saturated `GOLD` at 0.85 alpha in all four corners
+/// is not framing, it is a fifth thing on the screen shouting the loudest
+/// colour in the palette. A frame's whole job is to be noticed once and
+/// then ignored. Two pixels of `FRAME_INK` does that.
+const FRAME_THICK_PX: f32 = 2.0;
+
+/// The frame's colour. Not `SYSTEMS`.
+///
+/// The owner's note on the mech view was "more simple... professional
+/// similar to our old designs", against a reference whose entire chrome
+/// is neutral line-work with ONE accent. `SYSTEMS` (= `palette::GOLD`)
+/// has exactly one job left in this file after §5 — marking the SELECTED
+/// mount and the power-core pips — and a colour spent on eight
+/// decorative bars in the corners of the screen is a colour that can no
+/// longer mark anything. `gold_is_spent_on_selection_only` is the test.
+fn frame_ink() -> Color {
+    palette::INK_SOFT.with_alpha(0.38)
+}
 /// Inset of the bracket corner from the screen edge, 720p px.
 const FRAME_INSET_PX: f32 = 26.0;
 
@@ -554,6 +610,17 @@ struct SystemsValue(usize);
 #[derive(Component)]
 struct XiiPlate;
 
+/// THE HOST SLOT for `inventory_strip`'s row, inside the bottom-right
+/// group panel and directly above the ammo numeral.
+///
+/// Published so that module can find it at `Startup` without either
+/// module knowing the other's layout. It is empty here on purpose: if
+/// `InventoryStripPlugin` is not in the app it stays `Display::None` and
+/// the panel simply hugs the numeral, which is what mech mode wants
+/// anyway.
+#[derive(Component)]
+pub(crate) struct AmmoStripHost;
+
 // ---- plugin ---------------------------------------------------------------
 
 pub struct HudPlugin;
@@ -595,7 +662,7 @@ fn text(size: f32, color: Color) -> (Text, TextFont, TextColor) {
     )
 }
 
-fn spawn_layer(mut commands: Commands) {
+pub(crate) fn spawn_layer(mut commands: Commands) {
     let (v_a, v_o) = corner("vitals");
     let (a_a, a_o) = corner("ammo");
 
@@ -620,11 +687,13 @@ fn spawn_layer(mut commands: Commands) {
         .with_children(|r| {
             spawn_mech_frame(r);
             spawn_vitals(r, v_a, v_o);
+            // §5: `spawn_ammo` now builds the whole bottom-right GROUP —
+            // the strip's host slot, the systems column and the numerals
+            // — so `spawn_systems` is no longer a top-level call.
             spawn_ammo(r, a_a, a_o);
             spawn_top(r);
             spawn_equip(r);
             spawn_transient(r);
-            spawn_systems(r);
         });
 }
 
@@ -632,7 +701,7 @@ fn spawn_mech_frame(r: &mut ChildBuilder) {
     for i in 0..8 {
         r.spawn((
             frame_bar_node(i),
-            BackgroundColor(SYSTEMS.with_alpha(0.85)),
+            BackgroundColor(frame_ink()),
             Visibility::Hidden,
             MechOnly,
         ));
@@ -734,6 +803,39 @@ fn spawn_vitals(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
 #[derive(Component)]
 struct HullBarRow;
 
+/// THE BOTTOM-RIGHT GROUP — §5's second task, and the mech's third.
+///
+/// ## What the reference actually shows
+///
+/// One dark translucent rounded panel containing, top to bottom: the
+/// weapon icon and its small companions, the large ammo numeral with a
+/// smaller dimmer reserve beside it, and the weapon name in small caps
+/// underneath. ONE panel. §4 shipped the strip's plate sitting above the
+/// ammo cluster's plate — two rectangles of different widths and
+/// different alphas with a seam between them, which
+/// `handback/brief-vii/grenade_hold/01-fp-rifle-before-g.png` shows
+/// clearly and which §4's own handback called out as its second gap.
+///
+/// ## Why a HOST SLOT and not a merge
+///
+/// The ammo cluster serves MECH mode too, where the strip is hidden
+/// entirely, so folding the numeral into `inventory_strip` would have
+/// deleted the mech readout to fix the infantry one — the trap
+/// `count_text`'s doc comment already refuses. Instead this function
+/// spawns the shared panel and two EMPTY child slots above the numeral:
+///
+/// * `AmmoStripHost`, which `inventory_strip::spawn_strip` parents its
+///   row into at `Startup`, and
+/// * the systems column, mech only.
+///
+/// Neither module has to know the other's layout, the panel auto-sizes
+/// to whichever slot is displayed, and a harness that builds `HudPlugin`
+/// without `InventoryStripPlugin` (or the reverse) still works — the
+/// strip keeps its absolute-positioned fallback root.
+///
+/// The slots use `Display::None` when idle rather than
+/// `Visibility::Hidden`, because a hidden node still occupies its box
+/// and the panel would stay strip-height in a mech with nothing in it.
 fn spawn_ammo(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
     r.spawn((
         Node {
@@ -743,15 +845,47 @@ fn spawn_ammo(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::FlexEnd,
             row_gap: Val::Px(2.0),
-            padding: UiRect::all(Val::Px(10.0)),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
         BackgroundColor(Color::NONE),
         BorderColor(Color::NONE),
+        // The reference's rounded panel. One radius, on the one panel.
+        BorderRadius::all(Val::Px(6.0)),
         XiiPlate,
     ))
-    .with_children(|p| {
+    .with_children(|g| {
+        // slot 1: the infantry inventory strip parents itself here
+        g.spawn((
+            Node {
+                display: Display::None,
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                ..default()
+            },
+            AmmoStripHost,
+        ));
+        // slot 2: the mech systems column
+        spawn_systems(g);
+        // slot 3: the numeral pair and the weapon name
+        g.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            HullBarRow,
+        ))
+        .with_children(|p| {
+            spawn_ammo_numerals(p);
+        });
+    });
+}
+
+fn spawn_ammo_numerals(p: &mut ChildBuilder) {
+    {
         // THE BIG/SMALL PAIR. Two entities at two sizes — the old HUD
         // had `format!("{ammo} / {reserve}")`, one string at one size,
         // which is the one thing both references forbid outright.
@@ -797,14 +931,14 @@ fn spawn_ammo(r: &mut ChildBuilder, a: [f32; 2], o: [f32; 2]) {
             AmmoSub,
             XiiFade,
         ));
-    });
+    }
 }
 
 fn spawn_top(r: &mut ChildBuilder) {
     // Row 0 is "urgent". Only its OFFSET is used: the anchor's x is 0.5
     // and the rail below centres on its own width, which is the correct
     // way to centre and does not need the anchor to say so twice.
-    let u_off = XII_ANCHORS[0].2;
+    let u_off = xii("urgent");
     // The centred-rail idiom already in `main.rs` twice: a full-width
     // row with `justify_content: Center`. NOT `left: Percent(30.0)`,
     // which is what the banner, hit feed, compass and range text all
@@ -862,7 +996,7 @@ fn spawn_top(r: &mut ChildBuilder) {
 }
 
 fn spawn_equip(r: &mut ChildBuilder) {
-    let off = XII_ANCHORS[3].2;
+    let off = xii("equip");
     r.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -892,7 +1026,7 @@ fn spawn_equip(r: &mut ChildBuilder) {
 }
 
 fn spawn_transient(r: &mut ChildBuilder) {
-    let off = XII_ANCHORS[1].2;
+    let off = xii("transient");
     r.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -912,28 +1046,37 @@ fn spawn_transient(r: &mut ChildBuilder) {
     ));
 }
 
+/// The mech systems column — now a SLOT inside the bottom-right group
+/// panel rather than a floating panel of its own.
+///
+/// §5, the owner's "mech hud to be more simple". It used to be a
+/// separate plate with its own background, its own 2 px border and its
+/// own anchor, hanging above the ammo cluster's separate plate, which
+/// was itself opposite the hull cluster in the other corner — inside a
+/// gold frame. That is the four competing clusters.
+///
+/// **Every row it printed, it still prints.** Nothing here deletes a
+/// reading: `systems_lines` is untouched, so the mounts, their counts,
+/// `LOCK TRACKING` and `BARRIER` all survive verbatim. What went is the
+/// CHROME — the second plate, the second border and the gap between them
+/// — plus the floating anchor. The rows now sit on the one group panel
+/// in exactly the relationship the infantry strip has to the same
+/// numeral, so the two modes read as one instrument in two states.
+///
+/// `Display::None` rather than `Visibility::Hidden`: a hidden node still
+/// occupies its box, and the panel would stay systems-height on foot
+/// with nothing in it.
 fn spawn_systems(r: &mut ChildBuilder) {
-    let off = XII_ANCHORS[2].2;
     r.spawn((
         Node {
-            position_type: PositionType::Absolute,
-            right: Val::Percent(-off[0] * 100.0),
-            bottom: Val::Percent(-off[1] * 100.0),
+            display: Display::None,
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::FlexEnd,
-            row_gap: Val::Px(3.0),
-            padding: UiRect::all(Val::Px(8.0)),
-            border: UiRect::all(Val::Px(2.0)),
+            row_gap: Val::Px(2.0),
+            margin: UiRect::bottom(Val::Px(5.0)),
             ..default()
         },
-        BackgroundColor(plate()),
-        // XII-C: was `GOLD_DIM`. The mech frame is already gold and
-        // already surrounds this column; a second gold rectangle inside
-        // it was the loudest of the "competing elements" the owner asked
-        // to lose. A hairline of INK_FAINT still separates the plate
-        // from the world, which is all a border owes anyone.
-        BorderColor(palette::INK_FAINT.with_alpha(0.30)),
-        Visibility::Hidden,
+        BackgroundColor(Color::NONE),
         MechOnly,
     ))
     .with_children(|p| {
@@ -1071,14 +1214,19 @@ fn reanchor_legacy_centred_text(
 fn mode_sync(
     game: Res<Game>,
     mut mode: ResMut<HudMode>,
-    mut mech_only: Query<&mut Visibility, With<MechOnly>>,
+    // §5: the ONE idle clock, read (never re-timed) so the panels dim
+    // with the type they sit behind. §4 fixed exactly this desync for
+    // the strip's own plate; now that the strip has no plate of its own,
+    // the fix has to live where the surviving plate does.
+    fade: Res<XiiFadeAlpha>,
+    mut mech_only: Query<(&mut Visibility, &mut Node), With<MechOnly>>,
     mut plates: Query<(&mut BackgroundColor, &mut BorderColor), With<XiiPlate>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let m = hud_mode_of(p.in_mech(), p.alive());
     *mode = m;
     let mech = m == HudMode::Mech;
-    for mut v in &mut mech_only {
+    for (mut v, mut node) in &mut mech_only {
         let want = if mech {
             Visibility::Inherited
         } else {
@@ -1086,6 +1234,16 @@ fn mode_sync(
         };
         if *v != want {
             *v = want;
+        }
+        // §5: DISPLAY as well as visibility. The systems column is a
+        // child of the bottom-right group panel now, and a merely hidden
+        // child still occupies its box — the panel would stand four rows
+        // taller than its contents for the whole of an infantry match.
+        // The frame bars are absolutely positioned, so this is a no-op
+        // for them.
+        let want_d = if mech { Display::Flex } else { Display::None };
+        if node.display != want_d {
+            node.display = want_d;
         }
     }
     // Reference rule 4, and the whole of the density split: in HUMAN
@@ -1100,13 +1258,24 @@ fn mode_sync(
     // discipline excuses.
     for (mut bg, mut bc) in &mut plates {
         let (b, o) = if mech {
-            (plate(), palette::GOLD_DIM)
+            // §5: the border was `GOLD_DIM`. Two gold-ruled rectangles in
+            // the two bottom corners, under a gold frame, next to gold
+            // power pips and a gold selected-mount marker — five claims
+            // on one accent. A neutral hairline is all a panel edge owes
+            // anyone, and it is the same hairline the systems column's
+            // own border used before it lost its border entirely.
+            (plate(), palette::INK_FAINT.with_alpha(0.30))
         } else {
-            // XII-A: a scrim, not nothing. See `scrim`.
-            (scrim(), Color::NONE)
+            // §5: `group_plate()`, not `scrim()`. The strip's icons are
+            // 3 px strokes and needed the stronger backing (§4 proved it
+            // over sand); now that the strip and the numeral share ONE
+            // panel there can only be one alpha, and it has to be the
+            // stronger of the two or the icons wash out again.
+            (group_plate(), Color::NONE)
         };
-        bg.0 = b;
-        bc.0 = o;
+        let f = fade.0;
+        bg.0 = b.with_alpha(b.alpha() * f);
+        bc.0 = o.with_alpha(o.alpha() * f);
     }
 }
 
@@ -1686,6 +1855,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// §5: GOLD IS AN ACCENT AGAIN.
+    ///
+    /// The owner looked at the mech view and asked for "more simple...
+    /// professional similar to our old designs". The frame photographed
+    /// in `handback/brief-vii/hud_contrast/03-level-north.png` was eight
+    /// bars of `palette::GOLD` at 0.85 alpha, and the two bottom clusters
+    /// were ruled in `GOLD_DIM` — so the accent was simultaneously the
+    /// frame colour, the panel-edge colour, the power-pip colour and the
+    /// selected-mount colour. A colour that marks four things marks none.
+    ///
+    /// This asserts the two that were demoted are now NEUTRAL, and that
+    /// the one that survives is still gold. It fails on the pre-change
+    /// code at the first assert.
+    #[test]
+    fn gold_is_spent_on_selection_only() {
+        let chroma = |c: Color| {
+            let s = c.to_srgba();
+            s.red.max(s.green).max(s.blue) - s.red.min(s.green).min(s.blue)
+        };
+        assert!(
+            chroma(frame_ink()) < 0.12,
+            "the mech frame is still a saturated hue ({:.2} chroma)",
+            chroma(frame_ink())
+        );
+        assert!(
+            frame_ink().alpha() < 0.6,
+            "a frame at {:.2} alpha is a fifth widget, not framing",
+            frame_ink().alpha()
+        );
+        assert!(
+            FRAME_THICK_PX <= 2.0,
+            "a {FRAME_THICK_PX}px stroke in all four corners is not a hairline"
+        );
+        // ...and the accent still exists, on the one thing it marks.
+        assert_eq!(SYSTEMS, palette::GOLD);
+    }
+
+    /// §5: the systems column stopped being a fourth floating cluster.
+    ///
+    /// Its anchor is gone from `XII_ANCHORS` because the rows now live
+    /// inside the bottom-right group panel. This test is what stops the
+    /// deletion being silent: `spawn_top`/`spawn_equip` used to index
+    /// this table (`XII_ANCHORS[3].2`), so removing a row would have
+    /// moved the top-left panel to the bottom-right corner without a
+    /// single compiler complaint. Both call sites look up by NAME now.
+    ///
+    /// Fails on the pre-change code, where `xii` did not exist and
+    /// "mech-systems" did.
+    #[test]
+    fn the_xii_anchors_are_addressed_by_name_and_the_floating_column_is_gone() {
+        assert!(
+            !XII_ANCHORS.iter().any(|(n, _, _)| *n == "mech-systems"),
+            "the systems column still has a floating anchor of its own"
+        );
+        // every surviving name resolves to ITS OWN row, not to a position
+        for (name, _, off) in XII_ANCHORS {
+            assert_eq!(xii(name), *off, "{name} resolves to the wrong offset");
+        }
+        // and an unknown name is a safe-area corner, never a panic and
+        // never the centre of the screen
+        assert_eq!(xii("no-such-anchor"), [HUD_SAFE_FRAC, HUD_SAFE_FRAC]);
+    }
+
+    /// **Simplifying the mech HUD must not delete a mech reading.** Every
+    /// row exists because of a real past bug, and `systems_lines` is
+    /// deliberately untouched by §5 — only its chrome and its position
+    /// changed. This pins the content so a later "simplification" cannot
+    /// quietly drop one.
+    #[test]
+    fn the_simplified_mech_column_still_prints_every_reading() {
+        let rows = systems_lines(
+            &[sim::MechWeapon::Gatling, sim::MechWeapon::Rockets],
+            sim::MechWeapon::Gatling,
+            300,
+            10,
+            true,
+            Some(("BARRIER", "280".to_string())),
+        );
+        let labels: Vec<&str> = rows.iter().map(|r| r.0.trim()).collect();
+        for want in ["> TURRET", "ROCKETS", "LOCK", "BARRIER"] {
+            assert!(
+                labels.iter().any(|l| l == &want),
+                "{want} vanished from the mech column: {labels:?}"
+            );
+        }
+        // the unselected mount still carries its count - that is the one
+        // thing the column knows that the big numeral cannot say
+        assert_eq!(
+            rows.iter().find(|r| r.0.trim() == "ROCKETS").map(|r| &r.1),
+            Some(&"10".to_string())
+        );
+        assert!(
+            rows.len() <= SYSTEMS_ROWS,
+            "{} rows will not fit the {SYSTEMS_ROWS} spawned",
+            rows.len()
+        );
+    }
+
+    /// The human panel has to be the STRONGER of the two values, because
+    /// after §5 it is the only rectangle behind both the 76 px numerals
+    /// and the strip's 3 px icon strokes — and the icons are what needs
+    /// the backing. Fails on the pre-change code, where the ammo cluster
+    /// used `scrim()` directly and the strip carried its own plate.
+    #[test]
+    fn the_one_human_panel_is_backed_for_the_thinnest_thing_on_it() {
+        assert!(
+            group_plate().alpha() > scrim().alpha(),
+            "the group panel is no stronger than the bare scrim"
+        );
+        assert!(
+            group_plate().alpha() < plate().alpha(),
+            "the human panel has become as heavy as the mech's - that is \
+             the density split this HUD is built on"
+        );
     }
 
     /// The plate line reports the WORST plate on the body, not the first
