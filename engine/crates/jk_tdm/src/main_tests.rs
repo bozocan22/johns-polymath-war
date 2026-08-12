@@ -5307,3 +5307,158 @@ mod training_mode_tests {
         assert!(tdm.armor_pieces.is_some());
     }
 }
+
+// ---- §owner GUN PASS (DEAGLE) -------------------------------------------
+//
+// Its own module rather than another thousand lines into `band_tests`,
+// which is 1,400 lines and is edited by every lane at once.
+//
+// These two tests exist because a weapon MODEL is the one thing in this
+// repo a unit test genuinely cannot judge - and that is an argument for
+// testing the parts of it that are STRUCTURAL rather than an argument
+// for testing none of it. "Does this look like a Desert Eagle" is a
+// screenshot question. "Does this gun have a rear sight at all" is not,
+// and it is the question that had been answered wrong since the pistol
+// shipped.
+#[cfg(test)]
+mod deagle_model_tests {
+    use crate::*;
+
+    /// A Desert Eagle with a front post and NO REAR SIGHT, which is what
+    /// this gun shipped as - the only iron on it was a single black chip
+    /// out at z 0.22, and the whole back half of the slide was bare.
+    ///
+    /// Mutation-proof: run this against the block it replaces and it
+    /// fails on the first assert. There is no part anywhere in the
+    /// shipped Deagle behind z -0.038 - the rearmost thing on the gun is
+    /// the optic's own ocular ring at -0.0344 - so "find the rear iron"
+    /// finds nothing.
+    ///
+    /// The second half is the carbine's hard-won rule, generalised: a
+    /// rear iron that pokes into the optic's clear window blacks out the
+    /// thing you are aiming at. The window's floor is read off the
+    /// RETICLE part rather than retyped, so moving the optic moves the
+    /// bound with it.
+    #[test]
+    fn the_hand_cannon_has_irons_at_both_ends() {
+        let parts = weapon_parts(GunKind::Deagle);
+        let reticle = parts
+            .iter()
+            .find(|w| matches!(w.tone, Tone::Reticle))
+            .expect("the Deagle carries a red dot, so it has a reticle part");
+        let window_floor = reticle.pos.y - OPTIC_RING_MAJOR;
+
+        // BEHIND the optic entirely: every piece of the housing sits at
+        // z >= -0.0345, so anything past -0.038 is iron, not optic.
+        let rear: Vec<&WPart> = parts
+            .iter()
+            .filter(|w| w.pos.x.abs() < 1e-6 && w.pos.z < -0.038)
+            .collect();
+        assert!(
+            !rear.is_empty(),
+            "the Deagle has no rear sight - the only iron on it is the \
+             front post, and a notch you do not have is a notch you \
+             cannot aim with"
+        );
+        // it has to be UP at sight height, not a lump on the frame
+        let rear_top = rear.iter().map(|w| w.pos.y + w.size.y * 0.5).fold(f32::MIN, f32::max);
+        assert!(
+            rear_top > window_floor - 0.020,
+            "the rear iron tops out at {rear_top}, more than 2 cm below \
+             the optic's window floor {window_floor} - that is a bump on \
+             the slide, not a sight"
+        );
+        // ...and never INTO the window. `push_red_dot` allows a seated
+        // clamp half a frame deep; anything more is a blacked-out view.
+        assert!(
+            rear_top <= window_floor + OPTIC_FRAME * 0.5 + 1e-6,
+            "the rear iron reaches {rear_top} against a window floor of \
+             {window_floor} - it is inside the sight picture"
+        );
+
+        // and the front post is still there, still forward of the optic
+        let front_top = parts
+            .iter()
+            .filter(|w| w.pos.x.abs() < 1e-6 && w.pos.z > 0.19 && w.pos.z < 0.25)
+            .map(|w| w.pos.y + w.size.y * 0.5)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            front_top > window_floor,
+            "the front sight tops out at {front_top}, below the window \
+             floor {window_floor} - it would sit under the glass"
+        );
+    }
+
+    /// *"an oversized trigger guard (proportionally bigger than the
+    /// Glock's - this gun is famous for being oversized)"*.
+    ///
+    /// Mutation-proof: the shipped Deagle has NOTHING under its frame
+    /// forward of the grip. Not a small guard - no guard, and no trigger
+    /// either. Both `assert!(!...is_empty())` below fail on it.
+    ///
+    /// What is asserted is structure, not styling: a bottom bar, a front
+    /// upright forward of the trigger, and a trigger hanging INSIDE the
+    /// two rather than below them. Those relations are what makes a
+    /// guard a guard, and none of them is a number copied out of the
+    /// code under test.
+    #[test]
+    fn the_hand_cannon_has_a_trigger_guard_you_could_get_a_glove_into() {
+        let parts = weapon_parts(GunKind::Deagle);
+        // under the frame (bottom -0.025), forward of the grip
+        let guard: Vec<&WPart> = parts
+            .iter()
+            .filter(|w| w.pos.x.abs() < 1e-6 && w.pos.z > 0.0 && w.pos.y < -0.030)
+            .collect();
+        assert!(
+            !guard.is_empty(),
+            "the Deagle has nothing at all under its frame - no trigger \
+             guard and no trigger"
+        );
+
+        let bar = guard
+            .iter()
+            .max_by(|a, b| a.size.z.partial_cmp(&b.size.z).unwrap())
+            .expect("a guard has a bottom bar");
+        let upright = guard
+            .iter()
+            .max_by(|a, b| a.size.y.partial_cmp(&b.size.y).unwrap())
+            .expect("a guard has a front upright");
+        let trigger = guard
+            .iter()
+            .filter(|w| matches!(w.tone, Tone::Black))
+            .collect::<Vec<_>>();
+        assert!(
+            !trigger.is_empty(),
+            "the guard encloses nothing - there is no trigger blade in it"
+        );
+        let trigger = trigger[0];
+
+        // the blade hangs inside the hoop, not through the bottom of it
+        assert!(
+            trigger.pos.y - trigger.size.y * 0.5 > bar.pos.y - bar.size.y * 0.5,
+            "the trigger blade drops below the guard's bottom bar"
+        );
+        // ...and behind the front upright, with the bar running under both
+        assert!(
+            trigger.pos.z < upright.pos.z - upright.size.z * 0.5,
+            "the trigger is forward of the guard's front upright"
+        );
+        assert!(
+            bar.pos.z - bar.size.z * 0.5 < trigger.pos.z,
+            "the guard's bottom bar starts forward of the trigger"
+        );
+
+        // OVERSIZED, and this is the one measured claim: the clear
+        // opening between the bar's rear end and the upright's rear
+        // face. The model runs about 1.2 units to the metre (a Glock 17
+        // slide is 186 mm and is 0.22 units here), so 0.06 is ~50 mm -
+        // the reference's own trigger guard, and already generous.
+        let clear = (upright.pos.z - upright.size.z * 0.5) - (bar.pos.z - bar.size.z * 0.5);
+        assert!(
+            clear >= 0.060,
+            "the guard's clear opening is {clear} units (~{:.0} mm) - too \
+             small for the pistol the whole joke is about",
+            clear * 1000.0 / 1.2
+        );
+    }
+}

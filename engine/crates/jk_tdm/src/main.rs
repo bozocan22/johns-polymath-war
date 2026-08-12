@@ -6180,6 +6180,58 @@ const M4_MODEL_BEATS: &[CapBeat] = &[
 // If the stock ever needs to be seen, the instrument is a NEW carry
 // (a low ready, or an inspect pose), not a new camera angle.
 
+/// §owner GUN PASS: the PISTOLS' own profile, plus the scale pair.
+///
+/// A dedicated table rather than a fourth alias onto `M4_MODEL_BEATS`,
+/// and both of its differences from that table were MEASURED off frames
+/// this script took, not guessed:
+///
+/// 1. A pistol is not a rifle at the same boom. The carbine table sits
+///    at 0.55 for a 0.75-unit gun; a Deagle is 0.36 units end to end.
+///    But the first attempt here - boom 0.36, "half the gun, half the
+///    boom" - was WRONG, and the frames say why: the boom anchors on the
+///    HEAD, and a pistol is carried at the hip. Pulling the camera in
+///    fills the frame with a hat and pushes the weapon to the edge,
+///    where the body occludes it. The distance a pistol needs is not
+///    shorter, it is LOWER - so the boom went back out to 0.50 and the
+///    pitch went down to -0.55, which drops the camera under the head
+///    and looks back up at the hands.
+///
+/// 2. The scale pair is in FIRST PERSON, not third. Third person at any
+///    boom this rig allows renders a Deagle about 150 px wide with a
+///    shoulder in front of it, and "which of these two is bigger" is not
+///    a question 150 occluded pixels answer. The viewmodel is the same
+///    model at ten times the pixels, and pressing Digit2 between two
+///    snaps changes exactly one thing in the frame - the gun.
+const DEAGLE_MODEL_BEATS: &[CapBeat] = &[
+    // below the head anchor, looking back UP at the carried weapon - the
+    // sign trap `HANDS_BEATS` paid for, and the fix for attempt one
+    CapBeat { look: Some((0.0, -0.55)), boom: Some(0.50), ..beat(0.4) },
+    CapBeat { orbit: Some(PI * 0.5), ..beat(0.8) },
+    CapBeat { snap: Some("01-side-a"), ..beat(1.8) },
+    CapBeat { orbit: Some(PI * 1.5), ..beat(2.0) },
+    CapBeat { snap: Some("02-side-b"), ..beat(2.9) },
+    CapBeat { orbit: Some(PI * 0.8), ..beat(3.1) },
+    CapBeat { snap: Some("03-front-quarter"), ..beat(4.0) },
+    // first person, hip-held. The slide TOP - the rib, its vents and the
+    // optic - is the one face no third-person orbit ever gets above, and
+    // the muzzle end is the one the body is always in front of.
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(4.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(4.3) },
+    CapBeat { look: Some((0.0, -0.28)), ..beat(4.5) },
+    CapBeat { snap: Some("04-first-person-hip"), ..beat(5.3) },
+    // steeper down: the whole gun silhouetted against the ground, which
+    // is the only frame the barrel, the trigger guard and the grip are
+    // all unoccluded in
+    CapBeat { look: Some((0.0, -0.62)), ..beat(5.5) },
+    CapBeat { snap: Some("05-first-person-top"), ..beat(6.3) },
+    // ...and the Glock from the identical camera. THE scale frame.
+    CapBeat { press: &[CapKey::K(KeyCode::Digit2)], ..beat(6.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit2)], ..beat(6.6) },
+    CapBeat { snap: Some("06-first-person-glock"), ..beat(7.7) },
+    CapBeat { end: true, ..beat(8.1) },
+];
+
 /// BRIEF X: THE AGILE MECH'S PORTRAIT — four sides, then two close-ups.
 ///
 /// The existing `medic` script boards the same chassis and orbits it, and
@@ -7161,6 +7213,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         // front quarter, then hip-held" - and a second copy of the same
         // six numbers would be a second thing to keep in step.
         "m4_model" | "ak_model" | "awm_model" | "mp5_model" => M4_MODEL_BEATS,
+        "deagle_model" => DEAGLE_MODEL_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
         "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
@@ -7200,7 +7253,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 45] = [
+const CAPTURE_SCRIPTS: [&str; 46] = [
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7273,6 +7326,14 @@ const CAPTURE_SCRIPTS: [&str; 45] = [
     // handguard slots, the folded stock and the trigger group are all
     // edge-on or behind the optic. Same beats as the carbine.
     "mp5_model",
+    // §owner GUN PASS: the PISTOLS. `sights_b` is the only script that
+    // has ever carried a Deagle and it frames it down the barrel in ADS,
+    // behind an optic - so the slide rib, the trigger guard, the grip
+    // panels and the muzzle have never been in a frame this machine has
+    // taken, and neither has the Glock next to it for scale. See
+    // DEAGLE_MODEL_BEATS: its own boom, because a pistol is half a
+    // rifle's length.
+    "deagle_model",
     // §owner GUN PASS: the sniper's side profile. `muzzle_flash` is the
     // only script that carries an AWM at all and it frames the BARREL
     // TIP - so the bolt handle, the scope, the bipod and the thumbhole
@@ -7421,6 +7482,13 @@ fn capture_quick_deploy(
         // and the sniper, likewise in the primary slot
         Some("awm_model") => {
             sel.loadout = [GunKind::Awm, GunKind::Glock, GunKind::Mp5];
+        }
+        // the hand cannon in the primary slot and the Glock in slot 2 -
+        // the beats press Digit2 at the end to put the two pistols in
+        // front of the same camera, which is the only way the "biggest
+        // pistol in the arsenal" claim is checkable.
+        Some("deagle_model") => {
+            sel.loadout = [GunKind::Deagle, GunKind::Glock, GunKind::Mp5];
         }
         // the SMG hoisted OUT of slot 3 and into the primary, so the
         // shared beats - which never press a digit - actually frame it
@@ -10153,9 +10221,175 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             push_ejection_port(&mut parts, 0.027, 0.062, 0.12, 0.065);
             push_bolts(&mut parts, 0.025, 0.020, 0.00, 0.18, 3);
             push_grip_detail(&mut parts, 0.023, -0.030, -0.040, 0.18);
-            parts.push(wp(false, Tone::Dark, (0.0, -0.055, -0.01), 0.20, (0.046, 0.14, 0.065)));
-            push_muzzle(&mut parts, 0.055, 0.27, 0.055);
-            parts.push(wp(false, Tone::Black, (0.0, 0.10, 0.22), 0.0, (0.008, 0.014, 0.01)));
+            // The grip's rake and centre, named because the checkering
+            // below is laid out in the GRIP's frame and rotated into the
+            // model's, so two copies of these numbers would silently
+            // drift apart. The finger grooves are the standing proof
+            // that they do: `push_grip_detail` above is handed 0.18
+            // against a grip raked 0.20, and it is LEFT that way rather
+            // than quietly corrected, because no capture this harness
+            // can take resolves 0.02 rad on a 3 cm part and a visual
+            // change nobody has looked at is not a change worth making.
+            const GRIP_RAKE: f32 = 0.20;
+            const GRIP_MID: (f32, f32) = (-0.055, -0.010);
+            parts.push(wp(
+                false,
+                Tone::Dark,
+                (0.0, GRIP_MID.0, GRIP_MID.1),
+                GRIP_RAKE,
+                (0.046, 0.14, 0.065),
+            ));
+            // ---- §owner GUN PASS (DEAGLE): the hand cannon -------------
+            //
+            // Third pistol pass, and the frame that started it is
+            // `handback/brief-vii/deagle_model/06-first-person-glock.png`
+            // next to `05-first-person-top.png`: the same camera, the
+            // Glock and the Deagle. The Deagle was LONGER, and that was
+            // the only difference. The compact service pistol had slide
+            // serrations; the .50 AE hand cannon's slide was a bare pale
+            // slab with a rib laid on it. Bigger is not a design, it is a
+            // scale factor, and a gun that differs from a smaller gun
+            // only in scale reads as that gun rendered wrong.
+            //
+            // So this pass is the five things the reference is
+            // RECOGNISED by, and every one of them is absent from the
+            // Glock rather than merely larger than it:
+            //
+            //   the ventilated rib along the slide top, which is the
+            //   Deagle's whole plan view;
+            //   the gas cylinder slung UNDER the barrel, which no other
+            //   pistol in the arsenal has because no other pistol here
+            //   is gas-operated;
+            //   a barrel that steps out of the slide and keeps going;
+            //   a trigger guard big enough to be a joke about the gun;
+            //   and checkered grip panels.
+            //
+            // Plus the two irons, which is a bug fix rather than a
+            // feature: this gun had a front sight and NO REAR SIGHT AT
+            // ALL. See `the_hand_cannon_has_irons_at_both_ends`.
+
+            // VENTED SLIDE RIB. The rib itself already existed and was
+            // smooth, which is the one thing a Desert Eagle's slide top
+            // is not. Six cross-cuts through it, sized 2 mm wider than
+            // the rib (0.032 against 0.030) so the notch breaks the
+            // SIDE profile as well as the plan view - a vent you can
+            // only see from directly above is a vent the third-person
+            // camera can never photograph. Flush with the rib's top
+            // face at 0.102, so `push_red_dot`'s mount line is untouched.
+            for k in 0..6 {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (0.0, 0.0965, 0.045 + k as f32 * 0.029),
+                    0.0,
+                    (0.032, 0.011, 0.006),
+                ));
+            }
+            // ...and the two machined channels the rib stands between.
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Black, (sx * 0.0205, 0.0895, 0.100), 0.0, (0.008, 0.008, 0.27)));
+            }
+            // REAR COCKING SERRATIONS, at the Glock's own proportions:
+            // that gun cuts 0.040 of its 0.058 slide, so this one cuts
+            // 0.052 of 0.075. Same arsenal, same vocabulary, and the
+            // wider spacing is the only concession to the bigger gun.
+            for k in 0..6 {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (0.0, 0.055, -0.036 + k as f32 * 0.0125),
+                    0.0,
+                    (0.055, 0.052, 0.005),
+                ));
+            }
+            // THE GAS CYLINDER. A Desert Eagle is a gas-operated pistol
+            // and the tube that makes it one runs under the barrel, out
+            // in the open between the frame's nose (z 0.19) and the
+            // muzzle - which on this model was empty air. It is sunk
+            // into the slide's underside (slide bottom 0.0175 against a
+            // tube spanning 0.007-0.029) on purpose: a tube that merely
+            // approached the slide would read as a floating pipe, and
+            // the sliver that shows below the dust cover is exactly the
+            // silhouette the reference is known for. The collar at the
+            // front is the gas port block.
+            parts.push(wp(true, Tone::Dark, (0.0, 0.018, 0.235), FRAC_PI_2, (0.022, 0.110, 0.022)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.018, 0.272), 0.0, (0.028, 0.028, 0.016)));
+            // THE BARREL PAST THE SLIDE. What was here was
+            // `push_muzzle(.., w 0.055)` - a block WIDER than the 0.052
+            // slide it came out of, which is a rifle's flash hider and
+            // on a pistol reads as a mushroom. It is 0.042 now, i.e.
+            // narrower than the slide, so the front end steps DOWN and
+            // reads as barrel rather than device; the `Mid` shoulder is
+            // the collar it steps down at. Overall length is 8 mm
+            // shorter than the block it replaces, so nothing about the
+            // gun's reach changed - only what the reach is made of.
+            parts.push(wp(false, Tone::Mid, (0.0, 0.055, 0.244), 0.0, (0.048, 0.060, 0.016)));
+            push_muzzle(&mut parts, 0.055, 0.262, 0.042);
+            // THE TRIGGER GUARD, which this gun did not have. Three bars
+            // with daylight through them - the inline pattern the
+            // carbine established and the AK repeated - rather than a
+            // solid block, which would just read as more frame. The
+            // clear opening is 0.084 long by 0.037 tall; at this
+            // model's ~1.2 units per metre that is a 70 mm guard, and
+            // "comically oversized" is a thing the reference is
+            // genuinely famous for. It hangs off the frame's underside
+            // (frame bottom -0.025, guard top -0.023) so it is attached
+            // rather than floating, and its rear end runs into the grip.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.0480, 0.104), 0.0, (0.015, 0.050, 0.014)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.0665, 0.062), 0.0, (0.015, 0.013, 0.100)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.0440, 0.056), 0.0, (0.010, 0.036, 0.010)));
+            // CHECKERED GRIP PANELS. `push_grip_detail` gives finger
+            // grooves and they land on the BACKSTRAP (z -0.036), so the
+            // flanks - the part a hand actually wraps - carried no
+            // texture at all.
+            //
+            // Checkering is a diamond lattice, and `tilt` rotates about
+            // X, which means a bar laid on the x-face becomes a DIAGONAL
+            // across that face. Two leans off the grip's own rake give
+            // the lattice for twelve parts; a literal grid of bumps
+            // would have cost forty and read the same at any distance
+            // this gun is ever seen from.
+            //
+            // The bars are placed in the GRIP's frame and rotated into
+            // the model's, rather than eyeballed in world space - which
+            // is the only reason they stay on a grip that is raked.
+            let (gs, gc) = GRIP_RAKE.sin_cos();
+            for k in 0..3 {
+                let ly = -0.048 + k as f32 * 0.022;
+                let (gy, gz) = (GRIP_MID.0 + ly * gc, GRIP_MID.1 + ly * gs);
+                for sx in [-1.0_f32, 1.0] {
+                    for lean in [0.72_f32, -0.72] {
+                        parts.push(wp(
+                            false,
+                            Tone::Black,
+                            (sx * 0.0240, gy, gz),
+                            GRIP_RAKE + lean,
+                            (0.003, 0.0045, 0.050),
+                        ));
+                    }
+                }
+            }
+            // THE IRONS. The shipped gun had a front post and nothing
+            // behind it - you cannot aim a notch you do not have, and
+            // every other iron-sighted gun in this file has both.
+            //
+            // The REAR blade sits flush with the slide's rear face and
+            // its notch tops out at 0.1025, which is not a look either:
+            // the optic's clear window starts at 0.1045 (reticle 0.1300
+            // less `OPTIC_RING_MAJOR`), and the carbine's pass paid for
+            // the finding that a rear iron tall enough to enter that
+            // window blacks out the thing you are aiming at. Guarded by
+            // `the_hand_cannon_has_irons_at_both_ends`.
+            //
+            // The FRONT sight is the post that was already here, moved
+            // back 8 mm onto the rib and given the ramp a fixed combat
+            // sight is blended into - blade at the rear, ramp sloping
+            // away toward the muzzle, which is the way round a ramp
+            // actually goes and the opposite of the first attempt.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0955, -0.0440), 0.0, (0.030, 0.011, 0.012)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.0995, -0.0440), 0.0, (0.009, 0.006, 0.013)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.0945, 0.2320), 0.40, (0.022, 0.008, 0.030)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.0985, 0.2125), 0.0, (0.010, 0.016, 0.010)));
             push_red_dot(&mut parts, 0.1300, -0.02, 0.102); // slide rib top 0.102
         }
         GunKind::Mp5 => {
