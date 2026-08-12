@@ -10002,15 +10002,125 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             push_bolts(&mut parts, 0.024, 0.000, -0.08, 0.14, 4);
             push_mag_detail(&mut parts, -0.145, 0.010, 0.024, 0.038);
             parts.push(wp(true, Tone::Dark, (0.0, 0.045, 0.44), FRAC_PI_2, (0.026, 0.36, 0.026)));
-            parts.push(wp(true, Tone::Light, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
-            parts.push(wp(false, Tone::Dark, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
+            // GAS TUBE - steel, so `Mid` not `Light`; the wood that
+            // covers its rear half is the Light part, below.
+            parts.push(wp(true, Tone::Mid, (0.0, 0.078, 0.34), FRAC_PI_2, (0.020, 0.18, 0.020)));
+            // LOWER HANDGUARD, now wood, with the finger swells cut
+            // across it the same way the carbine's rail slots are.
+            parts.push(wp(false, Tone::Light, (0.0, 0.01, 0.32), 0.0, (0.05, 0.055, 0.18)));
+            for k in 0..3 {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (0.0, -0.005, 0.255 + k as f32 * 0.045),
+                    0.0,
+                    (0.054, 0.030, 0.006),
+            //
+            // §owner GUN PASS (AK): the carbine got its pass first, and
+            // doing this one straight after made the real problem
+            // obvious - the two rifles were the SAME SHAPE. Same dark
+            // furniture, same skeleton stock, same smooth handguard,
+            // and at third-person range the only thing telling them
+            // apart was the magazine's rake. A second rifle that reads
+            // as the first one is not a second rifle.
+            //
+            // So this pass is about the features the reference is
+            // recognised BY, and every one of them is a thing the M4
+            // does NOT have: WOOD furniture, a gas block with the tube
+            // running back over the barrel, the low rear sight sitting
+            // forward of the dust cover, the big external selector down
+            // the right flank, and a slant-cut brake.
+            //
+            // Tone: no wood in `Tone`, and inventing one for a single
+            // gun is the mistake the M4's own comment talks itself out
+            // of. But `Light` against the `Mid` receiver reads as pale
+            // furniture on a dark gun, which is exactly the AK's value
+            // structure - so the furniture goes Light and the gas tube,
+            // which is steel, goes Mid to stop it merging with the
+            // wood it sits under.
+                ));
+            }
+            // UPPER HANDGUARD: the wood over the BACK half of the gas
+            // tube only. Stopping it at z 0.36 is the point - the bare
+            // steel tube carrying on to the gas block is the AK's whole
+            // top line, and a handguard run the full length would hide
+            // the one silhouette feature this pass is for.
+            parts.push(wp(false, Tone::Light, (0.0, 0.080, 0.295), 0.0, (0.036, 0.030, 0.13)));
+            // GAS BLOCK: the part the tube actually JOINS the barrel
+            // at. Sized from the two heights it has to bridge - barrel
+            // centre 0.045 up to the tube at 0.078 - rather than
+            // picked, which is the mistake the front sight below was
+            // shipped with.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.060, 0.445), 0.0, (0.030, 0.062, 0.034)));
+            // MAGAZINE WELL, so the mag enters something.
+            parts.push(wp(false, Tone::Mid, (0.0, -0.030, 0.09), 0.0, (0.048, 0.028, 0.10)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.10, 0.09), 0.35, (0.036, 0.14, 0.075)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.185, 0.14), 0.75, (0.034, 0.11, 0.07)));
-            parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
-            push_stock(&mut parts, -0.30, 0.045);
+            // SELECTOR LEVER, right flank. `push_ejection_port` puts the
+            // port at +x, and the reference's selector is on the same
+            // side as the port - so +x is the right-hand side and the
+            // lever belongs here. It sits BELOW the port, because the
+            // long bar sweeps up ACROSS the port to reach safe, and a
+            // lever drawn through the port would read as a break in the
+            // receiver rather than a part on top of it.
+            parts.push(wp(false, Tone::Dark, (0.029, 0.018, 0.020), -0.15, (0.006, 0.022, 0.085)));
+            parts.push(wp(false, Tone::Mid, (0.031, 0.028, -0.020), 0.30, (0.008, 0.030, 0.020)));
+            // TRIGGER GUARD: three thin bars with daylight through
+            // them, the inline pattern the carbine established - front
+            // upright, bottom bar, and the blade inside. A solid block
+            // here would just look like more grip.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.040, 0.045), 0.0, (0.012, 0.040, 0.010)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.058, 0.010), 0.0, (0.012, 0.010, 0.080)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.038, 0.018), 0.0, (0.008, 0.030, 0.008)));
+            parts.push(wp(false, Tone::Light, (0.0, -0.08, -0.05), 0.30, (0.04, 0.10, 0.05)));
+            push_grip_detail(&mut parts, 0.020, -0.055, -0.048, 0.30);
+            // STOCK: SOLID and wooden, built inline instead of calling
+            // `push_stock`. That helper makes a skeletal outline with a
+            // hole through it, which is right for the carbine and wrong
+            // here - a one-piece club stock is the AK's rear silhouette,
+            // and while both rifles called the same helper their back
+            // halves were indistinguishable. Rearmost face lands at
+            // z -0.327, just inside the 0.36 `weapon_rear_extent` the
+            // chest-clearance sweep budgets for this gun, and no deeper
+            // than the skeleton stock's own pad reached.
+            parts.push(wp(false, Tone::Light, (0.0, -0.012, -0.145), -0.08, (0.040, 0.058, 0.16)));
+            parts.push(wp(false, Tone::Light, (0.0, 0.002, -0.265), -0.05, (0.044, 0.080, 0.10)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.010, -0.240), 0.0, (0.048, 0.020, 0.030)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.004, -0.320), 0.0, (0.046, 0.086, 0.014)));
             push_muzzle(&mut parts, 0.045, 0.635, 0.038);
+            // SLANT BRAKE: `push_muzzle` ends in a square block, which
+            // is the carbine's birdcage. `tilt` rotates about X, so one
+            // tilted plate across the front face IS the angled cut, and
+            // that is cheaper than teaching the shared helper a variant
+            // exactly one gun would ever pass.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.045, 0.672), 0.55, (0.036, 0.050, 0.012)));
+            parts.push(wp(false, Tone::Black, (0.020, 0.052, 0.660), 0.0, (0.008, 0.016, 0.020)));
             push_red_dot(&mut parts, 0.1060, 0.08, 0.078); // top cover 0.078
-            parts.push(wp(false, Tone::Black, (0.0, 0.09, 0.58), 0.0, (0.008, 0.018, 0.01)));
+            // REAR SIGHT, forward of the dust cover - which is where an
+            // AK's is, and the clearest single tell against an AR's
+            // rear-of-receiver aperture.
+            //
+            // Its top is 0.080. That is not a look, it is a clearance:
+            // the optic's window bottom is 0.0805 (y 0.1060 less the
+            // 0.0255 outer half-frame), and the carbine's pass paid for
+            // the finding that any iron tall enough to poke into that
+            // window blacks out the thing you are aiming at. A real AK's
+            // rear sight is a low block anyway.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.070, 0.170), 0.0, (0.034, 0.016, 0.030)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.077, 0.170), 0.0, (0.012, 0.006, 0.026)));
+            parts.push(wp(false, Tone::Mid, (0.0, 0.068, 0.145), 0.15, (0.030, 0.010, 0.030)));
+            // FRONT SIGHT. The shipped post hung at y 0.081-0.099 with
+            // the barrel's top at 0.058 - a 2 cm gap, a black chip
+            // floating beside the barrel, the identical bug the carbine
+            // had. It gets a block that REACHES: base wraps the barrel
+            // and tops out at 0.082, post runs 0.080 to 0.110 against
+            // the 0.1060 sight line, and the two protective ears the
+            // reference's front sight is hooded by.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.062, 0.585), 0.0, (0.026, 0.040, 0.028)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.095, 0.585), 0.0, (0.007, 0.030, 0.008)));
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(false, Tone::Dark, (sx * 0.013, 0.093, 0.585), 0.0, (0.006, 0.028, 0.010)));
+            }
         }
         GunKind::M4 => {
             // modern carbine: notched top rail, straight raked mag
