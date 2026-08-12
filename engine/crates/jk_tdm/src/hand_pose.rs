@@ -210,6 +210,76 @@ pub fn approach_curl(cur: f32, target: f32, dt: f32) -> f32 {
     }
 }
 
+/// THE ELBOW'S RANGE. The rig already refused to hyper-extend
+/// (`elbow.max(0.0)`), but nothing stopped the other end: a two-bone IK
+/// solver handed a target closer than the folded arm's own length
+/// returns a flex that keeps growing, and past about 150 deg the
+/// forearm passes THROUGH the upper arm and the elbow ball pops out the
+/// far side. Clamping here is what makes the hinge read as a hinge with
+/// a stop rather than a shoulder with two of them.
+pub const ELBOW_MIN: f32 = 0.0;
+/// 150 deg - about where a real elbow meets its own biceps.
+pub const ELBOW_MAX: f32 = 2.62;
+
+/// Clamp an IK-solved elbow flex into the hinge's real range.
+/// NaN-safe: a solver that fails should straighten the arm, not fold it
+/// into a knot (`f32::max` propagating NaN here would leave a rotation
+/// of NaN and the whole limb would vanish).
+pub fn clamp_elbow(flex: f32) -> f32 {
+    if flex.is_nan() {
+        return ELBOW_MIN;
+    }
+    flex.clamp(ELBOW_MIN, ELBOW_MAX)
+}
+
+/// THE WRIST, which had never rotated at all.
+///
+/// Every arm pose in `sync_fighters` produced its third tuple element
+/// as the literal `0.0` - shoulder quat, elbow flex, and a wrist that
+/// was hard-coded straight in all seven branches. The wrist ENTITY
+/// existed, was parented correctly and was written every frame, with a
+/// constant. (`ANTI_PATTERNS.md` calls this shape out: it is not a
+/// tuning problem, it is dead code.)
+///
+/// This gives it a real angle. Negative is flexion (palm toward the
+/// forearm, the way the elbow folds); positive is extension.
+pub fn wrist_pitch(elbow_flex: f32, is_weapon_hand: bool, i: &HandIntent) -> f32 {
+    let flex = clamp_elbow(elbow_flex);
+    // A hanging arm's wrist droops; a folded one straightens up. This
+    // alone is most of the read - it is the difference between a hand
+    // and a paddle on the end of a stick.
+    let mut w = -0.26 + 0.16 * flex.min(1.6);
+    if i.armed && is_weapon_hand {
+        // behind a grip the wrist is held straight and slightly
+        // extended - that is what taking the recoil looks like
+        w = 0.06;
+    }
+    if i.is_bow {
+        w = if is_weapon_hand {
+            // the DRAW wrist is pulled straight by the string, more so
+            // the harder it is pulled
+            0.04 + 0.20 * i.bow_draw.clamp(0.0, 1.0)
+        } else {
+            // the BOW wrist is cocked back against the riser
+            -0.30
+        };
+    }
+    if i.reload_t > 0.0 && !is_weapon_hand {
+        // the support hand rolls over to find the magazine well
+        w = -0.55;
+    }
+    if i.shield_up && !is_weapon_hand {
+        // braced flat behind the plate
+        w = -0.12;
+    }
+    if i.melee_phase > 0.0 && is_weapon_hand {
+        // the whip: the wrist lags the arm through the wind and snaps
+        // through ahead of it on the strike
+        w = -0.42;
+    }
+    w.clamp(-0.9, 0.9)
+}
+
 /// The rotation a joint takes at a given curl.
 ///
 /// These expressions are transcribed from `spawn_world_hand_fingered`
@@ -237,6 +307,83 @@ pub fn joint_rotation(kind: JointKind, m: f32, curl: f32) -> Quat {
 /// defined as a COUPLING of it and must not drift from it.
 pub fn vm_base_angle(curl: f32) -> f32 {
     -1.15 * curl
+}
+
+/// A FIRST-PERSON hand. `base` is the curl `weapon_hand_specs` carved
+/// it at - the shape that particular grip needs - and `weapon_hand` is
+/// the trigger side.
+///
+/// The viewmodel gets its own component because its base pose is
+/// per-WEAPON, not per-fighter: a fist round a pistol grip and an open
+/// cradle under a forend are both "carry", and flattening them to one
+/// number would throw away the per-weapon hand placement that already
+/// exists.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ViewHand {
+    pub base: f32,
+    pub weapon_hand: bool,
+}
+
+/// Where a first-person hand should be, given the shape it was carved
+/// at and what the player is doing.
+///
+/// The carve stays the authority for the weapon's grip; the intent only
+/// applies the DIFFERENCE between what it asks for and a plain carry.
+/// So a hand doing nothing special is at exactly its carved pose - the
+/// same no-op guarantee the world hand gets - and a reload opens it by
+/// as much as a reload opens any hand.
+pub fn view_hand_target(base: f32, weapon_hand: bool, i: &HandIntent) -> f32 {
+    let pick = |(l, r): (f32, f32)| if weapon_hand { r } else { l };
+    let now = pick(hand_curl_targets(i));
+    let carry = pick(hand_curl_targets(&HandIntent {
+        armed: i.armed,
+        ..Default::default()
+    }));
+    (base + (now - carry)).clamp(0.0, 1.0)
+}
+
+/// Drive the first-person hands from the player's own state.
+///
+/// This is the SECOND VIEW. The body rig's hands are driven in
+/// `sync_fighters`; without this system the fingers would move in third
+/// person and be frozen 30 cm from the camera, which is exactly the
+/// one-view defect this project has shipped three times (the viewmodel
+/// turret, the first-person minigun, the jump telegraph). Both drivers
+/// end at the same `hand_curl_targets` and the same
+/// `pose_hand_joints`, so they cannot disagree about what a reload
+/// looks like.
+pub fn drive_view_hands(
+    time: Res<Time>,
+    game: Res<crate::Game>,
+    mut hands: Query<(&mut HandCurl, &ViewHand)>,
+) {
+    let Some(p) = game.sim.fighters.get(game.sim.player) else {
+        return;
+    };
+    let is_bow = p.gun == crate::sim::GunKind::Bow;
+    let intent = HandIntent {
+        armed: p.armed(),
+        is_bow,
+        bow_draw: if is_bow {
+            crate::bow_draw_visual(
+                p.bow_draw_t,
+                p.fire_cd,
+                crate::gun(crate::sim::GunKind::Bow).fire_period,
+                true,
+            )
+        } else {
+            0.0
+        },
+        reload_t: p.reload_t,
+        melee_phase: p.knife_phase,
+        shield_up: p.shield_up,
+        cooking: p.cook_t > 0.0,
+    };
+    let dt = time.delta_secs();
+    for (mut curl, vh) in &mut hands {
+        let target = view_hand_target(vh.base, vh.weapon_hand, &intent);
+        curl.0 = approach_curl(curl.0, target, dt);
+    }
 }
 
 /// Write every tagged joint's rotation from the [`HandCurl`] above it.
@@ -403,6 +550,56 @@ mod tests {
             let got = hand_curl_targets(&c);
             assert!(got != base, "{name} poses the hands identically to carry");
         }
+    }
+
+    /// The elbow may not invert and may not fold through itself. Both
+    /// ends matter: the old code clamped one and left the other open.
+    #[test]
+    fn the_elbow_hinge_has_two_stops_and_survives_a_failed_solve() {
+        assert_eq!(clamp_elbow(-3.0), ELBOW_MIN);
+        assert_eq!(clamp_elbow(9.9), ELBOW_MAX);
+        assert_eq!(clamp_elbow(1.0), 1.0);
+        assert_eq!(clamp_elbow(f32::NAN), ELBOW_MIN);
+        assert!(ELBOW_MAX < std::f32::consts::PI, "an elbow is not a hinge that folds flat");
+    }
+
+    /// The wrist must not be a constant. This is the whole Section-3
+    /// finding: it WAS one, in all seven arm branches.
+    #[test]
+    fn the_wrist_actually_moves_and_stays_in_range() {
+        let carry = HandIntent { armed: true, ..Default::default() };
+        let hang = HandIntent::default();
+        let mut seen: Vec<f32> = Vec::new();
+        for (flex, weapon, i) in [
+            (0.0, false, hang),
+            (1.5, false, hang),
+            (0.4, true, carry),
+            (0.4, false, HandIntent { reload_t: 1.0, ..carry }),
+            (0.4, true, HandIntent { melee_phase: 0.2, ..carry }),
+            (0.4, true, HandIntent { is_bow: true, bow_draw: 1.0, ..carry }),
+        ] {
+            let w = wrist_pitch(flex, weapon, &i);
+            assert!(w.abs() <= 0.9, "wrist out of range: {w}");
+            seen.push(w);
+        }
+        // at least five genuinely distinct wrist angles across those
+        // six states - a constant would collapse them to one
+        let mut distinct = 0;
+        for (n, a) in seen.iter().enumerate() {
+            if !seen[..n].iter().any(|b| (a - b).abs() < 1e-3) {
+                distinct += 1;
+            }
+        }
+        assert!(distinct >= 5, "only {distinct} distinct wrist angles: {seen:?}");
+    }
+
+    /// The bow wrist must ROTATE with the draw, not just sit at a
+    /// different constant from the rifle's.
+    #[test]
+    fn the_draw_wrist_tracks_the_pull() {
+        let a = HandIntent { armed: true, is_bow: true, bow_draw: 0.0, ..Default::default() };
+        let b = HandIntent { bow_draw: 1.0, ..a };
+        assert!(wrist_pitch(0.6, true, &b) > wrist_pitch(0.6, true, &a) + 0.1);
     }
 
     /// The approach must actually arrive, and must never overshoot into

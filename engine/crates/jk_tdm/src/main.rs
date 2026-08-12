@@ -70,6 +70,9 @@ mod map_look;
 /// this line, and one `add_plugins` below. It owns its own layer and
 /// reads the sim; it writes nothing back.
 mod hud;
+/// THE INVENTORY STRIP. Same two-line contract as `hud` and `branding`:
+/// this line, and one `add_plugins` below. Read-only on the sim.
+mod inventory_strip;
 mod mech_lineup;
 mod mech_recoil;
 mod menu_ui;
@@ -3546,7 +3549,9 @@ const ALL_WEAPONS: [GunKind; N_WEAPONS] = [
     GunKind::Minigun,
 ];
 
-#[allow(dead_code)] // §7 dropped the caliber flavor line; kept for tooling
+/// The calibre under the ammo numeral. No longer dead: the BRIEF XII
+/// ammo cluster prints it now that `inventory_strip` owns the throwable
+/// half of that sub-line.
 fn ammo_kind(kind: GunKind) -> &'static str {
     match kind {
         GunKind::Fists => "",
@@ -5896,6 +5901,37 @@ const SPEAR_WIND_BEATS: &[CapBeat] = &[
 /// and still be unverifiable. This orbits to the FRONT and pulls the
 /// camera to a third of the normal distance, which is the only view in
 /// which the claim "the hand has fingers" can be checked at all.
+/// §owner HAND GRAPHICS PASS: the instrument the old one was not.
+///
+/// `HANDS_BEATS` sits at boom 0.50 with the whole torso, the hat, the
+/// rifle and half the HUD in frame; the hand occupies about forty pixels
+/// and is half behind the receiver. It is a fine "are the hands ON the
+/// gun" shot and a useless "do the fingers read" one - which is the
+/// instrument gap that let a hand made of four identical flat-ended
+/// planks stand for two briefs.
+///
+/// This is the close one: boom pulled in to 0.30, camera dropped well
+/// below the head anchor and looking back UP at the underside of the
+/// grip (negative pitch - see `HANDS_BEATS`, which paid for that
+/// knowledge), from three angles. The support hand on the forend is the
+/// subject; it is the one hand that is open enough to show finger
+/// separation.
+const HAND_DETAIL_BEATS: &[CapBeat] = &[
+    CapBeat { look: Some((0.0, -0.30)), boom: Some(0.30), orbit: Some(PI), ..beat(0.5) },
+    CapBeat { snap: Some("01-hand-front-close"), ..beat(1.6) },
+    CapBeat { orbit: Some(PI * 0.68), ..beat(1.8) },
+    CapBeat { snap: Some("02-hand-quarter-close"), ..beat(2.6) },
+    // side on: the knuckle ARC and the finger taper are Z-axis facts and
+    // neither exists in a front view.
+    CapBeat { orbit: Some(FRAC_PI_2), ..beat(2.8) },
+    CapBeat { snap: Some("03-hand-profile-close"), ..beat(3.6) },
+    // and one from underneath, which is where the palm, the heel and the
+    // thenar mound actually face.
+    CapBeat { orbit: Some(PI * 0.85), look: Some((0.0, -0.55)), boom: Some(0.26), ..beat(3.8) },
+    CapBeat { snap: Some("04-hand-underside"), ..beat(4.6) },
+    CapBeat { end: true, ..beat(5.0) },
+];
+
 const HANDS_BEATS: &[CapBeat] = &[
     // The boom anchors on the HEAD, and pitch moves the CAMERA around
     // that anchor - positive lifts it above and aims down, which framed
@@ -5908,6 +5944,35 @@ const HANDS_BEATS: &[CapBeat] = &[
     CapBeat { orbit: Some(PI * 0.6), ..beat(2.0) },
     CapBeat { snap: Some("02-hands-quarter"), ..beat(2.8) },
     CapBeat { end: true, ..beat(3.2) },
+];
+
+/// §owner GUN PASS: a WEAPON's own profile, close enough to judge it.
+///
+/// The instrument gap this fills: `sights_a/b/c` are the only scripts
+/// that frame a gun at all, and both of their views are down the barrel
+/// from behind - the one angle in which a magazine, a grip, a trigger
+/// guard and a handguard's flank are all either off-frame or edge-on.
+/// A gun's silhouette is a SIDE view, and nothing had ever taken one.
+///
+/// Both profiles, because the ejection port and the charging handle
+/// live on the right-hand flank and the left is the plain side: at
+/// `orbit` a half-turn apart, one of the two is the detailed face and
+/// which one it is cannot be reasoned out from the transform stack.
+const M4_MODEL_BEATS: &[CapBeat] = &[
+    // below the head anchor, looking back up at the carried weapon -
+    // the sign trap `HANDS_BEATS` documents
+    CapBeat { look: Some((0.0, -0.18)), ..beat(0.4) },
+    CapBeat { orbit: Some(PI * 0.5), boom: Some(0.55), ..beat(0.8) },
+    CapBeat { snap: Some("01-side-a"), ..beat(1.8) },
+    CapBeat { orbit: Some(PI * 1.5), ..beat(2.0) },
+    CapBeat { snap: Some("02-side-b"), ..beat(2.9) },
+    CapBeat { orbit: Some(PI * 0.8), ..beat(3.1) },
+    CapBeat { snap: Some("03-front-quarter"), ..beat(4.0) },
+    // and the viewmodel, hip-held, for the receiver top and the optic
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(4.2) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(4.3) },
+    CapBeat { snap: Some("04-first-person-hip"), ..beat(5.1) },
+    CapBeat { end: true, ..beat(5.5) },
 ];
 
 /// BRIEF X: THE AGILE MECH'S PORTRAIT — four sides, then two close-ups.
@@ -6873,6 +6938,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "hud_contrast" => HUD_CONTRAST_BEATS,
         "trims" => TRIMS_BEATS,
         "hands" => HANDS_BEATS,
+        "hand_detail" => HAND_DETAIL_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "spear_fp" => SPEAR_FP_BEATS,
@@ -6885,6 +6951,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "shield_fp" => SHIELD_FP_BEATS,
         "grenade_hold" => GRENADE_HOLD_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
+        "m4_model" => M4_MODEL_BEATS,
         "arrow_flight" | "spear_flight" => PROJECTILE_FLIGHT_BEATS,
         "melee_dirs" => MELEE_DIRS_BEATS,
         "class_line" | "class_skirmisher" | "class_warden" | "class_marksman" => {
@@ -6923,7 +6990,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 39] = [
+const CAPTURE_SCRIPTS: [&str; 41] = [
     // The CASTLE BAILEY. Every other script here deploys onto
     // `Selected::default().map` (Arena), so the 130 m castle map had
     // never appeared in a single frame this project has taken.
@@ -6958,6 +7025,9 @@ const CAPTURE_SCRIPTS: [&str; 39] = [
     "barrier",
     "trims",
     "hands",
+    // §owner HAND GRAPHICS PASS: the close world-hand shot. `hands` is
+    // the wide one and cannot resolve a finger.
+    "hand_detail",
     "baseline",
     "idle_life",
     "bow_draw",
@@ -6975,6 +7045,8 @@ const CAPTURE_SCRIPTS: [&str; 39] = [
     "sights_a",
     "sights_b",
     "sights_c",
+    // §owner GUN PASS: the carbine's own side profile - see M4_MODEL_BEATS
+    "m4_model",
     "arrow_flight",
     "spear_flight",
     "class_line",
@@ -7105,6 +7177,11 @@ fn capture_quick_deploy(
         }
         Some("sights_c") => {
             sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Ak47];
+        }
+        // the carbine in the primary slot, so the script never has to
+        // press a digit to reach it
+        Some("m4_model") => {
+            sel.loadout = [GunKind::M4, GunKind::Glock, GunKind::Mp5];
         }
         // the ONLY script that leaves Arena. `capture_quick_deploy` runs
         // before `start_match` reads `Selected`, so setting the map here
@@ -8471,6 +8548,7 @@ fn main() {
         // contended file in this repo.
         .add_plugins(muzzle_flash::MuzzleFlashPlugin)
         .add_plugins(hud::HudPlugin)
+        .add_plugins(inventory_strip::InventoryStripPlugin)
         .init_resource::<IntroPage>()
         .init_resource::<IntroEntryPage>()
         // Sampled from the key art. Was a cool blue-grey, which fought
@@ -9201,6 +9279,41 @@ fn sync_rockets(
     }
 }
 
+/// §owner HAND GRAPHICS PASS: THE FINGER LAYOUT, as data.
+///
+/// One row per finger, index → little:
+/// `(x across the palm, z of the knuckle, segment length, root width,
+/// splay angle)`.
+///
+/// It is a table rather than four literals inside the spawn loop because
+/// four literals inside a spawn loop cannot be checked by anything. The
+/// four properties this pass is ABOUT - the fingers differ in length,
+/// the knuckles sit on an arc, the fingers taper across the hand, and
+/// the fan opens outward - are all statements about these numbers, and
+/// `hand_craft_tests` now states them.
+///
+/// The old hand's row would have been, in this form:
+/// `[(-0.038, 0.058, 0.044, 0.022, 0.0), (-0.013, 0.058, 0.052, 0.022,
+/// 0.0), (0.013, 0.058, 0.052, 0.022, 0.0), (0.038, 0.058, 0.044, 0.022,
+/// 0.0)]` - one z for all four, one width for all four, two lengths
+/// shared between pairs, and no fan at all.
+const VM_FINGERS: [(f32, f32, f32, f32, f32); 4] = [
+    (-0.038, 0.058, 0.052, 0.022, 0.15),
+    (-0.013, 0.062, 0.058, 0.022, 0.05),
+    (0.013, 0.058, 0.053, 0.021, -0.06),
+    (0.038, 0.050, 0.042, 0.018, -0.17),
+];
+
+/// The same table for the WORLD hand, at body scale. Same column
+/// meanings as [`VM_FINGERS`]; x runs the other way because the world
+/// hand's un-mirrored side is the left one.
+const WORLD_FINGERS: [(f32, f32, f32, f32, f32); 4] = [
+    (0.027, 0.052, 0.052, 0.017, 0.16),
+    (0.009, 0.056, 0.058, 0.017, 0.05),
+    (-0.009, 0.052, 0.053, 0.016, -0.06),
+    (-0.027, 0.045, 0.042, 0.014, -0.18),
+];
+
 /// §2.1 (Brief II): a fully articulated fingered hand - palm, four
 /// two-jointed fingers, two-jointed thumb. VIEWMODEL ONLY: it lives on
 /// the viewmodel render layer, is never instanced per-bot, and therefore
@@ -9221,20 +9334,65 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
             Transform::from_xyz(0.0, 0.0, -0.045).with_scale(Vec3::splat(0.052)),
         ))
         .set_parent(root);
-    // palm
+    // THE PALM. Widened across the knuckles and shortened front-to-back
+    // (a palm is wider than it is long), with the wrist end taken over
+    // by the HEEL block below - the old single slab ran the full length
+    // at full width, so the hand had no waist and the wrist ball sat on
+    // a cliff.
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_scale(Vec3::new(0.105, 0.040, 0.115)),
+            Transform::from_xyz(0.0, 0.0, 0.008).with_scale(Vec3::new(0.112, 0.036, 0.094)),
+        ))
+        .set_parent(root);
+    // the HEEL of the hand, narrowing into the wrist
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(0.0, -0.002, -0.044).with_scale(Vec3::new(0.088, 0.032, 0.040)),
+        ))
+        .set_parent(root);
+    // THE THENAR MOUND - the pad at the base of the thumb. At 30 cm it
+    // is the difference between a hand and a table-tennis bat.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(-0.038 * m, -0.002, -0.004)
+                .with_scale(Vec3::new(0.052, 0.042, 0.088)),
         ))
         .set_parent(root);
     // four fingers, two segments each, dark knuckle balls at both joints
-    for (fi, fx) in [-0.038_f32, -0.013, 0.013, 0.038].into_iter().enumerate() {
-        let len = if fi == 0 || fi == 3 { 0.044 } else { 0.052 };
+    //
+    // §owner HAND GRAPHICS PASS, FIRST PERSON. This is the geometry the
+    // player stares at for the whole match, 30 cm from the lens, and it
+    // was four equal planks in a straight line: index and little the
+    // same length, middle and ring the same length, all four the same
+    // 2.2 cm gauge from root to squared-off tip.
+    //
+    // Now: four DIFFERENT lengths (middle longest, little visibly
+    // shortest), a knuckle ARC in z, a per-finger width, and a fan.
+    // `fz` and `splay` are the arc and the fan; both are pure placement.
+    for (fi, (fx, fz, len, fw, splay)) in VM_FINGERS.into_iter().enumerate() {
         let rest = hand_pose::vm_base_angle(curl);
+        // The fan is folded into the base joint's rest rotation for the
+        // viewmodel rather than getting its own node: `TriggerFinger`
+        // owns the index finger's rotation outright and rewrites it as a
+        // pure X rotation every frame, so an extra node under it would
+        // buy nothing for that finger and cost an entity on all four.
+        // The index finger therefore does not fan. It is the one finger
+        // whose direction the player never sees against the others,
+        // because it is on the trigger.
+        let fan = if fi == 0 && !mirror {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_y(splay * m)
+        };
         let mut base_cmd = commands.spawn((
-            Transform::from_xyz(fx * m, 0.0, 0.058).with_rotation(Quat::from_rotation_x(rest)),
+            Transform::from_xyz(fx * m, 0.0, fz)
+                .with_rotation(fan * Quat::from_rotation_x(rest)),
             Visibility::default(),
         ));
         // §HANDS: the INDEX finger of the firing hand belongs to
@@ -9251,19 +9409,20 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
             });
         }
         let base = base_cmd.set_parent(root).id();
-        // knuckle line at the palm edge
+        // knuckle dome at the palm edge, sized to its own finger
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(kit.grey_black.clone()),
-                Transform::from_scale(Vec3::splat(0.024)),
+                Transform::from_scale(Vec3::splat(fw * 1.12)),
             ))
             .set_parent(base);
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.hand.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.5).with_scale(Vec3::new(0.022, 0.023, len)),
+                Transform::from_xyz(0.0, 0.0, len * 0.5)
+                    .with_scale(Vec3::new(fw, fw * 1.05, len)),
             ))
             .set_parent(base);
         // §2.2 (Brief VII v2): the tip (DIP-equivalent) joint COUPLES to
@@ -9271,28 +9430,50 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         // - real fingertips can't out-curl the knuckle behind them, and
         // the old -1.3x (curling the TIP harder than the base) was
         // exactly backwards from how a hand actually closes.
-        let tip = commands
-            .spawn((
-                Transform::from_xyz(0.0, 0.0, len)
-                    .with_rotation(Quat::from_rotation_x(dip_from_driving_joint(rest))),
-                Visibility::default(),
-            ))
-            .set_parent(base)
-            .id();
+        let mut tip_cmd = commands.spawn((
+            Transform::from_xyz(0.0, 0.0, len)
+                .with_rotation(Quat::from_rotation_x(dip_from_driving_joint(rest))),
+            Visibility::default(),
+        ));
+        // the trigger finger's tip follows ITS base, not the hand curl -
+        // see the note above. Everything else curls with the hand.
+        if !(fi == 0 && !mirror) {
+            tip_cmd.insert(hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::VmTip,
+                m,
+            });
+        }
+        let tip = tip_cmd.set_parent(base).id();
         // mid-knuckle
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(kit.grey_black.clone()),
-                Transform::from_scale(Vec3::splat(0.021)),
+                Transform::from_scale(Vec3::splat(fw * 0.98)),
             ))
             .set_parent(tip);
+        // the distal segment: two thirds the length and 85% the gauge of
+        // the proximal. It used to be 80% long and 91% wide, which at
+        // 30 cm from the camera is not a taper, it is a manufacturing
+        // tolerance.
+        let dl = len * 0.66;
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(kit.hand.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.4)
-                    .with_scale(Vec3::new(0.020, 0.021, len * 0.8)),
+                Transform::from_xyz(0.0, 0.0, dl * 0.5)
+                    .with_scale(Vec3::new(fw * 0.85, fw * 0.92, dl)),
+            ))
+            .set_parent(tip);
+        // THE FINGERTIP. The old finger simply STOPPED - a box face,
+        // square to the world, four of them in a row. This is the
+        // rounded pad that ends it.
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(kit.hand.clone()),
+                Transform::from_xyz(0.0, 0.0, dl)
+                    .with_scale(Vec3::new(fw * 0.84, fw * 0.90, fw * 1.02)),
             ))
             .set_parent(tip);
     }
@@ -9300,8 +9481,12 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
     let tbase = commands
         .spawn((
             Transform::from_xyz(-0.056 * m, 0.0, 0.018).with_rotation(
-                Quat::from_rotation_y(0.9 * curl * m) * Quat::from_rotation_x(-0.5 * curl),
+                hand_pose::joint_rotation(hand_pose::JointKind::VmThumbBase, m, curl),
             ),
+            hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::VmThumbBase,
+                m,
+            },
             Visibility::default(),
         ))
         .set_parent(root)
@@ -9322,17 +9507,42 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         .set_parent(tbase);
     let ttip = commands
         .spawn((
-            Transform::from_xyz(0.0, 0.0, 0.046)
-                .with_rotation(Quat::from_rotation_y(0.9 * curl * m)),
+            Transform::from_xyz(0.0, 0.0, 0.046).with_rotation(hand_pose::joint_rotation(
+                hand_pose::JointKind::VmThumbTip,
+                m,
+                curl,
+            )),
+            hand_pose::FingerJoint {
+                kind: hand_pose::JointKind::VmThumbTip,
+                m,
+            },
             Visibility::default(),
         ))
         .set_parent(tbase)
         .id();
+    // the thumb has a JOINT BALL at its second knuckle like every other
+    // digit on this hand - it was the one joint on the whole viewmodel
+    // hand with no hardware in it, so the thumb tip looked welded on.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.grey_black.clone()),
+            Transform::from_scale(Vec3::splat(0.022)),
+        ))
+        .set_parent(ttip);
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.019).with_scale(Vec3::new(0.021, 0.022, 0.038)),
+            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.021, 0.022, 0.034)),
+        ))
+        .set_parent(ttip);
+    // and the thumb pad, matching the four fingertips
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.034).with_scale(Vec3::new(0.020, 0.021, 0.024)),
         ))
         .set_parent(ttip);
     root
@@ -9371,64 +9581,129 @@ fn spawn_world_hand_fingered(
         .spawn((Transform::IDENTITY, Visibility::default()))
         .id();
     // the PALM - flatter and squarer than the mitten's egg, because a
-    // palm is what fingers have to look like they grow out of
+    // palm is what fingers have to look like they grow out of.
+    //
+    // §owner HAND GRAPHICS PASS: it was a 7.2 x 5.2 x 7.8 cm brick,
+    // near-cubic, and a near-cubic palm is why the old hand read as a
+    // block with stalks. A real palm is WIDE, SHALLOW and TAPERED: it
+    // is widest across the knuckles and narrows to the wrist. Widened,
+    // thinned, and the taper is a second smaller box below (the HEEL),
+    // which costs one entity and does most of the silhouette work.
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(look.shell.clone()),
-            Transform::from_xyz(0.0, -0.012, 0.012)
+            Transform::from_xyz(0.0, -0.012, 0.016)
                 .with_rotation(Quat::from_rotation_x(-0.30 * curl))
-                .with_scale(Vec3::new(0.072, 0.052, 0.078)),
+                .with_scale(Vec3::new(0.080, 0.040, 0.070)),
+        ))
+        .set_parent(root);
+    // the HEEL of the palm: narrower and shallower, closing the wrist
+    // end. The taper from knuckles to wrist is the read.
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(look.shell2.clone()),
+            Transform::from_xyz(0.0, -0.014, -0.022)
+                .with_rotation(Quat::from_rotation_x(-0.30 * curl))
+                .with_scale(Vec3::new(0.062, 0.036, 0.036)),
+        ))
+        .set_parent(root);
+    // THE THENAR MOUND - the muscle pad at the base of the thumb.
+    //
+    // This is the single element that most makes a hand read as a hand
+    // rather than as a paddle with a spike on it: without it the thumb
+    // grows straight out of a flat side, which nothing's does. One
+    // squashed ball on the thumb side, blended into the palm.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(-0.026 * m, -0.010, 0.004)
+                .with_scale(Vec3::new(0.040, 0.036, 0.058)),
         ))
         .set_parent(root);
     // the KNUCKLE BAR: one dark bridge across the finger roots, so the
     // four fingers read as belonging to one hand rather than as four
-    // separate stalks
+    // separate stalks. Slimmer now - the four individual knuckle domes
+    // below carry the joint read, and a fat bar over the top of them
+    // just flattened the row back out again.
     commands
         .spawn((
             Mesh3d(kit.cyl.clone()),
             MeshMaterial3d(look.joint.clone()),
-            Transform::from_xyz(0.0, -0.020, 0.052)
+            Transform::from_xyz(0.0, -0.020, 0.050)
                 .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
-                .with_scale(Vec3::new(0.019, 0.070, 0.019)),
+                .with_scale(Vec3::new(0.014, 0.074, 0.014)),
         ))
         .set_parent(root);
-    // FOUR FINGERS, index to little. Each is two segments with a dark
-    // knuckle between them, and each is shorter than the one inboard of
-    // it - a row of equal fingers reads as a rake.
-    for (i, (fx, len)) in [
-        (0.026_f32, 0.052_f32),
-        (0.009, 0.056),
-        (-0.009, 0.052),
-        (-0.026, 0.044),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        // proximal: swings down from the knuckle bar with the curl.
+    // FOUR FINGERS, index to little.
+    //
+    // §owner HAND GRAPHICS PASS. Three things were wrong with the row:
+    //
+    // 1. THE KNUCKLES WERE IN A STRAIGHT LINE. A real knuckle row is an
+    //    ARC - the index and middle knuckles stand forward of the ring
+    //    and little by most of a centimetre. A straight row is the
+    //    single strongest "this is a rake, not a hand" cue, and it is
+    //    free to fix: it is one number per finger (`fz`).
+    // 2. THE FINGERS WERE PARALLEL PLANKS. Real fingers fan outward
+    //    from the palm. `splay` rotates each about Y at its root.
+    // 3. THEY WERE UNIFORM AND FLAT-ENDED. Each is now narrower at the
+    //    tip than the root, and each ends in a rounded PAD instead of a
+    //    cut-off box face - a flat-ended box at fingertip scale is
+    //    exactly what reads as a sausage.
+    //
+    // `fw` is the root width: the index and middle are the thick
+    // fingers, the little one is visibly slighter.
+    for (i, (fx, fz, len, fw, splay)) in WORLD_FINGERS.into_iter().enumerate() {
+        // THE KNUCKLE NODE. The fan lives HERE, one level above the
+        // bending joint, rather than being composed into the bend -
+        // because a joint's rotation is the thing an animator overwrites,
+        // and a splay baked into it would be the first casualty. This
+        // way the finger can be posed to anything and still points where
+        // it grew.
+        let knuckle = commands
+            .spawn((
+                Transform::from_xyz(fx * m, -0.020, fz)
+                    .with_rotation(Quat::from_rotation_y(splay * m)),
+                Visibility::default(),
+            ))
+            .set_parent(root)
+            .id();
+        // the knuckle DOME - one per finger. The old hand had a single
+        // bar across all four roots and nothing else, so the knuckles
+        // were a line rather than four bumps.
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.joint.clone()),
+                Transform::from_scale(Vec3::splat(fw * 1.30)),
+            ))
+            .set_parent(knuckle);
+        // proximal: swings down from the knuckle with the curl.
         // §HANDS: the angle comes from `hand_pose::joint_rotation` now,
-        // and the joint is TAGGED, so `pose_hand_joints` can rewrite it
-        // every frame. It used to be carved here and never touched
-        // again - one pose for the hand's whole life.
+        // and the joint is TAGGED, so a pose system can rewrite it.
         let prox = commands
             .spawn((
-                Transform::from_xyz(fx * m, -0.020, 0.052).with_rotation(
-                    hand_pose::joint_rotation(hand_pose::JointKind::WorldProx, m, curl),
-                ),
+                Transform::from_rotation(hand_pose::joint_rotation(
+                    hand_pose::JointKind::WorldProx,
+                    m,
+                    curl,
+                )),
                 hand_pose::FingerJoint {
                     kind: hand_pose::JointKind::WorldProx,
                     m,
                 },
                 Visibility::default(),
             ))
-            .set_parent(root)
+            .set_parent(knuckle)
             .id();
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(look.shell.clone()),
                 Transform::from_xyz(0.0, 0.0, len * 0.5)
-                    .with_scale(Vec3::new(0.016, 0.017, len)),
+                    .with_scale(Vec3::new(fw, fw * 1.06, len)),
             ))
             .set_parent(prox);
         // the middle knuckle, then the distal segment folding further
@@ -9451,15 +9726,29 @@ fn spawn_world_hand_fingered(
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(look.joint.clone()),
-                Transform::from_scale(Vec3::splat(0.019)),
+                Transform::from_scale(Vec3::splat(fw * 1.12)),
             ))
             .set_parent(dist);
+        // the distal segment is SHORTER and NARROWER than the proximal -
+        // the taper is what stops a finger reading as a dowel.
+        let dl = len * 0.66;
         commands
             .spawn((
                 Mesh3d(kit.cube.clone()),
                 MeshMaterial3d(look.shell2.clone()),
-                Transform::from_xyz(0.0, 0.0, len * 0.42)
-                    .with_scale(Vec3::new(0.014, 0.015, len * 0.82)),
+                Transform::from_xyz(0.0, 0.0, dl * 0.5)
+                    .with_scale(Vec3::new(fw * 0.84, fw * 0.90, dl)),
+            ))
+            .set_parent(dist);
+        // THE FINGERTIP PAD: a rounded end where there used to be a
+        // sawn-off box face. At this scale it is one ball per finger and
+        // it is the difference between a finger and a peg.
+        commands
+            .spawn((
+                Mesh3d(kit.ball.clone()),
+                MeshMaterial3d(look.shell.clone()),
+                Transform::from_xyz(0.0, 0.0, dl)
+                    .with_scale(Vec3::new(fw * 0.82, fw * 0.88, fw * 1.00)),
             ))
             .set_parent(dist);
         let _ = i;
@@ -9480,11 +9769,14 @@ fn spawn_world_hand_fingered(
         ))
         .set_parent(root)
         .id();
+    // the metacarpal segment. Thicker than any finger - a thumb that is
+    // the same gauge as the index finger reads as a fifth finger stuck
+    // on sideways, which is what this one did.
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(look.shell.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.024).with_scale(Vec3::new(0.020, 0.020, 0.048)),
+            Transform::from_xyz(0.0, 0.0, 0.024).with_scale(Vec3::new(0.023, 0.024, 0.048)),
         ))
         .set_parent(thumb);
     let thumb_tip = commands
@@ -9506,14 +9798,24 @@ fn spawn_world_hand_fingered(
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(look.joint.clone()),
-            Transform::from_scale(Vec3::splat(0.021)),
+            Transform::from_scale(Vec3::splat(0.023)),
         ))
         .set_parent(thumb_tip);
     commands
         .spawn((
             Mesh3d(kit.cube.clone()),
             MeshMaterial3d(look.shell2.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.018).with_scale(Vec3::new(0.018, 0.018, 0.038)),
+            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.020, 0.021, 0.034)),
+        ))
+        .set_parent(thumb_tip);
+    // the thumb PAD, matching the four fingertips - the broad flat pad
+    // is what a thumb presents to a grip, and it is the part that is
+    // supposed to be visibly facing the other four.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(look.shell.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.034).with_scale(Vec3::new(0.019, 0.020, 0.023)),
         ))
         .set_parent(thumb_tip);
     root
@@ -9678,6 +9980,19 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
         }
         GunKind::M4 => {
             // modern carbine: notched top rail, straight raked mag
+            //
+            // §owner GUN PASS (M4): this was the plainest firearm left -
+            // a smooth slab, a tube and a red dot, with none of the
+            // shared surface vocabulary every other rifle already
+            // carried. It gets the same helpers the AK does, plus the
+            // three features the reference carbine is actually
+            // recognised BY: a quad-rail handguard with slots, an
+            // A-frame front sight out at the gas block, and a trigger
+            // guard you can see daylight through.
+            //
+            // Tone stays the existing grey palette. The reference is
+            // FDE, but there is no tan in `Tone` and inventing one for a
+            // single gun would make the arsenal read as two armouries.
             parts.push(wp(false, Tone::Mid, (0.0, 0.02, 0.08), 0.0, (0.05, 0.09, 0.42)));
             push_rail(&mut parts, 0.078, -0.08, 0.30, 10);
             parts.push(wp(true, Tone::Dark, (0.0, 0.03, 0.45), FRAC_PI_2, (0.028, 0.34, 0.028)));
@@ -9685,10 +10000,63 @@ fn weapon_parts(kind: GunKind) -> Vec<WPart> {
             parts.push(wp(false, Tone::Dark, (0.0, -0.005, 0.30), 0.0, (0.055, 0.055, 0.20)));
             parts.push(wp(false, Tone::Light, (0.032, -0.005, 0.30), 0.0, (0.008, 0.02, 0.16)));
             parts.push(wp(false, Tone::Light, (-0.032, -0.005, 0.30), 0.0, (0.008, 0.02, 0.16)));
+            // QUAD RAIL: cross slots cut between the two side rails, so
+            // the handguard reads as a machined rail section rather than
+            // the smooth dark box it was. Each band stops just inboard
+            // of the light strips at x +-0.032 - that gap IS the rail.
+            for k in 0..6 {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (0.0, -0.005, 0.215 + k as f32 * 0.030),
+                    0.0,
+                    (0.058, 0.040, 0.006),
+                ));
+            }
+            // §owner GUN PASS: receiver seam, port + charging handle,
+            // and the two takedown pins an AR is held together by
+            push_panel_line(&mut parts, 0.038, -0.12, 0.16, 0.025);
+            push_ejection_port(&mut parts, 0.026, 0.042, 0.08, 0.075);
+            push_bolts(&mut parts, 0.024, 0.000, -0.10, 0.14, 2);
+            // MAGAZINE WELL, then the mag itself in two segments so it
+            // curves the way the reference's 30-rounder does. The upper
+            // box is the shipped one, untouched; the lower is raked
+            // further and carries the floorplate.
+            parts.push(wp(false, Tone::Mid, (0.0, -0.045, 0.06), 0.0, (0.052, 0.05, 0.10)));
             parts.push(wp(false, Tone::Mid, (0.0, -0.09, 0.06), 0.15, (0.038, 0.16, 0.08)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.165, 0.085), 0.30, (0.036, 0.09, 0.075)));
+            push_mag_detail(&mut parts, -0.213, 0.085, 0.025, 0.040);
+            // TRIGGER GUARD: no other gun in the arsenal models one, so
+            // this is three thin bars rather than a new primitive - a
+            // front upright and a bottom bar hung off the receiver, with
+            // the trigger blade inside them. The hole through it is the
+            // whole point; a solid block would just thicken the grip.
+            parts.push(wp(false, Tone::Dark, (0.0, -0.040, 0.008), 0.0, (0.012, 0.036, 0.010)));
+            parts.push(wp(false, Tone::Dark, (0.0, -0.056, -0.026), 0.0, (0.012, 0.010, 0.078)));
+            parts.push(wp(false, Tone::Black, (0.0, -0.038, -0.020), 0.0, (0.008, 0.028, 0.008)));
             parts.push(wp(false, Tone::Dark, (0.0, -0.08, -0.06), 0.35, (0.04, 0.10, 0.05)));
+            push_grip_detail(&mut parts, 0.020, -0.055, -0.048, 0.35);
             push_stock(&mut parts, -0.30, 0.05);
-            parts.push(wp(false, Tone::Black, (0.0, 0.105, 0.24), 0.0, (0.008, 0.018, 0.01)));
+            // THE SIGHT LINE. The front post used to sit at z 0.24, in
+            // the middle of the rail and well behind the handguard - a
+            // sight post on top of the receiver, which is nothing a
+            // carbine has. It moves out to the gas block at z 0.41, on
+            // an A-frame base, and gains a rear notch behind the optic:
+            // 0.114 / 0.116 either side of `sight_line_y` 0.1120, so the
+            // two really do line up on the height focus brings to the
+            // eye.
+            parts.push(wp(false, Tone::Dark, (0.0, 0.030, 0.410), 0.0, (0.030, 0.040, 0.030)));
+            parts.push(wp(false, Tone::Black, (0.0, 0.098, 0.410), 0.0, (0.008, 0.032, 0.010)));
+            parts.push(wp(false, Tone::Dark, (0.0, 0.090, -0.050), 0.0, (0.026, 0.016, 0.030)));
+            for sx in [-1.0_f32, 1.0] {
+                parts.push(wp(
+                    false,
+                    Tone::Black,
+                    (sx * 0.009, 0.104, -0.050),
+                    0.0,
+                    (0.008, 0.024, 0.012),
+                ));
+            }
             push_red_dot(&mut parts, 0.1120, 0.0, 0.084); // rail top 0.084
         }
         GunKind::Awm => {
@@ -10100,7 +10468,18 @@ fn spawn_weapon_model(
             let hand = spawn_hand_fingered(commands, kit, curl, mirror);
             commands
                 .entity(hand)
-                .insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(ry)))
+                .insert((
+                    Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(ry)),
+                    // §HANDS: the first-person half. `mirror` is the
+                    // OFF hand - `spawn_hand_fingered` gives the
+                    // trigger finger to the un-mirrored one, so that is
+                    // the same side the weapon hand is on.
+                    hand_pose::HandCurl(curl),
+                    hand_pose::ViewHand {
+                        base: curl,
+                        weapon_hand: !mirror,
+                    },
+                ))
                 .set_parent(root);
         }
     }
@@ -14544,8 +14923,17 @@ fn spawn_soldier_body(
                 Transform::from_xyz(0.0, FORE_CENTER, 0.0),
             ))
             .set_parent(fore);
+        // §HANDS: the wrist carries the live grip fraction for the hand
+        // below it. It sits HERE rather than on the hand root because
+        // `sync_fighters` already holds this entity (`arm[2]`), so
+        // driving the fingers costs one write and no extra lookup - and
+        // a bot with a mitten simply has nothing tagged underneath.
         let hand = commands
-            .spawn((Transform::from_xyz(0.0, WRIST_Y, 0.0), Visibility::default()))
+            .spawn((
+                Transform::from_xyz(0.0, WRIST_Y, 0.0),
+                hand_pose::HandCurl(hand_pose::WORLD_REST_CURL),
+                Visibility::default(),
+            ))
             .set_parent(fore)
             .id();
         // §1: a dark wrist ball closes the forearm → mitten seam
@@ -27334,6 +27722,62 @@ mod living_motion_tests {
 #[cfg(test)]
 mod hand_craft_tests {
     use super::*;
+
+    /// §owner HAND GRAPHICS PASS. Four claims about the finger row, one
+    /// test, both hands. Every one of them FAILS on the pre-pass tables
+    /// (one z for all four knuckles, one width for all four fingers,
+    /// lengths shared in pairs, no fan) - which is the point: they are
+    /// the difference between a hand and a garden rake, and nothing
+    /// could state them while the numbers lived inside a spawn loop.
+    #[test]
+    fn the_finger_row_is_a_hand_and_not_a_rake() {
+        for (name, row) in [("viewmodel", VM_FINGERS), ("world", WORLD_FINGERS)] {
+            let len = |i: usize| row[i].2;
+            let z = |i: usize| row[i].1;
+            let w = |i: usize| row[i].3;
+            let splay = |i: usize| row[i].4;
+            // 1. FOUR DIFFERENT LENGTHS, middle the longest, little the
+            //    shortest. Equal-length fingers are the rake.
+            assert!(
+                len(1) > len(0) && len(1) > len(2) && len(2) > len(3),
+                "{name}: middle is not the longest finger: {:?}",
+                (len(0), len(1), len(2), len(3))
+            );
+            for a in 0..4 {
+                for b in (a + 1)..4 {
+                    assert!(
+                        (len(a) - len(b)).abs() > 1e-4,
+                        "{name}: fingers {a} and {b} are the same length"
+                    );
+                }
+            }
+            // 2. THE KNUCKLE ARC: the index and middle knuckles stand
+            //    forward of the little one by a readable margin.
+            assert!(
+                z(1) > z(3) + 0.008,
+                "{name}: the knuckle row is flat ({:?})",
+                (z(0), z(1), z(2), z(3))
+            );
+            // 3. THE TAPER ACROSS THE HAND: the little finger is
+            //    slighter than the index.
+            assert!(w(3) < w(0) - 1e-4, "{name}: every finger is the same gauge");
+            // 4. THE FAN opens outward - the two ends of the row lean
+            //    opposite ways, and no finger is left un-fanned by
+            //    accident in the middle of a fanned row.
+            assert!(
+                splay(0) > 0.05 && splay(3) < -0.05,
+                "{name}: the fingers are parallel planks: {:?}",
+                (splay(0), splay(1), splay(2), splay(3))
+            );
+            for i in 0..3 {
+                assert!(
+                    splay(i) > splay(i + 1),
+                    "{name}: the fan reverses between {i} and {}",
+                    i + 1
+                );
+            }
+        }
+    }
 
     /// Joint-limit fuzz: 10,000 seeded random IK targets - the solved
     /// elbow flex must never exceed the biomechanical clamp, and never

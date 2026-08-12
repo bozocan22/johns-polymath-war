@@ -66,7 +66,7 @@ use crate::frontend::{T_BODY, T_HEAD, T_MICRO, T_SUB};
 use crate::{
     sim, ArmorSet, BannerText, CompassText, Game, GameState, HitFeedText, HudRoot, HudText,
     MechHudPiece, MechTargetBracket, Mode, PanelAmmoText, PanelInfoText, PrecisionChargeMark,
-    PromptText, RangeText, ScoreTimerText, ThrowKind, ARMOR_PIPS, ARMOR_PIP_REFERENCE,
+    PromptText, RangeText, ScoreTimerText, ARMOR_PIPS, ARMOR_PIP_REFERENCE,
     HUD_ANCHORS, HUD_SAFE_FRAC, MAX_HEALTH, POWER_MAX, VITALS_SEGMENTS,
 };
 
@@ -1251,16 +1251,21 @@ fn paint_ammo(
         }
     } else {
         let (a, b) = ammo_pair(p.ammo, p.reserve);
-        let k = ThrowKind::ALL[p.throw_sel as usize];
+        // The throwable half of this line MOVED to `inventory_strip`,
+        // which draws the selected throwable's icon, its key and its
+        // count directly above this cluster. Leaving `FRAG x1` here too
+        // would print one fact in two places six pixels apart — the
+        // duplication XII-A exists to remove.
+        //
+        // What replaces it is the CALIBRE, from `crate::ammo_kind` — the
+        // sim-adjacent table that already spells every one of these and
+        // had been sitting behind an `allow(dead_code)` since the flavour
+        // line was dropped. It is the one fact about the number above it
+        // that the strip does NOT carry.
         (
             a,
             b,
-            format!(
-                "{}   {} x{}",
-                crate::gun(p.gun).name,
-                k.name(),
-                p.grenades[p.throw_sel as usize]
-            ),
+            format!("{}   {}", crate::gun(p.gun).name, crate::ammo_kind(p.gun)),
             crate::ammo_is_low(p.ammo, crate::gun(p.gun).mag),
         )
     };
