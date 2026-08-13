@@ -487,9 +487,20 @@ mod tests {
         let mid = reticle_alpha(0.5, true);
         let full = reticle_alpha(1.0, true);
         assert!(mid > 0.0 && mid < full);
-        // squared, so the first half of the raise stays out of the way:
-        // linear would put mid at half of full
-        assert!(mid < full * 0.5 + 1e-4);
+        // Squared, so the first half of the raise stays out of the way.
+        //
+        // This assertion was `mid < full * 0.5 + 1e-4` and a mutation
+        // run caught it: replacing `t * t` with `t` puts `mid` at
+        // EXACTLY `full * 0.5`, and the epsilon then let the mutant
+        // through. A tolerance added on the wrong side of a boundary
+        // makes the test vacuous at precisely the value it is meant to
+        // exclude, which is rule 12's failure mode in miniature. The
+        // margin now cuts the other way: at t = 0.5 squaring gives a
+        // quarter of full, so demand comfortably less than a third.
+        assert!(
+            mid < full / 3.0,
+            "mid {mid} is not well below a third of full {full} - is the fade still squared?"
+        );
         assert!((full - RETICLE_RGBA.3).abs() < 1e-5);
     }
 
