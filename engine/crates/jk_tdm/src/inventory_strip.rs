@@ -270,11 +270,38 @@ fn icon_parts(item: Item) -> Vec<IconPart> {
             part(14.0, 17.0, 7.0, 8.0, 3.5, Accent),
             part(13.0, 4.0, 9.0, 7.0, 2.0, Detail),
         ],
+        // A CANISTER THAT IS ALREADY GOING OFF. The old large glyph was
+        // a 15x22 cylinder with two bands and a cap, and rendered at the
+        // size the selected cell actually draws it, it is a water
+        // bottle: an upright vessel with a lid, and nothing about it
+        // says smoke. Every other throwable in this table names its
+        // EFFECT - the frag has a pin, the molotov is alight - and this
+        // one named its packaging.
+        //
+        // So the subject is the plume and the canister is what it is
+        // coming out of: a squat body on a foot, low and left, with two
+        // soft lobes billowing up and to the right. The lobes are the
+        // brightest tone because they are the point; the canister is
+        // `Detail` under them.
+        //
+        // The GOLD is the identification band round the body, which is
+        // both the one highlight this table allows and the mark a real
+        // smoke grenade is actually read by. It is at the bottom, well
+        // clear of the plume, so it cannot do what the shield's bright
+        // shoulder did and steal the read from the outline.
+        //
+        // Body into foot by a pixel, for the seam the small glyph's note
+        // describes. NOTE this glyph is only drawn on the ACTIVE cell,
+        // and no capture script in the tree selects a throwable - so it
+        // is held by the offline render and by
+        // `the_large_smoke_is_the_same_idea_as_the_small_one`, and it
+        // has not been photographed in game. Stated rather than implied.
         Item::Throw(ThrowKind::Smoke) => vec![
-            part(10.0, 9.0, 15.0, 22.0, 3.0, Body),
-            part(10.0, 16.0, 15.0, 3.0, 1.0, Detail),
-            part(10.0, 21.0, 15.0, 3.0, 1.0, Detail),
-            part(14.0, 3.0, 7.0, 6.0, 1.5, Accent),
+            part(3.0, 27.0, 16.0, 5.0, 1.5, Detail),
+            part(6.0, 15.0, 10.0, 13.0, 1.5, Detail),
+            part(6.0, 20.0, 10.0, 4.0, 1.0, Accent),
+            part(4.0, 7.0, 14.0, 11.0, 5.5, Body),
+            part(14.0, 2.0, 20.0, 13.0, 6.5, Body),
         ],
         Item::Throw(ThrowKind::Molotov) => vec![
             part(10.0, 14.0, 15.0, 17.0, 4.0, Body),
@@ -364,8 +391,8 @@ fn gun_parts(k: GunKind) -> Vec<IconPart> {
 ///   until it ends in a point, which nothing else in the row does;
 /// * a BOW is two vertical limbs with a vertical string beside them;
 /// * the four throwables each have their OWN outline — a round frag with
-///   a lever, a BURST for the flash, a rimmed SPOOL for the smoke, a
-///   bottom-heavy bottle for the molotov.
+///   a lever, a BURST for the flash, a canister with a PLUME coming off
+///   it for the smoke, a bottom-heavy bottle for the molotov.
 ///
 /// ## Why the throwables stopped being four canisters
 ///
@@ -378,7 +405,17 @@ fn gun_parts(k: GunKind) -> Vec<IconPart> {
 ///
 /// So the tell moved from the marking to the OUTLINE, which is the same
 /// correction `ICON_SM_BOX` describes making for the whole table, applied
-/// to the pair that survived it. Worst overlap in this group is now 60%.
+/// to the pair that survived it.
+///
+/// ## ...and then stopped being containers at all
+///
+/// §6 bought that distinctness and paid for it in MEANING, which its own
+/// handback stated: the spool it drew for the smoke was unmistakably not
+/// the flash, and it was also not obviously smoke. Distinct and mute is
+/// only half a glyph. So the smoke names its effect now, like the other
+/// three do, and the overlap went DOWN rather than up when it did —
+/// worst pair in the group is 59% (frag/molotov) against §6's 60%
+/// (smoke/molotov), and the smoke's own worst is 44%.
 ///
 /// `every_small_glyph_states_its_own_silhouette` asserts the tells as
 /// properties rather than as coordinates, so a future retune is free to
@@ -411,8 +448,11 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
         // the edges of the box and a bright round core: the only glyph
         // in the row that is not convex, the only one that touches all
         // four sides, and the only one you can identify from its shape
-        // alone with the colour thrown away. Overlap with smoke is now
-        // 53%.
+        // alone with the colour thrown away. Overlap with smoke is 40%.
+        // (This comment said 53% and the raster said 46%; the number was
+        // measured before the smoke's last retune and never re-read.
+        // `no_two_pocket_glyphs_are_the_same_picture` prints the real
+        // one on failure, which is the only copy worth trusting.)
         //
         // The core carries the accent because a flashbang IS the light -
         // and it is one highlight, which is the table's standing rule.
@@ -421,25 +461,45 @@ fn small_icon_parts(item: Item) -> Vec<IconPart> {
             part(9.0, 0.0, 4.0, 20.0, 0.5, Body),
             part(6.0, 5.0, 10.0, 10.0, 4.0, Accent),
         ],
-        // THE SPOOL: a rolled rim top and bottom with a narrow waist
-        // between them, and a nozzle above.
+        // THE PLUME. A small hard canister low and left, and a soft mass
+        // twice its size billowing up and to the right out of it.
         //
-        // Also an outline change rather than a marking. The old smoke
-        // was a plain 10x16 cylinder wearing two `Detail` bands, and a
-        // tone step inside an 8 px body does not survive this size - the
-        // bands are in the capture and they do not read. Wide-narrow-
-        // wide does read: it is a profile no other pocket item has
-        // (the molotov is narrow-then-wide, the frag is round, the
-        // shield tapers one way only).
-        // The rims are DIFFERENT widths, narrow shoulder over wide base.
-        // The first cut made them equal and the capture read as a
-        // dumbbell — a symmetric object has no up, and a canister is a
-        // thing that stands on something.
+        // §6 made this a SPOOL - wide rim, narrow waist, wide rim - and
+        // that was the right correction to the wrong problem. It bought
+        // distinctness, which is what §5 had measured and lost, and its
+        // own handback said so in as many words: "smoke reads as a
+        // canister rather than specifically smoke - the spool wins on
+        // distinctness, not on iconography". Every other glyph in this
+        // row names what its item DOES. The spool named a container.
+        //
+        // The tell is now the thing itself. Two overlapping round lobes,
+        // bigger than the object they come out of, offset up and to one
+        // side: that diagonal is the only one in the row, and the only
+        // soft mass in it - everything else here is a body with a mark
+        // on it. It also happens to fix the pair the spool was WORST
+        // against, because a centred vertical canister is what a molotov
+        // is too: smoke/molotov was the group's worst overlap at 0.60
+        // and is 0.29 now, and smoke/flash went 0.46 -> 0.40.
+        //
+        // NO ACCENT, for the shield's reason. The large glyph can afford
+        // a gold identification band because it has a 12 px body to put
+        // it on; at 22 px the same band is a 3 px stripe of the
+        // BRIGHTEST tone across a 6 px canister, and rendered, it turns
+        // the whole thing into a segmented pole and out-reads the plume.
+        // The one highlight is worth less than the silhouette.
+        //
+        // The body OVERLAPS the foot by a pixel rather than sitting on
+        // it. Authored flush at y=18 they photographed as two separate
+        // dark blocks with a hairline of background between them - the
+        // cell is scaled by `UiScale` (1.25 at a 1600 px window against
+        // the 720p type ramp), so two nodes that share an edge round to
+        // two different subpixels and the join opens up. A canister in
+        // two pieces is not a canister.
         Item::Throw(ThrowKind::Smoke) => vec![
-            part(5.5, 3.0, 11.0, 3.0, 1.0, Body),
-            part(7.5, 6.0, 7.0, 12.0, 1.0, Body),
-            part(4.0, 18.0, 14.0, 3.0, 1.0, Body),
-            part(9.0, 0.0, 4.0, 3.0, 1.0, Accent),
+            part(1.0, 18.0, 11.0, 4.0, 1.0, Detail),
+            part(3.0, 12.0, 7.0, 7.0, 1.0, Detail),
+            part(4.0, 6.0, 9.0, 7.0, 3.5, Body),
+            part(10.0, 2.0, 12.0, 9.0, 4.5, Body),
         ],
         // a squat bottle, a neck, and a rag alight on top
         Item::Throw(ThrowKind::Molotov) => vec![
@@ -1603,7 +1663,7 @@ mod tests {
     /// per claim is also one mutation per test, which is the only way to
     /// show each of these can fail.
     #[test]
-    fn the_flash_is_a_burst_and_the_smoke_is_a_spool() {
+    fn the_flash_is_a_burst_and_the_smoke_is_a_plume() {
         let b = ICON_SM_BOX;
         // FLASH: rays that reach the sides of the box in BOTH axes — the
         // only glyph in the row that does — and a core they radiate
@@ -1631,28 +1691,137 @@ mod tests {
             "the flash has no bright core for its rays to come out of"
         );
 
-        // SMOKE: a SPOOL. Wide rim, narrow waist, wide rim — read off
-        // the row profile, because that is the thing the eye has at this
-        // size. A plain cylinder (§5's version) has a flat profile and
-        // is a molotov with the flame filed off.
+        // SMOKE: a PLUME coming off a canister. Three claims, and each
+        // one is the difference between this glyph and the spool §6
+        // drew, which was distinct from everything and looked like a
+        // cotton reel.
         let sm = small_icon_parts(Item::Throw(ThrowKind::Smoke));
-        let width_at = |ps: &Vec<IconPart>, y: f32| {
-            ps.iter()
-                .filter(|p| p.y <= y && p.y + p.h > y)
-                .map(|p| p.w)
-                .fold(0.0_f32, f32::max)
+        let area = |ps: &[IconPart]| ps.iter().map(|p| p.w * p.h).sum::<f32>();
+        let cx = |ps: &[IconPart]| {
+            let a = area(ps).max(1e-4);
+            ps.iter().map(|p| (p.x + p.w * 0.5) * p.w * p.h).sum::<f32>() / a
         };
-        let (top, waist, foot) = (width_at(&sm, 4.0), width_at(&sm, 12.0), width_at(&sm, 19.0));
+        let cy = |ps: &[IconPart]| {
+            let a = area(ps).max(1e-4);
+            ps.iter().map(|p| (p.y + p.h * 0.5) * p.w * p.h).sum::<f32>() / a
+        };
+        let plume: Vec<IconPart> = sm.iter().filter(|p| p.t == Tone::Body).copied().collect();
+        let can: Vec<IconPart> = sm.iter().filter(|p| p.t != Tone::Body).copied().collect();
         assert!(
-            top >= waist * 1.5 && foot >= waist * 1.5,
-            "the smoke is not a spool: rim {top:.0}, waist {waist:.0}, rim {foot:.0}"
+            !plume.is_empty() && !can.is_empty(),
+            "the smoke needs both a canister and something coming out of it"
         );
+        // 1. THE SMOKE IS THE SUBJECT. A canister with a wisp on it is a
+        //    canister; the plume has to out-mass the thing it came from,
+        //    or the eye reads the hard object and stops.
+        assert!(
+            area(&plume) >= 1.5 * area(&can),
+            "the plume is {:.0} px against a {:.0} px canister - the object \
+             is out-reading its own effect",
+            area(&plume),
+            area(&can)
+        );
+        // 2. IT RISES. Top-heavy, which is the exact inverse of the
+        //    molotov beside it - the pair that used to be this group's
+        //    worst overlap, because both were centred vertical vessels.
+        assert!(
+            cy(&plume) < cy(&can) - 4.0,
+            "the plume sits at y={:.1} and the canister at y={:.1}; smoke goes up",
+            cy(&plume),
+            cy(&can)
+        );
+        let mol = small_icon_parts(Item::Throw(ThrowKind::Molotov));
+        let mol_body: Vec<IconPart> = mol.iter().filter(|p| p.t == Tone::Body).copied().collect();
+        assert!(
+            cy(&mol_body) > cy(&plume),
+            "the molotov's mass is no longer below the smoke's, so the two \
+             bottom/top-heavy readings have collapsed into each other"
+        );
+        // 3. IT DRIFTS. The one diagonal composition in the row: the
+        //    plume leans off the canister rather than balancing on it,
+        //    which is what stops it reading as a tree.
+        assert!(
+            cx(&plume) >= cx(&can) + 3.0,
+            "the plume is centred over its canister ({:.1} vs {:.1}) - that is \
+             a mushroom, not smoke blowing off something",
+            cx(&plume),
+            cx(&can)
+        );
+        // ...and it is SOFT. Every lobe is round enough to be a puff,
+        // against a canister built from square corners. A tone step
+        // does not survive 22 px but a corner radius does.
+        for p in &plume {
+            assert!(
+                p.r >= 0.33 * p.w.min(p.h),
+                "a plume lobe {p:?} has hard corners; at this size a puff is \
+                 read entirely off its roundness"
+            );
+        }
+        for p in &can {
+            assert!(p.r <= 2.0, "the canister {p:?} is as round as the smoke");
+        }
         // and it must not out-grow the flash, or the burst stops being
         // the widest thing in the pocket group
+        let widest = sm.iter().map(|p| p.w).fold(0.0, f32::max);
         assert!(
-            ray_h.w > top * 1.4,
-            "the flash's rays no longer out-reach the smoke's rim"
+            ray_h.w > widest * 1.4,
+            "the flash's rays no longer out-reach the smoke ({:.0} vs {:.0})",
+            ray_h.w,
+            widest
         );
+    }
+
+    /// THE SELECTED CELL IS THE BIG ONE, AND IT WAS A WATER BOTTLE.
+    ///
+    /// `icon_art(_, false)` is what the active slot draws, at 34 px -
+    /// the largest icon in the strip and the one the eye actually lands
+    /// on. §5 and §6 both retuned the 22 px table and left this one
+    /// alone, so a player carrying smoke saw a plume in the pocket row
+    /// and an upright cylinder with a lid in their hand.
+    ///
+    /// Same claim as the small glyph, held against the large table, so
+    /// the two sizes cannot drift apart again.
+    #[test]
+    fn the_large_smoke_is_the_same_idea_as_the_small_one() {
+        let (big, box_px) = icon_art(Item::Throw(ThrowKind::Smoke), false);
+        assert_eq!(box_px, ICON, "the large glyph came from the wrong table");
+        let area = |ps: &[IconPart]| ps.iter().map(|p| p.w * p.h).sum::<f32>();
+        let plume: Vec<IconPart> = big.iter().filter(|p| p.t == Tone::Body).copied().collect();
+        let hard: Vec<IconPart> = big.iter().filter(|p| p.t != Tone::Body).copied().collect();
+        assert!(
+            area(&plume) >= 1.5 * area(&hard),
+            "the large smoke's plume does not out-mass its canister"
+        );
+        let mid = |ps: &[IconPart]| {
+            let a = area(ps).max(1e-4);
+            ps.iter().map(|p| (p.y + p.h * 0.5) * p.w * p.h).sum::<f32>() / a
+        };
+        assert!(
+            mid(&plume) < mid(&hard) - 6.0,
+            "the large smoke does not rise: plume {:.1}, canister {:.1}",
+            mid(&plume),
+            mid(&hard)
+        );
+        // the ONE highlight, and it is on the canister rather than in
+        // the plume - a bright patch inside the smoke would read as a
+        // hole in it
+        let acc: Vec<IconPart> = big.iter().filter(|p| p.t == Tone::Accent).copied().collect();
+        assert_eq!(acc.len(), 1, "the large smoke spends its accent once");
+        assert!(
+            acc[0].y + acc[0].h * 0.5 > mid(&plume),
+            "the accent is up in the plume, where it reads as a gap"
+        );
+        assert!(
+            acc[0].w * acc[0].h <= 0.25 * area(&plume),
+            "the accent band is big enough to be the subject"
+        );
+        // every part inside the box it is authored in
+        for p in &big {
+            assert!(
+                p.x >= 0.0 && p.y >= 0.0 && p.x + p.w <= ICON && p.y + p.h <= ICON,
+                "large smoke part {p:?} leaves its {ICON}px box"
+            );
+        }
     }
 
     /// SHIELD: it gets NARROWER on the way down, all the way to a POINT.
@@ -1745,8 +1914,11 @@ mod tests {
     /// the five POCKET items — the four throwables and the shield, which
     /// are the cells that sit side by side and are least alike in what
     /// they do. On §5's table the worst pair (flash, smoke) scores 0.87
-    /// and four more pairs are over this bound; on this one the worst
-    /// (smoke, molotov) is 0.60.
+    /// and four more pairs are over this bound; on §6's the worst
+    /// (smoke, molotov) was 0.60; on this one it is (frag, molotov) at
+    /// 0.59, and the smoke is no longer in the worst pair at all —
+    /// turning it from a vertical vessel into a plume moved it away from
+    /// the two vertical vessels it used to sit between.
     ///
     /// Deliberately NOT applied to the guns. A sniper is supposed to
     /// look like a rifle with a scope — the doc on `small_gun_parts`
@@ -1763,6 +1935,15 @@ mod tests {
             ("molotov", Item::Throw(ThrowKind::Molotov)),
             ("shield", Item::Shield),
         ];
+        /// And a tighter one for the SMOKE.
+        ///
+        /// §6 traded iconography for distinctness on this glyph and said
+        /// so; §7 bought the iconography back and the distinctness went
+        /// UP rather than down (worst pair 0.60 -> 0.44). That is a real
+        /// gain and it is the kind that gets quietly spent by the next
+        /// person trying to make a picture prettier, so it is pinned
+        /// where the trade would show.
+        const MAX_SMOKE_OVERLAP: f32 = 0.50;
         let mut worst = (0.0_f32, "", "");
         for (i, (an, a)) in pocket.iter().enumerate() {
             for (bn, c) in pocket.iter().skip(i + 1) {
@@ -1773,6 +1954,15 @@ mod tests {
                 let iou = inter / union;
                 if iou > worst.0 {
                     worst = (iou, an, bn);
+                }
+                if *an == "smoke" || *bn == "smoke" {
+                    assert!(
+                        iou <= MAX_SMOKE_OVERLAP,
+                        "{an}/{bn} are {:.0}% the same picture. The smoke is held \
+                         tighter than the rest of the row on purpose - it is the \
+                         glyph this group has already had to redraw twice.",
+                        iou * 100.0
+                    );
                 }
                 assert!(
                     iou <= MAX_OVERLAP,

@@ -127,6 +127,50 @@ pub const EDGE_MAX_SPREAD: f32 = 1.7;
 /// `lit_trim_never_burns_as_hard_as_a_gauge` is the test.
 const EDGE_LEVEL: f32 = 0.5;
 
+/// What a gauge with NOTHING TO SAY burns at.
+///
+/// `EDGE_LEVEL` put a seam below a readout and that was right, but it
+/// left the readouts themselves at the top of the range permanently -
+/// and a gauge is at the top of the range nearly all the time, because
+/// most of the time your hull is fine, your power is fine and your
+/// barrier is full. The barrier bar is the worst case: ten cells of the
+/// most saturated colour in the palette, in a row, along the bottom of
+/// the frame directly under the crosshair. Measured off
+/// `handback/brief-vii/cockpit/01-cockpit-level.png`, it was the single
+/// loudest thing in the cab.
+///
+/// So the level is now a FUNCTION OF THE ALARM (`gauge_level`): a calm
+/// gauge sits here, an alarming one climbs back to 1.0. That is not just
+/// a dimmer. Before this, a gauge at full and a gauge screaming were the
+/// same VALUE and differed only in hue - which is the exact failure
+/// `ALARM_TINT`'s own note records ("an alarm that reads as the amber
+/// one, but slightly more orange is not an alarm"), surviving in the one
+/// channel that note did not cover. An alarm now gains value as well as
+/// hue, and the quiet state pays for it.
+///
+/// Not lower, and the number is pinned from both sides:
+/// `lit_trim_never_burns_as_hard_as_a_gauge` demands the trim stay
+/// clearly under a CALM gauge (0.5 vs 0.75), and
+/// `a_calm_gauge_is_still_lit_instrumentation` demands a calm gauge stay
+/// clearly over the trim. A gauge dimmed into its own backing is not a
+/// quieter cockpit, it is a broken one.
+const GAUGE_CALM: f32 = 0.75;
+
+/// The most lit ink a gauge mounted on the CANOPY may cover, as a
+/// fraction of the screen.
+///
+/// Canopy-mounted only, and that asymmetry is the whole point. The
+/// instrument stack is outboard-left at |u| ~ 0.6-0.9, in peripheral
+/// vision, where a big readout costs nothing; the barrier bar is sunk
+/// into the console lip at the bottom CENTRE, which is where the eye
+/// already is because that is where the crosshair is. The same area of
+/// amber is not the same amount of loud in those two places.
+///
+/// `a_canopy_gauge_stays_out_of_the_sight_line` is the test, and it
+/// fails on the geometry this file shipped last pass: ten 0.050 x 0.060
+/// cells came to 0.43% of the screen against this 0.30% cap.
+pub const CANOPY_GAUGE_INK_MAX: f32 = 0.0030;
+
 /// THE INSTRUMENT STACK, front to back. Five layers, each one thin, and
 /// each one's NEAR face behind the next one's FAR face.
 ///
@@ -274,7 +318,13 @@ pub const HEAVY_SHELL: &[Panel] = &[
     // console's top face: at these v the lip's own top is only ~0.38 m
     // out, so a recess declared any deeper would be swallowed by the
     // console it is supposed to be cut into.
-    pn(0.02, 0.70, -0.98, -0.87, 0.380, 0.010, Role::Fascia),
+    //
+    // Tracks the bar. It was 0.02..0.70 x -0.98..-0.87 around a bar that
+    // filled it; the bar is a third of the height now, and a socket with
+    // 25 px of black margin round a 12 px readout reads as a slot with
+    // something missing from it rather than as an instrument. Snug: a
+    // couple of millimetres of surround on every side.
+    pn(0.03, 0.675, -0.958, -0.895, 0.380, 0.010, Role::Fascia),
     // --- lit edges: the amber lines that say the frame is powered -----
     // `EDGE_D` deep, not 0.02 - see its note. These four ring the whole
     // view, so any width they gain to parallax is multiplied by four.
@@ -376,6 +426,16 @@ pub struct Ladder {
     pub inst: bool,
 }
 
+/// How far the LIT face is inset inside its dark rung, per axis, as a
+/// fraction of the rung. The rung is the socket and the lit face is the
+/// bulb in it, so the bulb has to be visibly smaller than the hole.
+///
+/// Named rather than left as literals in the spawn because `ladder_ink`
+/// has to compute the same rectangle from a test, and two copies of an
+/// inset is exactly how a bound stops bounding what is drawn.
+const SEG_INSET_U: f32 = 0.10;
+const SEG_INSET_V: f32 = 0.14;
+
 impl Ladder {
     /// The screen rectangle the whole ladder occupies.
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
@@ -386,6 +446,21 @@ impl Ladder {
             self.v,
             self.v + self.dv * last + self.sv,
         )
+    }
+
+    /// The fraction of the SCREEN this ladder's lit faces cover with
+    /// every segment burning - the gauge's worst case, and the state
+    /// most of them are in most of the time.
+    ///
+    /// The u/v tables run -1..1 in both axes, so the screen is 2x2 = 4
+    /// units of area and a rectangle's share of it is `w * h / 4`. Only
+    /// the LIT faces count: the dark rungs behind them are near-black
+    /// and are what makes an empty cell read as a socket rather than a
+    /// hole, so they are not what anybody means by "too orange".
+    pub fn ink(&self) -> f32 {
+        let w = self.su * (1.0 - 2.0 * SEG_INSET_U);
+        let h = self.sv * (1.0 - 2.0 * SEG_INSET_V);
+        (w * h * self.n as f32 / 4.0).abs()
     }
 }
 
@@ -400,7 +475,18 @@ pub const HEAVY_LADDERS: &[Ladder] = &[
     // third-person frame with no console under it reads as debris. Its
     // pool is still on screen in both views - `shield_readout` carries
     // it on the right edge, which is where §18 put it.
-    Ladder { id: Gauge::Barrier, u: 0.05, v: -0.955, su: 0.050, sv: 0.060, du: 0.062, dv: 0.0, n: 10, inst: false },
+    //
+    // 0.042 x 0.038 CELLS, and they were 0.050 x 0.060. At the old size
+    // this was ten 32x19 px blocks of full-tint amber in a row 480 px
+    // long, directly under the crosshair, and the capture is not
+    // ambiguous about the result - it is a row of orange bricks and it
+    // is the first thing you see in the frame. A gauge that dominates
+    // the view is not more readable for it; a pilot reads a bar by HOW
+    // FAR ALONG IT the light stops, and that reading needs length, which
+    // this keeps in full, not height, which it does not. Same ten cells,
+    // same pitch, same position: a scale instead of a slab. See
+    // `CANOPY_GAUGE_INK_MAX`.
+    Ladder { id: Gauge::Barrier, u: 0.05, v: -0.945, su: 0.042, sv: 0.038, du: 0.062, dv: 0.0, n: 10, inst: false },
 ];
 
 /// The medic's dash: three short rows, read left to right. A different
@@ -525,6 +611,37 @@ pub fn panel_spread(p: &Panel) -> (f32, f32) {
 /// show.
 pub fn edge_color(tint: [f32; 3], stutter: f32) -> Color {
     srgb(tint, stutter * EDGE_LEVEL)
+}
+
+/// How hard a gauge burns, given how alarming it is. `GAUGE_CALM` when
+/// it has nothing to say, 1.0 when it is screaming.
+///
+/// Linear between the two on purpose: `gauge_alarm` already shapes the
+/// ramp per gauge (hull reads down, heat reads up), and putting a second
+/// curve on top of it would mean two places decide what "half alarming"
+/// looks like.
+pub fn gauge_level(alarm: f32) -> f32 {
+    let a = alarm.clamp(0.0, 1.0);
+    GAUGE_CALM + (1.0 - GAUGE_CALM) * a
+}
+
+/// THE colour of a gauge segment: the chassis tint, mixed toward
+/// `ALARM_TINT` by `alarm`, at `gauge_level(alarm)`, times `flicker`.
+///
+/// One function, called from both the spawn and `cockpit_sync`, for the
+/// reason `edge_color` gives above and one more: the alarm MIX used to
+/// live inline in the system, which meant the single most important
+/// colour decision in this module - what a gauge in trouble looks like -
+/// was unreachable from a test. It is three lines of arithmetic that
+/// nothing could call. Now `an_alarming_gauge_outburns_a_calm_one` can.
+pub fn gauge_color(tint: [f32; 3], alarm: f32, flicker: f32) -> Color {
+    let k = alarm.clamp(0.0, 1.0);
+    let mix = [
+        tint[0] * (1.0 - k) + ALARM_TINT[0] * k,
+        tint[1] * (1.0 - k) + ALARM_TINT[1] * k,
+        tint[2] * (1.0 - k) + ALARM_TINT[2] * k,
+    ];
+    srgb(mix, flicker * gauge_level(k))
 }
 
 /// `MAX_SHAKE_M` expressed in the screen fractions the tables use, at
@@ -933,8 +1050,18 @@ pub fn spawn_cockpit(
         let ladders = if heavy { HEAVY_LADDERS } else { MEDIC_LADDERS };
         for l in ladders {
             // one lit material per ladder, so a gauge can go to alarm
-            // colour without dragging the other three with it
-            let lit_mat = materials.add(lit(if heavy { heavy_amber } else { medic_cyan }, 1.0));
+            // colour without dragging the other three with it.
+            //
+            // Spawned through `gauge_color` at zero alarm rather than at
+            // a bare 1.0: the spawn value is the one a still capture
+            // photographs on frame 1 and the sync value is the one the
+            // game runs at, and a literal in each is how those two stop
+            // agreeing. Same reason `edge_color` exists.
+            let lit_mat = materials.add(StandardMaterial {
+                base_color: gauge_color(if heavy { heavy_amber } else { medic_cyan }, 0.0, 1.0),
+                unlit: true,
+                ..default()
+            });
             let mut segs = Vec::with_capacity(l.n as usize);
             for k in 0..l.n {
                 let (u0, v0) = (l.u + l.du * k as f32, l.v + l.dv * k as f32);
@@ -955,10 +1082,10 @@ pub fn spawn_cockpit(
                         Mesh3d(kit.cube.clone()),
                         MeshMaterial3d(lit_mat.clone()),
                         rect_transform(
-                            u0 + l.su * 0.10,
-                            u0 + l.su * 0.90,
-                            v0 + l.sv * 0.14,
-                            v0 + l.sv * 0.86,
+                            u0 + l.su * SEG_INSET_U,
+                            u0 + l.su * (1.0 - SEG_INSET_U),
+                            v0 + l.sv * SEG_INSET_V,
+                            v0 + l.sv * (1.0 - SEG_INSET_V),
                             Z_GAUGE,
                             Z_GAUGE_D,
                         ),
@@ -1267,13 +1394,7 @@ pub fn cockpit_sync(
             1.0
         };
         if let Some(m) = mats.get_mut(&g.lit) {
-            let k = alarm;
-            let mix = [
-                base[0] * (1.0 - k) + ALARM_TINT[0] * k,
-                base[1] * (1.0 - k) + ALARM_TINT[1] * k,
-                base[2] * (1.0 - k) + ALARM_TINT[2] * k,
-            ];
-            m.base_color = srgb(mix, stutter * pulse);
+            m.base_color = gauge_color(base, alarm, stutter * pulse);
         }
     }
 
@@ -1512,11 +1633,17 @@ mod tests {
     fn lit_trim_never_burns_as_hard_as_a_gauge() {
         for tint in [HEAVY_TINT, MEDIC_TINT] {
             let trim = edge_color(tint, 1.0).to_srgba();
-            let gauge = srgb(tint, 1.0).to_srgba();
+            // A CALM gauge, not a full-tint one. This test used to
+            // compare the trim against `srgb(tint, 1.0)`, which after
+            // `GAUGE_CALM` is a colour nothing on the panel ever burns:
+            // an ordering held against a hypothetical value is not an
+            // ordering. The claim is about the two things that are
+            // actually on the screen together.
+            let gauge = gauge_color(tint, 0.0, 1.0).to_srgba();
             let lum = |c: bevy::color::Srgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
             assert!(
                 lum(trim) <= 0.7 * lum(gauge),
-                "trim {:?} is not clearly below a full gauge {:?}",
+                "trim {:?} is not clearly below a calm gauge {:?}",
                 trim,
                 gauge
             );
@@ -1532,6 +1659,174 @@ mod tests {
         let dark = edge_color(HEAVY_TINT, 0.18).to_srgba();
         let bright = edge_color(HEAVY_TINT, 1.05).to_srgba();
         assert!(bright.red > dark.red * 3.0, "the hit flicker got flattened");
+    }
+
+    /// THE OTHER SIDE OF THE SAME NUMBER.
+    ///
+    /// `GAUGE_CALM` exists to stop the readouts being the loudest thing
+    /// in the cab, and the way to get that wrong is to keep going: a
+    /// gauge dimmed toward its own dark backing stops being a lit
+    /// instrument and starts being a sticker. So the calm level is
+    /// pinned from below as well - clearly over the trim it must
+    /// out-read, and far over the unlit rung it sits in.
+    #[test]
+    fn a_calm_gauge_is_still_lit_instrumentation() {
+        let lum = |c: bevy::color::Srgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        for tint in [HEAVY_TINT, MEDIC_TINT] {
+            let calm = gauge_color(tint, 0.0, 1.0).to_srgba();
+            let trim = edge_color(tint, 1.0).to_srgba();
+            let rung = srgb(tint, 0.085).to_srgba(); // the `seg_off` backing
+            assert!(
+                lum(calm) >= 1.35 * lum(trim),
+                "a calm gauge {calm:?} no longer out-reads the trim {trim:?} - \
+                 the readout has been dimmed into the seams"
+            );
+            assert!(
+                lum(calm) >= 5.0 * lum(rung),
+                "a calm gauge {calm:?} is barely brighter than the unlit rung \
+                 {rung:?} it sits in, so a lit cell no longer reads as lit"
+            );
+        }
+    }
+
+    /// AN ALARM GAINS VALUE, NOT JUST HUE.
+    ///
+    /// `ALARM_TINT`'s note records the first pass shipping an alarm that
+    /// read as "the amber one, but slightly more orange". It fixed the
+    /// hue and left the VALUE identical - full-tint either way - so on a
+    /// panel this small the only signal was the pulse. `gauge_level`
+    /// closes that: calm sits at `GAUGE_CALM`, alarming climbs to 1.0.
+    ///
+    /// Checked on the composed colour rather than on `gauge_level` alone,
+    /// because the mix and the level are applied together and it is the
+    /// product that reaches a pixel.
+    #[test]
+    fn an_alarming_gauge_outburns_a_calm_one() {
+        let lum = |c: bevy::color::Srgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        for tint in [HEAVY_TINT, MEDIC_TINT] {
+            let calm = gauge_color(tint, 0.0, 1.0).to_srgba();
+            let loud = gauge_color(tint, 1.0, 1.0).to_srgba();
+            // the RED channel is the alarm's own channel in both cabs -
+            // it is the one `ALARM_TINT` drives to 1.0 - so it must rise
+            // whichever tint it started from
+            assert!(
+                loud.red > calm.red + 0.15,
+                "{tint:?}: alarm {loud:?} is not visibly hotter than calm {calm:?}"
+            );
+            // and it must not merely be a different colour at the same
+            // brightness, which is the failure this test exists for
+            assert!(
+                loud.red / calm.red.max(1e-4) >= 1.2,
+                "{tint:?}: the alarm changed hue and kept the value"
+            );
+            // the calm end really is calm
+            assert!(
+                lum(calm) < lum(gauge_color(tint, 0.0, 1.0 / GAUGE_CALM).to_srgba()),
+                "GAUGE_CALM is not actually holding anything back"
+            );
+        }
+        // monotone the whole way, so a gauge sliding into trouble
+        // brightens continuously rather than stepping at a threshold
+        let mut prev = -1.0;
+        for i in 0..=20 {
+            let a = i as f32 / 20.0;
+            let v = gauge_level(a);
+            assert!(v > prev, "gauge_level is not monotone at alarm {a}");
+            prev = v;
+        }
+        assert!((gauge_level(1.0) - 1.0).abs() < 1e-6, "an alarm must reach full");
+        assert!((gauge_level(0.0) - GAUGE_CALM).abs() < 1e-6);
+        // clamped, because `gauge_alarm` is the only caller today and a
+        // future one might not clamp
+        assert!((gauge_level(4.0) - 1.0).abs() < 1e-6);
+        assert!((gauge_level(-1.0) - GAUGE_CALM).abs() < 1e-6);
+    }
+
+    /// THE BARRIER BAR IS IN THE SIGHT LINE AND THE STACK IS NOT.
+    ///
+    /// Position is half of how loud a thing is, and this table is the
+    /// only place that fact can be checked. A gauge in the CANOPY group
+    /// is by construction structure-mounted - the barrier bar is sunk
+    /// into the console lip directly below the crosshair - while the
+    /// instrument gauges are outboard on their own fascia in peripheral
+    /// vision. So the cap applies to the first and not the second.
+    ///
+    /// Fails on last pass's table: 10 cells of 0.050 x 0.060 inset to
+    /// 0.040 x 0.0432 is 0.432% of the screen against a 0.300% cap.
+    #[test]
+    fn a_canopy_gauge_stays_out_of_the_sight_line() {
+        for (name, ls) in [("heavy", HEAVY_LADDERS), ("medic", MEDIC_LADDERS)] {
+            for l in ls.iter().filter(|l| !l.inst) {
+                assert!(
+                    l.ink() <= CANOPY_GAUGE_INK_MAX,
+                    "{name}: the {:?} gauge is mounted on the canopy, in the \
+                     pilot's sight line, and covers {:.3}% of the screen in lit \
+                     tint against a {:.3}% cap",
+                    l.id,
+                    l.ink() * 100.0,
+                    CANOPY_GAUGE_INK_MAX * 100.0
+                );
+                // ...and it is still a gauge you can read across the
+                // room. The cap must be paid for in HEIGHT, not in
+                // length: a bar is read by how far along it the light
+                // stops, so shortening it would be spending the one
+                // dimension that carries the number.
+                let (u0, u1, ..) = l.bounds();
+                assert!(
+                    (u1 - u0).abs() >= 0.55,
+                    "{name}: the {:?} bar is only {:.2} of the screen long - a \
+                     segmented bar shortened is a bar you cannot read",
+                    l.id,
+                    (u1 - u0).abs()
+                );
+                assert!(
+                    l.n >= 8,
+                    "{name}: {:?} is down to {} cells; a bar with too few \
+                     stops cannot show you where the level is",
+                    l.id,
+                    l.n
+                );
+            }
+        }
+        // the exemption is real and deliberate: the outboard stack is
+        // allowed to be bigger than this, and if it ever came in under
+        // the cap the asymmetry above would be testing nothing
+        let stack: f32 = HEAVY_LADDERS.iter().filter(|l| l.inst).map(|l| l.ink()).sum();
+        assert!(
+            stack > CANOPY_GAUGE_INK_MAX,
+            "the instrument stack is now under the canopy cap, so this test \
+             no longer distinguishes the two mountings"
+        );
+    }
+
+    /// `ink` has to agree with the rectangle the spawner actually draws,
+    /// or the cap above is bounding a number nobody renders.
+    ///
+    /// Recomputed here from the ladder's own fields the long way round -
+    /// per segment, from the same `SEG_INSET_*` the spawn uses - so the
+    /// two disagree if anybody changes the inset in one place.
+    #[test]
+    fn ladder_ink_measures_what_the_spawner_draws() {
+        for l in HEAVY_LADDERS.iter().chain(MEDIC_LADDERS) {
+            let mut area = 0.0;
+            for k in 0..l.n {
+                let (u0, v0) = (l.u + l.du * k as f32, l.v + l.dv * k as f32);
+                let (a, b) = (u0 + l.su * SEG_INSET_U, u0 + l.su * (1.0 - SEG_INSET_U));
+                let (c, d) = (v0 + l.sv * SEG_INSET_V, v0 + l.sv * (1.0 - SEG_INSET_V));
+                area += (b - a).abs() * (d - c).abs();
+            }
+            assert!(
+                (l.ink() - area / 4.0).abs() < 1e-6,
+                "{:?}: ink() says {:.5}, the drawn faces come to {:.5}",
+                l.id,
+                l.ink(),
+                area / 4.0
+            );
+        }
+        // and the inset is a real inset - a lit face that filled its
+        // rung would leave no socket round it
+        assert!(SEG_INSET_U > 0.0 && SEG_INSET_V > 0.0);
+        assert!(SEG_INSET_U < 0.5 && SEG_INSET_V < 0.5);
     }
 
     /// A box declared at its FAR face and extruded toward the camera has
