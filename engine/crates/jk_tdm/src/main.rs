@@ -42,6 +42,12 @@ mod agile_mech;
 /// The CASTLE BAILEY capture tour. Its own module for the reason
 /// `branding` is: a beat table is bulk, and this file is contended.
 mod bailey_capture;
+/// §owner WEAPON-SPECIFIC AIMING, bow section: the 1.3x pre-aim zoom,
+/// the circular reticle and the landing ring. Its own module for the
+/// reason `branding` is - it wires in with this line and one
+/// `add_plugins` below, plus three PURE QUESTIONS asked at existing
+/// call sites rather than new logic grown inside this file.
+mod bow_aim;
 mod branding;
 /// §20 THE MECH COCKPIT - the first-person shell, its instruments and
 /// its vibration. Its own module for the reason `branding` is: it wires
@@ -6848,6 +6854,73 @@ const BOW_DRAW_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(3.1) },
 ];
 
+/// §owner WEAPON-SPECIFIC AIMING, bow section: the PRE-AIM script.
+///
+/// ## Why a fourth bow script exists
+///
+/// The instrument gap, again, and it is the same shape as the one that
+/// let the first-person bow go unposed for months. Read
+/// `BOW_DRAW_FP_BEATS` above: it presses V, Digit3 and LMB, and it never
+/// presses RIGHT MOUSE. RMB is PRE-AIM. So every bow frame this project
+/// has ever taken - third person or first - was of a HIP bow, and the
+/// entire pre-aim layer (the arc preview, the aim cone, the zoom, the
+/// reticle, the landing ring) has never appeared in a single capture.
+///
+/// That is not a small omission: `arc_preview`'s first line is
+/// `cam_ctl.ads && ...`, so the arc has been unphotographable since it
+/// was written. A feature nothing can see is a feature nobody checks,
+/// which is how the arc came to be documented by three separate
+/// paragraphs of hard-won comment and zero images.
+///
+/// ## What each frame is FOR
+///
+/// The four claims of the bow section, one frame each, and every one of
+/// them is a comparison rather than a single picture - a lone screenshot
+/// cannot show that something CHANGED:
+///
+/// - `01` vs `02`: the crosshair swap. 01 is the hip bow and must show
+///   the normal game crosshair; 02 is pre-aim and must show the small
+///   red CIRCLE instead, plus the 1.3x pull. Frame the two against the
+///   same scene so the zoom is legible as a change of scale.
+/// - `03` vs `04`: the draw. Both are pre-aim; 03 is ~0.2 s in
+///   (`bow_power_fraction` near its floor, 19.25 m/s) and 04 is past
+///   `BOW_DRAW_FULL_S` at 55 m/s. The arc in 04 must be VISIBLY LONGER.
+///   This is the one thing the draw mechanic exists to teach.
+/// - `04` again: the LANDING RING. A level shot from a 1.6 m eye at full
+///   draw falls to the ground about 30 m out, roughly 3 deg below the
+///   aim line - comfortably past `LANDING_SEP_RAD` - so the thin red
+///   ring should be lying on the ground ahead, well clear of the centre
+///   pixel, with the dot trail stopping short of it.
+/// - `05`: back at the hip after release, the normal crosshair returns.
+///
+/// The camera is left LEVEL on purpose. Pitching down would aim at
+/// nearby ground, where the impact sits almost on the aim line and
+/// `landing_ring_visible` correctly SUPPRESSES the ring - a true
+/// behaviour, but not the one this script is here to photograph.
+const BOW_AIM_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.9) },
+    // HIP: the normal crosshair, no arc, no zoom. The BEFORE frame.
+    CapBeat { snap: Some("01-hip-normal-crosshair"), ..beat(1.4) },
+    // PRE-AIM, undrawn. `ADS_TIME_S` is 0.12, so 0.5 s of settle is
+    // several transitions' worth - the FOV and the reticle fade are
+    // both fully arrived by the snap and neither is caught mid-ease.
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.5) },
+    CapBeat { snap: Some("02-preaim-circle-reticle-and-zoom"), ..beat(2.0) },
+    // DRAW begins. ~0.2 s in: the short, low-power arc.
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.1) },
+    CapBeat { snap: Some("03-preaim-quarter-draw-short-arc"), ..beat(2.3) },
+    // past BOW_DRAW_FULL_S (0.7 s): full power, long arc, landing ring
+    CapBeat { snap: Some("04-preaim-full-draw-long-arc-ring"), ..beat(3.0) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(3.1) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(3.2) },
+    // back at the hip: the normal crosshair returns, the circle is gone
+    CapBeat { snap: Some("05-hip-crosshair-returns"), ..beat(3.8) },
+    CapBeat { end: true, ..beat(4.2) },
+];
+
 /// The four surfaces that shipped with NO capture coverage, which is
 /// exactly why each one broke in a way only a player could see: the
 /// first-person hull mounts (the pilot used to hold his stowed rifle),
@@ -7523,6 +7596,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         hand_capture::SCRIPT_FP => hand_capture::FP_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
+        "bow_aim" => BOW_AIM_BEATS,
         "spear_fp" => SPEAR_FP_BEATS,
         "spear_wind" => SPEAR_WIND_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
@@ -7581,7 +7655,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 49] = [
+const CAPTURE_SCRIPTS: [&str; 50] = [
     // THE EDGE LOADOUT CARD. Its own beats, because no script here
     // could photograph a HUD element that is only up for 1.75 s after
     // a keypress - see loadout_edge::capture.
@@ -7635,6 +7709,9 @@ const CAPTURE_SCRIPTS: [&str; 49] = [
     "idle_life",
     "bow_draw",
     "bow_draw_fp",
+    // The only script that has ever pressed RMB with a bow in hand -
+    // see BOW_AIM_BEATS for why that mattered.
+    "bow_aim",
     // §owner BOW & SPEAR: the two views nothing had ever taken - the
     // javelin in first person, and the overhead wind from the side.
     "spear_fp",
@@ -7794,9 +7871,12 @@ fn capture_quick_deploy(
         // (spear_throw / bow_pierce arms lived here with no beat table
         // behind them, so naming either just hung the process. Validated
         // against CAPTURE_SCRIPTS at startup now.)
-        // both bow scripts press Digit3, so slot 3 has to actually hold a
+        // all three bow scripts press Digit3, so slot 3 has to actually hold
+        // a
         // bow or they capture whatever the default special happens to be
-        Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
+        Some("bow_draw") | Some("bow_draw_fp") | Some("bow_aim") => {
+            sel.loadout[2] = GunKind::Bow
+        }
         // §owner HAND GRAPHICS: the first-person hand script carries a
         // rifle in the primary and a bow in slot 3, because they are the
         // two hand SHAPES - a closed grip and an open one - and it
@@ -9212,6 +9292,7 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
+        .add_plugins(bow_aim::BowAimPlugin)
         // §owner FRONT END: the title / learn / main-menu / result
         // screens. Two lines, exactly like `branding` above.
         .add_plugins(frontend::FrontendPlugin)
@@ -18493,9 +18574,16 @@ fn setup(
                 .id(),
         );
     }
+    // §owner WEAPON-SPECIFIC AIMING §12/§15/§17: the landing marker.
+    // This WAS a filled `Cylinder::new(0.45, 0.03)` - a 0.9 m disc, a
+    // solid plate on the ground. The spec asks for a "small thin ring
+    // laid on the surface", so it is a torus: 0.56 m across the outer
+    // edge with a 0.04 m section, which reads as a drawn circle rather
+    // than a graphic. `bow_aim::landing_ring_rot` lays it against the
+    // normal `predict_arc` already returns.
     let ring = commands
         .spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.45, 0.03))),
+            Mesh3d(meshes.add(Torus::new(0.24, 0.28))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgba(1.0, 0.2, 0.15, 0.55),
                 emissive: LinearRgba::new(2.2, 0.3, 0.2, 1.0),
@@ -22850,11 +22938,28 @@ fn camera_system(
             if gun(p.gun).scoped && cam_ctl.zoom_stage == 2 {
                 10.0
             } else if gun(p.gun).projectile.is_some() {
-                // §owner: drawing a bow or cocking a spear TIGHTENS THE
-                // AIM - it does not zoom the world. The zoom was hiding
-                // the arc and making the draw feel like a scope instead
-                // of a weapon coming up to full power.
-                settings.fov_deg()
+                // §owner (SUPERSEDED, kept because it is still right
+                // about what it saw): "drawing a bow or cocking a spear
+                // TIGHTENS THE AIM - it does not zoom the world. The
+                // zoom was hiding the arc and making the draw feel like
+                // a scope instead of a weapon coming up to full power."
+                //
+                // That removed the gun's OWN `zoom_deg`, which for the
+                // bow is 58 deg against a 90 deg hip - a 1.63x pull
+                // narrowing the frustum by 32 degrees, enough to walk
+                // the low half of a lobbed arc off the bottom of the
+                // screen. The complaint was that THAT zoom cropped the
+                // arc, not that any zoom is wrong.
+                //
+                // The weapon-specific aiming spec asks for 1.3x (§5/§14)
+                // and in the same breath requires (§15) that the zoom
+                // make the trajectory EASIER to read, never crop it -
+                // the same requirement from two sides. So this is a
+                // gentler pull, not a second removal: 15 degrees, less
+                // than half of what was reverted. `bow_aim` owns the
+                // arithmetic and the reasoning; the SPEAR is still at
+                // hip here because this pass is the bow section only.
+                bow_aim::preaim_fov_deg(settings.fov_deg(), p.gun)
             } else {
                 gun(p.gun).zoom_deg
             }
@@ -24013,8 +24118,9 @@ fn arc_preview(
     let dn_dir = perturb_v(d, -spread);
     place_arc(&mut q, &arc.cone[..8], up_dir, 0.8);
     place_arc(&mut q, &arc.cone[8..], dn_dir, 0.8);
-    let _ = place_arc(&mut q, &arc.dots, d, 1.0);
-    // §owner THE CROSSHAIR IS SACRED - no landing marker, no range.
+    let (impact, normal, _range) = place_arc(&mut q, &arc.dots, d, 1.0);
+    // §owner THE CROSSHAIR IS SACRED - no range readout, and a landing
+    // marker ONLY when it is not sitting on the centre pixel.
     //
     // Two briefs forbid a landing marker for the bow and the spear in
     // bold, and until the input rework this code was reached only while
@@ -24034,8 +24140,43 @@ fn arc_preview(
     // the only double-entry check the missile integrator has. What goes
     // is the DRAWING.
     arc_state.range = None;
-    for e in [&arc.ring, &arc.drop_line] {
-        if let Ok((_, mut v)) = q.get_mut(*e) {
+    // The DROP-LINE stays gone unconditionally: it is a vertical bar
+    // under the marker whose only job was selling distance, and the
+    // metres readout it partnered went with `arc_state.range`.
+    if let Ok((_, mut v)) = q.get_mut(arc.drop_line) {
+        *v = Visibility::Hidden;
+    }
+
+    // §owner WEAPON-SPECIFIC AIMING §12/§15: the LANDING RING comes
+    // back for the bow - conditionally.
+    //
+    // The note above is right that a flat shot puts the impact point
+    // exactly on the crosshair, which made the old ring a second
+    // reticle. The spec is also right that the player must be able to
+    // see where the arrow lands. Those never apply to the SAME shot: a
+    // landing marker is only information when the arrow lands somewhere
+    // other than where you are pointing. `landing_ring_visible` is that
+    // gate, and its unit tests pin both halves.
+    //
+    // Note what did NOT change: `ARC_PREVIEW_SPAN` is still 0.62. The
+    // dots stay trimmed to their near span, so the ring closes the gap
+    // to the landing point instead of a trail of dots walking onto the
+    // centre pixel - which is the failure the trim was introduced to
+    // fix. Raising the span would have recreated it exactly.
+    //
+    // Bow only. The spear is a later section of the spec and inventing
+    // its behaviour here would be guessing.
+    let impact_v = Vec3::from_array(impact);
+    let ring_on = p.gun == GunKind::Bow
+        && bow_aim::landing_ring_visible(eye, d, impact_v, bow_aim::LANDING_SEP_RAD);
+    if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
+        if ring_on {
+            let n = Vec3::from_array(normal).normalize_or(Vec3::Y);
+            t.translation = impact_v + n * bow_aim::LANDING_LIFT_M;
+            t.rotation = bow_aim::landing_ring_rot(normal);
+            t.scale = Vec3::splat(bow_aim::landing_ring_scale((impact_v - eye).length()));
+            *v = Visibility::Visible;
+        } else {
             *v = Visibility::Hidden;
         }
     }
@@ -25520,8 +25661,16 @@ fn crosshair_render(
     // FOCUSED, hands the aiming job to its own dot. See
     // `optic_hides_crosshair` for why this is a separate rung of the
     // ladder from the no-scope hide above rather than an `||` onto it.
-    let optic_hidden =
-        optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech());
+    // §owner WEAPON-SPECIFIC AIMING §7: the BOW joins this rung. It has
+    // no optic (`sight_line_y(Bow)` is `None`) so it used to keep the
+    // green cross while pre-aiming; it now draws its own small red
+    // CIRCLE instead, which is the projectile weapon's aiming language.
+    // Same rung, not a new one: "this weapon draws its own mark, so do
+    // not stack the game crosshair under it". Hitmarkers still outrank
+    // both, which is the existing ladder and is correct - feedback beats
+    // aiming furniture.
+    let optic_hidden = optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech())
+        || bow_aim::bow_draws_own_reticle(p.gun, cam.ads, p.in_mech());
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
