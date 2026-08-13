@@ -80,6 +80,10 @@ mod hud;
 /// THE INVENTORY STRIP. Same two-line contract as `hud` and `branding`:
 /// this line, and one `add_plugins` below. Read-only on the sim.
 mod inventory_strip;
+/// THE EDGE LOADOUT CARD — the transient right-edge five-slot summary.
+/// Separate from `inventory_strip`, which owns the permanent bottom row;
+/// this one is hidden until the loadout changes. Same two-line contract.
+mod loadout_edge;
 mod mech_lineup;
 mod mech_recoil;
 mod menu_ui;
@@ -2010,13 +2014,37 @@ enum CrossFeedback {
     Idle,
 }
 
-/// The priority ladder, unchanged from the glyph version: hiding wins
-/// over everything (a no-scope must not leak an aim point through a
-/// hitmarker), then kill, then headshot, then hit, then blocked.
+/// The priority ladder: no-scope hiding wins over everything (a no-scope
+/// must not leak an aim point through a hitmarker), then kill, then
+/// headshot, then hit, then the OPTIC hide, then blocked.
+///
+/// §owner SIGHT PASS: "when you are aiming with the sight you don't need
+/// the actual original crosshair to appear, sight will have their own
+/// crosshair". `optic_hidden` is that rule, and the ADS captures are why
+/// it is worth having: the game crosshair draws a 12x12 px green cross
+/// at exact screen centre, and the optic's dot lands at exact screen
+/// centre too, so focusing an optic stacked the two marks one on top of
+/// the other in every single frame.
+///
+/// The two hides sit at DIFFERENT rungs on purpose, and the difference
+/// is the whole reason this is a fifth parameter rather than an `||`
+/// onto `noscope_hidden`:
+///
+///   - the no-scope hide is a TRADEOFF. It exists to deny information,
+///     so it has to beat the hitmarker too, or a lucky no-scope would
+///     paint an aim point for the next one.
+///   - the optic hide denies nothing - the player is looking at a
+///     reticle. It is only there to stop two marks drawing on one
+///     target. So it must NOT eat the kill pop, the headshot flash or
+///     the hitmarker: those are transient events, not an aiming mark,
+///     and they are the only hit feedback this HUD has. Swallowing them
+///     for 8 of the 12 weapons in the state players aim from would be a
+///     real regression smuggled in behind a cosmetic ask.
 fn crosshair_feedback(
     noscope_hidden: bool,
     fresh_kill: bool,
     fresh_hit_head: Option<bool>,
+    optic_hidden: bool,
     blocked: bool,
 ) -> CrossFeedback {
     if noscope_hidden {
@@ -2029,11 +2057,40 @@ fn crosshair_feedback(
         } else {
             CrossFeedback::Hit
         }
+    } else if optic_hidden {
+        CrossFeedback::Hidden
     } else if blocked {
         CrossFeedback::Blocked
     } else {
         CrossFeedback::Idle
     }
+}
+
+/// §owner SIGHT PASS (C): is the player looking THROUGH a sight that
+/// draws its own aiming mark?
+///
+/// The predicate is `sight_line_y(gun).is_some()`, and that is not a
+/// coincidence to be tidied away later - it is exactly the set of guns
+/// `push_red_dot` builds a tube for. `every_firearm_carries_an_aligned_optic`
+/// already pins the two lists to each other gun by gun, so asking "does
+/// this weapon declare a sight line" is the same question as "does this
+/// weapon have a reticle of its own", and it cannot drift.
+///
+/// The three exclusions each earn their place:
+///   - NOT in a mech. A pilot fires hull mounts, never the stowed
+///     rifle, so `sight_line_y` is reading a weapon that is not in play
+///     and the crosshair is the only mark the mech has.
+///   - NOT while hip-firing. The tube is on screen but the eye is not
+///     behind it; the dot is off in the corner with the gun.
+///   - NOT for a weapon with no optic. Fists, the bow, the spear and the
+///     scoped AWM all return `None`, and taking their crosshair away
+///     while they aim would leave them aiming at nothing at all. The
+///     AWM matters most here: it is the one weapon that is BOTH scoped
+///     and optic-less by this predicate, and its scope overlay draws
+///     the mark, so its long-standing "crosshair while zoomed, none
+///     while hip" behaviour comes through untouched.
+fn optic_hides_crosshair(has_optic: bool, ads: bool, in_mech: bool) -> bool {
+    has_optic && ads && !in_mech
 }
 
 /// The colour to paint the geometry. Only `Idle` uses the player's
@@ -3479,8 +3536,22 @@ fn vm_carry(wk: GunKind) -> VmCarry {
 /// front post pair, for guns that have one. Focus brings THIS line to
 /// the eye, so the drawn sights and the crosshair agree. `None` = no
 /// iron sights to align (fists, the scoped AWM whose viewmodel hides,
-/// the draw-pose bow and spear, the hip-fired minigun) - those keep the
-/// generic focus shift.
+/// and the draw-pose bow and spear) - those keep the generic focus
+/// shift.
+///
+/// (This list used to end "...and the hip-fired minigun", which the
+/// match two lines below has contradicted since the §owner MINIGUN pass
+/// gave it `Some(0.1120)` and a `push_red_dot` of its own. The doc was
+/// describing a weapon that had not been sightless for some time.)
+///
+/// §owner SIGHT PASS: `is_some()` here is now also the answer to "does
+/// this weapon draw its own aiming mark", which `optic_hides_crosshair`
+/// reads to take the game crosshair away while focused. The eight
+/// `Some` arms and the eight `push_red_dot` calls are the same eight
+/// guns, pinned together by
+/// `every_firearm_carries_an_aligned_optic` - so this function must
+/// stay the single list, and a ninth optic added without a sight line
+/// here would silently keep its crosshair.
 fn sight_line_y(wk: GunKind) -> Option<f32> {
     match wk {
         GunKind::Glock => Some(0.1075),
@@ -4934,7 +5005,27 @@ const OPTIC_DEPTH: f32 = 0.032;
 /// Side of the emissive dot. Small on purpose: the aiming mark must not
 /// cover the thing being aimed at, which is exactly how the old cross
 /// failed.
-const OPTIC_DOT_M: f32 = 0.0062;
+///
+/// §owner SIGHT PASS: "make sure red dot sight is much smaller". It was
+/// 0.0062, and the ADS captures say what that actually came to: 18 px
+/// across on the M4, 21 on the Deagle, 12 on the M249, in a clear window
+/// whose radius at the same distances is 63 / 76 / 43 px. That is a
+/// constant ~14% of the WINDOW DIAMETER on every gun - which is not a
+/// dot, it is a patch, and at 200 m it covers a whole torso.
+///
+/// The ratio is the thing to size against, not the metres: the dot and
+/// the aperture sit at nearly the same depth, so `OPTIC_DOT_M /
+/// (OPTIC_HALF * 2)` is very close to the fraction of the sight picture
+/// the mark eats, on all eight guns at once. 0.0030 puts it at 6.5%,
+/// slightly under half the old linear size and under a quarter of the
+/// old area, which measured 6-10 px across the arsenal - still several
+/// pixels wide at the smallest, so it survives being a dot rather than
+/// dissolving into one.
+///
+/// Readability is bought back in the MATERIAL instead (`optic_red`),
+/// which is the honest place for it: a smaller mark needs to be hotter,
+/// not fatter.
+const OPTIC_DOT_M: f32 = 0.0030;
 /// §owner OPTIC BODY: the turret caps and the mount foot.
 ///
 /// A windage cap on the side and an elevation cap on top are the two
@@ -9060,6 +9151,7 @@ fn main() {
         .add_plugins(muzzle_flash::MuzzleFlashPlugin)
         .add_plugins(hud::HudPlugin)
         .add_plugins(inventory_strip::InventoryStripPlugin)
+        .add_plugins(loadout_edge::LoadoutEdgePlugin)
         .add_plugins(threat_sensor::ThreatSensorPlugin)
         .init_resource::<IntroPage>()
         .init_resource::<IntroEntryPage>()
@@ -17540,9 +17632,34 @@ fn setup(
         mech_stencil: materials.add(metal(Color::srgb(0.68, 0.63, 0.55), 0.0, 0.8)),
         // unlit: an illuminated reticle does not take scene lighting, so
         // it stays legible against a dark wall and a bright skyline alike
+        //
+        // §9 DEAD CODE, not tuning. This carried
+        // `emissive: LinearRgba::new(6.0, 0.35, 0.20, 1.0)` next to
+        // `unlit: true`, and bevy_pbr 0.15's `pbr.wgsl` is explicit
+        // about what that means:
+        //
+        //     if (flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
+        //         out.color = apply_pbr_lighting(pbr_input);
+        //     } else {
+        //         out.color = pbr_input.material.base_color;
+        //     }
+        //
+        // An unlit fragment is base_color and NOTHING else - the
+        // emissive term is never read, and there is no Bloom in this
+        // app to have picked the 6.0 up downstream either. So the
+        // reticle has always rendered at plain `base_color`, and the
+        // BEFORE capture agrees: the dot sampled (215, 56, 42), well
+        // short of saturation. Six units of "hot" were doing nothing.
+        //
+        // The lever that does work is base_color itself, in LINEAR and
+        // above 1.0: the viewmodel camera is non-HDR, so tonemapping
+        // runs in-shader, and an over-range red lands near the top of
+        // the display range with a hotter core instead of clipping
+        // flat. That is what pays for the dot being less than half its
+        // old width (`OPTIC_DOT_M`) - a smaller mark has to be
+        // brighter or it stops being a mark.
         optic_red: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.14, 0.10),
-            emissive: LinearRgba::new(6.0, 0.35, 0.20, 1.0),
+            base_color: Color::LinearRgba(LinearRgba::new(4.0, 0.075, 0.045, 1.0)),
             unlit: true,
             ..default()
         }),
@@ -25293,10 +25410,17 @@ fn crosshair_render(
     // unscoped - the no-scope prayer is the tradeoff. A mech fires hull
     // mounts, never the stowed glass - the pilot keeps a crosshair.
     let noscope_hidden = gun(p.gun).scoped && !cam.ads && !p.in_mech();
+    // §owner SIGHT PASS (C): the inverse case - an optic-carrying gun,
+    // FOCUSED, hands the aiming job to its own dot. See
+    // `optic_hides_crosshair` for why this is a separate rung of the
+    // ladder from the no-scope hide above rather than an `||` onto it.
+    let optic_hidden =
+        optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech());
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
         fresh_hit_head,
+        optic_hidden,
         cam.blocked && p.alive(),
     );
     let fill = crosshair_color(fb, crosshair_rgb(&settings), settings.cross_alpha);
