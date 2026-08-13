@@ -1396,13 +1396,37 @@ pub mod capture {
         // men beside him has the clear shot, so the merged marker must
         // show HIS state, not the subject's.
         (13.0, Where::Open(AHEAD), Face::AtPlayer),
+        // --- SMOKE. One man, dead ahead, engaged, on an open line, and
+        // he stays exactly there for the rest of the run. Nothing about
+        // the SUBJECT changes across the three smoke frames — that is
+        // the whole point of them: the only variable is the cloud.
+        (14.6, Where::Open(AHEAD), Face::AtPlayerEngaged),
     ];
 
     const EXTRAS: &[(f32, Extra)] = &[
         (0.0, Extra::Parked),
         (11.4, Extra::Separated),
         (13.0, Extra::CoBearing),
+        (14.6, Extra::Parked),
     ];
+
+    /// When a real `SmokeVolume` sits on the line between the player and
+    /// the subject.
+    ///
+    /// This is the instrument for the `sight_clear` fix, and it needed
+    /// one: an empty ring photographs identically whether the cause is a
+    /// working smoke gate or a broken feature — a lesson this module
+    /// already paid for once (see `Where::Open`). What makes the frames
+    /// evidence is that the cloud is DRAWN. `main.rs` renders every
+    /// `sim.smokes` entry as a bloomed sphere, so frame 11 shows the grey
+    /// ball, no marker; frames 10 and 12 bracket it with the identical
+    /// scene and the clear-shot arc lit.
+    ///
+    /// The gaps are sized off this module's own constants rather than
+    /// guessed: a lost line takes `GRACE_S` + `FADE_OUT_S` (1.2 s) to go
+    /// fully dark, and a regained one takes up to a full stagger sweep
+    /// (0.4 s) plus `FADE_IN_S`. Every window here is more than double.
+    const SMOKE: &[(f32, bool)] = &[(0.0, false), (15.2, true), (17.8, false)];
 
     pub const BEATS: &[CapBeat] = &[
         CapBeat { look: Some((0.0, 0.0)), ..beat(0.2) },
@@ -1415,7 +1439,12 @@ pub mod capture {
         CapBeat { snap: Some("07-strafing-behind-post-grace-holds"), ..beat(10.6) },
         CapBeat { snap: Some("08-two-separated-two-markers"), ..beat(12.6) },
         CapBeat { snap: Some("09-co-bearing-one-merged-marker"), ..beat(14.2) },
-        CapBeat { end: true, ..beat(14.8) },
+        // The smoke triptych. Same man, same bearing, same engagement in
+        // all three; only the cloud moves.
+        CapBeat { snap: Some("10-clear-shot-before-the-smoke"), ..beat(15.0) },
+        CapBeat { snap: Some("11-smoke-on-the-line-ring-clears"), ..beat(17.4) },
+        CapBeat { snap: Some("12-smoke-gone-the-lock-returns"), ..beat(18.8) },
+        CapBeat { end: true, ..beat(19.4) },
     ];
 
     /// Which enemy the script drives, and where the player stands.
@@ -1666,6 +1695,38 @@ pub mod capture {
             Face::AtPlayerEngaged => player as i32,
             _ => -1,
         };
+
+        // ---- the SMOKE stage.
+        //
+        // The sim's own `SmokeVolume`, on the sim's own line, at half the
+        // distance so the sphere (2.6 m radius) is crossed through its
+        // middle. The sensor is never told any of this: it goes on asking
+        // `sight_clear` and simply gets a different answer, which is the
+        // only kind of staging that proves anything about a query.
+        //
+        // Cleared and re-pushed every frame, so the ttl never decays out
+        // of the render's bloom curve mid-window and no bot-thrown smoke
+        // can wander into a staged frame. Gated on this script like every
+        // other line in `drive`.
+        let mut smoke_on = SMOKE[0].1;
+        for e in SMOKE {
+            if st.t >= e.0 {
+                smoke_on = e.1;
+            }
+        }
+        s.smokes.clear();
+        if smoke_on {
+            s.smokes.push(sim::SmokeVolume {
+                pos: [
+                    (home[0] + pos[0]) * 0.5,
+                    home[1] + 1.2,
+                    (home[2] + pos[2]) * 0.5,
+                ],
+                // Well inside SMOKE_TTL_S so the client draws it fully
+                // bloomed rather than as the opening puff.
+                ttl: 10.0,
+            });
+        }
 
         // ---- §3: the other two bodies.
         let mut mode = EXTRAS[0].1;
@@ -2377,6 +2438,14 @@ mod tests {
                 }
             }
         }
+        // ...and it must actually BITE somewhere, or "never raises" is
+        // satisfied perfectly by a gate that does nothing at all - which
+        // is exactly what deleting the branch would leave behind.
+        assert!(
+            classify(true, true, 1.0, true, false).value()
+                < classify(true, true, 1.0, true, true).value(),
+            "the elevation gate never lowers anything"
+        );
         // it cannot resurrect a blocked line either
         assert_eq!(
             classify(true, false, 1.0, true, true),
