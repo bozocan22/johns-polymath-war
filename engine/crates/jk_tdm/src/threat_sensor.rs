@@ -15,19 +15,25 @@
 //! Nothing here is ever read by `sim.rs`, so real delta-time, per-client
 //! variation and frame-rate-dependent smoothing are all legitimate.
 //!
-//! ## The ray is the sim's ray
+//! ## The ray is the sim's ray, and it is the SIGHT ray
 //!
-//! `TdmSim::los_clear` is `pub(crate)` with a doc comment saying it was
-//! exposed precisely so `main.rs` could reuse the same query instead of
-//! writing a divergent one. This module uses it and writes no raycast of
-//! its own — a second cover test that disagreed with the first would put
-//! an indicator on a wall the bullets cannot cross.
+//! The sim publishes two 3D queries and they are not interchangeable.
+//! `los_clear` is walls-only — the DAMAGE path, because shrapnel crosses
+//! smoke unbothered. `sight_clear` is walls AND smoke — the VISION path,
+//! and it is what `nearest_visible_enemy` (the bot brain's own target
+//! selection) sees with. This module asks "can this enemy SEE me", so it
+//! asks `sight_clear`, and it writes no raycast of its own — a second
+//! cover test that disagreed with the first would put an indicator on a
+//! wall the bullets cannot cross.
 //!
-//! **Known gap, deliberately not closed here:** the sim's `sight_clear`
-//! (walls AND smoke — what a bot's target selection actually uses) is
-//! private, not `pub(crate)`. So a smoke grenade between you and an enemy
-//! blinds the BOT but does not clear this indicator. Exposing it is a
-//! one-word change in `sim.rs`, which is not this lane's file.
+//! That distinction used to be a live bug rather than a comment: the
+//! sensor called `los_clear`, so a smoke grenade blinded the BOT and left
+//! the threat ring lit, telling the player an enemy was aiming at him
+//! through smoke that enemy could not see through. `sight_clear` is
+//! `pub(crate)` now (sim lane) and the sensor consumes it, which is also
+//! why the smoke occlusion maths is NOT reproduced here: a client-side
+//! copy would drift the first time the 0.6 threshold or the smoke radius
+//! moved.
 //!
 //! ## The vertical axis does not exist on a `Fighter`
 //!
@@ -36,10 +42,19 @@
 //! the XZ offset to its target, and the vertical component of a bot's
 //! aim is synthesised inside `try_fire` from the target point, never
 //! stored. So the cone tests here are honestly HORIZONTAL — a bearing
-//! test in XZ. The vertical half of "can he see me" is carried by
-//! `los_clear`, which is a true 3D ray. This is stated rather than
-//! papered over: an enemy directly above you on a rampart, facing your
-//! bearing, reads as facing you, because in this data model he is.
+//! test in XZ. The vertical half of "can he see me" is carried by the
+//! sight ray, which is a true 3D test.
+//!
+//! Left at that, a yaw-only reading OVER-CLAIMS: an enemy standing on a
+//! rampart directly above you, facing your bearing, scores a perfect
+//! `cos` and reads as *aiming at you*, because in this data model he is.
+//! He cannot be given a pitch from here — that is `sim.rs`. So the top
+//! two rungs are gated on the ELEVATION between his eye and yours
+//! (`AIM_ELEV_HALF_ANGLE_DEG`); see that constant for what the gate
+//! approximates and what would replace it. Deliberately one-directional:
+//! it can only ever LOWER a reading, so the failure mode is a threat
+//! reported as `Tracking` instead of `Aiming` — never a warning tone for
+//! a man who could not shoot you.
 //!
 //! ## Architecture: detection never draws, drawing never raycasts
 //!
@@ -51,6 +66,7 @@
 //! interpolates, so the ring still moves smoothly at 144 Hz off a 10 Hz
 //! sensor.
 
+use bevy::audio::Volume;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -75,6 +91,46 @@ pub(crate) const VISION_HALF_ANGLE_DEG: f32 = 55.0;
 /// Half-angle of the tighter AIM cone. Inside it his weapon is actually
 /// pointed at you, not merely his body turned your way.
 pub(crate) const AIM_HALF_ANGLE_DEG: f32 = 12.0;
+
+/// THE VERTICAL BLIND SPOT, mitigated. How far off an enemy's own eye
+/// LEVEL you may be, in degrees, before the sensor stops believing that
+/// his stored yaw means his weapon is on you.
+///
+/// **Why it exists.** `Fighter` stores no pitch (see the module header).
+/// The cones are therefore a bearing test in XZ, and a bearing test says
+/// a man on a rampart four metres above you, facing your compass
+/// direction, is aiming at you. He may well be aiming at the horizon.
+///
+/// **What it approximates.** "Assume he is level, and ask how far off
+/// level I am." Within the band a yaw reading is decent evidence of aim;
+/// outside it, it is evidence of nothing but which way his body points,
+/// so the reading is capped at `Tracking` — he can still see you, the
+/// sensor simply stops claiming the gun is on you. 30 deg is generous on
+/// purpose: it must not fire on ordinary sloped ground, and the whole
+/// point of the gate is to stop a FALSE warning tone, so it earns its
+/// keep only in the flagrant cases.
+///
+/// **What would replace it.** A real `Fighter.pitch`: the gate becomes
+/// "is the required elevation inside `AIM_HALF_ANGLE_DEG` of his stored
+/// pitch", the vertical cone becomes as sharp as the horizontal one, and
+/// this constant and `AIM_ELEV_NEAR_M` both delete. Nothing here may add
+/// that field — it is sim state, it would feed replay, and this file is
+/// client-side-only by construction.
+pub(crate) const AIM_ELEV_HALF_ANGLE_DEG: f32 = 30.0;
+
+/// Contact range, metres. Inside this in BOTH the horizontal and the
+/// vertical, the elevation gate does not apply at all.
+///
+/// Two reasons, and they pull the same way. First, stance: the datum is
+/// eye-to-eye, so two standing fighters read 0 deg at any range, but a
+/// CROUCHED (1.15 m) or ROLLING (0.95 m) player sits 0.59 m / 0.79 m
+/// below a standing enemy's eye, and at a metre apart that alone is 30-40
+/// deg of elevation with nobody on a rampart. Second, honesty: a man this
+/// close is a threat whatever his pitch, and he can acquire the pitch
+/// faster than this sensor's own tick. Beyond the band the stance offsets
+/// are already inside the gate (0.79 m at 2 m is 21.6 deg), which
+/// `flat_ground_stances_never_trip_the_elevation_gate` pins.
+pub(crate) const AIM_ELEV_NEAR_M: f32 = 2.0;
 
 /// How often the detector re-evaluates, in seconds. Deliberately far
 /// slower than render.
@@ -187,6 +243,37 @@ pub(crate) const TALLY_OUTSET_PX: f32 = 10.0;
 /// Spacing between tally dots along the ring's tangent, UI px.
 pub(crate) const TALLY_SPACING_PX: f32 = 6.0;
 
+// --- §3C: the threat-lock cue ----------------------------------------
+//
+// `audio/threat_lock.wav` — two rising sine pips, 185 ms, generated at
+// gain 0.34 and the only electronic voice in the bank. It exists because
+// nothing already in the bank could be borrowed without lying: `click`
+// means "empty magazine", and every other sample is a gunshot, a hit or
+// a pickup.
+//
+// The rule the cue is written to is the owner's "do not be intrusive",
+// which for a sound means it must be RARE. Three things enforce that and
+// all three are needed: it fires on the ONSET of a clear shot and never
+// once per frame while one persists; a cooldown stops repeated onsets
+// machine-gunning it; and it is driven by one aggregate boolean over the
+// whole roster, so four men reaching a clear shot on the same frame are
+// one pip, not four.
+//
+// It is deliberately not directional. The codebase's audio helper is
+// non-spatial (`AudioPlayer` + `PlaybackSettings`, no emitter), so a
+// panned cue would be a fake. The compass ring carries the bearing; the
+// sound carries only "now".
+
+/// Playback volume for the cue. The sample is already quiet at source,
+/// so this sits with the UI sounds (`click` plays at 0.5) rather than
+/// with the gunfire.
+pub(crate) const LOCK_CUE_VOLUME: f32 = 0.5;
+
+/// Minimum seconds between two cues, however many onsets occur. Long
+/// enough that a firefight cannot turn it into a stutter, short enough
+/// that a genuinely new lock ten seconds later still announces itself.
+pub(crate) const LOCK_CUE_COOLDOWN_S: f32 = 3.0;
+
 // ---------------------------------------------------------------------
 // The state machine — pure, and therefore testable without a World.
 // ---------------------------------------------------------------------
@@ -233,16 +320,60 @@ pub(crate) fn aim_cos() -> f32 {
     AIM_HALF_ANGLE_DEG.to_radians().cos()
 }
 
+/// Elevation of `target` above `from`, in degrees. 0 is dead level,
+/// positive is above. Pure trigonometry on two world points.
+pub(crate) fn elevation_deg(from: [f32; 3], target: [f32; 3]) -> f32 {
+    let (dx, dz) = (target[0] - from[0], target[2] - from[2]);
+    let horiz = (dx * dx + dz * dz).sqrt();
+    if horiz < 1e-4 {
+        // straight up or straight down; call it the full quarter turn
+        // rather than dividing by zero
+        return if target[1] >= from[1] { 90.0 } else { -90.0 };
+    }
+    (target[1] - from[1]).atan2(horiz).to_degrees()
+}
+
+/// May a yaw-only reading be trusted to mean AIM, between these two
+/// points? See `AIM_ELEV_HALF_ANGLE_DEG`.
+///
+/// Both arguments are EYES, not eye-and-chest. That is the load-bearing
+/// choice: eye-to-eye is the level datum, so two standing fighters read
+/// exactly 0 deg at every range and the gate has no systematic bias to
+/// tune out. Measuring eye-to-CHEST would bake in a permanent -0.63 m
+/// offset that becomes tens of degrees at close range, and the gate would
+/// spend its life suppressing ordinary threats. The LOS ray still runs
+/// eye-to-chest — a threat model built on head visibility would clear the
+/// moment you crouched behind a crate.
+pub(crate) fn aim_elevation_plausible(from_eye: [f32; 3], target_eye: [f32; 3]) -> bool {
+    let (dx, dz) = (target_eye[0] - from_eye[0], target_eye[2] - from_eye[2]);
+    let horiz = (dx * dx + dz * dz).sqrt();
+    let vert = (target_eye[1] - from_eye[1]).abs();
+    if horiz <= AIM_ELEV_NEAR_M && vert <= AIM_ELEV_NEAR_M {
+        return true;
+    }
+    elevation_deg(from_eye, target_eye).abs() <= AIM_ELEV_HALF_ANGLE_DEG
+}
+
 /// THE classifier.
 ///
 /// * `in_range` — the squared-distance gate, already applied.
-/// * `los` — `TdmSim::los_clear` from his eye to your chest.
+/// * `los` — `TdmSim::sight_clear` from his eye to your chest: walls AND
+///   smoke, the same query the bot brain sees with.
 /// * `cos` — his facing (XZ, from `Fighter.yaw`) dotted with the
 ///   normalised XZ direction to you.
 /// * `engaging_me` — the sim's own `Fighter.engaging` names you. This is
 ///   READ from the sim, not re-derived: only the bot brain knows which
 ///   body it picked.
-pub(crate) fn classify(in_range: bool, los: bool, cos: f32, engaging_me: bool) -> ThreatState {
+/// * `elev_ok` — `aim_elevation_plausible`. It gates only the top two
+///   rungs, and only downward: a `Fighter` has no pitch, so `cos` alone
+///   cannot be allowed to claim AIM across a four-metre drop.
+pub(crate) fn classify(
+    in_range: bool,
+    los: bool,
+    cos: f32,
+    engaging_me: bool,
+    elev_ok: bool,
+) -> ThreatState {
     if !in_range || !los {
         return ThreatState::NotDetected;
     }
@@ -250,6 +381,11 @@ pub(crate) fn classify(in_range: bool, los: bool, cos: f32, engaging_me: bool) -
         // The line is open but he is looking somewhere else.
         ThreatState::Visible
     } else if cos < aim_cos() {
+        ThreatState::Tracking
+    } else if !elev_ok {
+        // Inside the aim cone in BEARING, but far off his eye level. On
+        // a yaw-only fighter that is not evidence of aim, so the rung
+        // stops here: visual contact, no arc, no tone.
         ThreatState::Tracking
     } else if engaging_me {
         ThreatState::ClearShot
@@ -327,6 +463,48 @@ pub(crate) fn eye_point(pos: [f32; 3], height: f32) -> [f32; 3] {
 /// behind a crate that still leaves your chest exposed.
 pub(crate) fn chest_point(pos: [f32; 3], height: f32) -> [f32; 3] {
     [pos[0], pos[1] + height * 0.55, pos[2]]
+}
+
+/// One enemy's rung, evaluated against the sim. READS ONLY: no field of
+/// `TdmSim` is written, no tick is stepped, nothing here can reach a hit
+/// position or a damage number.
+///
+/// Extracted out of `detect_threats` on purpose. Inside a Bevy system
+/// this arithmetic is unreachable from any test — the same shape that
+/// hid a 47 deg camera bug in this repo for months. Out here a test can
+/// build a two-fighter range, drop a smoke between them and ask the
+/// sensor what it believes, which is the only honest way to prove the
+/// smoke gate without photographing a grey screen.
+pub(crate) fn evaluate_threat(s: &sim::TdmSim, player: usize, i: usize) -> ThreatState {
+    let me = &s.fighters[player];
+    let f = &s.fighters[i];
+    if i == player || f.team == me.team || !f.alive() || !me.alive() {
+        return ThreatState::NotDetected;
+    }
+    let chest = chest_point(me.pos, me.height());
+    // 1. the cheap reject, BEFORE any ray
+    let (dx, dz) = (chest[0] - f.pos[0], chest[2] - f.pos[2]);
+    let d2 = dx * dx + dz * dz;
+    let in_range = d2 <= DETECT_RADIUS_M * DETECT_RADIUS_M;
+    if !in_range {
+        return ThreatState::NotDetected;
+    }
+    // 2. the sim's own SIGHT ray, from his eye to my chest — walls and
+    //    smoke, because the question is what he can see.
+    let his_eye = eye_point(f.pos, f.height());
+    let los = s.sight_clear(his_eye, chest);
+    // 3. the cones, in XZ off `Fighter.yaw` — see the module header on
+    //    why there is no pitch to use, and `AIM_ELEV_HALF_ANGLE_DEG` on
+    //    what stands in for one.
+    let fwd = Vec2::new(f.yaw.sin(), f.yaw.cos());
+    let to_me = Vec2::new(dx, dz);
+    let cos = if to_me.length_squared() < 1e-6 {
+        1.0
+    } else {
+        fwd.dot(to_me.normalize())
+    };
+    let elev_ok = aim_elevation_plausible(his_eye, eye_point(me.pos, me.height()));
+    classify(in_range, los, cos, f.engaging == player as i32, elev_ok)
 }
 
 /// How many of the `MAX_PIPS` are lit at a given threat value. One pip is
@@ -567,37 +745,16 @@ fn detect_threats(
             // One tick's worth of work, whatever the frame rate did —
             // never more than one slice per frame.
             sensor.accum = (sensor.accum - DETECT_INTERVAL_S).min(DETECT_INTERVAL_S);
-            let chest = chest_point(me.pos, me.height());
-            let my_team = me.team;
             let player = s.player;
             for _ in 0..STAGGER_PER_TICK.min(n) {
                 let i = sensor.cursor % n.max(1);
                 sensor.cursor = (sensor.cursor + 1) % n.max(1);
+                // Every rule about who counts, what ray, which cones and
+                // where the elevation gate bites lives in one testable
+                // function; this loop only owns the round-robin and the
+                // track's presence timers.
+                let st = evaluate_threat(s, player, i);
                 let f = &s.fighters[i];
-                if i == player || f.team == my_team || !f.alive() {
-                    sensor.tracks[i].state = ThreatState::NotDetected;
-                    continue;
-                }
-                // 1. the cheap reject, BEFORE any ray
-                let (dx, dz) = (chest[0] - f.pos[0], chest[2] - f.pos[2]);
-                let d2 = dx * dx + dz * dz;
-                let in_range = d2 <= DETECT_RADIUS_M * DETECT_RADIUS_M;
-                let st = if !in_range {
-                    ThreatState::NotDetected
-                } else {
-                    // 2. the sim's own ray, from HIS eye to my chest
-                    let los = s.los_clear(eye_point(f.pos, f.height()), chest);
-                    // 3. the cones, in XZ off `Fighter.yaw` — see the
-                    // module header on why there is no pitch to use.
-                    let fwd = Vec2::new(f.yaw.sin(), f.yaw.cos());
-                    let to_me = Vec2::new(dx, dz);
-                    let cos = if to_me.length_squared() < 1e-6 {
-                        1.0
-                    } else {
-                        fwd.dot(to_me.normalize())
-                    };
-                    classify(in_range, los, cos, f.engaging == player as i32)
-                };
                 let t = &mut sensor.tracks[i];
                 t.state = st;
                 if st.detected() {
@@ -645,6 +802,97 @@ fn detect_threats(
                 live.join(", ")
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// §3C — the threat-lock cue. Detection decides; this only announces.
+// ---------------------------------------------------------------------
+
+/// The cue's handle and its rate limiter.
+///
+/// The handle is loaded HERE, through `AssetServer`, rather than as a
+/// new field on `main.rs`'s `Sfx`. `main.rs` is the most contended file
+/// in the repo and this module's whole shape is "two lines of wiring
+/// there, everything else in here"; a `Sfx` field would have widened
+/// that to a struct, its literal and its loader.
+#[derive(Resource)]
+pub(crate) struct LockCue {
+    sound: Handle<AudioSource>,
+    /// Was ANYONE lined up last frame? This is the edge detector: the
+    /// cue fires on the transition into a clear shot and is silent for
+    /// however long one persists.
+    prev: bool,
+    /// Seconds left before another cue is allowed.
+    cooldown: f32,
+}
+
+fn load_lock_cue(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.insert_resource(LockCue {
+        sound: assets.load("audio/threat_lock.wav"),
+        prev: false,
+        cooldown: 0.0,
+    });
+}
+
+/// Is anyone lined up on the player RIGHT NOW?
+///
+/// `hold > 0.0` is what makes it *now*. A track keeps its last state
+/// while the grace runs and the marker fades out, which is correct for
+/// the RING — it goes on pointing at where he was, like the minimap's
+/// ghost dot. A sound has no fade: a pip fired off a memory would be a
+/// claim about the present that is not true.
+///
+/// It returns one boolean for the whole roster, and that is the "one cue,
+/// not one per enemy" rule made structural rather than remembered — this
+/// function cannot count, so nothing downstream can multiply.
+pub(crate) fn any_clear_shot(tracks: &[ThreatTrack]) -> bool {
+    tracks
+        .iter()
+        .any(|t| t.live && t.hold > 0.0 && t.state == ThreatState::ClearShot)
+}
+
+/// The rate limiter, pure. Returns `(fire this frame, new cooldown)`.
+///
+/// Two independent gates, and the test suite pins both separately
+/// because either one alone looks like it works: the EDGE (`!prev_clear`)
+/// stops a persisting lock retriggering at frame rate, and the COOLDOWN
+/// stops a man strafing in and out of a doorway turning genuine onsets
+/// into a stutter.
+pub(crate) fn cue_step(prev_clear: bool, any_clear: bool, cooldown: f32, dt: f32) -> (bool, f32) {
+    let cd = (cooldown - dt).max(0.0);
+    if any_clear && !prev_clear && cd <= 0.0 {
+        (true, LOCK_CUE_COOLDOWN_S)
+    } else {
+        (false, cd)
+    }
+}
+
+fn threat_lock_cue(
+    mut commands: Commands,
+    time: Res<Time>,
+    sensor: Res<ThreatSensor>,
+    mut cue: ResMut<LockCue>,
+    mut dbg: Local<Option<bool>>,
+) {
+    let any = any_clear_shot(&sensor.tracks);
+    let (fire, cd) = cue_step(cue.prev, any, cue.cooldown, time.delta_secs());
+    cue.cooldown = cd;
+    cue.prev = any;
+    if !fire {
+        return;
+    }
+    // The house pattern, matched rather than borrowed: `main.rs::play`
+    // spawns exactly this pair. Non-spatial, so the cue is deliberately
+    // undirectional — the ring carries the bearing.
+    commands.spawn((
+        AudioPlayer::new(cue.sound.clone()),
+        PlaybackSettings::DESPAWN.with_volume(Volume::new(LOCK_CUE_VOLUME)),
+    ));
+    if debug_on(&mut dbg) {
+        // A still cannot photograph a sound. This line and the tests are
+        // the instruments for this feature; there is no third one.
+        eprintln!("[threat] LOCK CUE fired at t={:.2}", time.elapsed_secs());
     }
 }
 
@@ -988,11 +1236,12 @@ impl Plugin for ThreatSensorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ThreatSensor>()
             .init_resource::<RingLayout>()
-            .add_systems(Startup, spawn_sensor)
+            .add_systems(Startup, (spawn_sensor, load_lock_cue))
             .add_systems(
                 Update,
                 (
                     detect_threats,
+                    threat_lock_cue,
                     resolve_ring,
                     paint_markers,
                     paint_arcs,
@@ -1511,27 +1760,30 @@ mod tests {
     fn a_blocked_line_is_never_a_threat_whatever_he_is_pointing_at() {
         // dead-on aim, engaging me, in range - but no line
         assert_eq!(
-            classify(true, false, 1.0, true),
+            classify(true, false, 1.0, true, true),
             ThreatState::NotDetected,
             "LOS is the gate; nothing above it may fire without it"
         );
         // and out of range is dead too, even with a clear line
-        assert_eq!(classify(false, true, 1.0, true), ThreatState::NotDetected);
+        assert_eq!(
+            classify(false, true, 1.0, true, true),
+            ThreatState::NotDetected
+        );
     }
 
     #[test]
     fn the_ladder_climbs_in_the_owners_order() {
         // looking away: line open, outside the vision cone
-        let away = classify(true, true, (110.0_f32).to_radians().cos(), false);
+        let away = classify(true, true, (110.0_f32).to_radians().cos(), false, true);
         assert_eq!(away, ThreatState::Visible);
         // inside vision, outside aim
-        let seen = classify(true, true, (30.0_f32).to_radians().cos(), false);
+        let seen = classify(true, true, (30.0_f32).to_radians().cos(), false, true);
         assert_eq!(seen, ThreatState::Tracking);
         // inside aim, not his chosen target
-        let aimed = classify(true, true, (4.0_f32).to_radians().cos(), false);
+        let aimed = classify(true, true, (4.0_f32).to_radians().cos(), false, true);
         assert_eq!(aimed, ThreatState::Aiming);
         // inside aim AND the sim says I am the target
-        let shot = classify(true, true, (4.0_f32).to_radians().cos(), true);
+        let shot = classify(true, true, (4.0_f32).to_radians().cos(), true, true);
         assert_eq!(shot, ThreatState::ClearShot);
         assert!(
             away.value() < seen.value() && seen.value() < aimed.value()
@@ -1552,12 +1804,13 @@ mod tests {
 
     #[test]
     fn the_cone_boundary_is_exactly_where_the_degree_constants_put_it() {
-        let just_in = classify(true, true, (VISION_HALF_ANGLE_DEG - 1.0).to_radians().cos(), false);
-        let just_out = classify(true, true, (VISION_HALF_ANGLE_DEG + 1.0).to_radians().cos(), false);
+        let deg = |d: f32, eng: bool| classify(true, true, d.to_radians().cos(), eng, true);
+        let just_in = deg(VISION_HALF_ANGLE_DEG - 1.0, false);
+        let just_out = deg(VISION_HALF_ANGLE_DEG + 1.0, false);
         assert_eq!(just_in, ThreatState::Tracking);
         assert_eq!(just_out, ThreatState::Visible);
-        let aim_in = classify(true, true, (AIM_HALF_ANGLE_DEG - 1.0).to_radians().cos(), false);
-        let aim_out = classify(true, true, (AIM_HALF_ANGLE_DEG + 1.0).to_radians().cos(), false);
+        let aim_in = deg(AIM_HALF_ANGLE_DEG - 1.0, false);
+        let aim_out = deg(AIM_HALF_ANGLE_DEG + 1.0, false);
         assert_eq!(aim_in, ThreatState::Aiming);
         assert_eq!(aim_out, ThreatState::Tracking);
         assert!(AIM_HALF_ANGLE_DEG < VISION_HALF_ANGLE_DEG, "aim must be the tighter cone");
@@ -1944,6 +2197,410 @@ mod tests {
         assert!(wants_arc(ThreatState::ClearShot) && !wants_arc(ThreatState::Aiming));
         assert!(ARC_SEGMENTS >= 8 && ARC_THICK_PX >= 4.0);
         assert!(ARC_ALPHA > ALPHA_MAX * (1.0 - PULSE_DEPTH), "the arc can be dimmer than a pip");
+    }
+
+    // -----------------------------------------------------------------
+    // The SIGHT query — walls AND smoke
+    // -----------------------------------------------------------------
+
+    /// A two-fighter shooting range with the cover stripped out, both
+    /// bodies pinned ten metres apart down the Z axis, the enemy facing
+    /// the player and engaging him.
+    ///
+    /// The recipe is `sim.rs`'s own test `range()`, which is private to
+    /// that file's test module — copied rather than called, because
+    /// nothing in this lane may edit `sim.rs` to publish it. Nothing here
+    /// steps the sim; the fixture is a pile of positions and the queries
+    /// under test are read-only.
+    fn staged_range() -> (sim::TdmSim, usize, usize) {
+        let mut s = sim::TdmSim::new(sim::MatchConfig {
+            seed: 0x5A1E,
+            per_team: 1,
+            mode: sim::Mode::Tdm,
+            map: sim::MapKind::Arena,
+            ..sim::MatchConfig::default()
+        });
+        s.cover.clear();
+        s.cover_kind.clear();
+        s.rebuild_grid();
+        let player = s.player;
+        let my_team = s.fighters[player].team;
+        let enemy = s
+            .fighters
+            .iter()
+            .position(|f| f.team != my_team)
+            .expect("a 1v1 range has an enemy");
+        s.fighters[player].pos = [0.0, 0.0, -5.0];
+        s.fighters[player].health = s.fighters[player].health.max(100.0);
+        s.fighters[enemy].pos = [0.0, 0.0, 5.0];
+        s.fighters[enemy].health = s.fighters[enemy].health.max(100.0);
+        // facing back down the axis at the player, and naming him
+        s.fighters[enemy].yaw = std::f32::consts::PI;
+        s.fighters[enemy].engaging = player as i32;
+        (s, player, enemy)
+    }
+
+    #[test]
+    fn a_smoke_that_blinds_the_bot_also_clears_the_threat_indicator() {
+        let (mut s, player, enemy) = staged_range();
+        assert_eq!(
+            evaluate_threat(&s, player, enemy),
+            ThreatState::ClearShot,
+            "the staged range is not staged: nothing to blind"
+        );
+        // the sim's own smoke, on the line between us
+        s.smokes.push(sim::SmokeVolume {
+            pos: [0.0, 1.2, 0.0],
+            ttl: 10.0,
+        });
+        assert_eq!(
+            evaluate_threat(&s, player, enemy),
+            ThreatState::NotDetected,
+            "a smoke grenade blinds the BOT but left the threat ring lit - \
+             the sensor is asking los_clear, not sight_clear"
+        );
+        // ...and it is the SMOKE doing it, not a wall. This is the whole
+        // assertion: walls-only LOS is still open, so a sensor built on
+        // `los_clear` would (and did) go on reporting a clear shot
+        // through smoke the enemy cannot see through.
+        let eye = eye_point(s.fighters[enemy].pos, s.fighters[enemy].height());
+        let chest = chest_point(s.fighters[player].pos, s.fighters[player].height());
+        assert!(
+            s.los_clear(eye, chest),
+            "the fixture blocked the line with geometry; this proves nothing about smoke"
+        );
+        assert!(!s.sight_clear(eye, chest), "the smoke is not on the line");
+    }
+
+    #[test]
+    fn the_smoke_lifts_when_the_smoke_does() {
+        // A cleared indicator that never comes back would be its own bug.
+        let (mut s, player, enemy) = staged_range();
+        s.smokes.push(sim::SmokeVolume {
+            pos: [0.0, 1.2, 0.0],
+            ttl: 10.0,
+        });
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::NotDetected);
+        s.smokes.clear();
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::ClearShot);
+    }
+
+    #[test]
+    fn a_smoke_well_off_the_line_blinds_nobody() {
+        // The sphere test is the sim's, but a client that passed the
+        // wrong two points would "work" on the test above and blind the
+        // player from anywhere. Pin that the geometry is real.
+        let (mut s, player, enemy) = staged_range();
+        s.smokes.push(sim::SmokeVolume {
+            pos: [18.0, 1.2, 0.0],
+            ttl: 10.0,
+        });
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::ClearShot);
+    }
+
+    #[test]
+    fn the_sensor_still_ignores_the_dead_the_friendly_and_the_distant() {
+        // The extraction of `evaluate_threat` out of the detection loop
+        // must not have dropped any of the gates that loop applied.
+        let (mut s, player, enemy) = staged_range();
+        assert_eq!(evaluate_threat(&s, player, player), ThreatState::NotDetected);
+        let mine = evaluate_threat(&s, player, enemy);
+        assert!(mine.detected());
+        s.fighters[enemy].health = 0.0;
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::NotDetected);
+        s.fighters[enemy].health = 100.0;
+        s.fighters[enemy].team = s.fighters[player].team;
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::NotDetected);
+        // and the range gate, off the same const the loop used
+        let (mut s, player, enemy) = staged_range();
+        s.fighters[enemy].pos = [0.0, 0.0, DETECT_RADIUS_M + 5.0];
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::NotDetected);
+    }
+
+    // -----------------------------------------------------------------
+    // The vertical blind spot
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn elevation_is_measured_the_way_a_gunner_would_call_it() {
+        assert!(elevation_deg([0.0, 0.0, 0.0], [10.0, 0.0, 0.0]).abs() < 1e-4);
+        let up = elevation_deg([0.0, 0.0, 0.0], [10.0, 10.0, 0.0]);
+        assert!((up - 45.0).abs() < 1e-3, "45 deg up read as {up}");
+        let down = elevation_deg([0.0, 0.0, 0.0], [0.0, -10.0, 10.0]);
+        assert!((down + 45.0).abs() < 1e-3, "45 deg down read as {down}");
+        // straight overhead has no horizontal to divide by
+        assert_eq!(elevation_deg([0.0, 0.0, 0.0], [0.0, 8.0, 0.0]), 90.0);
+        assert_eq!(elevation_deg([0.0, 0.0, 0.0], [0.0, -8.0, 0.0]), -90.0);
+    }
+
+    #[test]
+    fn a_man_on_a_rampart_cannot_reach_the_top_rungs_on_a_yaw_only_test() {
+        // The documented case: six metres up, eight metres out, facing
+        // the player's exact bearing. `cos` is 1.0 and he is engaging;
+        // without the gate that is a CLEAR SHOT and a warning tone.
+        let his_eye = eye_point([0.0, 6.0, 0.0], sim::BODY_HEIGHT);
+        let my_eye = eye_point([0.0, 0.0, 8.0], sim::BODY_HEIGHT);
+        assert!(
+            !aim_elevation_plausible(his_eye, my_eye),
+            "{} deg of elevation still counted as aim",
+            elevation_deg(his_eye, my_eye)
+        );
+        assert_eq!(
+            classify(true, true, 1.0, true, false),
+            ThreatState::Tracking,
+            "the elevation gate did not cap the rung"
+        );
+        // and it caps AIMING too, not just the clear shot
+        assert_eq!(classify(true, true, 1.0, false, false), ThreatState::Tracking);
+        // a pit works the same way: below is as unmeasurable as above
+        let deep = eye_point([0.0, -6.0, 0.0], sim::BODY_HEIGHT);
+        assert!(!aim_elevation_plausible(deep, my_eye));
+    }
+
+    #[test]
+    fn the_gate_only_ever_lowers_a_reading_and_never_touches_the_lower_rungs() {
+        // Under-reporting is the design; over-reporting is the bug. So
+        // for every input, gating OFF must never be stronger than gating
+        // ON — and the two rungs below aim must be identical either way,
+        // because they are claims about SEEING, not about aim.
+        for cos_deg in [0.0_f32, 5.0, 11.0, 13.0, 40.0, 54.0, 56.0, 120.0] {
+            for eng in [false, true] {
+                let c = cos_deg.to_radians().cos();
+                let open = classify(true, true, c, eng, true);
+                let gated = classify(true, true, c, eng, false);
+                assert!(
+                    gated.value() <= open.value(),
+                    "the elevation gate RAISED {cos_deg} deg from {open:?} to {gated:?}"
+                );
+                if open.value() <= ThreatState::Tracking.value() {
+                    assert_eq!(open, gated, "the gate moved a below-aim rung at {cos_deg} deg");
+                }
+            }
+        }
+        // it cannot resurrect a blocked line either
+        assert_eq!(
+            classify(true, false, 1.0, true, true),
+            ThreatState::NotDetected
+        );
+    }
+
+    #[test]
+    fn flat_ground_stances_never_trip_the_elevation_gate() {
+        // The gate's cost, bounded. Eye-to-eye is the level datum, so two
+        // standing men read 0 deg at any range; crouch and roll sit lower
+        // and are the only stances that can generate an angle on flat
+        // ground. Beyond the near band every one of them must still pass,
+        // or the gate would spend its life suppressing ordinary threats.
+        for h in [sim::BODY_HEIGHT, sim::CROUCH_HEIGHT, sim::ROLL_HEIGHT] {
+            for d in [AIM_ELEV_NEAR_M, 2.5, 4.0, 8.0, 20.0, DETECT_RADIUS_M] {
+                let his_eye = eye_point([0.0, 0.0, 0.0], sim::BODY_HEIGHT);
+                let my_eye = eye_point([0.0, 0.0, d], h);
+                assert!(
+                    aim_elevation_plausible(his_eye, my_eye),
+                    "a player at {h} m of stance, {d} m away on FLAT ground, \
+                     was gated at {} deg",
+                    elevation_deg(his_eye, my_eye)
+                );
+                // and the reverse: a crouching ENEMY looking up at me
+                assert!(aim_elevation_plausible(my_eye, his_eye));
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_at_contact_range_is_a_threat_whatever_the_stance_says() {
+        // Two bodies cannot be closer than their radii, and at that
+        // separation a rolling player is 40-plus degrees below a standing
+        // enemy's eye with nobody on a rampart. Without the near band the
+        // gate would mute the man with a barrel against your chest.
+        let touching = 2.0 * sim::BODY_RADIUS;
+        for h in [sim::BODY_HEIGHT, sim::CROUCH_HEIGHT, sim::ROLL_HEIGHT] {
+            let his_eye = eye_point([0.0, 0.0, 0.0], sim::BODY_HEIGHT);
+            let my_eye = eye_point([0.0, 0.0, touching], h);
+            assert!(
+                aim_elevation_plausible(his_eye, my_eye),
+                "a stance of {h} m at {touching} m was muted at {} deg",
+                elevation_deg(his_eye, my_eye)
+            );
+        }
+        // the near band is BOTH axes: a man one metre away and four
+        // metres up is not "point blank", he is on a wall.
+        let above = eye_point([0.0, 4.0, 0.0], sim::BODY_HEIGHT);
+        let me = eye_point([0.0, 0.0, 1.0], sim::BODY_HEIGHT);
+        assert!(
+            !aim_elevation_plausible(above, me),
+            "the near band rescued a man on a four-metre wall"
+        );
+    }
+
+    #[test]
+    fn the_elevation_gate_reaches_the_sensor_and_not_just_the_classifier() {
+        // Wiring, not arithmetic: the same staged enemy, moved onto a
+        // rampart. The bearing, the engagement and the open line are all
+        // unchanged, so anything but a drop in rung means `classify`'s
+        // new argument is being passed a constant.
+        let (mut s, player, enemy) = staged_range();
+        assert_eq!(evaluate_threat(&s, player, enemy), ThreatState::ClearShot);
+        s.fighters[enemy].pos = [0.0, 9.0, 2.0];
+        let to_me = (0.0_f32 - 0.0, -5.0_f32 - 2.0);
+        s.fighters[enemy].yaw = to_me.0.atan2(to_me.1);
+        assert_eq!(
+            evaluate_threat(&s, player, enemy),
+            ThreatState::Tracking,
+            "an enemy nine metres overhead still reads as a clear shot"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // §3C — the threat-lock cue
+    // -----------------------------------------------------------------
+
+    fn track(state: ThreatState, hold: f32) -> ThreatTrack {
+        ThreatTrack {
+            live: true,
+            state,
+            value: state.value(),
+            fade: 1.0,
+            hold,
+            pos: Vec3::ZERO,
+        }
+    }
+
+    /// Runs `n` frames at 60 Hz against a caller-supplied "is anyone
+    /// locked on right now" and counts the cues. Mirrors exactly what
+    /// `threat_lock_cue` does with the resource.
+    fn cue_run(n: usize, mut locked: impl FnMut(f32) -> bool) -> usize {
+        let dt = 1.0 / 60.0;
+        let (mut prev, mut cd, mut fired) = (false, 0.0_f32, 0usize);
+        for k in 0..n {
+            let any = locked(k as f32 * dt);
+            let (fire, next) = cue_step(prev, any, cd, dt);
+            cd = next;
+            prev = any;
+            if fire {
+                fired += 1;
+            }
+        }
+        fired
+    }
+
+    #[test]
+    fn the_cue_fires_on_the_onset_and_is_silent_while_the_lock_persists() {
+        // Two seconds of an unbroken clear shot: one pip, not 120.
+        assert_eq!(cue_run(120, |_| true), 1);
+        // and never at all if nobody is ever locked on
+        assert_eq!(cue_run(120, |_| false), 0);
+    }
+
+    #[test]
+    fn the_cooldown_stops_repeated_onsets_machine_gunning_the_cue() {
+        // The nasty case: a man strafing a doorway at 5 Hz. Every entry
+        // is a genuine onset, so the edge detector alone would fire ten
+        // times a second. Ten seconds of it.
+        let fired = cue_run(600, |t| ((t * 5.0) as i32) % 2 == 0);
+        let ceiling = (10.0 / LOCK_CUE_COOLDOWN_S).ceil() as usize + 1;
+        assert!(
+            fired <= ceiling,
+            "{fired} cues in ten seconds; the cooldown allows at most {ceiling}"
+        );
+        assert!(fired >= 1, "the cooldown silenced the cue entirely");
+        // and it really was a stream of onsets - without the limiter this
+        // is what the same input produces
+        let unlimited = {
+            let dt = 1.0 / 60.0;
+            let (mut prev, mut n) = (false, 0usize);
+            for k in 0..600 {
+                let any = ((k as f32 * dt * 5.0) as i32) % 2 == 0;
+                if any && !prev {
+                    n += 1;
+                }
+                prev = any;
+            }
+            n
+        };
+        assert!(
+            unlimited > ceiling * 2,
+            "the fixture produced only {unlimited} onsets; it proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_cue_can_fire_again_once_the_cooldown_has_run_out() {
+        // A limiter that latches would be as wrong as no limiter.
+        let long = LOCK_CUE_COOLDOWN_S + 1.0;
+        let fired = cue_run((long * 2.0 * 60.0) as usize, |t| {
+            // locked, then clear, then locked again well after the cooldown
+            t < 0.5 || t > long
+        });
+        assert_eq!(fired, 2, "a second lock a full cooldown later went unannounced");
+    }
+
+    #[test]
+    fn several_threats_reaching_a_clear_shot_at_once_are_one_cue() {
+        // Four men lining up over four frames: four onsets by any
+        // per-enemy reading, one by the aggregate.
+        let mut tracks = [ThreatTrack::default(); MAX_TRACKS];
+        let dt = 1.0 / 60.0;
+        let (mut prev, mut cd, mut fired) = (false, 0.0_f32, 0usize);
+        for k in 0..240 {
+            if k < 4 {
+                tracks[k] = track(ThreatState::ClearShot, GRACE_S);
+            }
+            let any = any_clear_shot(&tracks);
+            let (fire, next) = cue_step(prev, any, cd, dt);
+            cd = next;
+            prev = any;
+            if fire {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 1, "{fired} cues for four simultaneous threats");
+    }
+
+    #[test]
+    fn only_a_present_clear_shot_speaks() {
+        let mut tracks = [ThreatTrack::default(); MAX_TRACKS];
+        assert!(!any_clear_shot(&tracks), "an empty roster fired the cue");
+        // nothing below a clear shot is worth a sound
+        for st in [
+            ThreatState::Visible,
+            ThreatState::Tracking,
+            ThreatState::Aiming,
+        ] {
+            tracks[0] = track(st, GRACE_S);
+            assert!(!any_clear_shot(&tracks), "{st:?} fired the threat-lock cue");
+        }
+        tracks[0] = track(ThreatState::ClearShot, GRACE_S);
+        assert!(any_clear_shot(&tracks));
+        // a MEMORY of a clear shot - grace spent, marker still fading -
+        // keeps the ring pointing but must not speak. The ring may say
+        // "he was there"; a sound can only say "now".
+        tracks[0] = track(ThreatState::ClearShot, 0.0);
+        assert!(
+            !any_clear_shot(&tracks),
+            "the cue fired for a track whose grace had already run out"
+        );
+        // and a dead slot is silent whatever it still holds
+        tracks[0] = ThreatTrack {
+            live: false,
+            ..track(ThreatState::ClearShot, GRACE_S)
+        };
+        assert!(!any_clear_shot(&tracks));
+    }
+
+    #[test]
+    fn the_cue_is_quiet_and_rare_by_construction() {
+        // The owner's standing rule is "do not be intrusive". These are
+        // the two numbers that can break it.
+        assert!(
+            LOCK_CUE_VOLUME > 0.0 && LOCK_CUE_VOLUME <= 0.6,
+            "the threat cue is playing at {LOCK_CUE_VOLUME} - it is a hint, not an alarm"
+        );
+        assert!(
+            LOCK_CUE_COOLDOWN_S > GRACE_S,
+            "the cooldown ({LOCK_CUE_COOLDOWN_S}s) is shorter than the grace ({GRACE_S}s), \
+             so one man behind one post can pip twice for one engagement"
+        );
     }
 
     #[test]
