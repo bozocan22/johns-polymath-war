@@ -49,6 +49,10 @@ mod branding;
 mod cockpit;
 /// §7 (owner spec): the grenade you are holding, and the fist holding
 /// it. Same two-line wiring as `branding` and `cockpit`.
+/// §owner HAND GRAPHICS: the two camera handles a hand needs and this
+/// harness did not have - a boom anchor that can aim below the head, and
+/// the viewmodel camera's own lens. Same two-line wiring as `branding`.
+mod hand_capture;
 mod hand_pose;
 mod held_grenade;
 /// §owner FRONT END (2026-08-10): launch -> intro image -> two options ->
@@ -5862,6 +5866,24 @@ struct CapBeat {
     /// because it searched for one at deploy. This asks for that one
     /// back instead of guessing a second time.
     home: bool,
+    /// Capture-only: LOWER the third-person boom anchor by this many
+    /// metres - see `hand_capture::CaptureAim`. Held until changed.
+    ///
+    /// Added because a hand could not be framed at all. The anchor is
+    /// the HEAD (`anchor_h`), and an orbited capture camera `look_at`s
+    /// it, so shortening `boom` closes on the head and pushes the hands
+    /// - which hang the better part of half a metre lower - off the
+    /// bottom of the frame. `hand_detail` shipped four "close hand"
+    /// frames of a chest for exactly this reason.
+    aim_drop: Option<f32>,
+    /// Capture-only VIEWMODEL LENS: `[fov_deg, yaw_deg, pitch_deg]` -
+    /// see `hand_capture::CaptureVmLens`. Held until changed.
+    ///
+    /// The first-person hand is drawn by its own fixed-FOV camera and is
+    /// pinned to a corner, so `look` cannot move it (it is parented to
+    /// the camera) and no world-side field can magnify it. This is the
+    /// only handle on it.
+    vm_lens: Option<[f32; 3]>,
     snap: Option<&'static str>,
     end: bool,
 }
@@ -5877,6 +5899,8 @@ const fn beat(t: f32) -> CapBeat {
         hull: None,
         pos: None,
         home: false,
+        aim_drop: None,
+        vm_lens: None,
         snap: None,
         end: false,
     }
@@ -6100,8 +6124,33 @@ const SPEAR_WIND_BEATS: &[CapBeat] = &[
 /// knowledge), from three angles. The support hand on the forend is the
 /// subject; it is the one hand that is open enough to show finger
 /// separation.
+///
+/// # ...and it photographed a CHEST, four times out of four
+///
+/// Every frame this table produced (`handback/brief-vii/hand_detail/`,
+/// captured 2026-08-11) is of the subject's head and upper torso. Not
+/// one contains a hand. The paragraph above is a description of an
+/// intent, not of a frame anybody opened.
+///
+/// The cause is structural and no value of the three fields it was using
+/// could have fixed it. The boom anchors on `anchor_h` - the HEAD - and
+/// an orbited capture camera `look_at`s that same anchor, so `boom`
+/// scales the camera's distance from the HEAD and the hands, which hang
+/// ~0.45 m lower, fall out of frame FASTER the closer you pull in.
+/// Pitch does not help either: it swings the camera around the anchor
+/// rather than tilting the view off it.
+///
+/// So the fix is a fourth field, not a fourth number: `aim_drop` lowers
+/// the anchor to the hands and the camera aims where it was always
+/// claiming to. 0.46 m below the head anchor is a rifle at the ready.
 const HAND_DETAIL_BEATS: &[CapBeat] = &[
-    CapBeat { look: Some((0.0, -0.30)), boom: Some(0.30), orbit: Some(PI), ..beat(0.5) },
+    CapBeat {
+        look: Some((0.0, -0.10)),
+        boom: Some(0.30),
+        orbit: Some(PI),
+        aim_drop: Some(0.46),
+        ..beat(0.5)
+    },
     CapBeat { snap: Some("01-hand-front-close"), ..beat(1.6) },
     CapBeat { orbit: Some(PI * 0.68), ..beat(1.8) },
     CapBeat { snap: Some("02-hand-quarter-close"), ..beat(2.6) },
@@ -6110,8 +6159,15 @@ const HAND_DETAIL_BEATS: &[CapBeat] = &[
     CapBeat { orbit: Some(FRAC_PI_2), ..beat(2.8) },
     CapBeat { snap: Some("03-hand-profile-close"), ..beat(3.6) },
     // and one from underneath, which is where the palm, the heel and the
-    // thenar mound actually face.
-    CapBeat { orbit: Some(PI * 0.85), look: Some((0.0, -0.55)), boom: Some(0.26), ..beat(3.8) },
+    // thenar mound actually face. The camera goes UNDER the hands by
+    // dropping the anchor further, not by pitching - see above.
+    CapBeat {
+        orbit: Some(PI * 0.85),
+        look: Some((0.0, -0.28)),
+        boom: Some(0.26),
+        aim_drop: Some(0.60),
+        ..beat(3.8)
+    },
     CapBeat { snap: Some("04-hand-underside"), ..beat(4.6) },
     CapBeat { end: true, ..beat(5.0) },
 ];
@@ -7261,6 +7317,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "trims" => TRIMS_BEATS,
         "hands" => HANDS_BEATS,
         "hand_detail" => HAND_DETAIL_BEATS,
+        hand_capture::SCRIPT_FP => hand_capture::FP_BEATS,
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "spear_fp" => SPEAR_FP_BEATS,
@@ -7320,7 +7377,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 47] = [
+const CAPTURE_SCRIPTS: [&str; 48] = [
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7363,6 +7420,9 @@ const CAPTURE_SCRIPTS: [&str; 47] = [
     // §owner HAND GRAPHICS PASS: the close world-hand shot. `hands` is
     // the wide one and cannot resolve a finger.
     "hand_detail",
+    // ...and the FIRST-PERSON hand, which nothing had ever framed. See
+    // `hand_capture` for why neither of these worked before.
+    hand_capture::SCRIPT_FP,
     "baseline",
     "idle_life",
     "bow_draw",
@@ -7529,6 +7589,11 @@ fn capture_quick_deploy(
         // both bow scripts press Digit3, so slot 3 has to actually hold a
         // bow or they capture whatever the default special happens to be
         Some("bow_draw") | Some("bow_draw_fp") => sel.loadout[2] = GunKind::Bow,
+        // §owner HAND GRAPHICS: the first-person hand script carries a
+        // rifle in the primary and a bow in slot 3, because they are the
+        // two hand SHAPES - a closed grip and an open one - and it
+        // presses Digit3 to get from one to the other.
+        Some(hand_capture::SCRIPT_FP) => sel.loadout[2] = GunKind::Bow,
         // and both new spear scripts press Digit3 for the same reason
         Some("spear_fp") | Some("spear_wind") => sel.loadout[2] = GunKind::Spear,
         // the seven iron-sighted guns across three runs; the AWM is
@@ -7560,17 +7625,17 @@ fn capture_quick_deploy(
         Some("shotgun_model") => {
             sel.loadout = [GunKind::Shotgun, GunKind::Glock, GunKind::Mp5];
         }
+        // the SMG hoisted OUT of slot 3 and into the primary, so the
+        // shared beats - which never press a digit - actually frame it
+        Some("mp5_model") => {
+            sel.loadout = [GunKind::Mp5, GunKind::Glock, GunKind::Ak47];
+        }
         // the hand cannon in the primary slot and the Glock in slot 2 -
         // the beats press Digit2 at the end to put the two pistols in
         // front of the same camera, which is the only way the "biggest
         // pistol in the arsenal" claim is checkable.
         Some("deagle_model") => {
             sel.loadout = [GunKind::Deagle, GunKind::Glock, GunKind::Mp5];
-        }
-        // the SMG hoisted OUT of slot 3 and into the primary, so the
-        // shared beats - which never press a digit - actually frame it
-        Some("mp5_model") => {
-            sel.loadout = [GunKind::Mp5, GunKind::Glock, GunKind::Ak47];
         }
         // the ONLY script that leaves Arena. `capture_quick_deploy` runs
         // before `start_match` reads `Selected`, so setting the map here
@@ -7910,6 +7975,8 @@ fn capture_input_driver(
     mut cam: ResMut<CamCtl>,
     mut orbit: ResMut<CaptureOrbit>,
     mut boom: ResMut<CaptureBoom>,
+    mut cap_aim: ResMut<hand_capture::CaptureAim>,
+    mut cap_lens: ResMut<hand_capture::CaptureVmLens>,
     cap_home: Res<CaptureHome>,
     mut game: ResMut<Game>,
 ) {
@@ -7942,6 +8009,15 @@ fn capture_input_driver(
         }
         if let Some(bm) = b.boom {
             boom.0 = bm;
+        }
+        // §owner HAND GRAPHICS: aim the boom BELOW the head, and reach
+        // the viewmodel's own lens. Both hold until changed, like
+        // `orbit` and `boom` - see `hand_capture`.
+        if let Some(d) = b.aim_drop {
+            cap_aim.0 = d;
+        }
+        if let Some(l) = b.vm_lens {
+            cap_lens.0 = l;
         }
         // §20: stage a damage state. Written as a FRACTION of whatever
         // chassis the subject is in, so one beat table can serve both
@@ -8954,6 +9030,12 @@ fn main() {
         .init_resource::<CaptureOrbit>()
         .init_resource::<CaptureBoom>()
         .init_resource::<CaptureHome>()
+        // §owner HAND GRAPHICS: the boom's aim-below-the-head and the
+        // viewmodel lens. Both default to "no override" - see
+        // `hand_capture`.
+        .init_resource::<hand_capture::CaptureAim>()
+        .init_resource::<hand_capture::CaptureVmLens>()
+        .add_systems(Update, hand_capture::apply_capture_vm_lens)
         .init_resource::<PlasmaHitPool>()
         .add_systems(Startup, init_capture_mode)
         // §owner FRONT END: the app boots into `Title` now, not `Intro`,
@@ -17806,6 +17888,10 @@ fn setup(
             // §20: the viewmodel camera also draws the COCKPIT layer,
             // which the sun is not declared on - see `COCKPIT_LAYER`.
             RenderLayers::from_layers(&[VIEWMODEL_LAYER, COCKPIT_LAYER]),
+            // §owner HAND GRAPHICS: the one marker that makes this lens
+            // reachable from a capture beat. It had none, which is why
+            // the first-person hand had never been photographed close.
+            hand_capture::VmCam,
             Transform::IDENTITY,
         ))
         .set_parent(cam)
@@ -21957,6 +22043,7 @@ fn camera_system(
     settings: Res<GameSettings>,
     cap_orbit: Res<CaptureOrbit>,
     cap_boom: Res<CaptureBoom>,
+    cap_aim: Res<hand_capture::CaptureAim>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainCam>>,
 ) {
     cam_ctl.recoil = (cam_ctl.recoil - time.delta_secs() * 5.0).max(0.0);
@@ -22072,7 +22159,10 @@ fn camera_system(
     // fighter's ACTUAL height - a hardcoded 1.6m put the camera INSIDE
     // a 3m mech's own body once the scale changed. 1.6 was tuned for a
     // 1.78m soldier; keep that same proportion for every height.
-    let anchor_h = 1.6 * (frame_h / BODY_HEIGHT);
+    // §owner HAND GRAPHICS: a capture may aim BELOW the head. Zero in
+    // play - see `hand_capture::CaptureAim` for why no combination of
+    // boom, orbit and look could frame a hand without it.
+    let anchor_h = 1.6 * (frame_h / BODY_HEIGHT) - cap_aim.0;
     let anchor = Vec3::new(p.pos[0], p.pos[1] + anchor_h - crouch_drop, p.pos[2])
         + screen_right * (p.lean * LEAN_SHIFT * 0.8);
     let ads_e = ease_out(cam_ctl.ads_t);
