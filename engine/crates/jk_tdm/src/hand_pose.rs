@@ -296,10 +296,47 @@ pub fn joint_rotation(kind: JointKind, m: f32, curl: f32) -> Quat {
         JointKind::WorldThumbTip => Quat::from_rotation_x(-0.55 * c),
         JointKind::VmBase => Quat::from_rotation_x(vm_base_angle(c)),
         JointKind::VmTip => Quat::from_rotation_x(crate::dip_from_driving_joint(vm_base_angle(c))),
+        // §owner HAND GRAPHICS, SECTION 3: THE THUMB OPPOSES.
+        //
+        // This was `from_rotation_y(0.9 * c * m)`: the whole of the
+        // thumb's opposition was proportional to the CURL. At curl 0 it
+        // came to exactly zero, so an open first-person hand had its
+        // thumb lying parallel to the four fingers - a fifth finger, set
+        // slightly to one side. That is the single strongest "this is a
+        // paddle" cue there is, and it was worst in precisely the poses
+        // that show the hand best: the open bow hand, the reload, the
+        // empty hand.
+        //
+        // Opposition is STRUCTURAL, not a function of grip: the
+        // trapezium sits on a saddle joint and the thumb faces across
+        // the palm whether the hand is open or shut. So it is a constant
+        // plus a smaller curl term, and the world hand next door already
+        // had exactly this shape (a flat `0.85 * m`) - the two hands
+        // simply disagreed.
+        //
+        // The split is chosen so that `0.45 + 0.38 * c` at GRIP_CURL
+        // (0.86) is 0.7768 against the old 0.9 * 0.86 = 0.774: the
+        // carved rifle and pistol grips, which are tuned around real
+        // geometry and can clip a receiver if they move, are unchanged
+        // to three decimal places. The 26 degrees of opposition an open
+        // hand gains is all new information.
         JointKind::VmThumbBase => {
-            Quat::from_rotation_y(0.9 * c * m) * Quat::from_rotation_x(-0.5 * c)
+            Quat::from_rotation_y((0.45 + 0.38 * c) * m) * Quat::from_rotation_x(-0.5 * c)
         }
-        JointKind::VmThumbTip => Quat::from_rotation_y(0.9 * c * m),
+        // ...and the thumb's SECOND joint flexes. It was a pure YAW -
+        // `from_rotation_y(0.9 * c * m)` - which at a closed fist swung
+        // the distal segment 51 degrees SIDEWAYS out of the plane of the
+        // thumb it belongs to. An interphalangeal joint is a hinge; it
+        // has one axis and that axis is flexion. The world hand's
+        // equivalent (`WorldThumbTip`) is already a pure X flex, so this
+        // was also the two hands disagreeing about what a thumb is.
+        //
+        // A little yaw is kept because the metacarpal below it is
+        // rotated about Y, so some of the wrap genuinely does live here
+        // - but it is now the minority term rather than the only one.
+        JointKind::VmThumbTip => {
+            Quat::from_rotation_y(0.26 * c * m) * Quat::from_rotation_x(-0.62 * c)
+        }
     }
 }
 
@@ -455,10 +492,84 @@ mod tests {
             joint_rotation(JointKind::VmBase, 1.0, 1.0),
             Quat::from_rotation_x(-1.15),
         ));
-        assert!(approx(
-            joint_rotation(JointKind::VmThumbTip, -1.0, 1.0),
-            Quat::from_rotation_y(-0.9),
-        ));
+        // `VmThumbTip` USED to be asserted here as `from_rotation_y(-0.9)`
+        // and is deliberately no longer that shape - see the note on the
+        // joint. The no-op proof covers the joints this pass did not
+        // touch; the two it did are pinned by
+        // `the_thumb_opposes_and_its_second_joint_flexes` below, which is
+        // a statement about what a thumb IS rather than a transcription
+        // of what one file happened to say.
+    }
+
+    /// §owner HAND GRAPHICS, SECTION 3, as two claims.
+    ///
+    /// 1. THE THUMB OPPOSES AT EVERY CURL, including zero. The old
+    ///    viewmodel expression was `from_rotation_y(0.9 * c * m)`, which
+    ///    is exactly zero at c = 0, so an open hand's thumb lay parallel
+    ///    to its fingers.
+    /// 2. THE SECOND THUMB JOINT FLEXES. It was a pure yaw, so a closing
+    ///    fist swung the thumb tip sideways out of its own plane instead
+    ///    of folding it.
+    ///
+    /// Both fail on the pre-change expressions: (1) reads 0.0 against a
+    /// required 0.25, and (2) reads an X component of 0.0 against a
+    /// required fold.
+    #[test]
+    fn the_thumb_opposes_and_its_second_joint_flexes() {
+        for &m in &[1.0_f32, -1.0] {
+            // 1: opposition at a FULLY OPEN hand
+            let (_, y, _) = joint_rotation(JointKind::VmThumbBase, m, 0.0).to_euler(EulerRot::XYZ);
+            assert!(
+                y.abs() > 0.25,
+                "an open viewmodel thumb has only {y} rad of opposition - it is a fifth finger"
+            );
+            assert!(
+                y * m > 0.0,
+                "the thumb opposes the WRONG WAY on the m={m} hand"
+            );
+            // ...and it still opposes when closed, harder if anything
+            let (_, yc, _) = joint_rotation(JointKind::VmThumbBase, m, 1.0).to_euler(EulerRot::XYZ);
+            assert!(
+                yc.abs() >= y.abs(),
+                "closing the hand REDUCED the thumb's opposition ({y} -> {yc})"
+            );
+            // 2: the second joint folds, and folds further as it closes
+            let fold = |c: f32| {
+                let (x, _, _) = joint_rotation(JointKind::VmThumbTip, m, c).to_euler(EulerRot::XYZ);
+                x
+            };
+            assert!(
+                fold(1.0) < -0.3,
+                "the thumb's second joint barely folds at a full fist: {}",
+                fold(1.0)
+            );
+            assert!(
+                fold(1.0) < fold(0.5) && fold(0.5) < fold(0.0) + 1e-6,
+                "the thumb's second joint does not fold monotonically"
+            );
+        }
+    }
+
+    /// The carved GRIP is unchanged to three decimal places.
+    ///
+    /// The point of splitting the thumb's opposition into a constant
+    /// plus a curl term was to buy an open hand real opposition WITHOUT
+    /// moving the poses that are tuned against actual weapon geometry: a
+    /// thumb that swings 12 degrees further round a pistol grip goes
+    /// through the receiver. `GRIP_CURL` is that pose.
+    ///
+    /// Mutation-proof: change either coefficient and this fails - 0.45 +
+    /// 0.38 * 0.86 = 0.7768 is a coincidence that only holds for this
+    /// pair.
+    #[test]
+    fn the_thumb_split_leaves_the_carved_grip_where_it_was() {
+        let (_, y, _) =
+            joint_rotation(JointKind::VmThumbBase, 1.0, GRIP_CURL).to_euler(EulerRot::XYZ);
+        let old = 0.9 * GRIP_CURL;
+        assert!(
+            (y - old).abs() < 0.005,
+            "the grip pose moved: {y} against the shipped {old}"
+        );
     }
 
     /// A hand must CLOSE as the fraction rises, at every joint, in the

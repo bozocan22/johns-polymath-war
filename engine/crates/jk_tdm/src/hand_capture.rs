@@ -76,25 +76,48 @@ pub struct CaptureAim(pub f32);
 #[derive(Resource, Default)]
 pub struct CaptureVmLens(pub [f32; 3]);
 
-/// Apply [`CaptureVmLens`] to the viewmodel camera.
+/// The identity node between the viewmodel camera and everything drawn
+/// on it. See its spawn site in `setup` for why it exists; in short, the
+/// viewmodel is a CHILD of the camera, so turning the camera turns the
+/// subject with it and the frame does not change.
+#[derive(Component)]
+pub struct VmLensNode;
+
+/// Apply [`CaptureVmLens`]: turn and narrow the viewmodel camera, and
+/// counter-turn [`VmLensNode`] by exactly the same rotation so that what
+/// the camera is looking at does not move with it.
+///
+/// One query over both entities rather than two: two `Query<&mut
+/// Transform, With<..>>` on disjoint marker components are not provably
+/// disjoint to Bevy's scheduler and panic on conflicting access. The
+/// camera is the one of the two that carries a `Projection`, which is
+/// what tells them apart here.
 ///
 /// Change-detected: in a normal run the resource is never written, so
 /// this touches nothing after the first frame.
 pub fn apply_capture_vm_lens(
     lens: Res<CaptureVmLens>,
-    mut q: Query<(&mut Projection, &mut Transform), With<VmCam>>,
+    mut q: Query<
+        (&mut Transform, Option<&mut Projection>),
+        Or<(With<VmCam>, With<VmLensNode>)>,
+    >,
 ) {
     if !lens.is_changed() {
         return;
     }
     let [fov, yaw, pitch] = lens.0;
     let fov = if fov > 0.0 { fov } else { VM_FOV_DEG };
-    for (mut proj, mut tf) in &mut q {
-        if let Projection::Perspective(pp) = &mut *proj {
-            pp.fov = fov.to_radians();
+    let r = Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(pitch.to_radians());
+    for (mut tf, proj) in &mut q {
+        match proj {
+            Some(mut proj) => {
+                if let Projection::Perspective(pp) = &mut *proj {
+                    pp.fov = fov.to_radians();
+                }
+                tf.rotation = r;
+            }
+            None => tf.rotation = r.inverse(),
         }
-        tf.rotation =
-            Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(pitch.to_radians());
     }
 }
 
@@ -111,22 +134,47 @@ pub fn apply_capture_vm_lens(
 /// the right hand round a pistol grip and lays the left along a forend,
 /// while the bow leaves the support hand open - and an open hand is the
 /// only pose in which the fingers can be told apart at all.
+/// Where the hand actually IS, in degrees off the lens axis - MEASURED
+/// off a frame, not guessed.
+///
+/// The measurement only became meaningful once [`VmLensNode`] existed:
+/// before it, the lens rotation was inert (it turned the subject with
+/// the camera), so two runs at different yaws produced identical images
+/// and any angle read off them was a reading of the FOV alone.
+///
+/// These come off `01-rifle-hands-as-shipped` and the bow frames, both
+/// at the shipping 68-degree lens, where the focal length over a 1600 x
+/// 900 frame is `450 / tan(34 deg)` = 667 px and an offset of `d` px is
+/// `atan(d / 667)`. The rifle's support hand sits at about (905, 655) -
+/// 9 deg right, 17 deg down - and its trigger hand a further 6 deg out;
+/// the bow's support hand sits at about (1080, 730), 23 deg right and
+/// 23 deg down.
+///
+/// The rifle pair splits the difference between its two hands, because
+/// the point of the shot is to hold BOTH. The two weapons need separate
+/// numbers because they carry the hands in genuinely different places -
+/// the bow out to the right and low, the rifle tucked in.
+const RIFLE_YAW: f32 = -12.0;
+const RIFLE_PITCH: f32 = -21.0;
+const BOW_YAW: f32 = -23.0;
+const BOW_PITCH: f32 = -21.0;
+
 pub const FP_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
     // the shipping lens first: this is the hand as a player sees it, and
     // every zoomed frame below has to be read against it
     CapBeat { snap: Some("01-rifle-hands-as-shipped"), ..beat(1.2) },
-    CapBeat { vm_lens: Some([40.0, -13.0, -13.0]), ..beat(1.4) },
+    CapBeat { vm_lens: Some([40.0, RIFLE_YAW, RIFLE_PITCH]), ..beat(1.4) },
     CapBeat { snap: Some("02-rifle-hands-mid"), ..beat(1.9) },
-    CapBeat { vm_lens: Some([26.0, -14.0, -15.0]), ..beat(2.1) },
+    CapBeat { vm_lens: Some([24.0, RIFLE_YAW, RIFLE_PITCH]), ..beat(2.1) },
     CapBeat { snap: Some("03-rifle-hands-close"), ..beat(2.6) },
     // ...and the BOW, whose support hand is open round the riser
     CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(2.8) },
     CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(2.9) },
-    CapBeat { vm_lens: Some([40.0, -13.0, -13.0]), ..beat(3.1) },
+    CapBeat { vm_lens: Some([40.0, BOW_YAW, BOW_PITCH]), ..beat(3.1) },
     CapBeat { snap: Some("04-bow-hand-mid"), ..beat(3.6) },
-    CapBeat { vm_lens: Some([26.0, -14.0, -15.0]), ..beat(3.8) },
+    CapBeat { vm_lens: Some([24.0, BOW_YAW, BOW_PITCH]), ..beat(3.8) },
     CapBeat { snap: Some("05-bow-hand-close"), ..beat(4.3) },
     // at full draw the drawing hand hooks the string and the support
     // hand takes the riser's load - the two most open poses in the game

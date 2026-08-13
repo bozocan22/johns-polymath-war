@@ -53,6 +53,9 @@ mod cockpit;
 /// harness did not have - a boom anchor that can aim below the head, and
 /// the viewmodel camera's own lens. Same two-line wiring as `branding`.
 mod hand_capture;
+/// §owner HAND GRAPHICS: the tapered finger segment. One shared mesh,
+/// two lines of wiring, and no extra entity on any hand in the game.
+mod hand_craft;
 mod hand_pose;
 mod held_grenade;
 /// §owner FRONT END (2026-08-10): launch -> intro image -> two options ->
@@ -4079,6 +4082,21 @@ struct ModelKit {
     cube: Handle<Mesh>,
     cyl: Handle<Mesh>, // unit cylinder: radius 0.5, height 1, axis Y
     ball: Handle<Mesh>, // unit sphere: radius 0.5
+    /// §owner HAND GRAPHICS: a finger SEGMENT - the unit cube with its
+    /// +Z face narrowed. See `hand_craft::taper_mesh`.
+    ///
+    /// It is in the kit rather than built per hand because all three
+    /// hand builders want it and one of them (`spawn_world_hand_fingered`)
+    /// is spawned per player body: a shared handle costs nothing per
+    /// instance, and a per-hand mesh would cost an asset each.
+    ///
+    /// Drop-in for `cube` at any part already placed as
+    /// `from_xyz(0, 0, len * 0.5)` with `scale = (w, h, len)` - the root
+    /// end measures exactly what the cube measured, so nothing moves.
+    taper: Handle<Mesh>,
+    /// The same, at the gentler DISTAL ratio - see `hand_craft::TIP_TAPER`
+    /// for why the last segment must not taper as hard as the first.
+    taper_tip: Handle<Mesh>,
     /// §owner RED DOT: the optic's TUBE RING, axis Y, overall radius 0.5.
     ///
     /// A purpose-proportioned mesh rather than a generic torus, and that
@@ -6403,7 +6421,35 @@ const AGILE_BODY_BEATS: &[CapBeat] = &[
     CapBeat { snap: Some("07-agile-legs-close"), ..beat(6.8) },
     CapBeat { orbit: Some(FRAC_PI_2), ..beat(7.0) },
     CapBeat { snap: Some("08-agile-legs-profile"), ..beat(7.6) },
-    CapBeat { end: true, ..beat(8.1) },
+    // 09-10 THE MACHINE'S HAND. §owner SECTION 6 built a three-fingered
+    // manipulator with exposed knuckle pins onto this chassis
+    // (`agile_mech`, "THE MACHINE'S HAND") and no beat in this table has
+    // ever pointed at it: the head close-up is above it, the leg
+    // close-up is below it, and the four cardinal views are at boom 1.35
+    // where the whole hand is about thirty pixels.
+    //
+    // It needs `aim_drop` for the same reason the soldier's hand did -
+    // the anchor is the head - and it needs more of it, because this is
+    // a 1.7x chassis and the anchor scales with the subject's height.
+    //
+    // The first run of these two went out at `aim_drop` 1.45 / boom 0.50
+    // and came back with the machine's LOWER BODY: both manipulators
+    // were in frame at about 85 px, up at the top edge, with the aim
+    // point down on the feet. So 1.45 overshot - measured off that frame,
+    // the hands sit ~0.4-0.7 m above where it was pointing - and the
+    // boom was too long to resolve a finger plate anyway. Two drops
+    // rather than one re-guessed number: the pair brackets it.
+    CapBeat {
+        orbit: Some(PI * 0.78),
+        boom: Some(0.22),
+        look: Some((0.0, -0.06)),
+        aim_drop: Some(0.80),
+        ..beat(7.8)
+    },
+    CapBeat { snap: Some("09-agile-hand-quarter"), ..beat(8.5) },
+    CapBeat { orbit: Some(FRAC_PI_2), aim_drop: Some(1.05), ..beat(8.7) },
+    CapBeat { snap: Some("10-agile-hand-profile"), ..beat(9.3) },
+    CapBeat { end: true, ..beat(9.8) },
 ];
 
 /// BRIEF X §0 + §8: THE FOUR THINGS THIS REDESIGN MUST NOT BREAK.
@@ -9832,8 +9878,28 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(-0.038 * m, -0.002, -0.004)
-                .with_scale(Vec3::new(0.052, 0.042, 0.088)),
+            Transform::from_xyz(-0.038 * m, 0.004, -0.004)
+                .with_scale(Vec3::new(0.052, 0.044, 0.088)),
+        ))
+        .set_parent(root);
+    // ...and THE HYPOTHENAR MOUND, its opposite number on the little-
+    // finger edge.
+    //
+    // §owner SECTION 4 asks the palm for "a slight cup", and this is
+    // what actually produces one. A palm is not a dished surface - it is
+    // a flat floor with a muscle ridge down EACH side, and the hollow
+    // between them is the cup. With only the thumb-side mound modelled
+    // the palm had a ridge on one edge and a cliff on the other, which
+    // reads as a hand holding something even when it is open.
+    //
+    // Smaller than the thenar, because it is: it drives one finger, not
+    // an opposable thumb.
+    commands
+        .spawn((
+            Mesh3d(kit.ball.clone()),
+            MeshMaterial3d(kit.hand.clone()),
+            Transform::from_xyz(0.046 * m, 0.006, -0.010)
+                .with_scale(Vec3::new(0.032, 0.036, 0.076)),
         ))
         .set_parent(root);
     // four fingers, two segments each, dark knuckle balls at both joints
@@ -9881,17 +9947,26 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
             });
         }
         let base = base_cmd.set_parent(root).id();
-        // knuckle dome at the palm edge, sized to its own finger
+        // THE KNUCKLE, at the palm edge, sized to its own finger.
+        //
+        // §owner SECTION 2: it was `splat` - a perfect sphere - and a
+        // perfect sphere is the one shape a knuckle is not. A knuckle is
+        // WIDE across the hand, stands PROUD on the back, and is short
+        // along the finger's own axis; the row of them is what gives the
+        // back of a fist its scalloped edge. Sphered, they read as ball
+        // bearings, which is the "robot with pipe fingers" note.
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(kit.grey_black.clone()),
-                Transform::from_scale(Vec3::splat(fw * 1.12)),
+                Transform::from_scale(Vec3::new(fw * 1.24, fw * 1.16, fw * 0.90)),
             ))
             .set_parent(base);
+        // the PROXIMAL segment - tapered now, not a prism. See
+        // `hand_craft`: the transform is unchanged, only the mesh.
         commands
             .spawn((
-                Mesh3d(kit.cube.clone()),
+                Mesh3d(kit.taper.clone()),
                 MeshMaterial3d(kit.hand.clone()),
                 Transform::from_xyz(0.0, 0.0, len * 0.5)
                     .with_scale(Vec3::new(fw, fw * 1.05, len)),
@@ -9916,22 +9991,44 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
             });
         }
         let tip = tip_cmd.set_parent(base).id();
-        // mid-knuckle
+        // the MIDDLE knuckle: the same swell as the one at the palm,
+        // one size down. Oblate for the same reason - see above.
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(kit.grey_black.clone()),
-                Transform::from_scale(Vec3::splat(fw * 0.98)),
+                Transform::from_scale(Vec3::new(fw * 1.06, fw * 1.02, fw * 0.84)),
+            ))
+            .set_parent(tip);
+        // THE CREASE. §owner SECTION 2 asks for "a darker crease between
+        // segments", and it is the half of a joint the joint ball cannot
+        // do: the ball is the SWELL, which lives on the back of the
+        // finger, and a crease is a shadowed fold on the PALM side where
+        // the skin gathers. One thin dark plate, tucked against the
+        // joint on the palm face (+Y - the fingers curl toward +Y, so
+        // that is the inside of the hook they make).
+        //
+        // Viewmodel only. It is four entities on a hand that exists
+        // once, and it is invisible at any range the world hand is seen
+        // at - see the budget note on `spawn_world_hand_fingered`.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.grey_black.clone()),
+                Transform::from_xyz(0.0, fw * 0.40, 0.0)
+                    .with_scale(Vec3::new(fw * 0.86, fw * 0.30, fw * 0.34)),
             ))
             .set_parent(tip);
         // the distal segment: two thirds the length and 85% the gauge of
         // the proximal. It used to be 80% long and 91% wide, which at
         // 30 cm from the camera is not a taper, it is a manufacturing
-        // tolerance.
+        // tolerance. ...and it is a FRUSTUM now, so it also narrows
+        // along its own length instead of being a parallel-sided block
+        // with a ball stuck on the end.
         let dl = len * 0.66;
         commands
             .spawn((
-                Mesh3d(kit.cube.clone()),
+                Mesh3d(kit.taper_tip.clone()),
                 MeshMaterial3d(kit.hand.clone()),
                 Transform::from_xyz(0.0, 0.0, dl * 0.5)
                     .with_scale(Vec3::new(fw * 0.85, fw * 0.92, dl)),
@@ -9948,11 +10045,41 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
                     .with_scale(Vec3::new(fw * 0.84, fw * 0.90, fw * 1.02)),
             ))
             .set_parent(tip);
+        // THE NAIL. §owner SECTION 4: "the back of the hand is what the
+        // player sees most in first person", and the back of a hand is
+        // four knuckles and four nails. Nothing else in this vocabulary
+        // says "this is skin over bone" as directly - a fingertip with a
+        // nail on it cannot be read as the end of a pipe.
+        //
+        // On the DORSAL face, which is -Y: the joints rotate about X by
+        // a negative angle, which swings a finger's +Z toward +Y, so the
+        // fingers curl toward +Y and +Y is the palm.
+        //
+        // Viewmodel only, on the same budget argument as the crease: at
+        // world scale a nail is a fraction of a pixel.
+        commands
+            .spawn((
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.grey_light.clone()),
+                Transform::from_xyz(0.0, -fw * 0.44, dl * 0.60)
+                    .with_scale(Vec3::new(fw * 0.56, fw * 0.16, dl * 0.52)),
+            ))
+            .set_parent(tip);
     }
-    // thumb: two joints, wrapping from the side (flipped when mirrored)
+    // THE THUMB: two joints, wrapping from the side (flipped when
+    // mirrored).
+    //
+    // §owner SECTION 3, the base POSITION half - the axis half lives in
+    // `hand_pose::joint_rotation`. It sat at y = 0, level with the
+    // knuckle row, and a thumb whose base is level with the knuckles is
+    // a fifth finger set at an angle. A real carpometacarpal joint sits
+    // toward the PALM side and further back toward the wrist, which is
+    // what lets the thumb swing ACROSS the palm instead of alongside it.
+    // Moved 8 mm palm-ward (+Y) and 6 mm back (-Z), onto the thenar
+    // mound it is supposed to grow out of rather than beside.
     let tbase = commands
         .spawn((
-            Transform::from_xyz(-0.056 * m, 0.0, 0.018).with_rotation(
+            Transform::from_xyz(-0.056 * m, 0.008, 0.012).with_rotation(
                 hand_pose::joint_rotation(hand_pose::JointKind::VmThumbBase, m, curl),
             ),
             hand_pose::FingerJoint {
@@ -9967,14 +10094,16 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(kit.grey_black.clone()),
-            Transform::from_scale(Vec3::splat(0.024)),
+            Transform::from_scale(Vec3::new(0.027, 0.026, 0.021)),
         ))
         .set_parent(tbase);
+    // the metacarpal. Thicker than any finger and TAPERED like them: a
+    // thumb is the one digit that is unmistakably heavier at its root.
     commands
         .spawn((
-            Mesh3d(kit.cube.clone()),
+            Mesh3d(kit.taper.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.023).with_scale(Vec3::new(0.024, 0.025, 0.046)),
+            Transform::from_xyz(0.0, 0.0, 0.023).with_scale(Vec3::new(0.026, 0.027, 0.046)),
         ))
         .set_parent(tbase);
     let ttip = commands
@@ -9999,14 +10128,14 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(kit.grey_black.clone()),
-            Transform::from_scale(Vec3::splat(0.022)),
+            Transform::from_scale(Vec3::new(0.024, 0.023, 0.019)),
         ))
         .set_parent(ttip);
     commands
         .spawn((
-            Mesh3d(kit.cube.clone()),
+            Mesh3d(kit.taper_tip.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.021, 0.022, 0.034)),
+            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.023, 0.024, 0.034)),
         ))
         .set_parent(ttip);
     // and the thumb pad, matching the four fingertips
@@ -10014,7 +10143,17 @@ fn spawn_hand_fingered(commands: &mut Commands, kit: &ModelKit, curl: f32, mirro
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(kit.hand.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.034).with_scale(Vec3::new(0.020, 0.021, 0.024)),
+            Transform::from_xyz(0.0, 0.0, 0.034).with_scale(Vec3::new(0.022, 0.023, 0.026)),
+        ))
+        .set_parent(ttip);
+    // the THUMBNAIL, on the dorsal face like the other four - see the
+    // note on the finger nails for why -Y is the back of this hand.
+    // Wider than a finger's, because a thumbnail is.
+    commands
+        .spawn((
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.grey_light.clone()),
+            Transform::from_xyz(0.0, -0.012, 0.020).with_scale(Vec3::new(0.016, 0.004, 0.020)),
         ))
         .set_parent(ttip);
     root
@@ -10145,11 +10284,19 @@ fn spawn_world_hand_fingered(
         // the knuckle DOME - one per finger. The old hand had a single
         // bar across all four roots and nothing else, so the knuckles
         // were a line rather than four bumps.
+        //
+        // §owner SECTION 5, THE BUDGET SPLIT. This is the same knuckle
+        // as the viewmodel's - wide across the hand, proud on the back,
+        // short along the finger - because the two hands must not be two
+        // different designs. What it does NOT get is the viewmodel's
+        // crease plate or its nail: at the range this hand is seen, both
+        // are sub-pixel, and this builder runs on a BODY, where §0.3's
+        // per-fighter cost is real.
         commands
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(look.joint.clone()),
-                Transform::from_scale(Vec3::splat(fw * 1.30)),
+                Transform::from_scale(Vec3::new(fw * 1.42, fw * 1.32, fw * 1.04)),
             ))
             .set_parent(knuckle);
         // proximal: swings down from the knuckle with the curl.
@@ -10172,7 +10319,7 @@ fn spawn_world_hand_fingered(
             .id();
         commands
             .spawn((
-                Mesh3d(kit.cube.clone()),
+                Mesh3d(kit.taper.clone()),
                 MeshMaterial3d(look.shell.clone()),
                 Transform::from_xyz(0.0, 0.0, len * 0.5)
                     .with_scale(Vec3::new(fw, fw * 1.06, len)),
@@ -10198,15 +10345,19 @@ fn spawn_world_hand_fingered(
             .spawn((
                 Mesh3d(kit.ball.clone()),
                 MeshMaterial3d(look.joint.clone()),
-                Transform::from_scale(Vec3::splat(fw * 1.12)),
+                Transform::from_scale(Vec3::new(fw * 1.22, fw * 1.14, fw * 0.94)),
             ))
             .set_parent(dist);
         // the distal segment is SHORTER and NARROWER than the proximal -
-        // the taper is what stops a finger reading as a dowel.
+        // the taper is what stops a finger reading as a dowel. Both are
+        // frusta now, so each also narrows along its OWN length: the
+        // step between them was the only taper this hand had, and a
+        // stack of two parallel-sided blocks with a step in it is what a
+        // sausage looks like when you model it in boxes.
         let dl = len * 0.66;
         commands
             .spawn((
-                Mesh3d(kit.cube.clone()),
+                Mesh3d(kit.taper_tip.clone()),
                 MeshMaterial3d(look.shell2.clone()),
                 Transform::from_xyz(0.0, 0.0, dl * 0.5)
                     .with_scale(Vec3::new(fw * 0.84, fw * 0.90, dl)),
@@ -10246,9 +10397,9 @@ fn spawn_world_hand_fingered(
     // on sideways, which is what this one did.
     commands
         .spawn((
-            Mesh3d(kit.cube.clone()),
+            Mesh3d(kit.taper.clone()),
             MeshMaterial3d(look.shell.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.024).with_scale(Vec3::new(0.023, 0.024, 0.048)),
+            Transform::from_xyz(0.0, 0.0, 0.024).with_scale(Vec3::new(0.026, 0.027, 0.048)),
         ))
         .set_parent(thumb);
     let thumb_tip = commands
@@ -10270,14 +10421,14 @@ fn spawn_world_hand_fingered(
         .spawn((
             Mesh3d(kit.ball.clone()),
             MeshMaterial3d(look.joint.clone()),
-            Transform::from_scale(Vec3::splat(0.023)),
+            Transform::from_scale(Vec3::new(0.026, 0.024, 0.020)),
         ))
         .set_parent(thumb_tip);
     commands
         .spawn((
-            Mesh3d(kit.cube.clone()),
+            Mesh3d(kit.taper_tip.clone()),
             MeshMaterial3d(look.shell2.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.020, 0.021, 0.034)),
+            Transform::from_xyz(0.0, 0.0, 0.017).with_scale(Vec3::new(0.022, 0.023, 0.034)),
         ))
         .set_parent(thumb_tip);
     // the thumb PAD, matching the four fingertips - the broad flat pad
@@ -16844,6 +16995,14 @@ fn setup(
             .into(),
         )),
         ball: meshes.add(with_tangents(Sphere::new(0.5).mesh().uv(24, 12))),
+        // §owner HAND GRAPHICS: the two finger-segment frusta. Same
+        // tangent treatment as every other mesh here - `taper_mesh`
+        // emits positions, normals, UVs and indices precisely so it can
+        // go through this path and take the normal maps.
+        taper: meshes.add(with_tangents(hand_craft::taper_mesh(
+            hand_craft::SEGMENT_TAPER,
+        ))),
+        taper_tip: meshes.add(with_tangents(hand_craft::taper_mesh(hand_craft::TIP_TAPER))),
         grey_light: materials.add(tex_metal(Color::srgb_u8(0xC8, 0xC9, 0xCB), 0.05, 0.60, 3.0)),
         grey_mid: materials.add(tex_metal(Color::srgb_u8(0x8A, 0x8C, 0x8F), 0.05, 0.60, 3.0)),
         grey_dark: materials.add(tex_metal(Color::srgb_u8(0x3A, 0x3C, 0x40), 0.05, 0.60, 3.0)),
@@ -17897,19 +18056,52 @@ fn setup(
         .set_parent(cam)
         .id();
 
+    // ---- §owner HAND GRAPHICS: THE LENS COMPENSATION NODE ---------------
+    //
+    // One entity, identity in every normal frame, and the only reason a
+    // first-person hand can be photographed at all.
+    //
+    // Everything first-person hangs off `vm_cam`, so turning that camera
+    // to look at the hand turns the hand with it and the frame does not
+    // change by one pixel. That is not a theory - it is what the first
+    // `hand_fp` run produced: `02-rifle-hands-mid` at yaw -13 and at yaw
+    // -21 are the same image, because only the FOV was ever doing
+    // anything.
+    //
+    // So the capture rotates the CAMERA by R and this node by R inverse.
+    // Every child's world transform is unchanged (`vm_cam * R * R^-1 *
+    // local`), while the camera's view matrix now carries R - which is
+    // exactly "turn the lens, leave the subject where it is".
+    //
+    // It has to be its own entity rather than a counter-rotation written
+    // onto `vm_root`, because `fp_viewmodel` rewrites `vm_root`'s
+    // transform from scratch every frame for sway, bob and fire kick.
+    // Nothing writes this one.
+    let vm_lens = commands
+        .spawn((
+            Transform::IDENTITY,
+            Visibility::default(),
+            hand_capture::VmLensNode,
+        ))
+        .set_parent(vm_cam)
+        .id();
+
     // ---- §20 THE MECH COCKPIT ------------------------------------------
     // Hung off the viewmodel CAMERA, not off `vm_root`: the weapon root
     // carries bob, sway and fire kick, and a cockpit that swam with the
     // gun would be a cockpit the pilot is holding. It gets its own,
     // machine-flavoured tremor instead (`cockpit::cockpit_shake`).
-    let cockpit_rig = cockpit::spawn_cockpit(&mut commands, &kit, &mut materials, vm_cam);
+    // (Through `vm_lens`, which is that camera with an identity node in
+    // between - see above. A cockpit is eye-fixed geometry too and must
+    // stay put when the capture lens turns.)
+    let cockpit_rig = cockpit::spawn_cockpit(&mut commands, &kit, &mut materials, vm_lens);
     commands.insert_resource(cockpit_rig);
 
     // ---- first-person viewmodel: hands + weapon on the camera ----------
     // (the camera looks down its -Z, so the models yaw 180°: muzzle out)
     let vm_root = commands
         .spawn((Transform::IDENTITY, Visibility::Hidden))
-        .set_parent(vm_cam)
+        .set_parent(vm_lens)
         .id();
     let vm_arm_mat = materials.add(metal(Color::srgb(0.28, 0.24, 0.20), 0.1, 0.9));
     let mut vm_weapons = [Entity::PLACEHOLDER; N_WEAPONS];
