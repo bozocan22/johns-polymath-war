@@ -6918,7 +6918,31 @@ const BOW_AIM_BEATS: &[CapBeat] = &[
     CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(3.2) },
     // back at the hip: the normal crosshair returns, the circle is gone
     CapBeat { snap: Some("05-hip-crosshair-returns"), ..beat(3.8) },
-    CapBeat { end: true, ..beat(4.2) },
+    // THE LOBBED SHOT, and the reason it is a separate beat.
+    //
+    // Frames 02-04 are all LEVEL, and a level shot is the one case
+    // where a trajectory preview cannot read as a curve: the flight
+    // lies almost along the view axis, so it projects to a short
+    // vertical smear under the crosshair no matter how well it is
+    // drawn. That is geometry, not a tuning problem, and the first
+    // capture of these frames is what made it obvious.
+    //
+    // Pitching UP is what puts the arc ACROSS the view, which is also
+    // the shot a bow actually wants. Undrawn (no LMB) on purpose: at
+    // full power a 15 deg lob carries about 260 m and the landing ring
+    // is a speck, while at the draw floor it lands near 30 m where the
+    // whole curve and the ring on the ground fit in one frame.
+    //
+    // Pitch is NEGATIVE for up here - see HANDS_BEATS, which paid for
+    // that knowledge - and yaw 0 is the +Z the subject already faces.
+    CapBeat {
+        look: Some((0.0, -0.26)),
+        press: &[CapKey::M(MouseButton::Right)],
+        ..beat(3.9)
+    },
+    CapBeat { snap: Some("06-lobbed-arc-and-landing-ring"), ..beat(4.5) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(4.6) },
+    CapBeat { end: true, ..beat(5.0) },
 ];
 
 /// The four surfaces that shipped with NO capture coverage, which is
@@ -23993,10 +24017,14 @@ fn fp_viewmodel(
 /// (even spacing, no bunching at the apex) and size down along the arc;
 /// a ±spread cone of fainter arcs widens as the §4 stability degrades,
 /// so the player can watch their own accuracy in real time.
-/// How much of the predicted flight the preview actually DRAWS, as a
-/// fraction of arc length from the muzzle. See the trim comment inside
-/// `arc_preview`: the tail is the half that lands on the crosshair.
-const ARC_PREVIEW_SPAN: f32 = 0.62;
+/// How much of the predicted flight the preview DRAWS now lives in
+/// `bow_aim::ARC_SPAN_START` / `ARC_SPAN_END` as a testable pair, so
+/// this const is retired rather than left as a number nothing reads.
+/// The original wording is kept because it records the rule that still
+/// applies: "the tail is the half that lands on the crosshair". What
+/// the first pre-aim capture added is that the HEAD is the half that
+/// piles into a blob on the crosshair, which is why the window moved
+/// instead of widening.
 
 #[allow(clippy::too_many_arguments)]
 fn arc_preview(
@@ -24095,14 +24123,19 @@ fn arc_preview(
                 *v = Visibility::Hidden;
                 continue;
             }
-            // §owner: the arc SURVIVES, the marker does not. It is
-            // trimmed to its near span so the dots never walk out to
-            // the impact point - which for a flat shot projects onto
-            // the centre pixel and would be a landing marker made of
-            // dots. What is left reads as "this is a lobbed weapon and
-            // here is the drop", starting down at the muzzle and
-            // fading out well short of the crosshair.
-            let want = total * ARC_PREVIEW_SPAN * (i as f32 + 0.5) / ents.len() as f32;
+            // §owner: the arc SURVIVES, the marker does not - the dots
+            // must never walk out to the impact point, which for a flat
+            // shot projects onto the centre pixel and would be a
+            // landing marker made of dots. That rule still holds; the
+            // window it is enforced by has MOVED. See
+            // `bow_aim::ARC_SPAN_START` for the capture that forced it:
+            // trimming to the NEAR 62% kept the samples that have not
+            // dropped yet AND are closest to the camera, so they piled
+            // into a red blob on the crosshair - the same failure at
+            // the other end of the arc. The window now starts at 30%
+            // and ends at 92%, so the trail shows the drop and the
+            // landing ring covers the last stretch.
+            let want = total * bow_aim::arc_sample_frac(i, ents.len());
             let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
             let frac = i as f32 / ents.len() as f32;
             t.translation = Vec3::from_array(pts[k]);
@@ -24158,11 +24191,11 @@ fn arc_preview(
     // other than where you are pointing. `landing_ring_visible` is that
     // gate, and its unit tests pin both halves.
     //
-    // Note what did NOT change: `ARC_PREVIEW_SPAN` is still 0.62. The
-    // dots stay trimmed to their near span, so the ring closes the gap
-    // to the landing point instead of a trail of dots walking onto the
-    // centre pixel - which is the failure the trim was introduced to
-    // fix. Raising the span would have recreated it exactly.
+    // Note what did NOT change: the dots still stop SHORT of the
+    // impact (`bow_aim::ARC_SPAN_END` is 0.92), so the ring closes the
+    // last stretch instead of a trail of dots walking onto the centre
+    // pixel - the failure the original trim was introduced to fix.
+    // Raising the span to 1.0 would have recreated it exactly.
     //
     // Bow only. The spear is a later section of the spec and inventing
     // its behaviour here would be guessing.

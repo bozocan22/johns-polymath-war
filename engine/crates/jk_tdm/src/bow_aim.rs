@@ -351,6 +351,59 @@ pub const LANDING_SEP_RAD: f32 = 0.024;
 /// does not z-fight with the ground it is lying on.
 pub const LANDING_LIFT_M: f32 = 0.03;
 
+// ---- the arc's SAMPLING WINDOW ------------------------------------------
+
+/// Where along the predicted flight the dot trail starts and stops, as
+/// fractions of total arc length.
+///
+/// ## What the capture actually showed
+///
+/// `arc_preview` sampled `total * 0.62 * (i + 0.5) / n` — the NEAR 62%
+/// of the flight, starting at the muzzle. The reasoning was sound and is
+/// quoted in `landing_ring_visible`: don't let the dots walk out to the
+/// impact point, because for a flat shot that lands on the centre pixel.
+///
+/// The first capture ever taken of bow pre-aim (`bow_aim`, which is also
+/// the first script in this project's history to press RMB with a bow in
+/// hand) shows what it produced instead: a single filled red-orange
+/// blob, ~32 px, sitting exactly on the crosshair and covering the
+/// target. Not a trail of dots — a blob.
+///
+/// The mechanism is that the trim optimised for the wrong end. Near the
+/// muzzle the arc has not yet dropped, so those samples lie almost
+/// exactly ON the aim line and project onto the centre pixel anyway; and
+/// they are the samples CLOSEST to the camera, so they are also the
+/// biggest. A dot 1 m from the eye is enormous. The trim therefore kept
+/// precisely the samples that overlap into a blob at screen centre and
+/// discarded precisely the samples where the drop is legible.
+///
+/// Diagnostic numbers from that run, printed out of `predict_arc`: a
+/// level shot from eye height 1.62 m lands 14.1 m away undrawn and
+/// 19.0 m away at full draw, with 6-12 predicted points over a 13-18 m
+/// arc. The whole of the interesting drop is in the FAR half.
+///
+/// So the window moves rather than widening. It still stops short of the
+/// impact — `END` is 0.92, and the landing ring marks the last 8% — so
+/// the original rule ("the dots never walk out to the impact point") is
+/// preserved. What changes is that the near third, which was never
+/// showing the player anything except a red square over whatever they
+/// were aiming at, is skipped.
+pub const ARC_SPAN_START: f32 = 0.30;
+pub const ARC_SPAN_END: f32 = 0.92;
+
+/// Fraction of total arc length for dot `i` of `n`.
+///
+/// Kept out of the Bevy system so it can be tested at all — the 47 deg
+/// camera bug in this codebase survived for months because its
+/// arithmetic lived inside a system nothing could call.
+pub fn arc_sample_frac(i: usize, n: usize) -> f32 {
+    if n == 0 {
+        return ARC_SPAN_START;
+    }
+    let u = (i as f32 + 0.5) / n as f32;
+    ARC_SPAN_START + (ARC_SPAN_END - ARC_SPAN_START) * u
+}
+
 pub struct BowAimPlugin;
 
 impl Plugin for BowAimPlugin {
@@ -520,6 +573,46 @@ mod tests {
         assert!(q.is_finite());
         let up = q * Vec3::Y;
         assert!(up.distance(Vec3::NEG_Y) < 1e-5, "got {up}");
+    }
+
+    /// The dot trail must not start AT the muzzle. Those samples are a
+    /// metre from the eye, have not dropped yet, and project onto the
+    /// centre pixel as a blob over the target - which is what the first
+    /// pre-aim capture photographed.
+    #[test]
+    fn the_dot_trail_skips_the_near_field() {
+        let first = arc_sample_frac(0, 24);
+        assert!(
+            first >= ARC_SPAN_START,
+            "first dot at {first} is inside the near field"
+        );
+        // and it is a real skip, not a rounding of zero
+        assert!(first > 0.25);
+    }
+
+    /// ...and it still stops SHORT of the impact, which is the rule the
+    /// original 0.62 trim existed to enforce. The landing ring covers
+    /// the last stretch, not more dots.
+    #[test]
+    fn the_dot_trail_still_stops_short_of_the_impact() {
+        let last = arc_sample_frac(23, 24);
+        assert!(last < 1.0, "last dot at {last} reaches the impact point");
+        assert!(last <= ARC_SPAN_END);
+    }
+
+    /// Monotonic and inside the window for every index - a dot that goes
+    /// backwards along the flight would read as noise.
+    #[test]
+    fn the_dot_trail_walks_forward_across_the_window() {
+        let n = 24;
+        let mut prev = -1.0;
+        for i in 0..n {
+            let f = arc_sample_frac(i, n);
+            assert!(f > prev, "dot {i} went backwards: {f} after {prev}");
+            assert!((ARC_SPAN_START..=ARC_SPAN_END).contains(&f), "dot {i} at {f}");
+            prev = f;
+        }
+        assert_eq!(arc_sample_frac(0, 0), ARC_SPAN_START);
     }
 
     /// Growth is gentle and CLAMPED, so the ring never becomes the huge
