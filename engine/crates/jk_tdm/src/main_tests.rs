@@ -4145,15 +4145,24 @@ mod forge_tests {
         assert_eq!(crosshair_rgb(&back), (1, 2, 254));
 
         // a DEFAULT settings file round-trips to the spec's own defaults:
-        // size 5, gap 0, thickness 1, dot off, outline on 1, green
-        // 50/250/50, alpha 200, no T-shape, classic STATIC.
+        // size 5, gap 0, thickness 1, dot off, outline on 1, alpha 200,
+        // no T-shape, classic STATIC.
+        //
+        // The COLOUR default moved from Brief VIII's green to the AIMING
+        // spec §1's red ("a simple, centred, easy-to-see crosshair in
+        // red"); the green preset is still first in the row and
+        // `aiming_language_tests` pins that it is still selectable.
         let d = parse_settings(&settings_to_text(&GameSettings::default()));
         assert_eq!(d.cross_size, 5);
         assert_eq!(d.cross_gap, 0);
         assert_eq!(d.cross_thickness, 1);
         assert!(!d.cross_dot, "the dot is OFF by default");
         assert!(d.cross_outline && d.cross_outline_px == 1);
-        assert_eq!(crosshair_rgb(&d), (50, 250, 50), "spec default is green 50,250,50");
+        assert_eq!(
+            crosshair_rgb(&d),
+            CROSS_RGB_RED,
+            "the default aiming colour is §1's red"
+        );
         assert_eq!(d.cross_alpha, 200);
         assert!(!d.cross_t_shape);
         assert!(!d.cross_dynamic, "the default is classic STATIC");
@@ -5845,5 +5854,128 @@ mod deagle_model_tests {
              small for the pistol the whole joke is about",
             clear * 1000.0 / 1.2
         );
+    }
+}
+
+#[cfg(test)]
+mod aiming_language_tests {
+    use crate::*;
+
+    /// §1: "a simple, centred, easy-to-see crosshair in RED". A fresh
+    /// profile must come up red — and RED must be a real preset rather
+    /// than a triple invented at the default site.
+    ///
+    /// FAILS on the pre-change code, where `CROSS_COLOR_DEFAULT_IDX` was
+    /// 0 (GREEN) and `crosshair_rgb(&default)` returned (50, 250, 50).
+    #[test]
+    fn a_fresh_profile_aims_in_red() {
+        let s = GameSettings::default();
+        let (r, g, b) = crosshair_rgb(&s);
+        assert!(r > 200, "the default crosshair is not bright red: {r},{g},{b}");
+        assert!(
+            g < 100 && b < 100,
+            "green/blue are up too: {r},{g},{b} renders salmon under TonyMcMapface"
+        );
+        // it is the RED PRESET, not a one-off - the row's label and the
+        // resolved colour must be the same thing
+        assert_eq!(CROSS_COLOR_CHOICES[CROSS_COLOR_RED_IDX].0, "RED");
+        assert_eq!(CROSS_COLOR_DEFAULT_IDX, CROSS_COLOR_RED_IDX);
+        assert_eq!(CROSS_COLOR_CHOICES[CROSS_COLOR_DEFAULT_IDX].1, (r, g, b));
+    }
+
+    /// ...and the colour SETTING still works. Changing the default must
+    /// not amount to deleting the option: every preset still resolves to
+    /// its own advertised triple, and CUSTOM still reads `cross_rgb`.
+    ///
+    /// This is the regression guard on part A of the task, and it fails
+    /// on any "fix" that hard-codes red inside `crosshair_rgb`.
+    #[test]
+    fn the_colour_setting_still_chooses_every_preset() {
+        let mut s = GameSettings::default();
+        // GREEN is still there, at the head of the row
+        s.cross_color_idx = 0;
+        assert_eq!(crosshair_rgb(&s), (50, 250, 50));
+        // and so is everything between
+        for (i, (name, want)) in CROSS_COLOR_CHOICES.iter().enumerate() {
+            if i == CROSS_COLOR_CUSTOM_IDX {
+                continue;
+            }
+            s.cross_color_idx = i;
+            assert_eq!(crosshair_rgb(&s), *want, "preset {name} does not resolve");
+        }
+        // CUSTOM ignores the table and takes the player's own triple
+        s.cross_color_idx = CROSS_COLOR_CUSTOM_IDX;
+        s.cross_rgb = (12, 34, 56);
+        assert_eq!(crosshair_rgb(&s), (12, 34, 56));
+    }
+
+    /// §4: the crosshair does not POP off when the aim button goes down.
+    /// It is a curve over `ads_t`, monotone, complete at both ends.
+    ///
+    /// FAILS on the pre-change code, which had no such function at all
+    /// and stepped the crosshair off `cam.ads` in one frame.
+    #[test]
+    fn the_crosshair_fades_rather_than_popping() {
+        // a weapon that does not hide is untouched at every instant
+        for k in 0..=10 {
+            assert_eq!(crosshair_ads_fade(k as f32 / 10.0, false), 1.0);
+        }
+        // one that does: full at the hip, gone at the sight
+        assert_eq!(crosshair_ads_fade(0.0, true), 1.0);
+        assert_eq!(crosshair_ads_fade(1.0, true), 0.0);
+        // strictly decreasing in between - no plateau that would read as
+        // a pop at one end of it
+        let mut prev = crosshair_ads_fade(0.0, true);
+        for k in 1..=20 {
+            let f = crosshair_ads_fade(k as f32 / 20.0, true);
+            assert!(f < prev, "fade not monotone at t={}", k as f32 / 20.0);
+            assert!((0.0..=1.0).contains(&f));
+            prev = f;
+        }
+        // and it holds the cross through the FIRST part of the raise -
+        // mirroring `reticle_alpha`'s squared fade-in, so the two marks
+        // never both sit at half strength on the same pixel. At the
+        // midpoint the cross is still three quarters there.
+        //
+        // Mutation note: written as `> 0.5` this would survive replacing
+        // `1 - t*t` with a plain `1 - t`, which lands exactly on 0.5.
+        assert!(
+            crosshair_ads_fade(0.5, true) > 0.7,
+            "the fade is no longer back-loaded"
+        );
+        // hostile input cannot brighten it past full or invert it
+        assert_eq!(crosshair_ads_fade(-3.0, true), 1.0);
+        assert_eq!(crosshair_ads_fade(9.0, true), 0.0);
+    }
+
+    /// The transition lands inside the owner's 100-200 ms window on the
+    /// normal path, and the two faster paths are faster rather than
+    /// slower - a crosshair that outlived the sight picture would be the
+    /// stutter §4 is written against.
+    ///
+    /// FAILS on the pre-change code: the transition took 0 ms.
+    #[test]
+    fn the_transition_is_inside_the_owners_window() {
+        // `ads_t` covers 0..1 in `ads_time`, and the fade covers the
+        // whole of `ads_t`, so the two durations are the same number.
+        assert!(
+            (0.100..=0.200).contains(&ADS_TIME_S),
+            "ADS_TIME_S {ADS_TIME_S} is outside 100-200 ms, so the \
+             crosshair fade is too - use a curve over part of ads_t"
+        );
+        // Recon aims 40% faster; still a transition, still not a pop.
+        let recon = ADS_TIME_S / 1.4;
+        assert!(recon > 0.05 && recon < ADS_TIME_S);
+    }
+
+    /// §4's "reduces": the cross draws in as it fades, and a weapon that
+    /// never hides is never scaled.
+    #[test]
+    fn the_crosshair_draws_in_as_it_fades() {
+        assert_eq!(crosshair_ads_scale(1.0), 1.0);
+        let gone = crosshair_ads_scale(0.0);
+        assert!(gone < 1.0 && gone > 0.5, "shrink {gone} is not subtle");
+        assert!(crosshair_ads_scale(0.5) > gone);
+        assert!(crosshair_ads_scale(0.5) < 1.0);
     }
 }

@@ -1838,8 +1838,10 @@ impl Default for GameSettings {
             minimap_rotate: true,
             minimap_scale: MINIMAP_SCALE_DEFAULT,
             // §4.6 defaults, verbatim from the brief: size 5, gap 0,
-            // thickness 1, dot off, outline on at 1, green 50/250/50,
-            // alpha 200, no T-shape, classic static.
+            // thickness 1, dot off, outline on at 1, alpha 200, no
+            // T-shape, classic static. The COLOUR default has since moved
+            // from the brief's green to §1's RED (`CROSS_RGB_DEFAULT`);
+            // green is still the first preset in the row.
             cross_size: CROSS_SIZE_DEFAULT,
             cross_gap: CROSS_GAP_DEFAULT,
             cross_thickness: CROSS_THICK_DEFAULT,
@@ -1898,25 +1900,48 @@ const CROSS_GAP_DEFAULT: i32 = 0;
 const CROSS_THICK_DEFAULT: i32 = 1;
 const CROSS_OUTLINE_DEFAULT: i32 = 1;
 const CROSS_ALPHA_DEFAULT: u8 = 200;
-/// Spec default: green 50,250,50. This is a SIGNAL colour, deliberately
-/// outside `branding::palette` - the art palette is warm dust/gold/bronze
-/// and a crosshair drawn in it would vanish against this game's own
-/// ground. Readability beats theme at the centre of the screen.
-const CROSS_RGB_DEFAULT: (u8, u8, u8) = (50, 250, 50);
+/// The old default: green 50,250,50. Still a preset, no longer the
+/// default. This is a SIGNAL colour, deliberately outside
+/// `branding::palette` - the art palette is warm dust/gold/bronze and a
+/// crosshair drawn in it would vanish against this game's own ground.
+/// Readability beats theme at the centre of the screen.
+const CROSS_RGB_GREEN: (u8, u8, u8) = (50, 250, 50);
+
+/// §1 of the AIMING spec: "a simple, centred, easy-to-see crosshair in
+/// RED", and "keep this crosshair consistent across normal gameplay".
+/// Red is the aiming language of this game now - the projectile reticles
+/// in `projectile_aim` are already this family (`RETICLE_RGBA`), and a
+/// green cross beside three red circles was two languages at one pixel.
+///
+/// The channels are the palette's validated hot red rather than a fresh
+/// guess: the sight pass measured that raising ALL THREE channels
+/// renders salmon-pink under TonyMcMapface, so red is doubled and green
+/// and blue stay down.
+const CROSS_RGB_RED: (u8, u8, u8) = (240, 60, 55);
+
+/// What a fresh profile gets. Changing this changes the DEFAULT ONLY -
+/// every preset below is still selectable and the CUSTOM slot still
+/// reads `GameSettings::cross_rgb`, because §1 asks for a red aiming
+/// language and not for the colour row to stop working.
+const CROSS_RGB_DEFAULT: (u8, u8, u8) = CROSS_RGB_RED;
 
 /// Colour presets. The LAST entry is the custom slot - it ignores the
 /// triple stored here and reads `GameSettings::cross_rgb`.
 const CROSS_COLOR_CHOICES: [(&str, (u8, u8, u8)); 8] = [
-    ("GREEN", CROSS_RGB_DEFAULT),
+    ("GREEN", CROSS_RGB_GREEN),
     ("WHITE", (255, 255, 255)),
     ("CYAN", (40, 235, 245)),
     ("YELLOW", (250, 235, 60)),
     ("MAGENTA", (245, 70, 220)),
-    ("RED", (240, 60, 55)),
+    ("RED", CROSS_RGB_RED),
     ("BLUE", (70, 130, 255)),
     ("CUSTOM", CROSS_RGB_DEFAULT),
 ];
-const CROSS_COLOR_DEFAULT_IDX: usize = 0;
+/// Index of the RED preset. Named rather than spelled `5` at the default
+/// so the two cannot drift when a preset is inserted; a test pins the
+/// name at this index.
+const CROSS_COLOR_RED_IDX: usize = 5;
+const CROSS_COLOR_DEFAULT_IDX: usize = CROSS_COLOR_RED_IDX;
 const CROSS_COLOR_CUSTOM_IDX: usize = CROSS_COLOR_CHOICES.len() - 1;
 /// Opacity presets the settings row cycles through. The stored value is
 /// a raw u8, so a hand-edited file may sit anywhere in 0..=255.
@@ -2097,6 +2122,63 @@ fn crosshair_feedback(
 ///     while hip" behaviour comes through untouched.
 fn optic_hides_crosshair(has_optic: bool, ads: bool, in_mech: bool) -> bool {
     has_optic && ads && !in_mech
+}
+
+/// §4 of the AIMING spec: "when switching normal → ADS, change the
+/// crosshair smoothly. Do not instantly replace everything. Use a short
+/// transition: approximately 100-200 ms, subtle zoom, normal crosshair
+/// fades/reduces, ADS reticle becomes visible. When leaving ADS, reverse."
+///
+/// How much of the normal crosshair is still drawn: 1.0 = the full hip
+/// cross, 0.0 = gone. Multiplies the alpha, and drives a small shrink at
+/// the call site, so "fades" and "reduces" are one number.
+///
+/// ## Why this rides `ads_t` and does NOT get a clock of its own
+///
+/// `cam.ads_t` is the SAME 0→1 the FOV, the weapon pose, the third-person
+/// boom and `projectile_aim::reticle_alpha` all ride. A second timer
+/// started on the same keypress would agree today and drift the moment
+/// anything changes the ADS rate - and two things already do: Recon
+/// armour aims 40% faster, and a scoped gun steps in 0.05 s. A crosshair
+/// that finished fading before or after the sight picture arrived would
+/// read as a stutter, not a transition.
+///
+/// Measured against the owner's window: `ADS_TIME_S` is 0.12 s, so the
+/// normal path completes in 120 ms - inside 100-200 ms, which is why
+/// this uses the whole of `ads_t` rather than a fraction of it. Recon
+/// runs it in 86 ms and a scoped step in 50 ms; both are FASTER than the
+/// window rather than slower, and both are deliberate weapon/armour
+/// behaviour that a crosshair curve should follow rather than fight.
+///
+/// The curve is `1 - t²`: it holds most of the crosshair through the
+/// first third of the raise and clears late, so the cross is still
+/// legible while the eye is still moving to the sight and is out of the
+/// way by the time the sight picture settles. It is the mirror of
+/// `reticle_alpha`'s `t²` fade-IN, so at every instant the two marks sum
+/// to roughly one mark rather than crossing over as a double image.
+///
+/// Reversal is free: `ads_t` runs back down to 0 when the button is
+/// released, so leaving ADS plays the same curve backwards on the same
+/// clock. That is the second reason not to add a timer.
+fn crosshair_ads_fade(ads_t: f32, hides_at_ads: bool) -> f32 {
+    if !hides_at_ads {
+        return 1.0;
+    }
+    let t = ads_t.clamp(0.0, 1.0);
+    1.0 - t * t
+}
+
+/// The "subtle zoom" half of §4: the cross draws in slightly as it
+/// fades, so the transition is a movement and not only an opacity ramp.
+/// Bounded at a 30% pull - §17 asks for restraint, and a crosshair that
+/// collapses to a point reads as a glitch on a slow machine where the
+/// mid frames are the ones you see.
+const CROSS_ADS_SHRINK: f32 = 0.30;
+
+/// Scale for the crosshair root at a given fade. `fade == 1` is the
+/// untouched hip cross, so a weapon that never hides is never scaled.
+fn crosshair_ads_scale(fade: f32) -> f32 {
+    1.0 - CROSS_ADS_SHRINK * (1.0 - fade.clamp(0.0, 1.0))
 }
 
 /// The colour to paint the geometry. Only `Idle` uses the player's
@@ -26027,9 +26109,30 @@ fn crosshair_render(
     // IRON SIGHT on a weapon that is stowed out of the frame - a centre
     // pixel with nothing in it at all. The grenade's own mark now owns
     // that pixel instead.
-    let aw = projectile_aim::aim_weapon(p.gun, p.cook_t > 0.0 && !p.in_mech());
-    let optic_hidden = optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech())
-        || projectile_aim::draws_own_reticle(aw, cam.ads, p.in_mech());
+    //
+    // §3: a gun with NO mark of its own (fists, a hip-fired minigun)
+    // resolves to `OpenSight` and joins the same rung, so ADS swaps the
+    // cross for the tight ring instead of changing nothing at all. Guns
+    // that DO carry an optic are untouched - their 3D dot is the ADS
+    // reticle and a 2D overlay would be a second mark on one sight
+    // picture. `aim_weapon_ads` carries the full argument.
+    let aw = projectile_aim::aim_weapon_ads(
+        p.gun,
+        p.cook_t > 0.0 && !p.in_mech(),
+        projectile_aim::weapon_has_own_mark(p.gun),
+    );
+    // §4: what this asks is "would this weapon hide the crosshair at
+    // FULL ads", with `ads = true` pinned - NOT "is the button down".
+    // The button is a step and the old code stepped the crosshair off
+    // with it; the fade below is what turns that step into the owner's
+    // 100-200 ms transition, and it needs to know the DESTINATION, not
+    // the current instant. `cam.ads_t` supplies the instant.
+    let hides_at_ads = optic_hides_crosshair(sight_line_y(p.gun).is_some(), true, p.in_mech())
+        || projectile_aim::draws_own_reticle(aw, true, p.in_mech());
+    let ads_fade = crosshair_ads_fade(cam.ads_t, hides_at_ads);
+    // Fully faded is the old `optic_hidden`: at that point the pieces go
+    // away entirely rather than being drawn at zero alpha.
+    let optic_hidden = ads_fade <= 0.0;
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
@@ -26037,7 +26140,13 @@ fn crosshair_render(
         optic_hidden,
         cam.blocked && p.alive(),
     );
-    let fill = crosshair_color(fb, crosshair_rgb(&settings), settings.cross_alpha);
+    // The fade applies to the AIMING furniture only. A hitmarker fires
+    // during ADS - it outranks the optic hide, and that is the existing
+    // ladder - so muting it by the same curve would delete the one
+    // signal that must never be missed. Feedback keeps full strength.
+    let geo_fade = if fb == CrossFeedback::Idle { ads_fade } else { 1.0 };
+    let eff_alpha = (settings.cross_alpha as f32 * geo_fade).round().clamp(0.0, 255.0) as u8;
+    let fill = crosshair_color(fb, crosshair_rgb(&settings), eff_alpha);
     let hidden = fb == CrossFeedback::Hidden;
 
     // the same live cone the stability bracket reads, so a DYNAMIC
@@ -26059,6 +26168,10 @@ fn crosshair_render(
 
     if let Ok(mut tf) = root.get_single_mut() {
         tf.rotation = Quat::from_rotation_z(if fresh_kill { PI * 0.25 } else { 0.0 });
+        // §4's "subtle zoom": the cross draws IN as it fades out, and
+        // back out as it returns. One transform on the root, so every
+        // piece and its outline move together.
+        tf.scale = Vec3::splat(crosshair_ads_scale(geo_fade));
     }
 
     for (piece, mut node, mut bg) in &mut pieces {
@@ -26086,7 +26199,10 @@ fn crosshair_render(
         *bg = BackgroundColor(if piece.outline {
             // a dark backing, never a second colour to tune - its job is
             // contrast against a bright wall, nothing else
-            Color::srgba(0.0, 0.0, 0.0, 0.75 * (settings.cross_alpha as f32 / 255.0))
+            // `eff_alpha`, not the raw setting: the dark backing must
+            // fade with the arms it backs, or §4's transition leaves a
+            // black ghost cross on the sight picture.
+            Color::srgba(0.0, 0.0, 0.0, 0.75 * (eff_alpha as f32 / 255.0))
         } else {
             fill
         });

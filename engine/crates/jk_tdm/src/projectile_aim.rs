@@ -114,6 +114,9 @@ pub enum AimWeapon {
     Bow,
     Spear,
     Grenade,
+    /// §3 of the AIMING spec: a firearm being aimed that has NO optic of
+    /// its own — fists, the hip-fired minigun. See `aim_weapon_ads`.
+    OpenSight,
 }
 
 /// Resolve what is being pre-aimed. `cooking` is `p.cook_t > 0.0` — the
@@ -127,6 +130,61 @@ pub fn aim_weapon(gun: GunKind, cooking: bool) -> AimWeapon {
         GunKind::Spear => AimWeapon::Spear,
         _ => AimWeapon::None,
     }
+}
+
+/// The same question, asked for a weapon that is BEING AIMED, plus the
+/// one fact this module cannot see for itself: does the thing in the
+/// player's hands already carry a mark of its own?
+///
+/// ## §3 vs the gun-sight pass, resolved rather than picked between
+///
+/// §3 asks that the reticle visibly CHANGE on entering ADS, so the
+/// player reads "I am now aiming through the weapon sight". The gun
+/// sight pass has the owner's words for the other side: "when you are
+/// aiming with the sight you don't need the actual original crosshair to
+/// appear, sight will have their own crosshair", and `push_red_dot`
+/// builds a 3D tube with a lens for exactly that.
+///
+/// These agree once you read §3 as asking for *normal cross → precise
+/// sight picture* rather than for a specific 2D overlay. For a gun with
+/// an optic the change ALREADY happens and the 3D dot IS the new
+/// reticle; laying a 2D mark on top of it would put two marks on one
+/// sight picture, which is the thing §17's restraint most obviously
+/// forbids. So `has_own_mark` weapons are left exactly as they are.
+///
+/// What was missing is the weapons with no mark at all. Fists and a
+/// hip-fired minigun return `None` from `sight_line_y`, so aiming them
+/// changed nothing whatsoever on screen — the plain cross stayed put and
+/// §3 was simply unmet for them. They get the precise mark instead.
+///
+/// The SCOPED guns are excluded through the same argument: the AWM's
+/// scope overlay draws its own mark while zoomed, so it is a
+/// `has_own_mark` weapon even though `sight_line_y` says `None`. The
+/// call site passes `sight_line_y(..).is_some() || gun(..).scoped`, and
+/// the AWM's long-standing "crosshair while zoomed, nothing while
+/// hip-firing" behaviour comes through untouched.
+///
+/// `weapon_has_own_mark` below is the ONE place that answers the
+/// `has_own_mark` question, so the crosshair renderer and this module's
+/// own painter cannot come to different conclusions about the same gun.
+pub fn aim_weapon_ads(gun: GunKind, cooking: bool, has_own_mark: bool) -> AimWeapon {
+    match aim_weapon(gun, cooking) {
+        AimWeapon::None if !has_own_mark => AimWeapon::OpenSight,
+        other => other,
+    }
+}
+
+/// Does this weapon already put a mark of its own in front of the eye
+/// while aimed?
+///
+/// Two sources, and both are existing facts rather than a new list:
+/// `sight_line_y` is what `push_red_dot` builds a 3D tube against (and
+/// `every_firearm_carries_an_aligned_optic` pins the two together gun by
+/// gun), and `GunSpec::scoped` is what raises the AWM's scope overlay.
+/// A third hand-maintained list of "guns with sights" is exactly the
+/// drift this avoids.
+pub fn weapon_has_own_mark(gun: GunKind) -> bool {
+    crate::sight_line_y(gun).is_some() || crate::sim::gun(gun).scoped
 }
 
 /// Vertical FOV for a given magnification over a hip FOV.
@@ -193,8 +251,21 @@ pub fn preaim_mag(aw: AimWeapon) -> Option<f32> {
         AimWeapon::Bow => Some(BOW_PREAIM_MAG),
         AimWeapon::Spear => Some(SPEAR_PREAIM_MAG),
         AimWeapon::Grenade => Some(GRENADE_PREAIM_MAG),
-        AimWeapon::None => None,
+        // A firearm's ADS zoom is the gun's own `zoom_deg`, applied by
+        // the camera block in `main.rs`. Adding a pre-aim magnification
+        // here would multiply it - the mark is what changes, not the FOV.
+        AimWeapon::OpenSight | AimWeapon::None => None,
     }
+}
+
+/// Which weapons draw a reticle of this module's own at full aim.
+///
+/// Separate from `preaim_mag` because the two questions came apart when
+/// the open-sight gun joined: it draws a mark and does NOT zoom, so
+/// `preaim_mag(..).is_some()` stopped being the right predicate for
+/// "has a mark".
+fn has_reticle(aw: AimWeapon) -> bool {
+    !matches!(aw, AimWeapon::None)
 }
 
 // ---- §7: the circular reticle --------------------------------------------
@@ -216,7 +287,7 @@ pub fn preaim_mag(aw: AimWeapon) -> Option<f32> {
 /// `bow_draws_own_reticle`; a second `spear_draws_own_reticle` beside it
 /// would have been the same predicate twice.
 pub fn draws_own_reticle(aw: AimWeapon, ads: bool, in_mech: bool) -> bool {
-    preaim_mag(aw).is_some() && ads && !in_mech
+    has_reticle(aw) && ads && !in_mech
 }
 
 /// Outer diameter of the reticle circle, in the 720p authoring space the
@@ -258,10 +329,21 @@ const RETICLE_DOT: f32 = 2.0;
 /// against.
 ///
 /// Returns `(width_px, height_px)` in the 720p authoring space.
+///
+/// §3's OPEN-SIGHT gun takes the TIGHTEST mark in the family: a 9 px
+/// ring around the same 2 px point. The spec asks for "a more precise
+/// red dot/circle reticle" against the normal cross and is explicit that
+/// it must not be complicated, so precision here is literally a smaller
+/// circle - the cross's own arms reach 5-6 px out with a gap, so a 9 px
+/// ring is unmistakably a tighter mark on the same centre without being
+/// a new shape language. It is the smallest thing in the family, so it
+/// cannot widen the `RETICLE_CLEAR_RAD` sizing (which no gun uses
+/// anyway - firearms draw no arc).
 pub fn reticle_size(aw: AimWeapon) -> (f32, f32) {
     match aw {
         AimWeapon::Spear => (16.0, 22.0),
         AimWeapon::Grenade => (22.0, 14.0),
+        AimWeapon::OpenSight => (9.0, 9.0),
         _ => (RETICLE_D, RETICLE_D),
     }
 }
@@ -375,7 +457,11 @@ fn paint_reticle(
     // `p.gun` still says whatever is slung. `aim_weapon` is the one
     // place that resolves it, and it reads the sim's own `cook_t`
     // rather than watching the mouse for itself.
-    let aw = aim_weapon(p.gun, p.cook_t > 0.0);
+    //
+    // §3: and a gun with NO mark of its own joins the same rung while
+    // aimed, so the reticle DOES change on entering ADS for the weapons
+    // that had no 3D dot to change into.
+    let aw = aim_weapon_ads(p.gun, p.cook_t > 0.0, weapon_has_own_mark(p.gun));
     let active = *state.get() == GameState::Playing
         && p.alive()
         && draws_own_reticle(aw, cam.ads, p.in_mech());
@@ -1054,6 +1140,88 @@ mod tests {
             "mid {mid} is not well below a third of full {full} - is the fade still squared?"
         );
         assert!((full - RETICLE_RGBA.3).abs() < 1e-5);
+    }
+
+    /// §3: a gun with NO optic of its own gets the precise ADS mark,
+    /// because for it "the reticle changes on entering ADS" was not
+    /// happening at all. A gun that HAS one is left alone: its 3D dot is
+    /// the ADS reticle and a second 2D mark would double up on one sight
+    /// picture.
+    ///
+    /// FAILS on the pre-change code, which had no `aim_weapon_ads` and
+    /// resolved every firearm to `AimWeapon::None`.
+    #[test]
+    fn a_gun_with_no_optic_gets_the_precise_mark_and_one_with_an_optic_does_not() {
+        // no mark of its own -> the open sight reticle
+        let bare = aim_weapon_ads(GunKind::Fists, false, false);
+        assert_eq!(bare, AimWeapon::OpenSight);
+        assert!(draws_own_reticle(bare, true, false));
+        // ...and only while AIMED, and never from a mech seat
+        assert!(!draws_own_reticle(bare, false, false));
+        assert!(!draws_own_reticle(bare, true, true));
+        // carries its own mark -> nothing here draws
+        let optic = aim_weapon_ads(GunKind::M4, false, true);
+        assert_eq!(optic, AimWeapon::None);
+        assert!(!draws_own_reticle(optic, true, false));
+    }
+
+    /// The open sight does NOT bring a pre-aim zoom with it. A firearm
+    /// already has its own `zoom_deg`; stacking 1.3x on top of it would
+    /// be this module quietly retuning every gun in the game.
+    ///
+    /// FAILS on any implementation that reuses `preaim_mag` as the
+    /// "has a mark" predicate — which is what `draws_own_reticle` did
+    /// before `has_reticle` was split out of it.
+    #[test]
+    fn the_open_sight_marks_without_zooming() {
+        assert!(preaim_mag(AimWeapon::OpenSight).is_none());
+        assert_eq!(preaim_fov_deg(90.0, AimWeapon::OpenSight), 90.0);
+        // and yet it still draws
+        assert!(draws_own_reticle(AimWeapon::OpenSight, true, false));
+    }
+
+    /// The open sight's mark is the TIGHTEST in the family — "a more
+    /// precise red dot/circle reticle" — and it is round, not an oval
+    /// borrowed from a thrown weapon.
+    ///
+    /// FAILS on the pre-change code, where `OpenSight` did not exist and
+    /// anything unrecognised fell through to the bow's 14 px circle.
+    #[test]
+    fn the_open_sight_mark_is_the_tightest_circle_in_the_family() {
+        let (w, h) = reticle_size(AimWeapon::OpenSight);
+        assert_eq!(w, h, "the gun ADS mark is a circle: {w}x{h}");
+        let (bw, _) = reticle_size(AimWeapon::Bow);
+        assert!(w < bw, "the gun mark {w} is not tighter than the bow's {bw}");
+        // small enough to be a precision mark, big enough to see
+        assert!((6.0..=12.0).contains(&w), "gun ADS mark {w} px");
+        // it cannot have widened the arc cull sizing
+        let widest = [
+            reticle_size(AimWeapon::Bow),
+            reticle_size(AimWeapon::Spear),
+            reticle_size(AimWeapon::Grenade),
+            reticle_size(AimWeapon::OpenSight),
+        ]
+        .into_iter()
+        .flat_map(|(a, b)| [a, b])
+        .fold(0.0_f32, f32::max);
+        assert_eq!(widest, 22.0);
+    }
+
+    /// The two facts that decide `has_own_mark` are read from the code
+    /// that draws the marks, so this cannot drift into a third list.
+    ///
+    /// The AWM is the case worth pinning: `sight_line_y` says `None` for
+    /// it, so "no optic" alone would have handed it the open-sight mark
+    /// and taken away the crosshair its scope overlay is built around.
+    #[test]
+    fn a_scoped_rifle_counts_as_carrying_its_own_mark() {
+        assert!(weapon_has_own_mark(GunKind::Awm));
+        assert_eq!(aim_weapon_ads(GunKind::Awm, false, weapon_has_own_mark(GunKind::Awm)), AimWeapon::None);
+        // fists carry nothing, by either route
+        assert!(!weapon_has_own_mark(GunKind::Fists));
+        // and a wound throw still outranks whatever is slung, mark or no
+        assert_eq!(aim_weapon_ads(GunKind::Awm, true, true), AimWeapon::Grenade);
+        assert_eq!(aim_weapon_ads(GunKind::Fists, true, false), AimWeapon::Grenade);
     }
 
     /// A FLAT shot must not put a ring on the centre pixel. This is the
