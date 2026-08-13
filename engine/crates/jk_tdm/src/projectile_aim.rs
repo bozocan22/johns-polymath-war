@@ -1,5 +1,17 @@
-//! THE BOW'S OWN AIMING LANGUAGE — subtle pre-aim zoom, a circular
-//! reticle, and a landing ring that never becomes a second crosshair.
+//! THE PROJECTILE WEAPONS' AIMING LANGUAGE — subtle pre-aim zoom, a
+//! round reticle, and a landing ring that never becomes a second
+//! crosshair. Bow and spear both; the grenade is a later section.
+//!
+//! ## Why this is ONE module and not two
+//!
+//! It was `bow_aim.rs` when only the bow's section of the spec had been
+//! built. The spear's requirements (§9-§11) are the bow's with two
+//! numbers changed — 1.3x zoom, a round reticle, an arc from the real
+//! launch point — so a `spear_aim.rs` would have been a near-identical
+//! twin of this file with a different `GunKind` in the guards. Two
+//! reticle systems painting the same centre pixel is the split brain
+//! this codebase keeps paying for, so the weapon-specific parts are
+//! DATA (`reticle_size`, `preaim_mag`) and the systems are shared.
 //!
 //! ## Why this is its own module
 //!
@@ -9,13 +21,13 @@
 //! nobody else's diff is likely to collide with:
 //!
 //! ```ignore
-//! mod bow_aim;
+//! mod projectile_aim;
 //! // ...
-//! .add_plugins(bow_aim::BowAimPlugin)
+//! .add_plugins(projectile_aim::PreaimPlugin)
 //! ```
 //!
 //! ...plus two call sites in `main.rs` that ask this module a QUESTION
-//! (`preaim_fov_deg`, `bow_draws_own_reticle`, `landing_ring_visible`)
+//! (`preaim_fov_deg`, `draws_own_reticle`, `landing_ring_visible`)
 //! rather than growing new logic in place.
 //!
 //! ## What was already right, and is NOT rebuilt here
@@ -54,6 +66,12 @@ use crate::{CamCtl, Game, GameState, GunKind};
 /// 1.3x" and is explicit that this is NOT a sniper scope: "Keep the zoom
 /// subtle."
 pub const BOW_PREAIM_MAG: f32 = 1.3;
+
+/// The spear's, from §9: "use approximately 1.3x zoom". The same number
+/// the bow asks for, kept as its OWN constant rather than one shared
+/// `PREAIM_MAG` because the spec states it per weapon and a future
+/// retune of one must not silently move the other.
+pub const SPEAR_PREAIM_MAG: f32 = 1.3;
 
 /// Vertical FOV for a given magnification over a hip FOV.
 ///
@@ -100,20 +118,31 @@ pub fn magnified_fov_deg(hip_deg: f32, mag: f32) -> f32 {
 /// second removal: 1.3x of a 90 deg hip is 75.1 deg — a 15 degree
 /// narrowing, less than half of what was reverted.
 ///
-/// The SPEAR is deliberately left at hip. This pass is the bow section
-/// of the spec only; the spear gets its own section later and inventing
-/// its behaviour here would be guessing.
+/// The SPEAR now takes the same pull. It was left at hip when only the
+/// bow's section was built ("inventing its behaviour would be
+/// guessing"); §9 has since asked for it in the owner's own words, so it
+/// is no longer a guess.
 pub fn preaim_fov_deg(hip_deg: f32, gun: GunKind) -> f32 {
-    if gun == GunKind::Bow {
-        magnified_fov_deg(hip_deg, BOW_PREAIM_MAG)
-    } else {
-        hip_deg
+    match preaim_mag(gun) {
+        Some(m) => magnified_fov_deg(hip_deg, m),
+        None => hip_deg,
+    }
+}
+
+/// The pre-aim magnification a weapon asks for, or `None` if it does not
+/// zoom at pre-aim at all. The single place that decides which weapons
+/// are in this aiming language.
+pub fn preaim_mag(gun: GunKind) -> Option<f32> {
+    match gun {
+        GunKind::Bow => Some(BOW_PREAIM_MAG),
+        GunKind::Spear => Some(SPEAR_PREAIM_MAG),
+        _ => None,
     }
 }
 
 // ---- §7: the circular reticle --------------------------------------------
 
-/// Does the bow draw its OWN aiming mark right now, displacing the
+/// Does this weapon draw its OWN aiming mark right now, displacing the
 /// normal crosshair?
 ///
 /// This is the same rung of the ladder as `optic_hides_crosshair` in
@@ -123,10 +152,14 @@ pub fn preaim_fov_deg(hip_deg: f32, gun: GunKind) -> f32 {
 /// Hitmarkers still win over both: feedback outranks aiming furniture,
 /// and that priority already existed.
 ///
-/// At the HIP the bow keeps the normal crosshair. The circular reticle
-/// is a pre-aim mark, not the bow's permanent identity.
-pub fn bow_draws_own_reticle(gun: GunKind, ads: bool, in_mech: bool) -> bool {
-    gun == GunKind::Bow && ads && !in_mech
+/// At the HIP the weapon keeps the normal crosshair. The round reticle
+/// is a pre-aim mark, not the weapon's permanent identity.
+///
+/// Bow and spear share this rung. The old name was
+/// `bow_draws_own_reticle`; a second `spear_draws_own_reticle` beside it
+/// would have been the same predicate twice.
+pub fn draws_own_reticle(gun: GunKind, ads: bool, in_mech: bool) -> bool {
+    preaim_mag(gun).is_some() && ads && !in_mech
 }
 
 /// Outer diameter of the reticle circle, in the 720p authoring space the
@@ -140,6 +173,27 @@ pub fn bow_draws_own_reticle(gun: GunKind, ads: bool, in_mech: bool) -> bool {
 const RETICLE_D: f32 = 14.0;
 const RETICLE_BORDER: f32 = 1.5;
 const RETICLE_DOT: f32 = 2.0;
+
+/// §11: the spear's reticle must be "slightly circular", visually
+/// DIFFERENT from the gun ADS reticle but in the same red language — and
+/// in practice also different from the bow's, or the two weapons have
+/// one identity between them.
+///
+/// So the spear's is an OVAL: the same ring node, taller than it is
+/// wide. `BorderRadius::MAX` on a non-square `Node` gives an ellipse
+/// rather than a circle, so this costs no new geometry and no second
+/// entity — it is the bow's ring with one number changed. "Slightly"
+/// is the operative word in the spec and 16x22 is a 1.4 ratio: read as
+/// an upright oval at a glance, still unmistakably the same family as
+/// the bow's circle, and nothing like the gun's cross.
+///
+/// Returns `(width_px, height_px)` in the 720p authoring space.
+pub fn reticle_size(gun: GunKind) -> (f32, f32) {
+    match gun {
+        GunKind::Spear => (16.0, 22.0),
+        _ => (RETICLE_D, RETICLE_D),
+    }
+}
 
 /// The reticle red.
 ///
@@ -236,7 +290,7 @@ fn paint_reticle(
     cam: Res<CamCtl>,
     state: Res<State<GameState>>,
     mut root_q: Query<&mut Visibility, With<BowReticleRoot>>,
-    mut ring_q: Query<&mut BorderColor, With<BowReticleRing>>,
+    mut ring_q: Query<(&mut BorderColor, &mut Node), With<BowReticleRing>>,
     mut dot_q: Query<&mut BackgroundColor, With<BowReticleDot>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
@@ -247,8 +301,14 @@ fn paint_reticle(
     // looks like it prevents and does not.
     let active = *state.get() == GameState::Playing
         && p.alive()
-        && bow_draws_own_reticle(p.gun, cam.ads, p.in_mech());
+        && draws_own_reticle(p.gun, cam.ads, p.in_mech());
     let a = reticle_alpha(cam.ads_t, active);
+    // The ring is RESIZED per weapon rather than there being one ring
+    // entity per weapon: the spear's oval and the bow's circle are the
+    // same node with a different `width`/`height`. Only written while
+    // the mark is actually up, so an inactive frame does not thrash the
+    // UI layout every tick.
+    let (rw, rh) = reticle_size(p.gun);
     for mut v in &mut root_q {
         *v = if a > 0.004 {
             Visibility::Visible
@@ -257,8 +317,12 @@ fn paint_reticle(
         };
     }
     let (r, g, b, _) = RETICLE_RGBA;
-    for mut bc in &mut ring_q {
+    for (mut bc, mut n) in &mut ring_q {
         bc.0 = Color::srgba(r, g, b, a);
+        if active {
+            n.width = Val::Px(rw);
+            n.height = Val::Px(rh);
+        }
     }
     for mut bg in &mut dot_q {
         bg.0 = Color::srgba(r, g, b, a);
@@ -327,18 +391,34 @@ pub fn landing_ring_scale(dist_m: f32) -> f32 {
 /// The dot trail stays trimmed at 0.62 either way — the ring is what
 /// closes the gap to the landing point, not more dots.
 pub fn landing_ring_visible(eye: Vec3, aim_dir: Vec3, impact: Vec3, min_sep_rad: f32) -> bool {
-    let to_impact = impact - eye;
-    let d = to_impact.length();
-    // Degenerate: impact on top of the muzzle. Nothing useful to say.
+    match angular_sep(eye, aim_dir, impact) {
+        Some(sep) => sep > min_sep_rad,
+        None => false,
+    }
+}
+
+/// Angle in radians between `dir` and the direction from `eye` to
+/// `target` — i.e. HOW FAR FROM THE CENTRE OF THE SCREEN a world point
+/// lands, when `eye`/`dir` are the camera's.
+///
+/// `None` for the degenerate cases: a target on top of the eye, or a
+/// zero direction. Both would otherwise produce a NaN that reads as
+/// "very far from centre" and would draw furniture in the player's face.
+///
+/// Extracted so the landing ring and the dot cull below are ONE piece of
+/// arithmetic asked two questions, rather than two copies of an
+/// `acos(dot)` drifting apart.
+pub fn angular_sep(eye: Vec3, dir: Vec3, target: Vec3) -> Option<f32> {
+    let to = target - eye;
+    let d = to.length();
     if d < 0.5 {
-        return false;
+        return None;
     }
-    let a = aim_dir.normalize_or_zero();
+    let a = dir.normalize_or_zero();
     if a == Vec3::ZERO {
-        return false;
+        return None;
     }
-    let cos = (to_impact / d).dot(a).clamp(-1.0, 1.0);
-    cos.acos() > min_sep_rad
+    Some((to / d).dot(a).clamp(-1.0, 1.0).acos())
 }
 
 /// The separation at which the landing ring stops being a second
@@ -404,9 +484,153 @@ pub fn arc_sample_frac(i: usize, n: usize) -> f32 {
     ARC_SPAN_START + (ARC_SPAN_END - ARC_SPAN_START) * u
 }
 
-pub struct BowAimPlugin;
+// ---- §10 + the SHARED near-dot fix ---------------------------------------
 
-impl Plugin for BowAimPlugin {
+/// The launch speed the SPEAR preview must draw, given the weapon's base
+/// speed and the sim's own charge state.
+///
+/// ## The trap this exists to avoid, which the bow already fell into
+///
+/// `arc_preview` carries the bow's version of this note: reading the
+/// GunSpec's static speed drew a preview that was "completely static
+/// across the draw, hiding the one thing the draw mechanic exists to
+/// teach". The spear has the SAME mechanic and had the same bug — the
+/// preview read `spec.projectile`'s flat 22 m/s while the sim's
+/// `try_fire` launches at `v0 * fighters[i].spear_power`, which is
+/// `sim::spear_charge_mult(spear_charge_t)` over a 0.90..1.30 band. A
+/// 1.44x spread between a flick and a committed wind, and none of it
+/// was on screen.
+///
+/// This does NOT reimplement the curve. It calls the sim's own
+/// `spear_charge_mult`, exactly as the bow branch calls the sim's
+/// `bow_power_fraction`. There is no client-side spear speed here, and
+/// in particular the deleted `SPEAR_V0_MIN` branch is NOT resurrected:
+/// that mirrored a hip/pre-aim halving the sim has since removed, and
+/// this mirrors a charge the sim still applies.
+///
+/// The RUNNING-THROW bonus is included because the sim decides it at
+/// throw INITIATION — i.e. at the instant the player releases — so
+/// "what happens if I let go now" is the honest thing to draw. It reads
+/// the same `running_momentum_t >= RUNNING_THROW_MIN_S` gate and the
+/// same `RUNNING_THROW_MULT` the sim does, both `pub` in `sim`.
+pub fn spear_preview_v0(base_v0: f32, charge_t: f32, momentum_t: f32) -> f32 {
+    let running = if momentum_t >= crate::sim::RUNNING_THROW_MIN_S {
+        crate::sim::RUNNING_THROW_MULT
+    } else {
+        1.0
+    };
+    base_v0 * running * crate::sim::spear_charge_mult(charge_t)
+}
+
+/// The distance at which an arc dot is drawn at its authored world size.
+///
+/// The dot mesh is a 0.09 m cube. Under a 90 deg vertical FOV at 720p a
+/// world size `s` at distance `d` covers `s * 360 / d` pixels, so the
+/// authored cube is 32 px at 1 m and 5 px at 6.5 m. 5 px is the size the
+/// trail was always meant to be — a dotted line, not a bar.
+const DOT_REF_DIST_M: f32 = 6.5;
+
+/// How far the compensation is allowed to run at each end.
+///
+/// The near clamp stops a dot that is somehow ON the camera from
+/// collapsing to nothing; the far clamp stops the world-space cube from
+/// growing without bound down a long throw, so past ~26 m dots DO start
+/// shrinking on screen again. That residual shrink is wanted: §17 asks
+/// for restraint and a trail that tapers with range reads as depth.
+const DOT_SCALE_MIN: f32 = 0.35;
+const DOT_SCALE_MAX: f32 = 4.0;
+
+/// World-space scale for an arc dot `dist_m` from the camera, so its
+/// SCREEN size stays roughly constant along the flight.
+///
+/// ## Why this is the fix and the sampling window was only half of it
+///
+/// The bow section moved the sampling window to 30%..92% because the
+/// near samples piled into a 32 px blob on the crosshair. That removed
+/// the worst offenders but did not address the cause, which its own
+/// closing note admitted: "dots are fixed world-size, so near ones are
+/// large on screen... a distance-compensated dot scale is the fix and I
+/// did NOT do it." On a level full-draw shot the nearest surviving dot
+/// still sat inside the reticle circle.
+///
+/// Fixed world size means screen size `∝ 1/d`. Making the world size
+/// `∝ d` cancels it. The two halves are complementary: the window
+/// decides WHICH samples are worth drawing, this decides how big they
+/// are once drawn. Neither replaces the other, and raising the window
+/// back to the near field would still be wrong.
+pub fn dot_screen_scale(dist_m: f32) -> f32 {
+    (dist_m.max(0.0) / DOT_REF_DIST_M).clamp(DOT_SCALE_MIN, DOT_SCALE_MAX)
+}
+
+/// How far from screen centre a dot must land before it is drawn at all.
+///
+/// ## What the capture showed, after the scale fix above did NOT work
+///
+/// `dot_screen_scale` was written against the bow section's stated
+/// diagnosis — "dots are fixed world-size, so near ones are large on
+/// screen". A before/after of the same `bow_aim` script says that
+/// diagnosis was wrong for the shot it was made on. Counting saturated
+/// red pixels in the 120 px box around the crosshair:
+///
+/// ```text
+///   frame 03 (quarter draw)  before 155   after 137
+///   frame 04 (full draw)     before 102   after 124
+/// ```
+///
+/// Unchanged, and frame 04 slightly worse. The arithmetic explains it:
+/// with the window already at 30%..92%, a full-draw arc's samples sit
+/// 5-17 m away, not 1 m. At 5 m the old dot was already only ~6 px, so
+/// there was no bloat left to remove — and the far samples, which the
+/// old code shrank to under a pixel, got BIGGER when their screen size
+/// was stabilised. Net: more red, not less.
+///
+/// The real driver is PROJECTION, not size. On a level shot the flight
+/// lies along the view axis, so two dozen dots spread over 12 m of world
+/// all land within a few pixels of the centre and sum into a solid
+/// square, however small each one is. No per-dot size can fix a pile.
+///
+/// So a dot that projects inside the reticle is CULLED. This costs the
+/// player nothing: a dot on the aim line is telling them the arrow
+/// starts out going where they are pointing, which they know. What they
+/// cannot know is where it has dropped to, and every one of those dots
+/// is outside this cone and still drawn.
+///
+/// It is deliberately the same question `landing_ring_visible` asks, on
+/// the same helper, because it is the same rule: nothing but the reticle
+/// may occupy the centre pixel. A level shot therefore shows the reticle
+/// alone — which is the "crosshair is sacred" rule the trim, the removed
+/// range readout and the ring gate were all reaching for.
+///
+/// ## Sizing
+///
+/// The pre-aim frame is ~90 deg over 720 authored px, so about 0.125
+/// deg per px. The largest reticle here is the spear's oval at 22 px
+/// tall, an 11 px half-extent — 1.375 deg, or 0.024 rad. Rounded to
+/// 0.026 so a dot clears the ring's outer edge rather than kissing it.
+/// It is FOV-independent by choice: at the zoomed 75 deg the reticle is
+/// the same pixel size but subtends less angle, so this cone is
+/// slightly generous there, which errs toward a clean centre.
+pub const RETICLE_CLEAR_RAD: f32 = 0.026;
+
+/// Should this arc dot be drawn, given where the CAMERA is looking?
+///
+/// Note the arguments are the camera's, not the muzzle's: the question
+/// is what overlaps the reticle on screen, and the reticle is at the
+/// centre of the camera's frame. The arc still LAUNCHES from
+/// `sim.muzzle_origin` — this changes which of its samples are visible,
+/// never where it goes.
+pub fn dot_is_clear_of_reticle(cam_pos: Vec3, cam_fwd: Vec3, dot: Vec3) -> bool {
+    match angular_sep(cam_pos, cam_fwd, dot) {
+        Some(sep) => sep > RETICLE_CLEAR_RAD,
+        // Degenerate (a dot on the lens) is exactly the case that would
+        // paint the centre pixel, so it is hidden, not shown.
+        None => false,
+    }
+}
+
+pub struct PreaimPlugin;
+
+impl Plugin for PreaimPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_reticle)
             .add_systems(Update, paint_reticle);
@@ -461,21 +685,67 @@ mod tests {
         assert!(hip - z > 5.0, "zoom is imperceptible");
     }
 
-    /// The spear is NOT part of this pass and must be untouched.
+    /// §9: the spear takes the same 1.3x pull the bow does, and it is
+    /// the PROJECTILE weapons only - a rifle's pre-aim is not this.
+    ///
+    /// FAILS on the pre-change code, where `preaim_fov_deg` returned the
+    /// hip FOV for everything that was not a bow.
     #[test]
-    fn only_the_bow_zooms() {
-        assert_eq!(preaim_fov_deg(90.0, GunKind::Spear), 90.0);
-        assert_eq!(preaim_fov_deg(90.0, GunKind::M4), 90.0);
+    fn the_spear_zooms_like_the_bow_and_the_guns_do_not() {
+        let hip = 90.0;
+        let spear = preaim_fov_deg(hip, GunKind::Spear);
+        assert!(spear < hip, "the spear must actually zoom, got {spear}");
+        // approximately 1.3x, by the same tangent relation - derived
+        // longhand rather than read off the function under test
+        let want = 2.0 * (1.0_f32 / 1.3).atan().to_degrees();
+        assert!((spear - want).abs() < 1e-3, "spear pre-aim FOV {spear}");
+        // and subtle, by the same band the bow is held to
+        assert!(hip - spear < 20.0 && hip - spear > 5.0);
+        // guns are untouched
+        assert_eq!(preaim_fov_deg(hip, GunKind::M4), hip);
+        assert_eq!(preaim_fov_deg(hip, GunKind::Glock), hip);
+        assert!(preaim_mag(GunKind::M4).is_none());
+        assert!(preaim_mag(GunKind::Spear).is_some());
+    }
+
+    /// §11: the spear's reticle is "slightly circular" and must not be
+    /// the bow's circle wearing the same size - the two weapons need
+    /// distinguishable marks. It is an OVAL, and "slightly" bounds how
+    /// far from round it is allowed to get.
+    ///
+    /// FAILS on the pre-change code, which had one hard-coded 14x14.
+    #[test]
+    fn the_spear_reticle_is_an_oval_and_the_bow_reticle_is_a_circle() {
+        let (bw, bh) = reticle_size(GunKind::Bow);
+        assert_eq!(bw, bh, "the bow's mark is a circle");
+        let (sw, sh) = reticle_size(GunKind::Spear);
+        assert!(sh > sw, "the spear's mark is upright: {sw}x{sh}");
+        // "SLIGHTLY circular" - an oval, not a slot. Anything past 2:1
+        // stops reading as the same family as the bow's circle.
+        let ratio = sh / sw;
+        assert!(
+            (1.15..2.0).contains(&ratio),
+            "aspect {ratio} is either indistinguishable from a circle or no longer one"
+        );
+        // and distinguishable from the bow at a glance, without being
+        // the "giant" graphic §17 forbids
+        assert!(sh != bh, "the two marks are the same height");
+        assert!(sh <= 28.0, "reticle {sh} px tall is getting big");
     }
 
     /// The reticle is a PRE-AIM mark. At the hip the bow keeps the
     /// normal crosshair, and a pilot in a mech is firing hull mounts.
     #[test]
     fn reticle_replaces_the_crosshair_only_while_pre_aiming_a_bow() {
-        assert!(bow_draws_own_reticle(GunKind::Bow, true, false));
-        assert!(!bow_draws_own_reticle(GunKind::Bow, false, false));
-        assert!(!bow_draws_own_reticle(GunKind::Bow, true, true));
-        assert!(!bow_draws_own_reticle(GunKind::M4, true, false));
+        assert!(draws_own_reticle(GunKind::Bow, true, false));
+        assert!(!draws_own_reticle(GunKind::Bow, false, false));
+        assert!(!draws_own_reticle(GunKind::Bow, true, true));
+        assert!(!draws_own_reticle(GunKind::M4, true, false));
+        // and the spear joined it, under exactly the same conditions -
+        // at the HIP a javelin keeps the normal crosshair.
+        assert!(draws_own_reticle(GunKind::Spear, true, false));
+        assert!(!draws_own_reticle(GunKind::Spear, false, false));
+        assert!(!draws_own_reticle(GunKind::Spear, true, true));
     }
 
     /// It fades in rather than popping, and is fully absent when not
@@ -624,6 +894,159 @@ mod tests {
             prev = f;
         }
         assert_eq!(arc_sample_frac(0, 0), ARC_SPAN_START);
+    }
+
+    /// §10: the preview must TRACK the wind. This is the bug the bow
+    /// had - a static speed hides the one thing the charge mechanic
+    /// exists to teach - and the spear had it too.
+    ///
+    /// FAILS on the pre-change code, where `arc_preview` read the flat
+    /// `spec.projectile` speed for the spear, so the two ends of the
+    /// charge drew the SAME arc.
+    #[test]
+    fn the_spear_preview_speed_follows_the_wind() {
+        let base = 22.0;
+        let flick = spear_preview_v0(base, crate::sim::SPEAR_CHARGE_MIN_S, 0.0);
+        let wound = spear_preview_v0(base, crate::sim::SPEAR_CHARGE_FULL_S, 0.0);
+        assert!(
+            wound > flick * 1.25,
+            "a wound throw must preview visibly faster: {flick} vs {wound}"
+        );
+        // The band is the SIM's (0.90..1.30), not one invented here.
+        assert!((flick - base * crate::sim::SPEAR_CHARGE_V0_MIN).abs() < 1e-4);
+        assert!((wound - base * crate::sim::SPEAR_CHARGE_V0_MAX).abs() < 1e-4);
+        // Holding past full stops paying, so the arc stops growing -
+        // otherwise the preview promises what the throw will not pay.
+        let overheld = spear_preview_v0(base, crate::sim::SPEAR_CHARGE_FULL_S * 3.0, 0.0);
+        assert!((overheld - wound).abs() < 1e-4, "the arc kept growing past full");
+    }
+
+    /// ...and the RUNNING-THROW bonus is in the preview too, on the
+    /// sim's own gate. A player sprinting into a throw sees the longer
+    /// arc they are about to get.
+    #[test]
+    fn a_running_throw_previews_the_bonus_it_will_actually_get() {
+        let base = 22.0;
+        let charge = crate::sim::SPEAR_CHARGE_FULL_S;
+        let standing = spear_preview_v0(base, charge, 0.0);
+        let running = spear_preview_v0(base, charge, crate::sim::RUNNING_THROW_MIN_S);
+        assert!(
+            (running - standing * crate::sim::RUNNING_THROW_MULT).abs() < 1e-3,
+            "running {running} must be standing {standing} x the sim's multiplier"
+        );
+        // and the gate is a THRESHOLD, not a ramp - just under it pays
+        // nothing, which is the sim's rule and must not be softened
+        // into a lerp on the presentation side.
+        let nearly = spear_preview_v0(base, charge, crate::sim::RUNNING_THROW_MIN_S - 0.01);
+        assert!((nearly - standing).abs() < 1e-4, "the momentum gate leaked");
+    }
+
+    /// THE SHARED NEAR-DOT FIX. A dot's SCREEN size is its world size
+    /// over its distance, so a screen-stable dot needs a world size
+    /// proportional to distance.
+    ///
+    /// FAILS on the pre-change code, which had no such function: the
+    /// scale was `1.0 - 0.55 * frac` with no distance term at all, so
+    /// this test's central ratio was 1.0 at every range.
+    #[test]
+    fn near_dots_are_screen_stable_instead_of_bloating() {
+        // Across the working band the arc actually occupies, screen
+        // size is CONSTANT: size/dist is flat. Computed from the
+        // definition of perspective, not from the function's output.
+        let screen_px = |d: f32| dot_screen_scale(d) * 0.09 * 360.0 / d;
+        let near = screen_px(3.0);
+        let far = screen_px(20.0);
+        assert!(
+            (near - far).abs() < 0.05 * near,
+            "screen size drifted across the band: {near} px at 3 m vs {far} px at 20 m"
+        );
+        // and it is around the 5 px the doc claims, not a bar
+        assert!((4.0..6.5).contains(&near), "dot is {near} px on screen");
+
+        // THE ACTUAL BUG: a dot 1.2 m from the eye used to be ~27 px -
+        // wider than the 14 px reticle it sat inside. Now it is small.
+        let very_near = screen_px(1.2);
+        assert!(
+            very_near < RETICLE_D,
+            "a 1.2 m dot is {very_near} px, still bigger than the {RETICLE_D} px reticle"
+        );
+
+        // Monotone, so the trail never jumps in size mid-flight.
+        let mut prev = 0.0;
+        let mut d = 0.5;
+        while d < 60.0 {
+            let s = dot_screen_scale(d);
+            assert!(s >= prev - 1e-6, "scale went down at {d} m");
+            prev = s;
+            d += 0.25;
+        }
+        // Clamped at both ends: no zero-size dot, no unbounded cube.
+        assert_eq!(dot_screen_scale(0.0), DOT_SCALE_MIN);
+        assert_eq!(dot_screen_scale(1000.0), DOT_SCALE_MAX);
+    }
+
+    /// THE ACTUAL NEAR-DOT FIX. A dot that projects onto the reticle is
+    /// not drawn, so nothing but the reticle occupies the centre.
+    ///
+    /// FAILS on the pre-change code, which had no cull at all: every
+    /// sample in the window was `Visibility::Visible` unconditionally,
+    /// which is what put a solid red square inside the ring in
+    /// `bow_aim/04`.
+    #[test]
+    fn a_dot_on_the_aim_line_is_not_drawn_over_the_reticle() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // dead on the aim line at 10 m: this is the pile-up
+        assert!(!dot_is_clear_of_reticle(cam, fwd, Vec3::new(0.0, 0.0, 10.0)));
+        // 1 cm off at 10 m - still inside the ring, still culled
+        assert!(!dot_is_clear_of_reticle(cam, fwd, Vec3::new(0.01, 0.0, 10.0)));
+        // ...but a dot that has DROPPED half a metre by 10 m is 2.9 deg
+        // off centre, well outside the ring, and is the whole point of
+        // drawing an arc at all
+        assert!(dot_is_clear_of_reticle(cam, fwd, Vec3::new(0.0, -0.5, 10.0)));
+        // a dot behind the camera is not "far from centre" and drawn
+        assert!(dot_is_clear_of_reticle(cam, fwd, Vec3::new(0.0, 0.0, -10.0)));
+        // degenerate: a dot on the lens must never paint the centre
+        assert!(!dot_is_clear_of_reticle(cam, fwd, Vec3::new(0.0, 0.0, 0.1)));
+    }
+
+    /// The cull cone must actually cover the reticle it is protecting,
+    /// and not much more - a cone far wider than the mark would eat the
+    /// informative near-drop as well as the pile-up.
+    #[test]
+    fn the_cull_cone_is_the_size_of_the_reticle_it_protects() {
+        // 90 deg over 720 authored px = 0.125 deg/px. The spear's oval
+        // is the tallest mark at 22 px, so an 11 px half-extent.
+        let deg_per_px = 90.0 / 720.0;
+        let (_, tallest) = reticle_size(GunKind::Spear);
+        let half_extent_rad = (tallest * 0.5 * deg_per_px).to_radians();
+        assert!(
+            RETICLE_CLEAR_RAD >= half_extent_rad,
+            "the cone {RETICLE_CLEAR_RAD} is narrower than the {half_extent_rad} rad reticle, \
+             so dots can still land inside the ring"
+        );
+        assert!(
+            RETICLE_CLEAR_RAD < half_extent_rad * 2.0,
+            "the cone is more than twice the mark - it will swallow real drop"
+        );
+    }
+
+    /// The two gates are ONE piece of arithmetic. If they ever disagree
+    /// about what "at the centre of the screen" means, a level shot gets
+    /// a landing ring under a culled dot trail or vice versa.
+    #[test]
+    fn the_ring_gate_and_the_dot_cull_share_their_geometry() {
+        let eye = Vec3::ZERO;
+        let aim = Vec3::Z;
+        let target = Vec3::new(0.0, -2.0, 30.0);
+        let sep = angular_sep(eye, aim, target).expect("a real separation");
+        // ~3.8 deg, computed independently of the helper
+        let want = (2.0_f32 / 30.0).atan();
+        assert!((sep - want).abs() < 1e-4, "sep {sep} vs {want}");
+        assert_eq!(landing_ring_visible(eye, aim, target, sep - 1e-4), true);
+        assert_eq!(landing_ring_visible(eye, aim, target, sep + 1e-4), false);
+        assert!(angular_sep(eye, aim, Vec3::new(0.0, 0.0, 0.2)).is_none());
+        assert!(angular_sep(eye, Vec3::ZERO, target).is_none());
     }
 
     /// Growth is gentle and CLAMPED, so the ring never becomes the huge

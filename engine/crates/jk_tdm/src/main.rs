@@ -47,7 +47,7 @@ mod bailey_capture;
 /// reason `branding` is - it wires in with this line and one
 /// `add_plugins` below, plus three PURE QUESTIONS asked at existing
 /// call sites rather than new logic grown inside this file.
-mod bow_aim;
+mod projectile_aim;
 mod branding;
 /// §20 THE MECH COCKPIT - the first-person shell, its instruments and
 /// its vibration. Its own module for the reason `branding` is: it wires
@@ -6236,6 +6236,64 @@ const SPEAR_FP_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(10.5) },
 ];
 
+/// §owner WEAPON-SPECIFIC AIMING §9/§10/§11: SPEAR PRE-AIM.
+///
+/// The counterpart to `BOW_AIM_BEATS`, and it exists for the same
+/// reason: `spear_fp` presses RMB, but it is a POSE script - it looks at
+/// the hands and the javelin, never at the aiming furniture, and it runs
+/// in first person where the arc leaves the frame almost immediately.
+/// Nothing in this project had ever photographed the spear's reticle,
+/// its zoom or its trajectory preview, which is precisely the instrument
+/// gap that let the first-person bow go unposed for months.
+///
+/// The frames, and what each is evidence FOR:
+///
+/// - `01` hip: the normal crosshair, no circle, no arc. The BEFORE.
+/// - `02` pre-aim at the charge floor: the oval reticle, the 1.3x pull,
+///   and the SHORT arc a flick would throw.
+/// - `03` full wind: the same shot with the charge in - the arc must be
+///   visibly LONGER than 02 or `spear_preview_v0` is not tracking.
+/// - `04` the level shot at full wind, which is the frame the near-dot
+///   fix has to be judged on: no dot may sit inside the reticle.
+/// - `05` a LOBBED throw, where the drop and the landing ring live.
+/// - `06` back at the hip - the circle is gone, the crosshair is back.
+const SPEAR_AIM_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    CapBeat { press: &[CapKey::K(KeyCode::Digit3)], ..beat(0.8) },
+    CapBeat { release: &[CapKey::K(KeyCode::Digit3)], ..beat(0.9) },
+    CapBeat { snap: Some("01-hip-normal-crosshair"), ..beat(1.4) },
+    // PRE-AIM, uncharged. ADS_TIME_S is 0.12, so 0.5 s is several
+    // transitions' worth: neither the FOV nor the reticle fade is
+    // caught mid-ease.
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.5) },
+    CapBeat { snap: Some("02-preaim-oval-reticle-and-zoom"), ..beat(2.0) },
+    // WIND begins. SPEAR_CHARGE_FULL_S is 3.0 s, so 0.3 s in is near
+    // the bottom of the 0.90..1.30 band...
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.1) },
+    CapBeat { snap: Some("03-preaim-early-wind-short-arc"), ..beat(2.4) },
+    // ...and 3.2 s in is past full, the top of it. If 03 and 04 show
+    // the same arc, the preview is not reading the charge.
+    CapBeat { snap: Some("04-preaim-full-wind-long-arc"), ..beat(5.4) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(5.5) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(5.7) },
+    CapBeat { snap: Some("05-hip-crosshair-returns"), ..beat(6.3) },
+    // THE LOBBED THROW. Same reasoning as BOW_AIM_BEATS frame 06: a
+    // LEVEL shot lies along the view axis and projects to a smear, so
+    // pitching up is the only way a trajectory reads as a curve at all.
+    // Pitch is NEGATIVE for up - HANDS_BEATS paid for that knowledge.
+    // Uncharged, so it lands near enough for the whole arc and the ring
+    // to fit in one frame.
+    CapBeat {
+        look: Some((0.0, -0.26)),
+        press: &[CapKey::M(MouseButton::Right)],
+        ..beat(6.4)
+    },
+    CapBeat { snap: Some("06-lobbed-arc-and-landing-ring"), ..beat(7.0) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(7.1) },
+    CapBeat { end: true, ..beat(7.5) },
+];
+
 /// §owner §7 THE CHARGING MOTION, THIRD PERSON - the overhead wind.
 ///
 /// The pose it photographs did not exist before this pass and neither
@@ -7622,6 +7680,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "bow_aim" => BOW_AIM_BEATS,
         "spear_fp" => SPEAR_FP_BEATS,
+        "spear_aim" => SPEAR_AIM_BEATS,
         "spear_wind" => SPEAR_WIND_BEATS,
         "mech_scale" => MECH_CAPTURE_BEATS,
         "mech_fp" => MECH_FP_BEATS,
@@ -7679,7 +7738,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 50] = [
+const CAPTURE_SCRIPTS: [&str; 51] = [
     // THE EDGE LOADOUT CARD. Its own beats, because no script here
     // could photograph a HUD element that is only up for 1.75 s after
     // a keypress - see loadout_edge::capture.
@@ -7739,6 +7798,10 @@ const CAPTURE_SCRIPTS: [&str; 50] = [
     // §owner BOW & SPEAR: the two views nothing had ever taken - the
     // javelin in first person, and the overhead wind from the side.
     "spear_fp",
+    // ...and the one that has ever pressed RMB with a JAVELIN in hand -
+    // see SPEAR_AIM_BEATS. `spear_fp` presses it too but photographs the
+    // hands, not the reticle, the zoom or the arc.
+    "spear_aim",
     "spear_wind",
     "mech_scale",
     "mech_fp",
@@ -7907,7 +7970,9 @@ fn capture_quick_deploy(
         // presses Digit3 to get from one to the other.
         Some(hand_capture::SCRIPT_FP) => sel.loadout[2] = GunKind::Bow,
         // and both new spear scripts press Digit3 for the same reason
-        Some("spear_fp") | Some("spear_wind") => sel.loadout[2] = GunKind::Spear,
+        Some("spear_fp") | Some("spear_wind") | Some("spear_aim") => {
+            sel.loadout[2] = GunKind::Spear
+        }
         // the seven iron-sighted guns across three runs; the AWM is
         // deliberately absent (scoped-class hides its viewmodel by
         // design) as are the bow/spear/minigun, which have no irons
@@ -9316,7 +9381,7 @@ fn main() {
         // splash state, systems and teardown, and skips itself entirely
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
-        .add_plugins(bow_aim::BowAimPlugin)
+        .add_plugins(projectile_aim::PreaimPlugin)
         // §owner FRONT END: the title / learn / main-menu / result
         // screens. Two lines, exactly like `branding` above.
         .add_plugins(frontend::FrontendPlugin)
@@ -18603,7 +18668,7 @@ fn setup(
     // solid plate on the ground. The spec asks for a "small thin ring
     // laid on the surface", so it is a torus: 0.56 m across the outer
     // edge with a 0.04 m section, which reads as a drawn circle rather
-    // than a graphic. `bow_aim::landing_ring_rot` lays it against the
+    // than a graphic. `projectile_aim::landing_ring_rot` lays it against the
     // normal `predict_arc` already returns.
     let ring = commands
         .spawn((
@@ -22980,10 +23045,11 @@ fn camera_system(
                 // make the trajectory EASIER to read, never crop it -
                 // the same requirement from two sides. So this is a
                 // gentler pull, not a second removal: 15 degrees, less
-                // than half of what was reverted. `bow_aim` owns the
-                // arithmetic and the reasoning; the SPEAR is still at
-                // hip here because this pass is the bow section only.
-                bow_aim::preaim_fov_deg(settings.fov_deg(), p.gun)
+                // than half of what was reverted. `projectile_aim` owns
+                // the arithmetic and the reasoning, and §9 has since put
+                // the SPEAR on the same 1.3x pull - so this line is now
+                // "the projectile weapons zoom", not "the bow zooms".
+                projectile_aim::preaim_fov_deg(settings.fov_deg(), p.gun)
             } else {
                 gun(p.gun).zoom_deg
             }
@@ -24018,7 +24084,7 @@ fn fp_viewmodel(
 /// a ±spread cone of fainter arcs widens as the §4 stability degrades,
 /// so the player can watch their own accuracy in real time.
 /// How much of the predicted flight the preview DRAWS now lives in
-/// `bow_aim::ARC_SPAN_START` / `ARC_SPAN_END` as a testable pair, so
+/// `projectile_aim::ARC_SPAN_START` / `ARC_SPAN_END` as a testable pair, so
 /// this const is retired rather than left as a number nothing reads.
 /// The original wording is kept because it records the rule that still
 /// applies: "the tail is the half that lands on the crosshair". What
@@ -24080,8 +24146,20 @@ fn arc_preview(
     // sim's rule now one rule for player and bot, `SPEAR_V0_MIN` equals
     // the full speed and the branch was a no-op arguing for a behaviour
     // that no longer exists.
+    //
+    // §10 (owner, spear section): what the deleted branch was WRONG
+    // about is not that the spear's preview speed is fixed - it is that
+    // the branch mirrored a HIP/PRE-AIM split the sim deleted. The sim
+    // still varies a javelin's launch speed, by the WIND: `try_fire`
+    // launches at `v0 * spear_power`, i.e. `spear_charge_mult` over a
+    // 0.90..1.30 band. Reading `v0_full` flat was the bow's old bug
+    // wearing a spear - a static arc across a charge the whole mechanic
+    // exists to teach. `projectile_aim::spear_preview_v0` asks the sim's
+    // own curve; it does not contain one.
     let v0 = if p.gun == GunKind::Bow {
         BOW_V0_FULL * bow_power_fraction(p.bow_draw_t).unwrap_or(BOW_POWER_MIN)
+    } else if is_spear {
+        projectile_aim::spear_preview_v0(v0_full, p.spear_charge_t, p.running_momentum_t)
     } else {
         v0_full
     };
@@ -24128,19 +24206,45 @@ fn arc_preview(
             // shot projects onto the centre pixel and would be a
             // landing marker made of dots. That rule still holds; the
             // window it is enforced by has MOVED. See
-            // `bow_aim::ARC_SPAN_START` for the capture that forced it:
+            // `projectile_aim::ARC_SPAN_START` for the capture that forced it:
             // trimming to the NEAR 62% kept the samples that have not
             // dropped yet AND are closest to the camera, so they piled
             // into a red blob on the crosshair - the same failure at
             // the other end of the arc. The window now starts at 30%
             // and ends at 92%, so the trail shows the drop and the
             // landing ring covers the last stretch.
-            let want = total * bow_aim::arc_sample_frac(i, ents.len());
+            let want = total * projectile_aim::arc_sample_frac(i, ents.len());
             let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
             let frac = i as f32 / ents.len() as f32;
-            t.translation = Vec3::from_array(pts[k]);
-            t.scale = Vec3::splat(scale0 * (1.0 - 0.55 * frac)); // size down
-            *v = Visibility::Visible;
+            let at = Vec3::from_array(pts[k]);
+            t.translation = at;
+            // SCREEN-STABLE dot size. The taper along the arc is kept -
+            // it is what makes the trail read as going away from you -
+            // but it now multiplies a scale that compensates for camera
+            // distance instead of one that is constant in the world.
+            //
+            // The bow section's closing note is the whole reason this
+            // line changed: fixed world size means a dot 1 m from the
+            // eye is 32 px and one at 20 m is 1.6 px, so the near end
+            // bloats over the reticle and the far end vanishes. See
+            // `projectile_aim::dot_screen_scale`.
+            let dist = at.distance(cam_tf.translation);
+            t.scale =
+                Vec3::splat(scale0 * (1.0 - 0.55 * frac) * projectile_aim::dot_screen_scale(dist));
+            // ...and a dot that would land ON the reticle is not drawn.
+            // Screen-stable size alone did NOT clear the centre - the
+            // measured before/after is in `dot_is_clear_of_reticle` -
+            // because on a level shot the whole flight projects into a
+            // few pixels and piles up regardless of per-dot size.
+            *v = if projectile_aim::dot_is_clear_of_reticle(
+                cam_tf.translation,
+                cam_tf.forward().as_vec3(),
+                at,
+            ) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
         }
         let range = (Vec3::from_array(impact) - eye).length();
         (impact, normal, range)
@@ -24192,22 +24296,28 @@ fn arc_preview(
     // gate, and its unit tests pin both halves.
     //
     // Note what did NOT change: the dots still stop SHORT of the
-    // impact (`bow_aim::ARC_SPAN_END` is 0.92), so the ring closes the
+    // impact (`projectile_aim::ARC_SPAN_END` is 0.92), so the ring closes the
     // last stretch instead of a trail of dots walking onto the centre
     // pixel - the failure the original trim was introduced to fix.
     // Raising the span to 1.0 would have recreated it exactly.
     //
-    // Bow only. The spear is a later section of the spec and inventing
-    // its behaviour here would be guessing.
+    // The SPEAR is in now too (§10: "if the spear has gravity/drop, show
+    // the predicted drop"). It needs no separate rule and gets none: the
+    // gate is angular separation between where you point and where it
+    // lands, so a flat javelin simply fails the test and draws no ring,
+    // which is the same sentence as "keep the trajectory nearly
+    // straight, do not exaggerate the curve". A lobbed one earns it.
+    // This is why the gate was written as a question about the SHOT
+    // rather than a question about the weapon.
     let impact_v = Vec3::from_array(impact);
-    let ring_on = p.gun == GunKind::Bow
-        && bow_aim::landing_ring_visible(eye, d, impact_v, bow_aim::LANDING_SEP_RAD);
+    let ring_on = projectile_aim::preaim_mag(p.gun).is_some()
+        && projectile_aim::landing_ring_visible(eye, d, impact_v, projectile_aim::LANDING_SEP_RAD);
     if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
         if ring_on {
             let n = Vec3::from_array(normal).normalize_or(Vec3::Y);
-            t.translation = impact_v + n * bow_aim::LANDING_LIFT_M;
-            t.rotation = bow_aim::landing_ring_rot(normal);
-            t.scale = Vec3::splat(bow_aim::landing_ring_scale((impact_v - eye).length()));
+            t.translation = impact_v + n * projectile_aim::LANDING_LIFT_M;
+            t.rotation = projectile_aim::landing_ring_rot(normal);
+            t.scale = Vec3::splat(projectile_aim::landing_ring_scale((impact_v - eye).length()));
             *v = Visibility::Visible;
         } else {
             *v = Visibility::Hidden;
@@ -25703,7 +25813,7 @@ fn crosshair_render(
     // both, which is the existing ladder and is correct - feedback beats
     // aiming furniture.
     let optic_hidden = optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech())
-        || bow_aim::bow_draws_own_reticle(p.gun, cam.ads, p.in_mech());
+        || projectile_aim::draws_own_reticle(p.gun, cam.ads, p.in_mech());
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
