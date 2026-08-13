@@ -828,9 +828,16 @@ mod tests {
             t += 1.0 / 240.0;
         }
         assert_eq!(a.alpha, 0.0);
-        // HOLD starts ticking during the fade-in, so total is
+        // A LITERAL, not `HOLD_S + FADE_OUT_S`. Deriving the expected
+        // value from the constants under test is the defect OPERATION.md
+        // rule 12 names: the mutation run proved it, because this test
+        // still PASSED with HOLD_S moved to five seconds. 1.75 is the
+        // spec's number (~1.5 s visible + a 200-300 ms fade), and the
+        // test is now allowed to disagree with the code.
+        //
+        // HOLD starts ticking during the fade-in, so the total is
         // HOLD + FADE_OUT, not HOLD + FADE_IN + FADE_OUT.
-        let want = HOLD_S + FADE_OUT_S;
+        let want: f32 = 1.75;
         assert!((t - want).abs() < 0.05, "hidden after {t}s, wanted ~{want}");
     }
 
@@ -989,7 +996,12 @@ mod tests {
     #[test]
     fn the_card_is_narrow_and_flush_to_the_right_edge() {
         assert!(EDGE_MARGIN <= 5.0, "spec asks for a 0-5px margin");
-        assert!(CARD_W <= 80.0, "not a narrow card");
+        // "Narrow" against the 1280-wide space the type ramp is
+        // authored in, rather than against a bare literal: the card
+        // legitimately grew from 66 to 84 to stop `30/120` printing off
+        // the plate, and a test that fights a legibility fix is worse
+        // than no test. A twelfth of the screen is still an edge dock.
+        assert!(CARD_W <= 1280.0 / 12.0, "not a narrow card: {CARD_W}");
         // Taller than wide: it is a vertical strip, not a bar.
         assert!(SLOT_H * SLOTS as f32 > CARD_W * 2.0);
     }
