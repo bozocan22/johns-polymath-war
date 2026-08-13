@@ -6251,12 +6251,15 @@ const SPEAR_FP_BEATS: &[CapBeat] = &[
 /// - `01` hip: the normal crosshair, no circle, no arc. The BEFORE.
 /// - `02` pre-aim at the charge floor: the oval reticle, the 1.3x pull,
 ///   and the SHORT arc a flick would throw.
-/// - `03` full wind: the same shot with the charge in - the arc must be
-///   visibly LONGER than 02 or `spear_preview_v0` is not tracking.
-/// - `04` the level shot at full wind, which is the frame the near-dot
-///   fix has to be judged on: no dot may sit inside the reticle.
-/// - `05` a LOBBED throw, where the drop and the landing ring live.
-/// - `06` back at the hip - the circle is gone, the crosshair is back.
+/// - `03`/`04` the LEVEL shot at each end of the wind. These were
+///   written expecting a short arc and a long one; what they actually
+///   photograph is the reticle alone, because a level flight projects
+///   onto the centre and is culled. They are kept as the near-dot fix's
+///   evidence, not as the charge's - see 07/08 for that.
+/// - `05` back at the hip - the circle is gone, the crosshair is back.
+/// - `06` a LOBBED throw, where the drop and the landing ring live.
+/// - `07`/`08` the same lobbed shot at each end of the wind, which is
+///   where the charge IS visible. See the note on those beats.
 const SPEAR_AIM_BEATS: &[CapBeat] = &[
     CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
     CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
@@ -6271,10 +6274,10 @@ const SPEAR_AIM_BEATS: &[CapBeat] = &[
     // WIND begins. SPEAR_CHARGE_FULL_S is 3.0 s, so 0.3 s in is near
     // the bottom of the 0.90..1.30 band...
     CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(2.1) },
-    CapBeat { snap: Some("03-preaim-early-wind-short-arc"), ..beat(2.4) },
+    CapBeat { snap: Some("03-preaim-early-wind-level-shot"), ..beat(2.4) },
     // ...and 3.2 s in is past full, the top of it. If 03 and 04 show
     // the same arc, the preview is not reading the charge.
-    CapBeat { snap: Some("04-preaim-full-wind-long-arc"), ..beat(5.4) },
+    CapBeat { snap: Some("04-preaim-full-wind-level-shot"), ..beat(5.4) },
     CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(5.5) },
     CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(5.7) },
     CapBeat { snap: Some("05-hip-crosshair-returns"), ..beat(6.3) },
@@ -6290,8 +6293,40 @@ const SPEAR_AIM_BEATS: &[CapBeat] = &[
         ..beat(6.4)
     },
     CapBeat { snap: Some("06-lobbed-arc-and-landing-ring"), ..beat(7.0) },
-    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(7.1) },
-    CapBeat { end: true, ..beat(7.5) },
+    // THE WIND, WHERE IT CAN ACTUALLY BE SEEN.
+    //
+    // Frames 03 and 04 were meant to be the charge evidence and they
+    // are not: measured on the first run of this script, the level
+    // frames carry 4 and 0 arc pixels respectively. That is the cull
+    // working as designed - a level flight projects onto the reticle and
+    // is hidden - but it means the two ends of the 0.90..1.30 band look
+    // identical there. They stay in the script because "level shows the
+    // reticle alone" is itself the near-dot fix's evidence.
+    //
+    // These two are the same PITCHED shot at the two ends of the wind,
+    // held on one camera so the only thing that differs between them is
+    // the charge.
+    //
+    // WHAT THEY ACTUALLY SHOW, measured rather than hoped for. Counting
+    // saturated red pixels within 60 px of the crosshair: 07 has 46 and
+    // 08 has ZERO. The wind is being read - the two frames are plainly
+    // different and nothing but the charge changed - but the difference
+    // is not "a longer trail". A full wind is 1.30x speed against 0.90,
+    // so the flight is FLATTER, so more of the drawn window falls inside
+    // the reticle cull cone, until at full wind all of it does.
+    //
+    // That is physically right and it is what §10 asks for ("if it is
+    // mostly straight, keep the trajectory nearly straight, do not
+    // exaggerate the curve"), but it means a fully wound javelin
+    // currently previews as the reticle ALONE. Whether that reads as
+    // restraint or as a missing feature is an owner call, and this beat
+    // exists so it is made on a frame instead of on a description.
+    CapBeat { press: &[CapKey::M(MouseButton::Left)], ..beat(7.2) },
+    CapBeat { snap: Some("07-lobbed-early-wind-visible-drop"), ..beat(7.5) },
+    CapBeat { snap: Some("08-lobbed-full-wind-flat-arc-culled"), ..beat(10.6) },
+    CapBeat { release: &[CapKey::M(MouseButton::Left)], ..beat(10.7) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(10.9) },
+    CapBeat { end: true, ..beat(11.3) },
 ];
 
 /// §owner §7 THE CHARGING MOTION, THIRD PERSON - the overhead wind.
