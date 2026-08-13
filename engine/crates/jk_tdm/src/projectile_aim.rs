@@ -73,6 +73,62 @@ pub const BOW_PREAIM_MAG: f32 = 1.3;
 /// retune of one must not silently move the other.
 pub const SPEAR_PREAIM_MAG: f32 = 1.3;
 
+/// The grenade's, from §12: "enter approximately 1.3x zoom IF
+/// APPROPRIATE". It is appropriate for the same reason it was for the
+/// other two — the thing being read is a long thin arc landing tens of
+/// metres away — and §15's rule that the zoom must make the trajectory
+/// easier to read, never crop it, is what bounds it to the same gentle
+/// pull rather than a scope.
+pub const GRENADE_PREAIM_MAG: f32 = 1.3;
+
+// ---- WHICH weapon is being pre-aimed -------------------------------------
+
+/// What the player is pre-aiming with right now.
+///
+/// ## Why this exists rather than another `GunKind` arm
+///
+/// Bow and spear are `GunKind`s, so every question in this module used
+/// to be keyed on `GunKind` alone. The grenade is not: it is a STATE
+/// (`cook_t > 0`) that overrides whatever is in the hands — you wind a
+/// frag while carrying a rifle, and `p.gun` still says `M4`. Keying the
+/// grenade off `GunKind` was therefore not possible, and the two obvious
+/// alternatives were both wrong:
+///
+/// - a `grenade_preaim_mag` / `grenade_reticle_size` /
+///   `grenade_draws_own_reticle` triplet beside the existing ones —
+///   which is the third reticle system this module's header exists to
+///   refuse; or
+/// - a `cooking: bool` threaded through every function as a second
+///   argument, which makes `preaim_mag(GunKind::Bow, true)` a
+///   representable state that means nothing.
+///
+/// One resolution up front, in `aim_weapon`, then every question below
+/// takes the ANSWER. The grenade wins over the gun because the pin is
+/// out: the sim already gives the trigger to the throw
+/// (`shoot: pressed && !nade_ready`), so the aiming furniture follows
+/// the same decision instead of making a second one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AimWeapon {
+    /// Nothing in this aiming language — a rifle, fists, a mech mount.
+    None,
+    Bow,
+    Spear,
+    Grenade,
+}
+
+/// Resolve what is being pre-aimed. `cooking` is `p.cook_t > 0.0` — the
+/// sim's own wind-up clock, not a client guess at intent.
+pub fn aim_weapon(gun: GunKind, cooking: bool) -> AimWeapon {
+    if cooking {
+        return AimWeapon::Grenade;
+    }
+    match gun {
+        GunKind::Bow => AimWeapon::Bow,
+        GunKind::Spear => AimWeapon::Spear,
+        _ => AimWeapon::None,
+    }
+}
+
 /// Vertical FOV for a given magnification over a hip FOV.
 ///
 /// ## This is a TANGENT relation, not a division of degrees
@@ -122,8 +178,8 @@ pub fn magnified_fov_deg(hip_deg: f32, mag: f32) -> f32 {
 /// bow's section was built ("inventing its behaviour would be
 /// guessing"); §9 has since asked for it in the owner's own words, so it
 /// is no longer a guess.
-pub fn preaim_fov_deg(hip_deg: f32, gun: GunKind) -> f32 {
-    match preaim_mag(gun) {
+pub fn preaim_fov_deg(hip_deg: f32, aw: AimWeapon) -> f32 {
+    match preaim_mag(aw) {
         Some(m) => magnified_fov_deg(hip_deg, m),
         None => hip_deg,
     }
@@ -132,11 +188,12 @@ pub fn preaim_fov_deg(hip_deg: f32, gun: GunKind) -> f32 {
 /// The pre-aim magnification a weapon asks for, or `None` if it does not
 /// zoom at pre-aim at all. The single place that decides which weapons
 /// are in this aiming language.
-pub fn preaim_mag(gun: GunKind) -> Option<f32> {
-    match gun {
-        GunKind::Bow => Some(BOW_PREAIM_MAG),
-        GunKind::Spear => Some(SPEAR_PREAIM_MAG),
-        _ => None,
+pub fn preaim_mag(aw: AimWeapon) -> Option<f32> {
+    match aw {
+        AimWeapon::Bow => Some(BOW_PREAIM_MAG),
+        AimWeapon::Spear => Some(SPEAR_PREAIM_MAG),
+        AimWeapon::Grenade => Some(GRENADE_PREAIM_MAG),
+        AimWeapon::None => None,
     }
 }
 
@@ -158,8 +215,8 @@ pub fn preaim_mag(gun: GunKind) -> Option<f32> {
 /// Bow and spear share this rung. The old name was
 /// `bow_draws_own_reticle`; a second `spear_draws_own_reticle` beside it
 /// would have been the same predicate twice.
-pub fn draws_own_reticle(gun: GunKind, ads: bool, in_mech: bool) -> bool {
-    preaim_mag(gun).is_some() && ads && !in_mech
+pub fn draws_own_reticle(aw: AimWeapon, ads: bool, in_mech: bool) -> bool {
+    preaim_mag(aw).is_some() && ads && !in_mech
 }
 
 /// Outer diameter of the reticle circle, in the 720p authoring space the
@@ -187,10 +244,24 @@ const RETICLE_DOT: f32 = 2.0;
 /// an upright oval at a glance, still unmistakably the same family as
 /// the bow's circle, and nothing like the gun's cross.
 ///
+/// The GRENADE's is the spear's oval LAID DOWN — 22 wide by 14 tall.
+///
+/// Three weapons in one family need three marks, and the two axes of one
+/// ellipse are the whole vocabulary this shape has. Upright was taken by
+/// the spear, round by the bow, so the grenade takes the third: a wide
+/// oval. It is not an arbitrary leftover — a frag is the one throw in
+/// the game whose effect is an AREA on the ground rather than a point,
+/// and a mark that is wider than it is tall reads that way. Same 1.4
+/// ratio as the spear's, so "slightly circular" still describes it and
+/// nothing in the family has grown: the largest extent across all three
+/// marks is still 22 px, which is what `RETICLE_CLEAR_RAD` is sized
+/// against.
+///
 /// Returns `(width_px, height_px)` in the 720p authoring space.
-pub fn reticle_size(gun: GunKind) -> (f32, f32) {
-    match gun {
-        GunKind::Spear => (16.0, 22.0),
+pub fn reticle_size(aw: AimWeapon) -> (f32, f32) {
+    match aw {
+        AimWeapon::Spear => (16.0, 22.0),
+        AimWeapon::Grenade => (22.0, 14.0),
         _ => (RETICLE_D, RETICLE_D),
     }
 }
@@ -299,16 +370,22 @@ fn paint_reticle(
     // on a pause or a result screen and the circle would be left frozen
     // on top of the menu, which is the failure mode a run condition
     // looks like it prevents and does not.
+    //
+    // §12: a wound-up THROW is pre-aim too, and it is not a `GunKind` -
+    // `p.gun` still says whatever is slung. `aim_weapon` is the one
+    // place that resolves it, and it reads the sim's own `cook_t`
+    // rather than watching the mouse for itself.
+    let aw = aim_weapon(p.gun, p.cook_t > 0.0);
     let active = *state.get() == GameState::Playing
         && p.alive()
-        && draws_own_reticle(p.gun, cam.ads, p.in_mech());
+        && draws_own_reticle(aw, cam.ads, p.in_mech());
     let a = reticle_alpha(cam.ads_t, active);
     // The ring is RESIZED per weapon rather than there being one ring
     // entity per weapon: the spear's oval and the bow's circle are the
     // same node with a different `width`/`height`. Only written while
     // the mark is actually up, so an inactive frame does not thrash the
     // UI layout every tick.
-    let (rw, rh) = reticle_size(p.gun);
+    let (rw, rh) = reticle_size(aw);
     for mut v in &mut root_q {
         *v = if a > 0.004 {
             Visibility::Visible
@@ -628,6 +705,132 @@ pub fn dot_is_clear_of_reticle(cam_pos: Vec3, cam_fwd: Vec3, dot: Vec3) -> bool 
     }
 }
 
+// ---- §19 + the SHARED MINIMUM VISIBLE ARC --------------------------------
+
+/// How many dots the trail is guaranteed to show, however flat the shot.
+///
+/// ## The honest flag this closes
+///
+/// `dot_is_clear_of_reticle` is right, and the spear capture proved it
+/// can also be TOO right. Measured on `spear_aim`, counting saturated
+/// red pixels within 60 px of the crosshair: frame 07 (early wind,
+/// pitched up) has 46, and frame 08 — the SAME camera at full wind — has
+/// ZERO. A full wind is 1.30x speed against 0.90, so the flight is
+/// flatter, so more of the drawn window falls inside the cull cone,
+/// until at full wind all of it does and the preview is the reticle
+/// alone.
+///
+/// That is physically correct and it contradicts §19: "the player should
+/// ALWAYS understand: this is where my weapon is actually going to send
+/// the projectile." A frame with no arc pixels in it does not say that.
+///
+/// ## Why a FLOOR and not a wider cone
+///
+/// The obvious fix — relax `RETICLE_CLEAR_RAD` — reintroduces exactly
+/// the failure the cull was built for, because on a flat shot ALL two
+/// dozen samples project into the same few pixels and sum into a solid
+/// red square over the target. The cause was never dot size (measured;
+/// see `dot_is_clear_of_reticle`), it was COUNT.
+///
+/// So the floor is on the count, and it keeps the samples that are
+/// FARTHEST from screen centre. Two properties follow, and they are what
+/// make this safe:
+///
+/// - it can never draw more than `MIN_VISIBLE_ARC_DOTS` dots inside the
+///   cone, so the pile-up is bounded at four however flat the shot;
+/// - four dots chosen by descending separation are the four most
+///   visually separated ones available, so they read as a short dash
+///   leading away from the mark rather than as a blob on it.
+///
+/// Four rather than one because a single dot is a speck and reads as an
+/// artefact; four is enough to have a DIRECTION, which is the one thing
+/// §19 insists must survive.
+///
+/// ## WHAT THE CAPTURE SAID ABOUT THIS, WHICH IS NOT WHAT I EXPECTED
+///
+/// The first version of this floor promoted the four widest samples
+/// unconditionally. `spear_aim/04` (level, full wind), before and after,
+/// cropped to the 120 px box around the mark: the AFTER frame has a
+/// small solid red BAR sitting INSIDE the reticle oval, under the centre
+/// dot. Four dots rather than twenty-four, so not the old 32 px blob -
+/// but inside the ring, which is the one place the whole cull chain
+/// exists to keep empty, and a regression on the exact frames I was
+/// told not to regress.
+///
+/// It is not a tuning problem, it is a contradiction. Every dot the cull
+/// removes is, by construction, inside the drawn mark; so "always draw
+/// something" and "nothing but the reticle at the centre" cannot both
+/// hold on a shot whose whole flight lies along the view axis. The
+/// promotion is therefore bounded by `RETICLE_EDGE_RAD` below - the
+/// floor may reach into the cull's SAFETY MARGIN, never into the mark
+/// itself - and on a genuinely dead-flat shot it can still draw nothing.
+///
+/// That is the right side of the contradiction, and the measurement that
+/// made the other side look necessary does not survive checking either:
+/// the flag was "frame 08 has ZERO arc pixels", counted in a 60 px box
+/// around the crosshair. Re-run on this build, frame 08 has a dotted
+/// trail perfectly visible below the mark - it simply starts more than
+/// 60 px down, because a full wind lands far away and the drop projects
+/// low. The preview was never blank. The instrument was.
+pub const MIN_VISIBLE_ARC_DOTS: usize = 4;
+
+/// The reticle's own half-extent: 22 authored px at 0.125 deg/px.
+///
+/// `RETICLE_CLEAR_RAD` is this rounded UP to 0.026 so a culled dot
+/// clears the ring's outer edge rather than kissing it. That rounding
+/// leaves a thin band which is outside the drawn mark but inside the
+/// cull, and the band is the only room the floor is allowed to use: a
+/// dot promoted from it touches the ring's edge, a dot promoted from
+/// inside it lands on the target the player is aiming at.
+pub const RETICLE_EDGE_RAD: f32 = 0.024;
+
+/// Which of a trail's samples are drawn, given where the camera looks.
+///
+/// The normal answer is `dot_is_clear_of_reticle` per dot. When that
+/// answer is "none of them" — the flat-shot case above — the
+/// `MIN_VISIBLE_ARC_DOTS` samples with the LARGEST angular separation
+/// are drawn anyway.
+///
+/// The floor is bounded by `RETICLE_EDGE_RAD`, so it can never place a
+/// dot inside the drawn mark - see `MIN_VISIBLE_ARC_DOTS` for the
+/// before/after that forced that bound. On a shot flat enough that
+/// nothing at all clears the mark's edge, the answer stays "the reticle
+/// alone", which is the honest read: a dot on the aim line only tells
+/// the player the projectile starts out going where they are pointing.
+///
+/// Degenerate samples (a dot on the lens, `angular_sep` returning
+/// `None`) are never promoted either: those are precisely the ones that
+/// would paint the centre pixel, and "always show something" must not
+/// become "show the thing we specifically banned".
+///
+/// Pure, and takes a slice rather than a Bevy query, so the flat-shot
+/// case can be tested without a running app.
+pub fn arc_dot_visibility(cam_pos: Vec3, cam_fwd: Vec3, dots: &[Vec3]) -> Vec<bool> {
+    let seps: Vec<Option<f32>> = dots
+        .iter()
+        .map(|d| angular_sep(cam_pos, cam_fwd, *d))
+        .collect();
+    let mut vis: Vec<bool> = seps
+        .iter()
+        .map(|s| s.map(|v| v > RETICLE_CLEAR_RAD).unwrap_or(false))
+        .collect();
+    if vis.iter().filter(|v| **v).count() >= MIN_VISIBLE_ARC_DOTS {
+        return vis;
+    }
+    // The floor. Rank only the samples that HAVE a separation AND are
+    // outside the drawn mark, take the widest, and stop.
+    let mut ranked: Vec<(usize, f32)> = seps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.filter(|v| *v > RETICLE_EDGE_RAD).map(|v| (i, v)))
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (i, _) in ranked.into_iter().take(MIN_VISIBLE_ARC_DOTS) {
+        vis[i] = true;
+    }
+    vis
+}
+
 pub struct PreaimPlugin;
 
 impl Plugin for PreaimPlugin {
@@ -677,7 +880,7 @@ mod tests {
     #[test]
     fn bow_preaim_zoom_is_subtle_not_a_scope() {
         let hip = 90.0;
-        let z = preaim_fov_deg(hip, GunKind::Bow);
+        let z = preaim_fov_deg(hip, AimWeapon::Bow);
         assert!(z < hip, "the bow must actually zoom");
         // narrower than hip, but by less than 20 degrees - the reverted
         // `zoom_deg` pull was 32 degrees and cropped the arc
@@ -693,7 +896,7 @@ mod tests {
     #[test]
     fn the_spear_zooms_like_the_bow_and_the_guns_do_not() {
         let hip = 90.0;
-        let spear = preaim_fov_deg(hip, GunKind::Spear);
+        let spear = preaim_fov_deg(hip, AimWeapon::Spear);
         assert!(spear < hip, "the spear must actually zoom, got {spear}");
         // approximately 1.3x, by the same tangent relation - derived
         // longhand rather than read off the function under test
@@ -702,10 +905,82 @@ mod tests {
         // and subtle, by the same band the bow is held to
         assert!(hip - spear < 20.0 && hip - spear > 5.0);
         // guns are untouched
-        assert_eq!(preaim_fov_deg(hip, GunKind::M4), hip);
-        assert_eq!(preaim_fov_deg(hip, GunKind::Glock), hip);
-        assert!(preaim_mag(GunKind::M4).is_none());
-        assert!(preaim_mag(GunKind::Spear).is_some());
+        let m4 = aim_weapon(GunKind::M4, false);
+        assert_eq!(preaim_fov_deg(hip, m4), hip);
+        assert_eq!(preaim_fov_deg(hip, aim_weapon(GunKind::Glock, false)), hip);
+        assert!(preaim_mag(m4).is_none());
+        assert!(preaim_mag(AimWeapon::Spear).is_some());
+    }
+
+    /// §12: "enter approximately 1.3x zoom if appropriate" - the GRENADE
+    /// joins the same gentle pull, and it does so while `p.gun` is still
+    /// a rifle, because winding a throw does not change what is slung.
+    ///
+    /// FAILS on the pre-change code twice over: `preaim_fov_deg` took a
+    /// `GunKind` and there was no way to express "an M4 is in hand but a
+    /// frag is being wound", so a cooking player got the M4's own
+    /// `zoom_deg` and never this.
+    #[test]
+    fn winding_a_throw_zooms_even_with_a_rifle_slung() {
+        let hip = 90.0;
+        // the state that matters: rifle in hand, pin out
+        let cooking = aim_weapon(GunKind::M4, true);
+        assert_eq!(cooking, AimWeapon::Grenade);
+        let z = preaim_fov_deg(hip, cooking);
+        // the same tangent relation, derived longhand rather than read
+        // off the function under test
+        let want = 2.0 * (1.0_f32 / 1.3).atan().to_degrees();
+        assert!((z - want).abs() < 1e-3, "throw pre-aim FOV {z}");
+        // subtle, by the band the other two are held to (§17)
+        assert!(hip - z < 20.0 && hip - z > 5.0);
+        // ...and the SAME rifle, pin in, is not in this language at all
+        assert_eq!(preaim_fov_deg(hip, aim_weapon(GunKind::M4, false)), hip);
+    }
+
+    /// The throw OUTRANKS whatever is slung. A player winding a frag
+    /// with a bow on their back is aiming the frag - the sim already
+    /// gives the trigger to the throw, so the furniture must not
+    /// disagree and paint a bow's circle over a grenade's arc.
+    ///
+    /// FAILS on the pre-change code, which had no `aim_weapon` and
+    /// resolved the question as `p.gun` alone.
+    #[test]
+    fn the_pin_being_out_outranks_the_weapon_in_hand() {
+        assert_eq!(aim_weapon(GunKind::Bow, true), AimWeapon::Grenade);
+        assert_eq!(aim_weapon(GunKind::Spear, true), AimWeapon::Grenade);
+        assert_eq!(aim_weapon(GunKind::Fists, true), AimWeapon::Grenade);
+        // and with the pin in, the weapon is the weapon
+        assert_eq!(aim_weapon(GunKind::Bow, false), AimWeapon::Bow);
+        assert_eq!(aim_weapon(GunKind::Spear, false), AimWeapon::Spear);
+        assert_eq!(aim_weapon(GunKind::Fists, false), AimWeapon::None);
+    }
+
+    /// §11 in three: the family has three distinguishable marks and no
+    /// two of them are the same shape. The grenade's is the wide oval.
+    ///
+    /// FAILS on the pre-change code, where a cooking player fell through
+    /// `_ => (RETICLE_D, RETICLE_D)` and got the bow's circle.
+    #[test]
+    fn the_grenade_reticle_is_a_wide_oval_distinct_from_the_other_two() {
+        let (gw, gh) = reticle_size(AimWeapon::Grenade);
+        assert!(gw > gh, "the grenade's mark lies down: {gw}x{gh}");
+        // "SLIGHTLY circular" bounds it the same way the spear's is
+        // bounded - past 2:1 it stops reading as the same family
+        let ratio = gw / gh;
+        assert!((1.15..2.0).contains(&ratio), "aspect {ratio}");
+        // three marks, three shapes
+        let (bw, bh) = reticle_size(AimWeapon::Bow);
+        let (sw, sh) = reticle_size(AimWeapon::Spear);
+        assert_eq!(bw, bh);
+        assert!(sh > sw);
+        assert!((gw, gh) != (bw, bh) && (gw, gh) != (sw, sh));
+        // and the family has NOT grown: the largest extent anywhere is
+        // still 22 px, which is the number `RETICLE_CLEAR_RAD` is sized
+        // against. If this fails the cull cone is now too narrow.
+        let widest = [bw, bh, sw, sh, gw, gh]
+            .into_iter()
+            .fold(0.0_f32, f32::max);
+        assert_eq!(widest, 22.0, "a mark grew past the cull cone's sizing");
     }
 
     /// §11: the spear's reticle is "slightly circular" and must not be
@@ -716,9 +991,9 @@ mod tests {
     /// FAILS on the pre-change code, which had one hard-coded 14x14.
     #[test]
     fn the_spear_reticle_is_an_oval_and_the_bow_reticle_is_a_circle() {
-        let (bw, bh) = reticle_size(GunKind::Bow);
+        let (bw, bh) = reticle_size(AimWeapon::Bow);
         assert_eq!(bw, bh, "the bow's mark is a circle");
-        let (sw, sh) = reticle_size(GunKind::Spear);
+        let (sw, sh) = reticle_size(AimWeapon::Spear);
         assert!(sh > sw, "the spear's mark is upright: {sw}x{sh}");
         // "SLIGHTLY circular" - an oval, not a slot. Anything past 2:1
         // stops reading as the same family as the bow's circle.
@@ -737,15 +1012,22 @@ mod tests {
     /// normal crosshair, and a pilot in a mech is firing hull mounts.
     #[test]
     fn reticle_replaces_the_crosshair_only_while_pre_aiming_a_bow() {
-        assert!(draws_own_reticle(GunKind::Bow, true, false));
-        assert!(!draws_own_reticle(GunKind::Bow, false, false));
-        assert!(!draws_own_reticle(GunKind::Bow, true, true));
-        assert!(!draws_own_reticle(GunKind::M4, true, false));
+        assert!(draws_own_reticle(AimWeapon::Bow, true, false));
+        assert!(!draws_own_reticle(AimWeapon::Bow, false, false));
+        assert!(!draws_own_reticle(AimWeapon::Bow, true, true));
+        assert!(!draws_own_reticle(AimWeapon::None, true, false));
         // and the spear joined it, under exactly the same conditions -
         // at the HIP a javelin keeps the normal crosshair.
-        assert!(draws_own_reticle(GunKind::Spear, true, false));
-        assert!(!draws_own_reticle(GunKind::Spear, false, false));
-        assert!(!draws_own_reticle(GunKind::Spear, true, true));
+        assert!(draws_own_reticle(AimWeapon::Spear, true, false));
+        assert!(!draws_own_reticle(AimWeapon::Spear, false, false));
+        assert!(!draws_own_reticle(AimWeapon::Spear, true, true));
+        // §12: and so did the grenade. A wound throw at the HIP keeps
+        // the normal crosshair too - you can still throw blind, it just
+        // does not tell you where it lands.
+        assert!(draws_own_reticle(aim_weapon(GunKind::M4, true), true, false));
+        assert!(!draws_own_reticle(aim_weapon(GunKind::M4, true), false, false));
+        // a pilot's LAUNCHER is a hull mount, not this
+        assert!(!draws_own_reticle(aim_weapon(GunKind::M4, true), true, true));
     }
 
     /// It fades in rather than popping, and is fully absent when not
@@ -1018,8 +1300,14 @@ mod tests {
         // 90 deg over 720 authored px = 0.125 deg/px. The spear's oval
         // is the tallest mark at 22 px, so an 11 px half-extent.
         let deg_per_px = 90.0 / 720.0;
-        let (_, tallest) = reticle_size(GunKind::Spear);
-        let half_extent_rad = (tallest * 0.5 * deg_per_px).to_radians();
+        // The largest EXTENT in the family, on either axis: the spear's
+        // oval is 22 tall and the grenade's is 22 wide. Reading only the
+        // spear's height would have gone stale the moment a mark grew
+        // sideways instead, which is exactly what §12 added.
+        let (gw, _) = reticle_size(AimWeapon::Grenade);
+        let (_, sh) = reticle_size(AimWeapon::Spear);
+        let widest = sh.max(gw);
+        let half_extent_rad = (widest * 0.5 * deg_per_px).to_radians();
         assert!(
             RETICLE_CLEAR_RAD >= half_extent_rad,
             "the cone {RETICLE_CLEAR_RAD} is narrower than the {half_extent_rad} rad reticle, \
@@ -1047,6 +1335,156 @@ mod tests {
         assert_eq!(landing_ring_visible(eye, aim, target, sep + 1e-4), false);
         assert!(angular_sep(eye, aim, Vec3::new(0.0, 0.0, 0.2)).is_none());
         assert!(angular_sep(eye, Vec3::ZERO, target).is_none());
+    }
+
+    /// THE MINIMUM VISIBLE ARC, on the exact shot that produced a blank
+    /// preview: a dead-flat flight lying along the view axis, every
+    /// sample inside the cull cone.
+    ///
+    /// FAILS on the pre-change code, which had no `arc_dot_visibility`
+    /// at all - `arc_preview` asked `dot_is_clear_of_reticle` per dot
+    /// and this arrangement answered "no" for every one of them, which
+    /// is `spear_aim/08` with zero arc pixels in it.
+    #[test]
+    fn a_nearly_flat_shot_still_draws_a_readable_stub_of_arc() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // 24 samples along a flight whose drop lands them in the CULL'S
+        // SAFETY MARGIN - past the mark's own edge (0.024) but inside
+        // the cone (0.026), so the plain per-dot cull hides every one of
+        // them while none of them is actually on top of the reticle.
+        // Separation here is a constant 0.025 rad by construction.
+        let dots: Vec<Vec3> = (0..24)
+            .map(|i| {
+                let z = 4.0 + i as f32;
+                Vec3::new(0.0, -0.025_f32.tan() * z, z)
+            })
+            .collect();
+        // the un-floored answer really is "nothing"
+        assert!(
+            dots.iter().all(|d| !dot_is_clear_of_reticle(cam, fwd, *d)),
+            "this fixture is not the culled case it claims to be"
+        );
+        let vis = arc_dot_visibility(cam, fwd, &dots);
+        let shown = vis.iter().filter(|v| **v).count();
+        // The expected count is written out LONGHAND, not read from
+        // `MIN_VISIBLE_ARC_DOTS`. The first draft asserted
+        // `shown == MIN_VISIBLE_ARC_DOTS` and a mutation run walked
+        // straight through it: setting the constant to 0 makes that
+        // assertion true and vacuous, because it derives its expected
+        // value from the code under test. Rule 12, caught in the act.
+        assert_eq!(shown, 4, "the floor drew {shown} dots, not four");
+        assert!(shown > 0, "the preview went blank");
+        // ...and four is a DIRECTION, not a speck: more than one dot,
+        // and far fewer than the two dozen that made the blob.
+        assert!(shown > 1 && shown < dots.len() / 2);
+    }
+
+    /// THE REGRESSION THE FLOOR MUST NOT CAUSE, in its strongest form.
+    ///
+    /// On a DEAD-flat shot every sample is inside the reticle itself,
+    /// and there the floor must decline: `spear_aim/04`'s AFTER frame
+    /// grew a red bar inside the oval when it did not, which is the
+    /// "crosshair is sacred" rule broken by the thing meant to help.
+    ///
+    /// FAILS on the first version of this floor, which ranked every
+    /// sample with a finite separation and promoted the widest four
+    /// however small "widest" happened to be.
+    #[test]
+    fn the_floor_declines_rather_than_draw_inside_the_mark() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // at 24 m the lowest is 4 cm down: 0.0017 rad, deep inside the
+        // 22 px mark, which is 0.024 rad of half-extent
+        let dots: Vec<Vec3> = (0..24)
+            .map(|i| {
+                let z = 4.0 + i as f32;
+                Vec3::new(0.0, -0.0017 * z, z)
+            })
+            .collect();
+        let vis = arc_dot_visibility(cam, fwd, &dots);
+        assert!(
+            vis.iter().all(|v| !*v),
+            "the floor put {} dots inside the reticle",
+            vis.iter().filter(|v| **v).count()
+        );
+        // and the bound really is the MARK's extent, not the cone's -
+        // if these two ever converge the safety margin the floor lives
+        // in disappears and it becomes a no-op.
+        assert!(RETICLE_EDGE_RAD < RETICLE_CLEAR_RAD);
+    }
+
+    /// The floor is a FLOOR, not a cap and not a bypass. A shot with
+    /// real drop is unaffected: every dot outside the cone still draws.
+    #[test]
+    fn the_floor_never_takes_dots_away_from_a_lobbed_shot() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // a real lob: half a metre down by 10 m and falling away
+        let dots: Vec<Vec3> = (0..12)
+            .map(|i| {
+                let z = 6.0 + i as f32;
+                Vec3::new(0.0, -0.08 * z, z)
+            })
+            .collect();
+        let vis = arc_dot_visibility(cam, fwd, &dots);
+        assert!(vis.iter().all(|v| *v), "the floor culled a visible arc");
+        assert!(vis.len() > MIN_VISIBLE_ARC_DOTS);
+    }
+
+    /// THE REGRESSION THE FLOOR MUST NOT CAUSE. The cull exists because
+    /// two dozen axially-projected dots summed into a solid red square
+    /// over the crosshair. Whatever the floor does, it may never put
+    /// more than `MIN_VISIBLE_ARC_DOTS` of them back.
+    #[test]
+    fn the_floor_cannot_rebuild_the_blob() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // 40 samples in the cull's SAFETY MARGIN - every one of them
+        // eligible for promotion (past the mark's edge, inside the
+        // cone), so the only thing standing between this fixture and a
+        // 40-dot pile is the cap. Dots exactly ON the aim line would
+        // NOT test this: they are all rejected by the edge bound before
+        // the cap is ever reached, which is how the first version of
+        // this test let `.take(usize::MAX)` survive a mutation run.
+        let dots: Vec<Vec3> = (0..40)
+            .map(|i| {
+                let z = 2.0 + i as f32 * 0.5;
+                Vec3::new(0.0, -0.025_f32.tan() * z, z)
+            })
+            .collect();
+        assert!(
+            dots.iter().all(|d| !dot_is_clear_of_reticle(cam, fwd, *d)),
+            "fixture must be fully culled, or the cap is not what is under test"
+        );
+        let shown = arc_dot_visibility(cam, fwd, &dots)
+            .iter()
+            .filter(|v| **v)
+            .count();
+        // longhand again, for the same reason as the stub test
+        assert!(shown <= 4, "the floor let {shown} dots pile onto the mark");
+    }
+
+    /// Degenerate samples are never promoted. A dot ON the lens is
+    /// precisely the one that would paint the centre pixel, so "always
+    /// show something" must not become "show the banned thing".
+    #[test]
+    fn the_floor_will_not_promote_a_dot_that_is_on_the_lens() {
+        let cam = Vec3::ZERO;
+        let fwd = Vec3::Z;
+        // every sample inside `angular_sep`'s 0.5 m degenerate radius
+        let dots = vec![
+            Vec3::new(0.0, 0.0, 0.1),
+            Vec3::new(0.0, 0.1, 0.2),
+            Vec3::new(0.1, 0.0, 0.3),
+        ];
+        let vis = arc_dot_visibility(cam, fwd, &dots);
+        assert!(
+            vis.iter().all(|v| !*v),
+            "the floor drew a dot on the camera"
+        );
+        // and an empty trail is an empty answer, not a panic
+        assert!(arc_dot_visibility(cam, fwd, &[]).is_empty());
     }
 
     /// Growth is gentle and CLAMPED, so the ring never becomes the huge

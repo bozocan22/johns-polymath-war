@@ -6329,6 +6329,64 @@ const SPEAR_AIM_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(11.3) },
 ];
 
+/// §12/§13 (owner, GRENADE section): the throw's aiming read.
+///
+/// ## Why a second grenade script exists
+///
+/// `grenade_hold` is a POSE script - it photographs the frag in the
+/// hand, the wind-up, the empty hand after release and the molotov
+/// cycle - and it looks slightly DOWN, which is the one pitch at which
+/// a throw's arc is hardest to see. Run against the shipped build it
+/// shows the pose perfectly and shows no arc, no landing marker and no
+/// crosshair at all; the preview code was there the whole time and
+/// nothing had ever photographed it. That is the instrument gap the
+/// first-person bow lost months to, so this script is the instrument
+/// rather than a wider claim about the old one.
+///
+/// The camera pitches UP. A throw aimed level lands short and its whole
+/// flight lies along the view axis, exactly like the bow's and spear's
+/// level shots; pitched up, the arc lofts against the sky where every
+/// dot is legible against a flat background and the landing ring sits
+/// out on open ground. Pitch is NEGATIVE for up - HANDS_BEATS paid for
+/// that knowledge and SPEAR_AIM_BEATS repeats it.
+///
+/// Frames 03 and 04 are THE CHARGE EVIDENCE and are the reason the
+/// beats are timed the way they are: `THROW_CHARGE_MAX_S` is 2.3 s, so
+/// 0.4 s of wind is near the bottom of the 0.55..1.86 power band and
+/// 2.9 s is past the top of it. Same camera, same aim, nothing between
+/// them but the hold. If the two arcs are the same length the preview
+/// is not reading `cook_t` and §13 is not met.
+const GRENADE_AIM_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.4) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    // pitch up and hold this camera for the whole run
+    CapBeat { look: Some((0.0, -0.22)), ..beat(0.7) },
+    // BEFORE, in the same run and on the same camera: the rifle's
+    // normal crosshair at the hip, no arc, no zoom.
+    CapBeat { snap: Some("01-hip-rifle-normal-crosshair"), ..beat(1.3) },
+    CapBeat { press: &[CapKey::K(KeyCode::KeyG)], ..beat(1.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyG)], ..beat(1.6) },
+    // frag in hand, NOT yet aimed - still the hip crosshair. §5: the
+    // arc is what right-click buys, holding one shows nothing.
+    CapBeat { snap: Some("02-frag-in-hand-still-hip"), ..beat(2.2) },
+    // RMB aims, LMB winds. Both together is the aiming state §12
+    // describes, and the frame where the reticle, the arc and the
+    // landing ring all have to be present at once.
+    CapBeat {
+        press: &[CapKey::M(MouseButton::Right), CapKey::M(MouseButton::Left)],
+        ..beat(2.4)
+    },
+    CapBeat { snap: Some("03-preaim-short-cook-arc-and-ring"), ..beat(2.8) },
+    CapBeat { snap: Some("04-preaim-long-cook-arc-reaches-further"), ..beat(5.3) },
+    CapBeat {
+        release: &[CapKey::M(MouseButton::Left), CapKey::M(MouseButton::Right)],
+        ..beat(5.5)
+    },
+    // and the rifle's crosshair comes back the moment the hand empties
+    CapBeat { snap: Some("05-thrown-crosshair-returns"), ..beat(6.1) },
+    CapBeat { end: true, ..beat(6.6) },
+];
+
 /// §owner §7 THE CHARGING MOTION, THIRD PERSON - the overhead wind.
 ///
 /// The pose it photographs did not exist before this pass and neither
@@ -7724,6 +7782,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "cockpit" | "medic_cockpit" => COCKPIT_BEATS,
         "shield_fp" => SHIELD_FP_BEATS,
         "grenade_hold" => GRENADE_HOLD_BEATS,
+        "grenade_aim" => GRENADE_AIM_BEATS,
         "sights_a" | "sights_b" | "sights_c" => IRON_SIGHTS_BEATS,
         // The AK reuses the carbine's beats verbatim. They are not
         // M4-specific - they are "a rifle, from both flanks, then a
@@ -7773,7 +7832,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 51] = [
+const CAPTURE_SCRIPTS: [&str; 52] = [
     // THE EDGE LOADOUT CARD. Its own beats, because no script here
     // could photograph a HUD element that is only up for 1.75 s after
     // a keypress - see loadout_edge::capture.
@@ -7805,6 +7864,11 @@ const CAPTURE_SCRIPTS: [&str; 51] = [
     "frontend",
     // §7 (owner spec): the throwable in the hand, all six states.
     "grenade_hold",
+    // §12/§13: the throw's AIMING read - arc, landing ring, and the two
+    // ends of the cook. `grenade_hold` above is the pose script and
+    // looks down; see GRENADE_AIM_BEATS for why that could not see any
+    // of this.
+    "grenade_aim",
     "medic",
     // §gallery: the training range's exhibit - both chassis, both
     // liveries, and the royal paint, in one frame.
@@ -9828,25 +9892,70 @@ fn grenade_arc(
     };
     let (pts, end, first_bounce) = game.sim.predict_grenade(kind, o, vel, fuse, 8.0);
     let fb = first_bounce.unwrap_or(pts.len()).min(pts.len());
+    let cam_pos = cam_tf.translation;
+    let cam_fwd = cam_tf.forward().as_vec3();
+    // §12/§17: the same three rules the bow and spear arcs earned, now
+    // that the grenade is in the same aiming language rather than a
+    // parallel amber one.
+    //
+    // - SCREEN-STABLE dot size (`dot_screen_scale`). The grenade dots
+    //   were fixed 0.09 m cubes, so a throw that lands 40 m out drew its
+    //   far half at under a pixel: measured on `grenade_hold/03`, the
+    //   arc was not findable in the frame at all.
+    // - the reticle cull, so the launch end does not pile onto the mark.
+    // - the §19 FLOOR under that cull, so a flat throw is never blank.
     let mut place = |ents: &[Entity], seg: &[[f32; 3]]| {
+        let n_ent = ents.len();
+        let positions: Vec<Vec3> = if seg.len() < 2 {
+            Vec::new()
+        } else {
+            (0..n_ent)
+                .map(|i| {
+                    let idx = (i * (seg.len() - 1)) / (n_ent - 1).max(1);
+                    Vec3::from_array(seg[idx])
+                })
+                .collect()
+        };
+        let mask = projectile_aim::arc_dot_visibility(cam_pos, cam_fwd, &positions);
         for (i, e) in ents.iter().enumerate() {
             let Ok((mut t, mut v)) = q.get_mut(*e) else {
                 continue;
             };
-            if seg.len() < 2 {
+            if positions.is_empty() {
                 *v = Visibility::Hidden;
                 continue;
             }
-            let idx = (i * (seg.len() - 1)) / (ents.len() - 1).max(1);
-            t.translation = Vec3::from_array(seg[idx]);
-            *v = Visibility::Visible;
+            let at = positions[i];
+            t.translation = at;
+            t.scale = Vec3::splat(projectile_aim::dot_screen_scale(at.distance(cam_pos)));
+            *v = if mask[i] {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
         }
     };
     place(&arc.pre, &pts[..fb]);
     place(&arc.post, &pts[fb..]);
+    // THE LANDING RING. Unlike the bow's it is NOT gated on angular
+    // separation, and that is a deliberate difference rather than an
+    // oversight: the gate exists so a marker never sits on the centre
+    // pixel, and a thrown grenade physically cannot land there. It
+    // leaves the hand at 1.45 m with 2.2 m/s of lift bolted onto the aim
+    // vector and falls under gravity for two seconds - the impact is
+    // always well below where you are pointing. The gate would pass on
+    // every throw, so asking it would be theatre.
+    //
+    // `predict_grenade` returns no surface normal (unlike `predict_arc`)
+    // so the ring lies flat, which is what the ground it rests on
+    // almost always is. Marked here rather than left as a silent
+    // assumption: on a sloped or stacked-cover landing this ring will
+    // intersect the surface rather than lie on it.
     if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
-        t.translation = Vec3::from_array(end) + Vec3::Y * 0.04;
+        let at = Vec3::from_array(end);
+        t.translation = at + Vec3::Y * projectile_aim::LANDING_LIFT_M;
         t.rotation = Quat::IDENTITY;
+        t.scale = Vec3::splat(projectile_aim::landing_ring_scale(at.distance(cam_pos)));
         *v = Visibility::Visible;
     }
 }
@@ -18738,26 +18847,24 @@ fn setup(
 
     // ---- §1 (Brief V): grenade pre-aim arc - amber, with a fainter
     // post-bounce run and a landing ring --------------------------------
-    let amber_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.75, 0.2),
-        emissive: LinearRgba::new(2.6, 1.6, 0.3, 1.0),
-        unlit: true,
-        ..default()
-    });
-    let amber_faint = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.75, 0.25, 0.30),
-        emissive: LinearRgba::new(0.9, 0.55, 0.12, 1.0),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    });
+    //
+    // §1 (owner, weapon-specific aiming): RED is the aiming language,
+    // and the grenade was speaking amber. Two colours for the same
+    // question - "where will this land" - is a split identity, not a
+    // distinction, and the pre/post-bounce split already carries the one
+    // real difference (certain vs less certain) as ALPHA. So these are
+    // now the same `laser_mat` / `faint_mat` the bow and spear arcs use:
+    // one material, one language, and no third set of channels to get
+    // wrong. (The palette note applies here too - red is doubled and
+    // green/blue stay down, because raising all three renders
+    // salmon-pink under TonyMcMapface.)
     let mut gpre = Vec::new();
     for _ in 0..16 {
         gpre.push(
             commands
                 .spawn((
                     Mesh3d(dot_mesh.clone()),
-                    MeshMaterial3d(amber_mat.clone()),
+                    MeshMaterial3d(laser_mat.clone()),
                     Transform::IDENTITY,
                     Visibility::Hidden,
                 ))
@@ -18770,19 +18877,25 @@ fn setup(
             commands
                 .spawn((
                     Mesh3d(dot_mesh.clone()),
-                    MeshMaterial3d(amber_faint.clone()),
+                    MeshMaterial3d(faint_mat.clone()),
                     Transform::IDENTITY,
                     Visibility::Hidden,
                 ))
                 .id(),
         );
     }
+    // §17: this WAS `Cylinder::new(0.55, 0.03)` - a filled 1.1 m plate
+    // of light on the ground, which is the "huge trajectory graphic" the
+    // brief forbids and is the same mistake the bow's marker had already
+    // been through (its note is 120 lines up). Same torus, same red, so
+    // the two weapons mark a landing the same way; `landing_ring_scale`
+    // grows it gently with range and clamps.
     let gring = commands
         .spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.55, 0.03))),
+            Mesh3d(meshes.add(Torus::new(0.24, 0.28))),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 0.75, 0.2, 0.55),
-                emissive: LinearRgba::new(2.0, 1.2, 0.25, 1.0),
+                base_color: Color::srgba(1.0, 0.2, 0.15, 0.55),
+                emissive: LinearRgba::new(2.2, 0.3, 0.2, 1.0),
                 alpha_mode: AlphaMode::Blend,
                 unlit: true,
                 ..default()
@@ -18796,7 +18909,19 @@ fn setup(
         post: gpost,
         ring: gring,
     });
-    // §owner: the pod's pre-fire aim dots
+    // §owner: the pod's pre-fire aim dots. These stay AMBER on purpose
+    // while the grenade's went red: the red language is the HAND
+    // weapons' pre-aim, and a mech's dumb-fire tube line is a hull
+    // mount's read, not a projectile the pilot is arcing. (This is the
+    // only remaining user of the amber dot material, which is why it is
+    // now declared here instead of beside the grenade arc.)
+    let amber_faint = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.75, 0.25, 0.30),
+        emissive: LinearRgba::new(0.9, 0.55, 0.12, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
     let mut rdots = Vec::new();
     for _ in 0..14 {
         rdots.push(
@@ -23058,7 +23183,20 @@ fn camera_system(
     // `+= (target-fov)*k` exponential that stalls and never arrives
     if let Projection::Perspective(persp) = &mut *proj {
         // §5.2 (Brief VI): scoped-class two-stage zoom - 40° then 10°
-        let zoom = if p.armed() && !p.shield_up {
+        //
+        // §12 (owner, grenade section): "when preparing a grenade: enter
+        // approximately 1.3x zoom if appropriate". A wound throw is
+        // checked FIRST and outside `p.armed()`, because neither of
+        // those tests could see it: `armed()` is `gun != Fists`, and
+        // `p.gun` is whatever is slung while the frag is in the other
+        // hand - so a rifleman winding a throw was being given the M4's
+        // own `zoom_deg`, and a fist-fighter winding one got nothing.
+        // `aim_weapon` resolves the conflict once; this reads the answer.
+        let throwing = p.cook_t > 0.0 && !p.in_mech();
+        let aw = projectile_aim::aim_weapon(p.gun, throwing);
+        let zoom = if throwing {
+            projectile_aim::preaim_fov_deg(settings.fov_deg(), aw)
+        } else if p.armed() && !p.shield_up {
             if gun(p.gun).scoped && cam_ctl.zoom_stage == 2 {
                 10.0
             } else if gun(p.gun).projectile.is_some() {
@@ -23084,7 +23222,7 @@ fn camera_system(
                 // the arithmetic and the reasoning, and §9 has since put
                 // the SPEAR on the same 1.3x pull - so this line is now
                 // "the projectile weapons zoom", not "the bow zooms".
-                projectile_aim::preaim_fov_deg(settings.fov_deg(), p.gun)
+                projectile_aim::preaim_fov_deg(settings.fov_deg(), aw)
             } else {
                 gun(p.gun).zoom_deg
             }
@@ -24138,7 +24276,17 @@ fn arc_preview(
 ) {
     let p = &game.sim.fighters[game.sim.player];
     let spec = gun(p.gun);
-    let show = cam_ctl.ads && p.alive() && spec.projectile.is_some() && p.roll_t <= 0.0;
+    // §12: `&& p.cook_t <= 0.0` - a wound THROW owns the preview. Both
+    // arcs are gated on RMB, so a player winding a frag with a bow in
+    // hand drew two trajectories at once from two different launch
+    // points, in the same red, and only one of them was the thing the
+    // trigger was about to send. The sim already resolves this the same
+    // way (`shoot: pressed && !nade_ready`).
+    let show = cam_ctl.ads
+        && p.alive()
+        && spec.projectile.is_some()
+        && p.roll_t <= 0.0
+        && p.cook_t <= 0.0;
     // §9 (dead code, not tuning): a `yaw_rate` was computed here every
     // frame "for the cone width" and never read - the cone has taken its
     // width from the sim's own `aim_spread_of` since that copy was
@@ -24228,11 +24376,34 @@ fn arc_preview(
             cum.push(cum.last().unwrap() + d2.length());
         }
         let total = *cum.last().unwrap_or(&0.0);
+        // §19 + THE MINIMUM VISIBLE ARC. The per-dot cull below used to
+        // be decided inside this loop, one dot at a time, which is why
+        // it could answer "hide" for every dot on a flat shot and leave
+        // the preview blank (`spear_aim/08`, measured: zero arc pixels).
+        // Whether a dot is drawn is a question about the WHOLE trail
+        // now, so the sample positions are collected first and
+        // `arc_dot_visibility` answers once, with a guaranteed floor.
+        let sample_at = |i: usize| -> Vec3 {
+            let want = total * projectile_aim::arc_sample_frac(i, ents.len());
+            let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
+            Vec3::from_array(pts[k])
+        };
+        let degenerate = pts.len() < 2 || total < 0.4;
+        let positions: Vec<Vec3> = if degenerate {
+            Vec::new()
+        } else {
+            (0..ents.len()).map(sample_at).collect()
+        };
+        let vis_mask = projectile_aim::arc_dot_visibility(
+            cam_tf.translation,
+            cam_tf.forward().as_vec3(),
+            &positions,
+        );
         for (i, e) in ents.iter().enumerate() {
             let Ok((mut t, mut v)) = q.get_mut(*e) else {
                 continue;
             };
-            if pts.len() < 2 || total < 0.4 {
+            if degenerate {
                 *v = Visibility::Hidden;
                 continue;
             }
@@ -24248,10 +24419,8 @@ fn arc_preview(
             // the other end of the arc. The window now starts at 30%
             // and ends at 92%, so the trail shows the drop and the
             // landing ring covers the last stretch.
-            let want = total * projectile_aim::arc_sample_frac(i, ents.len());
-            let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
             let frac = i as f32 / ents.len() as f32;
-            let at = Vec3::from_array(pts[k]);
+            let at = positions[i];
             t.translation = at;
             // SCREEN-STABLE dot size. The taper along the arc is kept -
             // it is what makes the trail read as going away from you -
@@ -24271,11 +24440,11 @@ fn arc_preview(
             // measured before/after is in `dot_is_clear_of_reticle` -
             // because on a level shot the whole flight projects into a
             // few pixels and piles up regardless of per-dot size.
-            *v = if projectile_aim::dot_is_clear_of_reticle(
-                cam_tf.translation,
-                cam_tf.forward().as_vec3(),
-                at,
-            ) {
+            //
+            // ...unless that would leave NOTHING, which §19 forbids.
+            // `arc_dot_visibility` is the same cull with a floor of four
+            // widest-projecting samples under it.
+            *v = if vis_mask[i] {
                 Visibility::Visible
             } else {
                 Visibility::Hidden
@@ -24345,7 +24514,10 @@ fn arc_preview(
     // This is why the gate was written as a question about the SHOT
     // rather than a question about the weapon.
     let impact_v = Vec3::from_array(impact);
-    let ring_on = projectile_aim::preaim_mag(p.gun).is_some()
+    // `false` for the cooking flag, not a live read: this system does
+    // not run at all while a throw is wound (see `show` above), so the
+    // weapon here is always the one in the hands.
+    let ring_on = projectile_aim::preaim_mag(projectile_aim::aim_weapon(p.gun, false)).is_some()
         && projectile_aim::landing_ring_visible(eye, d, impact_v, projectile_aim::LANDING_SEP_RAD);
     if let Ok((mut t, mut v)) = q.get_mut(arc.ring) {
         if ring_on {
@@ -25847,8 +26019,17 @@ fn crosshair_render(
     // not stack the game crosshair under it". Hitmarkers still outrank
     // both, which is the existing ladder and is correct - feedback beats
     // aiming furniture.
+    //
+    // §12: and a wound THROW takes the centre pixel off whatever is
+    // slung. The rifle branch above is why this matters rather than
+    // being a nicety: `sight_line_y(M4).is_some()` is true, so a player
+    // winding a frag with a carbine had the crosshair hidden for an
+    // IRON SIGHT on a weapon that is stowed out of the frame - a centre
+    // pixel with nothing in it at all. The grenade's own mark now owns
+    // that pixel instead.
+    let aw = projectile_aim::aim_weapon(p.gun, p.cook_t > 0.0 && !p.in_mech());
     let optic_hidden = optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech())
-        || projectile_aim::draws_own_reticle(p.gun, cam.ads, p.in_mech());
+        || projectile_aim::draws_own_reticle(aw, cam.ads, p.in_mech());
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
