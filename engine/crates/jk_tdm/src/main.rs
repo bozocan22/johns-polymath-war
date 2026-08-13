@@ -3446,10 +3446,68 @@ const fn carry(pos: Vec3, pitch: f32, roll: f32, yaw: f32) -> VmCarry {
 /// because `ads_shift` already multiplies a sight height by it.
 const VM_MODEL_SCALE: f32 = 0.9;
 
+/// The convergence toe-in every carried weapon shares: the muzzle is
+/// yawed inward so a shouldered rifle's barrel line crosses the screen
+/// centre at a plausible distance. Correct at the HIP - it is what stops
+/// the gun looking like it is pointed off into the wings.
+///
+/// §owner SIGHT PASS (section 2): it is WRONG while aiming, and
+/// measurably so. A yaw converts a part's Z LEVER ARM into lateral
+/// screen offset, so the error grows with how far forward a part sits.
+/// The tube and the dot sit close to the shooter and land within a
+/// couple of pixels of centre; the FRONT POST, being at the far end of
+/// the barrel, does not - the M4's post at z 0.410 lands about 11 px
+/// left of centre at 1600x900, ~17% of the window radius. That is the
+/// off-axis metal the owner photographed.
+///
+/// Every front post in `weapon_parts` is already `x = 0.0`, so the
+/// geometry table is not the bug and must not be nudged - moving a post
+/// would trade this ADS error for a third-person one. The fix is to take
+/// the toe-in OUT while the sights are up, which is what
+/// `VM_CONVERGE_YAW * (1.0 - ads_e)` does below: at full focus the
+/// weapon's optical axis is parallel to the camera's, so the post, the
+/// dot and screen centre are collinear by construction.
+const VM_CONVERGE_YAW: f32 = 0.026;
+
+/// How much of `VM_CONVERGE_YAW` is still applied at a given focus
+/// blend. 1.0 at the hip (untouched), 0.0 at full ADS.
+///
+/// Extracted so it is testable without a Bevy world - the 47-degree
+/// camera bug survived for months because its arithmetic lived inside a
+/// system nothing could call.
+fn converge_yaw_at(ads_e: f32) -> f32 {
+    VM_CONVERGE_YAW * (1.0 - ads_e.clamp(0.0, 1.0))
+}
+
+/// The FULL-focus translation for a gun that has an iron pair: x cancels
+/// the carry's rightward offset exactly, y lifts the weapon until its
+/// sight line (scaled by the model scale) sits on the eye line, z pulls
+/// it in. Multiply by the focus blend for a partial ADS.
+///
+/// Extracted out of `fp_viewmodel` so the sight-alignment tests measure
+/// the SHIPPED shift instead of a retyped copy - a retyped copy is how
+/// the bow's pre-aim guard went stale, and it is the split brain
+/// `ANTI_PATTERNS.md` names.
+///
+/// Panics for a gun with no sight line; callers gate on `sight_line_y`.
+fn iron_ads_shift(wk: GunKind) -> Vec3 {
+    let sy = sight_line_y(wk).expect("iron_ads_shift wants a gun with sights");
+    let tr = vm_carry(wk).pos;
+    Vec3::new(-tr.x, -(tr.y + sy * VM_MODEL_SCALE), 0.10)
+}
+
 impl VmCarry {
-    /// The full model rotation, exactly as `setup` builds it.
+    /// The full model rotation, exactly as `setup` builds it - i.e. the
+    /// HIP pose, with the convergence toe-in fully applied.
     fn rotation(&self) -> Quat {
-        Quat::from_rotation_y(PI + 0.026 + self.yaw)
+        self.rotation_at(0.0)
+    }
+
+    /// The model rotation at a given focus blend. See `VM_CONVERGE_YAW`:
+    /// the toe-in is unwound as the sights come up, and nothing else
+    /// about the pose changes, so hip fire is bit-identical to before.
+    fn rotation_at(&self, ads_e: f32) -> Quat {
+        Quat::from_rotation_y(PI + converge_yaw_at(ads_e) + self.yaw)
             * Quat::from_rotation_z(self.roll)
             * Quat::from_rotation_x(self.pitch)
     }
@@ -3470,7 +3528,15 @@ impl VmCarry {
     /// This projects properly instead, so a part is judged where the
     /// player actually sees it.
     fn screen_point(&self, shift: Vec3, local: Vec3) -> Option<Vec2> {
-        let p = self.pos + shift + self.rotation() * (local * VM_MODEL_SCALE);
+        self.screen_point_at(0.0, shift, local)
+    }
+
+    /// `screen_point` at a given focus blend - the aimed sight picture.
+    /// The intrusion sweep asks its question about the HIP pose, so it
+    /// keeps calling `screen_point`; the sight-alignment measurements
+    /// pass `ads_e = 1.0`.
+    fn screen_point_at(&self, ads_e: f32, shift: Vec3, local: Vec3) -> Option<Vec2> {
+        let p = self.pos + shift + self.rotation_at(ads_e) * (local * VM_MODEL_SCALE);
         // the camera looks down -Z, so forward depth is -z
         let depth = -p.z;
         if depth <= 1e-3 {
@@ -23605,9 +23671,8 @@ fn fp_viewmodel(
         // for the spear "slightly closer and further RIGHT" in the
         // owner's own words.
         preaim_shift(p.gun) * ads_e
-    } else if let Some(sy) = sight_line_y(p.gun) {
-        let tr = vm_carry(p.gun).pos;
-        Vec3::new(-tr.x, -(tr.y + sy * 0.9), 0.10) * ads_e
+    } else if sight_line_y(p.gun).is_some() {
+        iron_ads_shift(p.gun) * ads_e
     } else {
         // no iron pair - still cancel THIS gun's own lateral carry (the
         // fists and the hip-fired minigun land here). A nominal sight
@@ -23718,6 +23783,28 @@ fn fp_viewmodel(
     } else {
         0.0
     };
+    // §owner SIGHT PASS (section 2): UNWIND THE CONVERGENCE WHILE AIMED.
+    //
+    // See `VM_CONVERGE_YAW`. This is the whole fix for "metal sight is
+    // off sight make it on the center": the toe-in is what threw the
+    // front post ~11 px left at full ADS, and it is unwound HERE, on the
+    // weapon-model node, rather than on `vm.root` - rotating the root
+    // would swing the carry offset itself about the eye and move the
+    // gun sideways instead of just aiming it.
+    //
+    // Restricted to guns with an iron pair, which is the same population
+    // `optic_hides_crosshair` reads (`sight_line_y(..).is_some()`), and
+    // for the same reason: a weapon with nothing to align has nothing to
+    // straighten. The bow and the javelin are deliberately kept OFF the
+    // midline by `preaim_shift` and must not be quietly squared up.
+    // Third person is untouched - these entities are viewmodel-only.
+    if !p.in_mech() && sight_line_y(p.gun).is_some() {
+        if let Some(wi) = ALL_WEAPONS.iter().position(|w| *w == p.gun) {
+            if let Ok((mut mt, _)) = q.get_mut(vm.weapons[wi]) {
+                mt.rotation = vm_carry(p.gun).rotation_at(ads_e);
+            }
+        }
+    }
     if let Ok((mut tf, mut vmvis)) = q.get_mut(vm.root) {
         // §1.1 Rule 2 (Brief VI): zoomed scoped-class weapon → the
         // viewmodel is not rendered at all; unscope restores next frame.
@@ -25547,6 +25634,21 @@ fn compass_system(cam: Res<CamCtl>, mut q: Query<&mut Text, With<CompassText>>) 
 
 /// §7: the stability bracket widens with the live spread - bloom, stance,
 /// movement, ADS all feed it. The value already exists; this just shows it.
+/// Is the stance/stability bracket drawn this frame?
+///
+/// `on_glass` is `optic_hides_crosshair` - the SAME gate the crosshair
+/// leaves on, passed in rather than recomputed, so the two readouts
+/// cannot drift into disagreeing about what "focused through an optic"
+/// means.
+///
+/// A pure fn because the previous rule (`alive && armed`) lived inside a
+/// Bevy system and so had no way to be tested at all; that is exactly
+/// how the bracket kept drawing across the sight picture through a whole
+/// section of sight work.
+fn stability_bracket_shown(alive: bool, armed: bool, on_glass: bool) -> bool {
+    alive && armed && !on_glass
+}
+
 fn stability_bracket(
     game: Res<Game>,
     cam: Res<CamCtl>,
@@ -25563,8 +25665,24 @@ fn stability_bracket(
     // §4.6: the SAME px-per-radian the dynamic crosshair uses, so the
     // bracket and the arms cannot bloom at two different rates.
     let px = 12.0 + spread * CROSS_SPREAD_PX_PER_RAD;
+    // §owner SIGHT PASS (section 2): NOTHING DRAWS ON THE GLASS.
+    //
+    // The bracket is a stance readout, not the crosshair, so section 1's
+    // crosshair hide did not touch it - and the AFTER captures showed it
+    // still sitting inside the sight picture, a pale `[ ]` straight
+    // across the aiming area of a sight that is meant to read as
+    // professional. It is HIDDEN while focused through an optic, not
+    // deleted: at the hip it is the only thing telling the player their
+    // cone is blooming, and that is where it earns its place.
+    //
+    // The gate is `optic_hides_crosshair` ITSELF, not a second rule that
+    // says the same thing today and drifts tomorrow - the two readouts
+    // leave the glass together or not at all.
+    let on_glass =
+        optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech());
+    let show = stability_bracket_shown(p.alive(), p.armed(), on_glass);
     for (b, mut node, mut vis) in &mut q {
-        *vis = if p.alive() && p.armed() {
+        *vis = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden

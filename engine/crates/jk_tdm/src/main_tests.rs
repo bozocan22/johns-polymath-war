@@ -4504,6 +4504,178 @@ mod forge_tests {
         );
     }
 
+    /// §owner SIGHT PASS (section 2): *"metal sight is off sight make it
+    /// on the center"*.
+    ///
+    /// The measurement section 1 made and deferred acting on. A weapon
+    /// -local point on the gun's own vertical plane (`x = 0`) - the front
+    /// post, the rear notch, the tube, the dot are ALL at x 0 - must
+    /// land on screen x 0 while focused. It did not, because
+    /// `VM_CONVERGE_YAW` turns a part's Z LEVER ARM into lateral offset:
+    /// the further down the barrel a part sits, the further left it
+    /// drew. The dot, sitting close to the eye, was within a couple of
+    /// pixels; the front post at z 0.41 was ~11 px off at 1600x900.
+    ///
+    /// Mutation-proof: this fails on the shipped code for every gun with
+    /// a post forward of the receiver, and it fails again if
+    /// `converge_yaw_at` is made to return a constant.
+    #[test]
+    fn the_metal_sits_on_the_centre_line_while_focused() {
+        // 1600x900, the resolution the section-1 offsets were read at.
+        let half_h_px = 450.0_f32;
+        // The span of a gun's own sight axis: rear notch to muzzle. The
+        // far end is what the convergence hurt most.
+        let z_samples = [-0.10_f32, 0.0, 0.10, 0.205, 0.410, 0.60];
+        for k in ALL_WEAPONS {
+            let Some(sy) = sight_line_y(k) else { continue };
+            let c = vm_carry(k);
+            // the SHIPPED shift, at full focus
+            let shift = iron_ads_shift(k);
+            for z in z_samples {
+                let local = Vec3::new(0.0, sy, z);
+                let Some(s) = c.screen_point_at(1.0, shift, local) else {
+                    continue; // behind the eye, not drawn
+                };
+                let (dx, dy) = (s.x * half_h_px, s.y * half_h_px);
+                assert!(
+                    dx.abs() < 0.5,
+                    "{k:?}: metal on the gun's centre plane at z {z} lands \
+                     {dx:+.2} px from screen centre while focused - the \
+                     sight is off the sight line"
+                );
+                assert!(
+                    dy.abs() < 0.5,
+                    "{k:?}: the sight line at z {z} lands {dy:+.2} px off \
+                     the eye line while focused"
+                );
+            }
+        }
+    }
+
+    /// ...and the HIP pose is untouched. The convergence toe-in is
+    /// CORRECT at the hip - it is what keeps a carried rifle from
+    /// looking like it points off into the wings - so the fix above may
+    /// only unwind it as the sights come up.
+    ///
+    /// Mutation-proof: fails if `converge_yaw_at` drops the `1.0 -`, and
+    /// fails if the base yaw is changed at all.
+    #[test]
+    fn the_hip_pose_keeps_its_convergence() {
+        assert!(
+            (converge_yaw_at(0.0) - 0.026).abs() < 1e-9,
+            "the hip pose lost its toe-in: {}",
+            converge_yaw_at(0.0)
+        );
+        assert!(
+            converge_yaw_at(1.0).abs() < 1e-9,
+            "full focus must leave NO convergence, got {}",
+            converge_yaw_at(1.0)
+        );
+        // and it is monotone between, so the blend cannot swing past
+        // and come back
+        let mut prev = converge_yaw_at(0.0);
+        for i in 1..=10 {
+            let v = converge_yaw_at(i as f32 / 10.0);
+            assert!(v < prev, "the unwind must be monotone: {v} after {prev}");
+            prev = v;
+        }
+        // out-of-range blends clamp rather than over-rotating
+        assert!((converge_yaw_at(-1.0) - 0.026).abs() < 1e-9);
+        assert!(converge_yaw_at(2.0).abs() < 1e-9);
+        // the rotation the SPAWN builds is still the hip rotation, so a
+        // gun that is never aimed is bit-identical to before
+        for k in ALL_WEAPONS {
+            let c = vm_carry(k);
+            assert_eq!(
+                c.rotation(),
+                c.rotation_at(0.0),
+                "{k:?}: the spawn rotation drifted from the hip pose"
+            );
+        }
+    }
+
+    /// §owner SIGHT PASS (section 2): NOTHING DRAWS ON THE GLASS.
+    ///
+    /// The stability bracket is a separate readout from the crosshair,
+    /// which is why section 1's hide left it drawing a pale `[ ]` across
+    /// the sight picture. It leaves on the SAME gate, so the two cannot
+    /// drift apart.
+    ///
+    /// Mutation-proof: fails on the shipped code, where the bracket's
+    /// visibility read `alive && armed` and nothing else.
+    #[test]
+    fn the_stability_bracket_leaves_the_sight_picture() {
+        for k in ALL_WEAPONS {
+            let optic = sight_line_y(k).is_some();
+            // The whole rule, driven through the PRODUCTION gate rather
+            // than a retyped boolean.
+            let aimed = optic_hides_crosshair(optic, true, false);
+            assert_eq!(
+                stability_bracket_shown(true, true, aimed),
+                !optic,
+                "{k:?}: focused, the bracket must leave the glass iff \
+                 there is glass to leave"
+            );
+            // hip fire: the bracket is the only bloom readout there and
+            // must stay, on every weapon
+            assert!(
+                stability_bracket_shown(
+                    true,
+                    true,
+                    optic_hides_crosshair(optic, false, false)
+                ),
+                "{k:?}: hip fire keeps its stability bracket"
+            );
+            // a pilot fires hull mounts, not the stowed rifle the gate
+            // is reading
+            assert!(
+                stability_bracket_shown(
+                    true,
+                    true,
+                    optic_hides_crosshair(optic, true, true)
+                ),
+                "{k:?}: a pilot keeps the bracket"
+            );
+        }
+        // the pre-existing conditions still gate it - the hide is an
+        // EXTRA rung, not a replacement
+        assert!(!stability_bracket_shown(false, true, false), "the dead draw nothing");
+        assert!(!stability_bracket_shown(true, false, false), "bare hands have no cone");
+    }
+
+    /// The section-2 offset table, printed rather than asserted, so the
+    /// handback can quote measured numbers instead of adjectives. Run
+    /// with `--nocapture`. It asserts nothing the tests above do not
+    /// already assert; it exists to SHOW the before/after.
+    ///
+    /// BEFORE is `screen_point_at(0.0, ..)` - the old rotation with the
+    /// aimed shift, which is exactly the shipped aimed pose.
+    #[test]
+    fn print_the_section_two_sight_offsets() {
+        let half_h_px = 450.0_f32;
+        println!("\n gun        part            before_dx  after_dx  dy");
+        for k in ALL_WEAPONS {
+            let Some(sy) = sight_line_y(k) else { continue };
+            let c = vm_carry(k);
+            let shift = iron_ads_shift(k);
+            let label = format!("{k:?}");
+            for (name, z) in [("dot/tube", 0.0_f32), ("front post", 0.410)] {
+                let local = Vec3::new(0.0, sy, z);
+                let before = c.screen_point_at(0.0, shift, local);
+                let after = c.screen_point_at(1.0, shift, local);
+                match (before, after) {
+                    (Some(b), Some(a)) => println!(
+                        " {label:<10} {name:<15} {:+8.2}  {:+8.2}  {:+6.2}",
+                        b.x * half_h_px,
+                        a.x * half_h_px,
+                        a.y * half_h_px
+                    ),
+                    _ => println!(" {label:<10} {name:<15}  behind the eye"),
+                }
+            }
+        }
+    }
+
     /// §owner SIGHT PASS (B): "make sure red dot sight is much smaller".
     ///
     /// Sized against the WINDOW rather than in bare metres, because the
