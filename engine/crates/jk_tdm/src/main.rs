@@ -7178,6 +7178,114 @@ const BOW_AIM_BEATS: &[CapBeat] = &[
     CapBeat { end: true, ..beat(5.0) },
 ];
 
+
+/// §1-§4 (owner AIMING spec): THE SHARED CROSSHAIR LAYER, which nothing
+/// in this project has ever been able to photograph.
+///
+/// Three gaps, all of them instrument gaps rather than feature gaps:
+///
+/// - **Colour.** No script has ever framed the hip crosshair as its
+///   SUBJECT. `baseline` has it in frame incidentally, at 5 px, behind
+///   whatever the scene happens to be.
+/// - **The transition.** §4 asks for a 100-200 ms fade. Every existing
+///   ADS script settles for half a second before snapping (`bow_aim`
+///   says so in as many words: "0.5 s of settle is several
+///   transitions' worth ... neither is caught mid-ease"). That is the
+///   right call for a script about the ARRIVED state and it means the
+///   transition itself has never been in a frame. The three snaps here
+///   are deliberately 30-40 ms apart, which at 60 Hz is a distinct
+///   rendered frame each - `capture_screenshot_driver` fires every due
+///   beat in one frame, so anything closer would save the same image
+///   three times under three names.
+/// - **The ARRIVED sight picture as the subject of the frame.**
+///   `sights_a/b/c` photograph the gun's irons; this one is about what
+///   is - and is not - drawn OVER them.
+///
+/// This script also ran a "fists at ADS" pair while a precise open-sight
+/// reticle was being tried. It photographed an M4, because
+/// `sim::switch_slot` silently refuses a slot holding `Fists`; that is
+/// the observation that established the open-sight case is unreachable
+/// and got the feature removed. Kept here as the reason the script has
+/// seven frames and not nine.
+///
+/// First person throughout (V), because the optic's 3D dot only exists
+/// in the viewmodel and the whole question of frame 05 is whether the
+/// dot is alone on the sight picture.
+///
+/// What each frame must show:
+///
+/// - `01`: M4 at the hip. A RED cross, centred. Not green.
+/// - `02`-`09`: the same cross partway through the raise - dimmer and
+///   slightly smaller as it goes, never gone in one step.
+/// - `10`: full ADS. NO 2D crosshair at all - the red dot on the gun is
+///   the reticle, and two marks on one sight picture is the thing §17
+///   most obviously forbids.
+/// - `11`-`16`: leaving ADS. The cross coming BACK, same curve reversed.
+/// - `17`: hip again, red cross restored.
+const ADS_CROSS_BEATS: &[CapBeat] = &[
+    CapBeat { press: &[CapKey::K(KeyCode::KeyV)], ..beat(0.5) },
+    CapBeat { release: &[CapKey::K(KeyCode::KeyV)], ..beat(0.6) },
+    // (no earlier than ~1.4 s: the first render frames land before the
+    // swapchain settles and save a 0-byte PNG - MECH_FP_BEATS paid for
+    // that knowledge.)
+    CapBeat { snap: Some("01-hip-red-cross"), ..beat(1.4) },
+    CapBeat { press: &[CapKey::M(MouseButton::Right)], ..beat(1.500) },
+    // EIGHT snaps at 20 ms over the 120 ms raise, and the density is the
+    // point.
+    //
+    // WHAT THREE RUNS OF THIS ACTUALLY SHOWED, because it is a harness
+    // fact no other script had reason to discover: when several
+    // `Screenshot` entities are queued in ONE frame, Bevy does not save
+    // them all. It logs `Duplicate render target for screenshot,
+    // skipping entity ...` and keeps one. So closely spaced snaps do not
+    // produce duplicate images - they produce MISSING images, silently,
+    // and a script that asks for seventeen can hand back five. The first
+    // run here did exactly that (5 of 17) because the first frames of a
+    // session are slow with shader compilation; runs 2 and 3 on a warm
+    // process returned 15 and 14. Sample generously and check the count.
+    //
+    // The other half of the same fact: a frame that drops screenshots
+    // can also SAVE ONE THAT IS MISSING THE VIEWMODEL AND THE UI, since
+    // those come from later cameras compositing onto the same target.
+    // Run 1 produced two such frames and they read exactly like a bug in
+    // the thing under test - an empty centre pixel where the crosshair
+    // should be. They are an artefact. If a frame has no gun in it
+    // either, suspect the instrument before the feature. The first run of this script sampled at 30-40 ms and caught
+    // the cross at full strength and then gone, with nothing between -
+    // which is what a POP looks like too. `capture_screenshot_driver`
+    // fires every due beat in one frame, so on a frame slower than the
+    // spacing several of these save the same image; that is fine and is
+    // itself the measurement. What matters is that SOME frame lands mid
+    // curve, and eight tickets is what buys that at an unknown frame
+    // rate. Compare them by red pixel count, not by eye - a 25% alpha
+    // step on a 5 px cross is not something an eye reads off a PNG.
+    CapBeat { snap: Some("02-fade-t020"), ..beat(1.520) },
+    CapBeat { snap: Some("03-fade-t040"), ..beat(1.540) },
+    CapBeat { snap: Some("04-fade-t060"), ..beat(1.560) },
+    CapBeat { snap: Some("05-fade-t080"), ..beat(1.580) },
+    CapBeat { snap: Some("06-fade-t100"), ..beat(1.600) },
+    CapBeat { snap: Some("07-fade-t120"), ..beat(1.620) },
+    CapBeat { snap: Some("08-fade-t140"), ..beat(1.640) },
+    CapBeat { snap: Some("09-fade-t160"), ..beat(1.660) },
+    // settled: ads_t is 1.0 long since, the sight picture is arrived
+    CapBeat { snap: Some("10-full-ads-optic-dot-only"), ..beat(2.100) },
+    CapBeat { release: &[CapKey::M(MouseButton::Right)], ..beat(2.200) },
+    // and the reverse - the same curve run backwards on the same clock,
+    // sampled the same way. The first run took ONE frame here, 50 ms in,
+    // and it came back empty: the release beat and the snap beat had
+    // landed in the same rendered frame, so `ads_t` had not moved yet
+    // and the picture was still full ADS. A single sample cannot tell
+    // that apart from a broken return, which is why there are six.
+    CapBeat { snap: Some("11-return-t020"), ..beat(2.220) },
+    CapBeat { snap: Some("12-return-t040"), ..beat(2.240) },
+    CapBeat { snap: Some("13-return-t060"), ..beat(2.260) },
+    CapBeat { snap: Some("14-return-t080"), ..beat(2.280) },
+    CapBeat { snap: Some("15-return-t100"), ..beat(2.300) },
+    CapBeat { snap: Some("16-return-t120"), ..beat(2.320) },
+    CapBeat { snap: Some("17-hip-red-cross-returns"), ..beat(2.800) },
+    CapBeat { end: true, ..beat(3.200) },
+];
+
 /// The four surfaces that shipped with NO capture coverage, which is
 /// exactly why each one broke in a way only a player could see: the
 /// first-person hull mounts (the pilot used to hold his stowed rifle),
@@ -7854,6 +7962,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
     "bow_draw" => BOW_DRAW_BEATS,
         "bow_draw_fp" => BOW_DRAW_FP_BEATS,
         "bow_aim" => BOW_AIM_BEATS,
+        "ads_cross" => ADS_CROSS_BEATS,
         "spear_fp" => SPEAR_FP_BEATS,
         "spear_aim" => SPEAR_AIM_BEATS,
         "spear_wind" => SPEAR_WIND_BEATS,
@@ -7914,7 +8023,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 52] = [
+const CAPTURE_SCRIPTS: [&str; 53] = [
     // THE EDGE LOADOUT CARD. Its own beats, because no script here
     // could photograph a HUD element that is only up for 1.75 s after
     // a keypress - see loadout_edge::capture.
@@ -7976,6 +8085,10 @@ const CAPTURE_SCRIPTS: [&str; 52] = [
     // The only script that has ever pressed RMB with a bow in hand -
     // see BOW_AIM_BEATS for why that mattered.
     "bow_aim",
+    // §1-§4 AIMING: the shared crosshair layer. The only script that
+    // photographs the crosshair MID-TRANSITION, and the only one that
+    // aims a weapon with no optic at all. See ADS_CROSS_BEATS.
+    "ads_cross",
     // §owner BOW & SPEAR: the two views nothing had ever taken - the
     // javelin in first person, and the overhead wind from the side.
     "spear_fp",
@@ -8153,6 +8266,14 @@ fn capture_quick_deploy(
         // and both new spear scripts press Digit3 for the same reason
         Some("spear_fp") | Some("spear_wind") | Some("spear_aim") => {
             sel.loadout[2] = GunKind::Spear
+        }
+        // §1-§4 AIMING: a gun WITH an optic in the primary and a weapon
+        // with NONE in slot 3, so one run can photograph both sides of
+        // the §3 rule. Fists are the only thing in the game that is
+        // aimable and carries no sight of any kind (the minigun is
+        // world-pickup only and cannot be put in a loadout).
+        Some("ads_cross") => {
+            sel.loadout = [GunKind::M4, GunKind::Glock, GunKind::Fists];
         }
         // the seven iron-sighted guns across three runs; the AWM is
         // deliberately absent (scoped-class hides its viewmodel by
@@ -26110,17 +26231,28 @@ fn crosshair_render(
     // pixel with nothing in it at all. The grenade's own mark now owns
     // that pixel instead.
     //
-    // §3: a gun with NO mark of its own (fists, a hip-fired minigun)
-    // resolves to `OpenSight` and joins the same rung, so ADS swaps the
-    // cross for the tight ring instead of changing nothing at all. Guns
-    // that DO carry an optic are untouched - their 3D dot is the ADS
-    // reticle and a 2D overlay would be a second mark on one sight
-    // picture. `aim_weapon_ads` carries the full argument.
-    let aw = projectile_aim::aim_weapon_ads(
-        p.gun,
-        p.cook_t > 0.0 && !p.in_mech(),
-        projectile_aim::weapon_has_own_mark(p.gun),
-    );
+    // §3 of the AIMING spec asks that the reticle visibly CHANGE on
+    // entering ADS. NOTHING WAS ADDED HERE FOR IT, and the reason is
+    // worth writing down because the obvious change is dead code:
+    //
+    // A "precise ADS reticle for guns with no optic" was built, tested
+    // and then removed, because there is no such gun. `sight_line_y`
+    // returns `Some` for all eight firearms - including the MINIGUN,
+    // which `every_firearm_carries_an_aligned_optic` pins to a real 3D
+    // dot at 0.1120 - the AWM is scoped and raises its own overlay, and
+    // the bow, spear and grenade already draw the rings above. That
+    // leaves `Fists`, and `sim::switch_slot` refuses outright to select
+    // a slot holding `Fists`, so a player can never be aiming a weapon
+    // with no mark of its own.
+    //
+    // So §3 is already satisfied for every weapon a player can hold: the
+    // cross gives way to an optic dot, a scope picture or a ring. Adding
+    // a 2D overlay on top of the 3D dot would put two marks on one sight
+    // picture, which is what §17's restraint most obviously forbids, and
+    // adding one for the empty hand would be a feature no frame can
+    // show. What §4 asked for - that the change be SMOOTH - is what was
+    // actually missing, and that is the fade below.
+    let aw = projectile_aim::aim_weapon(p.gun, p.cook_t > 0.0 && !p.in_mech());
     // §4: what this asks is "would this weapon hide the crosshair at
     // FULL ads", with `ads = true` pinned - NOT "is the button down".
     // The button is a step and the old code stepped the crosshair off
