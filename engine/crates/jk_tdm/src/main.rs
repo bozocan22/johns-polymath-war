@@ -7485,6 +7485,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         "traversal" => TRAVERSAL_BEATS,
         "map_lap" => MAP_LAP_BEATS,
         bailey_capture::SCRIPT => bailey_capture::BEATS,
+        loadout_edge::capture::SCRIPT => loadout_edge::capture::BEATS,
         threat_sensor::capture::SCRIPT => threat_sensor::capture::BEATS,
         _ => &[],
     }
@@ -7514,7 +7515,11 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 48] = [
+const CAPTURE_SCRIPTS: [&str; 49] = [
+    // THE EDGE LOADOUT CARD. Its own beats, because no script here
+    // could photograph a HUD element that is only up for 1.75 s after
+    // a keypress - see loadout_edge::capture.
+    loadout_edge::capture::SCRIPT,
     // §HUD rework section 2: the threat ring. Its own module owns the
     // beats AND the staging - no script before it had ever pointed an
     // enemy at the subject on purpose, which is why "who can see me"
@@ -7917,7 +7922,9 @@ fn capture_stage_pos(sim: &TdmSim) -> [f32; 3] {
 /// scripts pin the subject's health so the weapon-feel frames actually
 /// get taken. Capture-harness only: inert without `JK_CAPTURE`, and it
 /// never runs for a human-launched game.
-const CAPTURE_KEEP_ALIVE: [&str; 6] = [
+const CAPTURE_KEEP_ALIVE: [&str; 7] = [
+    // five seconds standing still while cycling weapons
+    loadout_edge::capture::SCRIPT,
     "minigun_check",
     "traversal",
     "map_lap",
@@ -17658,8 +17665,20 @@ fn setup(
         // flat. That is what pays for the dot being less than half its
         // old width (`OPTIC_DOT_M`) - a smaller mark has to be
         // brighter or it stops being a mark.
+        //
+        // 2.0, and the CHROMA LEFT ALONE, both measured rather than
+        // picked. The first attempt went to (4.0, 0.075, 0.045) - red
+        // quadrupled AND green/blue lifted with it - and the capture
+        // came back at (253, 129, 106): a salmon-pink chip. Tony
+        // McMapface desaturates hard as it approaches the top of the
+        // display range, so over-driving all three channels of a "red"
+        // dot is how you arrive at a pink one. Doubling ONLY the red
+        // and holding g/b at the values the old srgb(1.0, 0.14, 0.10)
+        // linearised to keeps the hue where it was and spends the whole
+        // gain on brightness, which is the half of it that a smaller
+        // mark actually needs.
         optic_red: materials.add(StandardMaterial {
-            base_color: Color::LinearRgba(LinearRgba::new(4.0, 0.075, 0.045, 1.0)),
+            base_color: Color::LinearRgba(LinearRgba::new(2.0, 0.0169, 0.010, 1.0)),
             unlit: true,
             ..default()
         }),

@@ -4336,11 +4336,13 @@ mod forge_tests {
         for kill in [false, true] {
             for hit in [None, Some(false), Some(true)] {
                 for blocked in [false, true] {
-                    assert_eq!(
-                        crosshair_feedback(true, kill, hit, blocked),
-                        CrossFeedback::Hidden,
-                        "noscope must hide through kill={kill} hit={hit:?} blocked={blocked}"
-                    );
+                    for optic in [false, true] {
+                        assert_eq!(
+                            crosshair_feedback(true, kill, hit, optic, blocked),
+                            CrossFeedback::Hidden,
+                            "noscope must hide through kill={kill} hit={hit:?} optic={optic} blocked={blocked}"
+                        );
+                    }
                 }
             }
         }
@@ -4351,26 +4353,29 @@ mod forge_tests {
             assert_eq!(c.alpha, 0.0, "a hidden crosshair must be fully transparent");
         }
 
-        // the rest of the ladder, in order
+        // the rest of the ladder, in order (optic hide off throughout)
         assert_eq!(
-            crosshair_feedback(false, true, Some(true), true),
+            crosshair_feedback(false, true, Some(true), false, true),
             CrossFeedback::Kill,
             "a kill outranks a headshot marker"
         );
         assert_eq!(
-            crosshair_feedback(false, false, Some(true), true),
+            crosshair_feedback(false, false, Some(true), false, true),
             CrossFeedback::Headshot
         );
         assert_eq!(
-            crosshair_feedback(false, false, Some(false), true),
+            crosshair_feedback(false, false, Some(false), false, true),
             CrossFeedback::Hit,
             "a body hit outranks the blocked warning"
         );
         assert_eq!(
-            crosshair_feedback(false, false, None, true),
+            crosshair_feedback(false, false, None, false, true),
             CrossFeedback::Blocked
         );
-        assert_eq!(crosshair_feedback(false, false, None, false), CrossFeedback::Idle);
+        assert_eq!(
+            crosshair_feedback(false, false, None, false, false),
+            CrossFeedback::Idle
+        );
 
         // Idle is the ONLY state painted in the player's own colour
         let idle = crosshair_color(CrossFeedback::Idle, (50, 250, 50), 200).to_srgba();
@@ -4391,6 +4396,155 @@ mod forge_tests {
             quiet_hit.alpha
         );
         assert!(quiet_hit.red > quiet_hit.green, "the hit flash is red, not the fill green");
+    }
+
+    /// §owner SIGHT PASS (C): "when you are aiming with the sight you
+    /// don't need the actual original crosshair to appear".
+    ///
+    /// The crux is WHICH guns. The ADS captures put both marks at exact
+    /// screen centre - a 12x12 px green cross sitting on the optic's own
+    /// dot - so the hide is right for the eight guns that carry a tube
+    /// and catastrophic for the four that do not: fists, bow, spear and
+    /// the AWM would be left aiming at bare sky.
+    ///
+    /// So this walks EVERY `GunKind` rather than spot-checking, and
+    /// derives the expectation from `push_red_dot`'s own eight-gun list
+    /// written out by hand here - never from `sight_line_y`, which is
+    /// the function under test.
+    #[test]
+    fn focusing_an_optic_hides_the_crosshair_and_focusing_anything_else_keeps_it() {
+        use sim::GunKind as G;
+        // hand-written, NOT read from `sight_line_y`: these are the eight
+        // guns `spawn_weapon_model` calls `push_red_dot` for.
+        const WITH_OPTIC: [G; 8] = [
+            G::Glock, G::Deagle, G::Mp5, G::Shotgun,
+            G::Ak47, G::M4, G::M249, G::Minigun,
+        ];
+        const WITHOUT_OPTIC: [G; 4] = [G::Fists, G::Awm, G::Bow, G::Spear];
+
+        for k in WITH_OPTIC {
+            assert!(
+                sight_line_y(k).is_some(),
+                "{k:?} carries a red dot but declares no sight line, so the \
+                 crosshair hide would never fire for it"
+            );
+            assert!(
+                optic_hides_crosshair(true, true, false),
+                "{k:?}: focusing an optic must take the crosshair away"
+            );
+            // ...but only while FOCUSED. Hip-firing, the eye is not
+            // behind the tube and the dot is off in the corner.
+            assert!(
+                !optic_hides_crosshair(true, false, false),
+                "{k:?}: hip fire must keep its crosshair"
+            );
+            // ...and never in a mech, which fires hull mounts and never
+            // the stowed rifle `sight_line_y` is reading.
+            assert!(
+                !optic_hides_crosshair(true, true, true),
+                "{k:?}: a pilot keeps a crosshair"
+            );
+        }
+
+        for k in WITHOUT_OPTIC {
+            assert!(
+                sight_line_y(k).is_none(),
+                "{k:?} declares a sight line it has no optic for"
+            );
+            for ads in [false, true] {
+                for mech in [false, true] {
+                    assert!(
+                        !optic_hides_crosshair(false, ads, mech),
+                        "{k:?} has no reticle of its own - it must keep the \
+                         crosshair at ads={ads} mech={mech}"
+                    );
+                }
+            }
+        }
+
+        // The two hides are DIFFERENT rungs. The optic hide must not eat
+        // the hit feedback the way the no-scope hide deliberately does -
+        // that is the whole reason it is a separate parameter.
+        assert_eq!(
+            crosshair_feedback(false, true, None, true, false),
+            CrossFeedback::Kill,
+            "a kill pop must still flash while focused through an optic"
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, Some(true), true, false),
+            CrossFeedback::Headshot,
+            "a headshot marker must still flash while focused through an optic"
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, Some(false), true, false),
+            CrossFeedback::Hit,
+            "a hitmarker must still flash while focused through an optic"
+        );
+        // ...and with nothing happening, it really is gone - including
+        // over the top of the blocked warning, which is a steady-state
+        // readout rather than an event flash.
+        assert_eq!(
+            crosshair_feedback(false, false, None, true, false),
+            CrossFeedback::Hidden,
+            "the idle crosshair goes away behind an optic"
+        );
+        assert_eq!(
+            crosshair_feedback(false, false, None, true, true),
+            CrossFeedback::Hidden,
+            "the optic hide outranks the blocked warning"
+        );
+        // and the AWM, the one weapon that is BOTH scoped and optic-less
+        // here, keeps exactly the behaviour it always had: nothing from
+        // the hip, a crosshair while zoomed.
+        assert!(gun(G::Awm).scoped, "the AWM is the scoped-class weapon");
+        assert!(
+            !optic_hides_crosshair(sight_line_y(G::Awm).is_some(), true, false),
+            "the scoped rifle's overlay draws its own mark - this rule must \
+             not be the thing that hides its crosshair"
+        );
+    }
+
+    /// §owner SIGHT PASS (B): "make sure red dot sight is much smaller".
+    ///
+    /// Sized against the WINDOW rather than in bare metres, because the
+    /// dot and the aperture sit at nearly the same depth on all eight
+    /// guns - so this ratio is very close to the fraction of the sight
+    /// picture the mark actually eats, and it is the number the captures
+    /// were read in.
+    #[test]
+    fn the_reticle_dot_is_a_dot_and_stays_inside_its_glass() {
+        let window = OPTIC_HALF * 2.0;
+        let frac = OPTIC_DOT_M / window;
+        assert!(
+            frac < 0.09,
+            "the dot covers {:.1}% of the window - that is a patch, not a \
+             dot (the ADS captures measured the old 0.0062 at 13.5%)",
+            frac * 100.0
+        );
+        // ...but it must survive being drawn. The M249 is the worst case
+        // in the arsenal: its optic sits furthest from the eye, so it
+        // subtends the fewest pixels of any gun.
+        assert!(
+            frac > 0.04,
+            "the dot has shrunk to {:.1}% of the window and will alias away \
+             on the M249, which carries the optic furthest from the eye",
+            frac * 100.0
+        );
+        // The documented invariant, restated against the SMALLER dot: at
+        // full recoil drift the mark must still be wholly inside the
+        // clear aperture, or it slides behind the housing and reads as a
+        // rendering bug rather than as recoil.
+        let farthest = OPTIC_DOT_M * 0.5 + RETICLE_DRIFT_M;
+        assert!(
+            farthest < OPTIC_HALF,
+            "the dot leaves the window at full drift: {farthest} vs the \
+             {OPTIC_HALF} aperture"
+        );
+        // and shrinking it can only ever have made that safer
+        assert!(
+            RETICLE_DRIFT_M < OPTIC_HALF * 0.5,
+            "the drift is no longer 'bounded well inside' the aperture"
+        );
     }
 
     /// The settings rows are a real control surface: every row renders a
