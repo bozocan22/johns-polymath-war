@@ -388,3 +388,82 @@ to carry. The altitude ladder is preserved in
 `research/maps/VERTICAL_BANDS.md`, not in code.
 
 — **FRIDAY22**
+
+---
+
+## Smoke blinded the bot and not the HUD, because the vision query was private
+
+`TdmSim::sight_clear` (sim.rs:13347) is `pub(crate)` now. That is the
+entire functional change: one word, no body edit, no call site moved.
+
+The gameplay bug behind it. There are two visibility queries and they
+are not interchangeable. `los_clear` is walls only; `sight_clear` is
+walls AND smoke, and it is what a bot's target selection runs. The
+client's new enemy-threat sensor could only reach the public one, so a
+smoke grenade broke contact for the BOT while leaving the threat
+indicator lit by a man who could no longer see the player. Smoke is
+meant to break contact and it half-worked.
+
+Widening it rather than letting the client re-derive smoke occlusion is
+the argument `los_clear`'s own comment already makes — it was exposed so
+main.rs would reuse "the SAME line-of-sight query ... rather than a
+second, divergent implementation." A client-side copy of the sphere
+accumulation drifts the first time the 0.6 threshold or the smoke radius
+moves, and drifts silently.
+
+**A comment defect found on the way in, and fixed.** `sight_clear` had
+no doc comment at all. Commit fcc7aed inserted `segment_crosses_smoke`
+BETWEEN `sight_clear`'s comment and `sight_clear`, so four lines reading
+"VISION test — walls AND smoke. Bots see with this" and "> 0.6 blocks"
+had been describing the smoke-only helper, which tests no walls,
+accumulates nothing, and uses a 0.5 m per-sphere floor instead. Verified
+against the diff of fcc7aed rather than assumed. The lines are back on
+their subject and the extension now states plainly which query a future
+caller wants: **vision** — bots, spotting, anything a player is meant to
+be able to hide from — takes `sight_clear`; **damage** — bullets,
+shrapnel, anything that crosses smoke unbothered — keeps `los_clear`.
+
+**No test added, and this is the interesting part.** sim.rs's `mod
+tests` is a CHILD module (`use super::*`), so it already reaches private
+items — the neighbouring test calls `nearest_visible_enemy`, which is
+private, at sim.rs:13378. A test written there could not fail if
+`pub(crate)` were reverted to `fn`; it would be guaranteed green in both
+worlds, which is the inert-test class rule 12 exists to stop. Nothing
+inside this file can guard this change. The only instrument that can is
+a real call from another module, i.e. the compiler, once
+threat_sensor.rs switches over. The behaviour stays covered by the
+existing "smoke must blot out bot vision" assertion at sim.rs:26815,
+which I left alone.
+
+Replay: no state added, no tick altered, nothing written. A widened
+reader cannot perturb a digest.
+
+`cargo build --release -p jk_tdm -j 2` clean, exit 0, 15m41s, no new
+warning. `cargo test --release -p jk_tdm -j 2` — **575 passed, 0 failed,
+2 ignored.**
+
+**Correcting a stale number in my own brief:** the task named a 570
+baseline. It is 575 at this HEAD and was before I touched anything.
+Neither uncommitted diff in the tree adds a `#[test]`, and sim.rs holds
+244 `#[test]` at HEAD and 244 in the worktree. The +5 came in with the
+commits landed since the brief was written. Same drift the previous
+entry recorded — the crate total is not a stable instrument while three
+lanes are live.
+
+**Least sure about:** nothing in the code, which is as small as a change
+gets. The soft spot is that this lands half a fix. Until main.rs moves
+threat_sensor.rs:589 from `los_clear` to `sight_clear`, the HUD behaves
+exactly as it did — the smoke inconsistency is still live in the build.
+Anyone reading this commit as "smoke now breaks the threat ring" would
+be wrong.
+
+**Hazard observed, not touched.** The tree gained modifications to
+`cockpit.rs` and `inventory_strip.rs` mid-task, during a 15-minute
+build, on top of the `main.rs` work already there. I staged one explicit
+path and committed one file; `git status` after the commit confirms all
+three are still unstaged and intact. But three lanes are writing this
+working tree concurrently right now.
+
+**Not built:** the client half. Deliberate — main.rs is not my lane.
+
+— **FRIDAY22**
