@@ -147,3 +147,32 @@ write("reload.wav", cat(noise_burst(0.02, 0.005, 0.8), noise_burst(0.03, 0.007, 
 write("jump.wav", scaled(sine(0.12, 220, 0.05, f1=340), 0.7), gain=0.4)
 write("kill.wav", sine(0.22, 700, 0.09, f1=420))
 write("win.wav", cat(sine(0.15, 523, 0.09), sine(0.15, 659, 0.09), sine(0.30, 784, 0.14)))
+
+# ---------------------------------------------------------------------
+# THREAT LOCK WARNING — the mech sensor's "someone has a clear shot on
+# you" cue. Added last, and built from `sine` ONLY, deliberately: every
+# other voice in this file draws from the shared `rng` via `noise_burst`,
+# so a new noise layer anywhere above would shift the stream and silently
+# re-roll unrelated sounds. Pure sine touches no RNG, so every existing
+# .wav stays byte-identical when this file is regenerated.
+#
+# Design constraints, from the owner's brief: it must be RARE and QUIET
+# ("do NOT make the HUD excessively intrusive"), and it must not be
+# confusable with any existing cue. `click.wav` already means "empty
+# magazine" and everything else is a gunshot, a hit, a pickup or a
+# jingle — so this is deliberately the only ELECTRONIC voice in the
+# bank: two clean rising pips, no noise, no percussive attack. A rise
+# reads as a question being asked of you (a lock acquiring); a fall
+# would read as something completing or dying.
+#
+# Kept short (~0.16 s total) and at low gain so it can fire during a
+# firefight without stepping on the gunfire it is warning you about.
+write(
+    "threat_lock.wav",
+    cat(
+        mix(sine(0.055, 1046.5, 0.020), scaled(sine(0.055, 2093.0, 0.014), 0.22)),
+        mix(sine(0.070, 1396.9, 0.026), scaled(sine(0.070, 2793.8, 0.018), 0.22)),
+        gap=0.030,
+    ),
+    gain=0.34,
+)
