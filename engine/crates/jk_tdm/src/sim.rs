@@ -13291,10 +13291,6 @@ impl TdmSim {
         true
     }
 
-    /// §5.4: VISION test — walls AND smoke. Bots see with this; damage
-    /// paths keep `los_clear` (shrapnel doesn't care about smoke).
-    /// Occlusion accumulates by path length through each sphere; > 0.6
-    /// blocks. The sphere test runs only on rays the walls left clear.
     /// Does the segment cross a meaningful depth of smoke? Same
     /// sphere-intersection arithmetic as `sight_clear`, but a boolean at
     /// a 0.5 m floor - clipping a bloom's outermost wisp is not
@@ -13328,7 +13324,27 @@ impl TdmSim {
         false
     }
 
-    fn sight_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+    /// §5.4: VISION test — walls AND smoke. Bots see with this; damage
+    /// paths keep `los_clear` (shrapnel doesn't care about smoke).
+    /// Occlusion accumulates by path length through each sphere; > 0.6
+    /// blocks. The sphere test runs only on rays the walls left clear.
+    ///
+    /// `pub(crate)` for `los_clear`'s reason, one query further in: the
+    /// client's threat sensor (`threat_sensor.rs`) asks "can this enemy
+    /// SEE me", and seeing is this function, not `los_clear`. Left
+    /// private, the client's only route to smoke occlusion was to
+    /// re-implement the sphere accumulation — a second copy that drifts
+    /// the first time the 0.6 threshold or the smoke radius moves. The
+    /// symptom that reuse exists to prevent: a threat ring still lit by
+    /// an enemy whom the smoke has already blinded.
+    ///
+    /// So, for the next caller deciding between the two: VISION — bots,
+    /// spotting, anything a player is meant to be able to HIDE from —
+    /// takes `sight_clear`. DAMAGE — bullets, shrapnel, anything that
+    /// crosses smoke unbothered — keeps `los_clear`. Neither writes any
+    /// state nor steps a tick, so a client calling them cannot perturb
+    /// replay.
+    pub(crate) fn sight_clear(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         if !self.los_clear(from, to) {
             return false;
         }
