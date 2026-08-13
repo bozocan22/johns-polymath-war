@@ -52,7 +52,7 @@
 use bevy::prelude::*;
 
 use crate::frontend::palette;
-use crate::{sim, Game, GameState, GunKind, ThrowKind};
+use crate::{sim, Game, GameState, GunKind};
 
 // ---- timing ---------------------------------------------------------------
 
@@ -71,8 +71,17 @@ pub(crate) const SLIDE_PX: f32 = 14.0;
 
 /// Gap between the card and the right screen edge. Spec: 0-5 px.
 const EDGE_MARGIN: f32 = 4.0;
-const CARD_W: f32 = 66.0;
-const SLOT_H: f32 = 44.0;
+// WIDE ENOUGH FOR THE WIDEST COUNT. This was 66, and the first
+// capture caught it: `30/120` is six glyphs of a 10px monospace face,
+// centred in a 66px card with 4px of padding, and it printed past both
+// sides of the plate. `inventory_strip.rs` carries the same scar for
+// the same reason - a count string is not the width you guessed.
+const CARD_W: f32 = 84.0;
+// TALL ENOUGH THAT THE LABEL IS NOT INSIDE THE ICON. At 44 the three
+// stacked rows (22 icon + label + count) summed to more than the box
+// once line-height was applied, so `SHD` and `NADE` were printing over
+// the foot of their own glyphs.
+const SLOT_H: f32 = 50.0;
 const ICON: f32 = 22.0;
 /// Icons are authored in this box and drawn at exactly this size, so
 /// every literal in `icon_parts` is a real pixel.
@@ -81,7 +90,7 @@ const RULE_H: f32 = 1.0;
 const MAX_PARTS: usize = 4;
 pub(crate) const SLOTS: usize = 5;
 
-const T_LABEL: f32 = 8.0;
+const T_LABEL: f32 = 9.0;
 const T_COUNT: f32 = 10.0;
 
 /// Panel fill. Spec: dark, ~30-40% alpha.
@@ -346,11 +355,17 @@ fn icon_parts(slot: Slot) -> Vec<IconPart> {
             part(9.0, 13.0, 3.0, 6.0, Detail),
         ],
         // Kite shield: broad shoulders, tapered foot.
+        // A CREST OVER A TAPERED FOOT. The first capture read this as a
+        // bucket or a funnel: the top band was as wide as the body, so
+        // the outline was a rectangle that suddenly narrowed, which is
+        // a vessel, not a shield. Insetting the crest gives the
+        // shoulders their curve and moves the taper to the bottom third
+        // where a kite shield actually has it.
         Slot::Shield => vec![
-            part(3.0, 2.0, 16.0, 4.0, Detail),
-            part(3.0, 6.0, 16.0, 8.0, Body),
-            part(6.0, 14.0, 10.0, 4.0, Body),
-            part(8.0, 18.0, 6.0, 3.0, Body),
+            part(5.0, 1.0, 12.0, 3.0, Detail),
+            part(3.0, 4.0, 16.0, 9.0, Body),
+            part(5.0, 13.0, 12.0, 4.0, Body),
+            part(8.0, 17.0, 6.0, 4.0, Body),
         ],
         // Grenade: body, band, neck, spoon.
         Slot::Grenades => vec![
@@ -512,6 +527,10 @@ fn spawn_slot(b: &mut ChildBuilder, index: usize, slot: Slot) {
             },
             TextColor(Color::NONE),
             TextLayout::new_with_no_wrap(),
+            Node {
+                margin: UiRect::vertical(Val::Px(1.0)),
+                ..default()
+            },
             EdgeLabel(index),
         ));
         c.spawn((
@@ -675,6 +694,91 @@ impl Plugin for LoadoutEdgePlugin {
                 ),
             );
     }
+}
+
+// ---- capture --------------------------------------------------------------
+
+/// The card's own instrument. It has to exist, because NO script in
+/// `CAPTURE_SCRIPTS` could photograph this feature: the card is hidden
+/// unless a loadout change landed within the last ~1.75 s, and a frame
+/// is only meaningful if you know how long ago the last key went down.
+/// Every other script's snaps are timed for a camera, not for a fade.
+///
+/// So the beats below are timed AGAINST the clock in this file:
+///
+/// * `01-hidden` at t=1.0 — a full second with no input. Nothing on the
+///   right edge. This is the default state and is half the evidence.
+/// * a `Digit2` press at 1.4, snapped at 1.6 — 200 ms after the event,
+///   i.e. past `FADE_IN_S` and deep inside `HOLD_S`. The card is lit and
+///   the SECONDARY slot is ringed.
+/// * a `Digit3` press at 2.2, snapped at 2.4 — the reset case. If the
+///   timer stacked instead of resetting, this frame would be wrong.
+/// * `04-hidden-again` at 4.6 — 2.4 s after the last event, which is
+///   past `HOLD_S + FADE_OUT_S` (1.75 s). Back to nothing.
+///
+/// Timings are held one beat apart from any camera move so a snap is
+/// never taken on the same frame as a teleport.
+pub mod capture {
+    use crate::{beat, CapBeat, CapKey};
+    use bevy::prelude::KeyCode;
+
+    pub const SCRIPT: &str = "loadout_edge";
+
+    pub const BEATS: &[CapBeat] = &[
+        // Settle the camera first; nothing here touches the loadout, so
+        // the card must still be down when the first frame is taken.
+        CapBeat {
+            look: Some((0.0, 0.02)),
+            boom: Some(2.6),
+            ..beat(0.3)
+        },
+        CapBeat {
+            snap: Some("01-hidden"),
+            ..beat(1.0)
+        },
+        // ---- event 1: swap to the secondary ----
+        CapBeat {
+            press: &[CapKey::K(KeyCode::Digit2)],
+            ..beat(1.4)
+        },
+        CapBeat {
+            release: &[CapKey::K(KeyCode::Digit2)],
+            ..beat(1.5)
+        },
+        CapBeat {
+            snap: Some("02-shown-secondary"),
+            ..beat(1.6)
+        },
+        // ---- event 2: swap to the special, WHILE still visible ----
+        CapBeat {
+            press: &[CapKey::K(KeyCode::Digit3)],
+            ..beat(2.2)
+        },
+        CapBeat {
+            release: &[CapKey::K(KeyCode::Digit3)],
+            ..beat(2.3)
+        },
+        CapBeat {
+            snap: Some("03-shown-special-timer-reset"),
+            ..beat(2.4)
+        },
+        // MID-FADE-OUT. This beat was at 4.0 s and photographed nothing:
+        // the last event lands at 2.3, the hold runs to 3.8 and the
+        // fade-out is over by 4.05, so 4.0 was already past the end of
+        // the animation. The window is 250 ms wide and this is the
+        // middle of it - the frame that proves the fade is a fade and
+        // not a pop.
+        CapBeat {
+            snap: Some("04-fading-out"),
+            ..beat(3.92)
+        },
+        // 2.4 s after the last event — past HOLD + FADE_OUT.
+        CapBeat {
+            snap: Some("05-hidden-again"),
+            ..beat(4.7)
+        },
+        CapBeat { end: true, ..beat(5.2) },
+    ];
 }
 
 // ---- tests ----------------------------------------------------------------
