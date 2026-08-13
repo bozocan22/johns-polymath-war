@@ -514,37 +514,42 @@ mod tests {
     /// Both fail on the pre-change expressions: (1) reads 0.0 against a
     /// required 0.25, and (2) reads an X component of 0.0 against a
     /// required fold.
+    /// Both claims are stated as WHERE THE SEGMENT POINTS, not as an
+    /// Euler component of the joint quaternion. That is not fussiness:
+    /// these joints are a Y rotation composed with an X rotation, and
+    /// `to_euler(XYZ)` decomposes such a product in a different order,
+    /// so its "y" is not the yaw that was written. The first version of
+    /// the sibling test below read 0.691 out of a joint built with
+    /// 0.7768 in it and failed for that reason alone. A digit's own
+    /// local +Z is the axis it grows along; where that ends up after
+    /// the joint is the only thing either claim is actually about.
     #[test]
     fn the_thumb_opposes_and_its_second_joint_flexes() {
         for &m in &[1.0_f32, -1.0] {
-            // 1: opposition at a FULLY OPEN hand
-            let (_, y, _) = joint_rotation(JointKind::VmThumbBase, m, 0.0).to_euler(EulerRot::XYZ);
+            // 1: OPPOSITION at a fully open hand - the metacarpal points
+            // ACROSS the palm (its own X), not along the fingers.
+            let across =
+                |c: f32| (joint_rotation(JointKind::VmThumbBase, m, c) * Vec3::Z).x * m;
             assert!(
-                y.abs() > 0.25,
-                "an open viewmodel thumb has only {y} rad of opposition - it is a fifth finger"
+                across(0.0) > 0.30,
+                "an open viewmodel thumb reaches only {} across the palm - it is a fifth finger",
+                across(0.0)
             );
             assert!(
-                y * m > 0.0,
-                "the thumb opposes the WRONG WAY on the m={m} hand"
+                across(1.0) > 0.30,
+                "a closed thumb stopped opposing: {}",
+                across(1.0)
             );
-            // ...and it still opposes when closed, harder if anything
-            let (_, yc, _) = joint_rotation(JointKind::VmThumbBase, m, 1.0).to_euler(EulerRot::XYZ);
+            // 2: the second joint FOLDS toward the palm (+Y - the four
+            // fingers curl that way too), and folds further as it closes.
+            let fold = |c: f32| (joint_rotation(JointKind::VmThumbTip, m, c) * Vec3::Z).y;
             assert!(
-                yc.abs() >= y.abs(),
-                "closing the hand REDUCED the thumb's opposition ({y} -> {yc})"
-            );
-            // 2: the second joint folds, and folds further as it closes
-            let fold = |c: f32| {
-                let (x, _, _) = joint_rotation(JointKind::VmThumbTip, m, c).to_euler(EulerRot::XYZ);
-                x
-            };
-            assert!(
-                fold(1.0) < -0.3,
+                fold(1.0) > 0.3,
                 "the thumb's second joint barely folds at a full fist: {}",
                 fold(1.0)
             );
             assert!(
-                fold(1.0) < fold(0.5) && fold(0.5) < fold(0.0) + 1e-6,
+                fold(1.0) > fold(0.5) && fold(0.5) > fold(0.0) - 1e-6,
                 "the thumb's second joint does not fold monotonically"
             );
         }
@@ -559,16 +564,22 @@ mod tests {
     /// through the receiver. `GRIP_CURL` is that pose.
     ///
     /// Mutation-proof: change either coefficient and this fails - 0.45 +
-    /// 0.38 * 0.86 = 0.7768 is a coincidence that only holds for this
-    /// pair.
+    /// 0.38 * 0.86 = 0.7768 against the shipped 0.9 * 0.86 = 0.774 is a
+    /// coincidence that only holds for this pair.
+    ///
+    /// The comparison is between the two ROTATIONS, not between an Euler
+    /// component of one of them - see the note on the test above for
+    /// why an Euler read of a Y-then-X product lies.
     #[test]
     fn the_thumb_split_leaves_the_carved_grip_where_it_was() {
-        let (_, y, _) =
-            joint_rotation(JointKind::VmThumbBase, 1.0, GRIP_CURL).to_euler(EulerRot::XYZ);
-        let old = 0.9 * GRIP_CURL;
+        let now = joint_rotation(JointKind::VmThumbBase, 1.0, GRIP_CURL);
+        let shipped = Quat::from_rotation_y(0.9 * GRIP_CURL)
+            * Quat::from_rotation_x(-0.5 * GRIP_CURL);
+        let off = now.angle_between(shipped);
         assert!(
-            (y - old).abs() < 0.005,
-            "the grip pose moved: {y} against the shipped {old}"
+            off < 0.01,
+            "the carved grip moved by {:.2} degrees",
+            off.to_degrees()
         );
     }
 

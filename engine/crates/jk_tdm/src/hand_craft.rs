@@ -108,9 +108,15 @@ pub fn taper_mesh(k: f32) -> Mesh {
     // front (+Z, the narrow cap) and back (-Z, the wide root)
     quad([front[0], front[1], front[2], front[3]]);
     quad([back[1], back[0], back[3], back[2]]);
-    // the four slanted flanks
-    quad([back[1], front[1], front[2], back[2]]); // +X
-    quad([front[0], back[0], back[3], front[3]]); // -X
+    // The four slanted flanks. The two X faces were wound the other way
+    // round in the first cut and `every_face_normal_points_outward`
+    // caught it: their normals came out at -0.99 on X, i.e. both sides
+    // of every finger segment in the game lit as if they faced inward.
+    // That is not a visible-as-an-error kind of bug - it reads as an
+    // odd dark band down the side of a finger, which is exactly the
+    // sort of thing that gets mistaken for shading and shipped.
+    quad([back[1], back[2], front[2], front[1]]); // +X
+    quad([back[0], front[0], front[3], back[3]]); // -X
     quad([back[0], back[1], front[1], front[0]]); // -Y
     quad([back[3], front[3], front[2], back[2]]); // +Y
     let mut m = Mesh::new(
