@@ -24336,6 +24336,20 @@ fn fp_viewmodel(
 /// viewmodel, a weapon with no drawn projectile, or a launch point at or
 /// behind the eye - and the caller then falls back to the old
 /// eye-launched trail rather than drawing something wrong.
+/// `JK_ARC_DEBUG=1` prints the pre-aim anchor's arithmetic per frame.
+///
+/// This exists because the anchor shipped INVERTED and every non-visual
+/// signal said it was fine: it compiled, the unit tests passed, and
+/// `anchored` was `true` at runtime with a plainly non-zero `vis_off` -
+/// so the one number that was wrong (the lens ratio inside
+/// `vm_point_to_world_cam_space`) was the one number nothing printed.
+/// Reading `cam_local` out of a live frame and checking it against the
+/// arrow head's pixel in the PNG is what localised it in one run.
+fn arc_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("JK_ARC_DEBUG").is_ok())
+}
+
 fn fp_arc_visual_origin(
     vm: Option<&VmRig>,
     gt_q: &Query<&GlobalTransform>,
@@ -24344,14 +24358,38 @@ fn fp_arc_visual_origin(
     kind: GunKind,
     draw: f32,
 ) -> Option<Vec3> {
-    let vm = vm?;
-    let local = vm_launch_local(kind, draw)?;
+    let dbg = arc_debug();
+    let Some(vm) = vm else {
+        if dbg {
+            eprintln!("[arc] no VmRig");
+        }
+        return None;
+    };
+    let Some(local) = vm_launch_local(kind, draw) else {
+        if dbg {
+            eprintln!("[arc] no vm_launch_local for {kind:?}");
+        }
+        return None;
+    };
     let slot = ALL_WEAPONS.iter().position(|w| *w == kind)?;
-    let gt = gt_q.get(*vm.weapons.get(slot)?).ok()?;
+    let Ok(gt) = gt_q.get(*vm.weapons.get(slot)?) else {
+        if dbg {
+            eprintln!("[arc] no GlobalTransform for slot {slot}");
+        }
+        return None;
+    };
     let cam_local = cam_gt
         .affine()
         .inverse()
         .transform_point3(gt.transform_point(local));
+    if dbg {
+        eprintln!(
+            "[arc] {kind:?} draw={draw:.2} local={local:?} world={:?} cam_local={cam_local:?} camgt={:?} wfov={:.3}",
+            gt.transform_point(local),
+            cam_gt.translation(),
+            world_fov
+        );
+    }
     let on_ray = projectile_aim::vm_point_to_world_cam_space(
         cam_local,
         VM_FOV_DEG.to_radians(),
@@ -24429,6 +24467,12 @@ fn arc_preview(
         Vec3::ZERO
     };
     let anchored = vis_off.length_squared() > 1e-8;
+    if arc_debug() {
+        eprintln!(
+            "[arc] fp={} vis_off={vis_off:?} anchored={anchored} eye={eye:?}",
+            cam_ctl.first_person
+        );
+    }
     let (d, _) = crosshair_aim_dir(&game.sim, cam_tf);
     let is_spear = p.gun == GunKind::Spear;
     let settled = cam_ctl.ads_t > 0.9;
@@ -24495,6 +24539,29 @@ fn arc_preview(
             cum.push(cum.last().unwrap() + d2.length());
         }
         let total = *cum.last().unwrap_or(&0.0);
+        // §owner PRE-FIRE AIM MUST LEAVE THE BOW, the third defect.
+        //
+        // The anchored trail walks its own copy of the flight: the EYE
+        // prepended as vertex 0, and arc length measured from there.
+        // `predict_arc` never emits the launch point - it advances a
+        // step before its first push and then keeps only every fifth -
+        // so without this the near end of the "flight" was already a
+        // metre or two down range, and asking for 0.0 m got a point that
+        // was not the launch. Third person keeps `pts`/`cum` untouched
+        // and is bit-identical.
+        let mut poly: Vec<Vec3> = Vec::new();
+        let mut poly_cum: Vec<f32> = Vec::new();
+        let mut poly_total = 0.0_f32;
+        if anchored {
+            poly.push(eye);
+            poly_cum.push(0.0);
+            for p in &pts {
+                let v = Vec3::from_array(*p);
+                poly_cum.push(poly_cum.last().unwrap() + v.distance(*poly.last().unwrap()));
+                poly.push(v);
+            }
+            poly_total = *poly_cum.last().unwrap_or(&0.0);
+        }
         // §19 + THE MINIMUM VISIBLE ARC. The per-dot cull below used to
         // be decided inside this loop, one dot at a time, which is why
         // it could answer "hide" for every dot on a flat shot and leave
@@ -24510,16 +24577,22 @@ fn arc_preview(
         // and the per-dot reticle cull are unchanged, which is what keeps
         // the centre pixel clean.
         let sample_at = |i: usize| -> Vec3 {
-            let frac = if anchored {
-                projectile_aim::arc_sample_frac_fp(i, ents.len())
-            } else {
-                projectile_aim::arc_sample_frac(i, ents.len())
-            };
+            if anchored {
+                let frac = projectile_aim::arc_sample_frac_fp(i, ents.len(), poly_total);
+                let want = poly_total * frac;
+                // INTERPOLATED, not snapped: `predict_arc` emits a vertex
+                // every fifth step, so a snap quantises the whole blend
+                // onto two or three points and puts the "0 m" dot a metre
+                // and a half down range. See `poly_point_at`.
+                let at = projectile_aim::poly_point_at(&poly, &poly_cum, want);
+                // the tracer bend: full offset at the launch, none of it
+                // once the flight is `FP_BLEND_LEN_M` along.
+                return projectile_aim::anchored_dot(at, vis_off, want);
+            }
+            let frac = projectile_aim::arc_sample_frac(i, ents.len());
             let want = total * frac;
             let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
-            // the tracer bend: full offset at the launch, none of it once
-            // the flight is `FP_BLEND_LEN_M` along. Zero when not
-            // anchored, so third person is bit-identical to before.
+            // `vis_off` is zero here, so third person is bit-identical.
             projectile_aim::anchored_dot(Vec3::from_array(pts[k]), vis_off, want)
         };
         let degenerate = pts.len() < 2 || total < 0.4;
@@ -24528,6 +24601,18 @@ fn arc_preview(
         } else {
             (0..ents.len()).map(sample_at).collect()
         };
+        if arc_debug() {
+            let inv = cam_gt.affine().inverse();
+            let s: Vec<String> = positions
+                .iter()
+                .take(6)
+                .map(|p| {
+                    let c = inv.transform_point3(*p);
+                    format!("({:.2},{:.2},{:.2})", c.x, c.y, c.z)
+                })
+                .collect();
+            eprintln!("[arc] total={total:.1} n={} near={}", ents.len(), s.join(" "));
+        }
         let vis_mask = projectile_aim::arc_dot_visibility(
             cam_tf.translation,
             cam_tf.forward().as_vec3(),

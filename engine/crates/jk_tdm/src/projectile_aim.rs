@@ -607,6 +607,32 @@ pub const VIS_ORIGIN_DEPTH_M: f32 = 1.1;
 /// `tan(fov/2)`, and the two cameras share an aspect ratio, so the ratio
 /// of tangents converts one lens to the other exactly.
 ///
+/// ## The direction of that ratio, and the capture that caught it
+///
+/// The first shipped version wrote `k = tan(vm/2) / tan(world/2)`. It is
+/// the other way round, and the sign of the mistake is what made it look
+/// like a *missing feature* rather than a wrong number: it pulled the
+/// anchor TOWARD the crosshair by exactly the factor it should have
+/// pushed it away, so the "trail leaves the bow" work landed, compiled,
+/// tested, and produced a frame indistinguishable from not having done
+/// it at all. `bow_aim/02` and `/04` both show a 40 px red stub beside
+/// the reticle with the bow 650 px away in the corner.
+///
+/// Derivation, both cameras sharing an aspect: a point lands on the same
+/// pixel iff `(y/-z) / tan(fov/2)` matches, so
+/// `y_w/-z_w = (y_vm/-z_vm) * tan(world/2) / tan(vm/2)`.
+///
+/// Measured on the run that found it: the arrow head sat at
+/// `cam_local = (0.263, -0.314, -0.947)` under a 68 deg viewmodel lens,
+/// i.e. NDC (0.232, -0.492) - which is (985, 673) on a 1600x900 frame and
+/// is exactly where the arrow head is in the PNG, so the input to this
+/// function was never wrong. The world lens was 85 deg, giving
+/// `tan(w/2)/tan(vm/2) = 1.36` where the code applied 0.736: an anchor
+/// placed at 54% of the offset it needed. Under the pre-aim pull the
+/// error grows without bound - the narrower the world lens gets, the
+/// harder the inverted ratio squeezes the trail onto the centre pixel,
+/// which is why zooming in made the bug worse.
+///
 /// Returns `None` when the weapon point is at or behind the eye - a
 /// couched javelin's butt lives there - because such a point has no
 /// screen position to anchor to.
@@ -620,7 +646,7 @@ pub fn vm_point_to_world_cam_space(
     if vm_depth <= 1e-3 || depth <= 0.0 {
         return None;
     }
-    let k = (vm_fov_rad * 0.5).tan() / (world_fov_rad * 0.5).tan().max(1e-6);
+    let k = (world_fov_rad * 0.5).tan() / (vm_fov_rad * 0.5).tan().max(1e-6);
     Some(Vec3::new(
         vm_local.x / vm_depth * k * depth,
         vm_local.y / vm_depth * k * depth,
@@ -675,13 +701,132 @@ pub fn anchored_dot(true_pt: Vec3, vis_off: Vec3, s_m: f32) -> Vec3 {
     true_pt + vis_off * fp_blend_weight(s_m)
 }
 
-/// `arc_sample_frac` for the weapon-anchored first-person trail.
-pub fn arc_sample_frac_fp(i: usize, n: usize) -> f32 {
+/// The point `s_m` metres along a polyline, LINEARLY INTERPOLATED between
+/// its vertices, with `cum[i]` the arc length at `poly[i]`.
+///
+/// ## The third and last reason the anchor was invisible
+///
+/// `arc_preview` located a sample with
+/// `cum.partition_point(|&c| c < want)` and used that vertex as-is. That
+/// is a nearest-vertex SNAP, and `sim::predict_arc` only emits every
+/// fifth integration step - roughly 1.5 m apart on a fresh draw and 4.6 m
+/// at full - so the whole of `FP_BLEND_LEN_M` contains two or three
+/// distinct vertices. Ten near dots asking for 0.0, 0.7, 1.4 ... metres
+/// all snapped to the same one or two points, and the FIRST of them
+/// landed 1.4 m down range while being weighted as though it were at
+/// 0.27 m.
+///
+/// That is exactly the discrepancy measured off a live frame: solving
+/// `dot = true_pt + w * vis_off` backwards for the logged dot gave a
+/// "true point" at 1.44 m depth for a sample requested at 0.266 m. The
+/// weight was right, the offset was right, and the point the offset was
+/// added to was a metre and a half further down the flight than the
+/// weight believed - so the dot was already too deep for the offset to
+/// carry it anywhere near the weapon's bearing.
+///
+/// Interpolating also makes `s_m` and the drawn position agree by
+/// construction, which is what `fp_blend_weight` assumes.
+///
+/// Only the anchored trail uses this. Third person keeps the snap, so it
+/// stays bit-identical - see `arc_sample_frac`.
+pub fn poly_point_at(poly: &[Vec3], cum: &[f32], s_m: f32) -> Vec3 {
+    if poly.is_empty() {
+        return Vec3::ZERO;
+    }
+    if poly.len() == 1 {
+        return poly[0];
+    }
+    let s = s_m.max(0.0);
+    // first vertex at or past `s`; the segment we want ends there
+    let hi = cum.partition_point(|&c| c < s).clamp(1, poly.len() - 1);
+    let lo = hi - 1;
+    let seg = cum[hi] - cum[lo];
+    let t = if seg > 1e-6 {
+        ((s - cum[lo]) / seg).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    poly[lo].lerp(poly[hi], t)
+}
+
+/// How many of the trail's dots are spent inside the blend.
+///
+/// ## Why the anchored trail needs its own SPACING and not just its own start
+///
+/// The first version of this function differed from `arc_sample_frac`
+/// only in where it started (0.02 instead of 0.30) and still spread the
+/// dots evenly over a FRACTION of the flight. That is a silent function
+/// of the arc's length, and the arc is long: measured out of a live
+/// frame, a full-draw bow arc at 8 m/s of gravity-time is **107 m** of
+/// flight, not the ~19 m the near-blob investigation was reasoning
+/// about. At 107 m, dot 0 of 24 sits at `0.0388 * 107 = 4.15 m` - which
+/// is already 59% of the way through `FP_BLEND_LEN_M`, so it inherits
+/// 17% of the launch offset, and dot 1 inherits almost none.
+///
+/// So the anchor was invisible for a second, independent reason: even
+/// with the lens ratio corrected, the trail had NO SAMPLE anywhere near
+/// the weapon to draw. Fixing only the ratio moved the near end by about
+/// 15 px and left it looking like the same bug.
+///
+/// The near dots are therefore placed by METRES rather than by fraction:
+/// `FP_NEAR_DOTS` of them evenly over the blend, and the rest spread
+/// over what is left. That makes the departure from the bow read at any
+/// arc length - a 12 m flick and a 107 m lob get the same near geometry,
+/// which is also what "the trail leaves the weapon" means as a sentence.
+pub const FP_NEAR_DOTS: usize = 10;
+
+/// The near dots are spread as `u^FP_NEAR_BIAS` rather than evenly in
+/// metres, i.e. bunched toward the weapon.
+///
+/// Evenly in metres is even along the FLIGHT, which is not even on the
+/// SCREEN: the drawn dot's screen bearing is
+/// `w(s) * off / (s + w(s) * D)`, and both the numerator falling and the
+/// denominator rising work in the same direction over the first metre.
+/// Measured on the 10-dot even version, the first gap was 130 px and the
+/// third 40 px, so the trail read as a lone blob at the arrow head
+/// followed by a separate dotted line. At 1.5 the first three gaps come
+/// out around 66/90/69 px instead.
+///
+/// This is cosmetic spacing on a preview: it changes which points of the
+/// sim's own predicted flight get a dot, never the flight.
+pub const FP_NEAR_BIAS: f32 = 1.5;
+
+/// Fraction of total arc length for dot `i` of `n` on the weapon-anchored
+/// first-person trail, given how long the flight is.
+///
+/// The first `FP_NEAR_DOTS` walk the blend in equal METRE steps; the
+/// remainder cover the rest of the span as before. Monotone in `i`, and
+/// never past `ARC_SPAN_END` - the dots still stop short of the impact,
+/// which is the rule `ARC_SPAN_END` exists to keep.
+pub fn arc_sample_frac_fp(i: usize, n: usize, total_m: f32) -> f32 {
     if n == 0 {
         return ARC_SPAN_START_FP;
     }
-    let u = (i as f32 + 0.5) / n as f32;
-    ARC_SPAN_START_FP + (ARC_SPAN_END - ARC_SPAN_START_FP) * u
+    // A flight shorter than the blend has no "far" section worth the
+    // name; fall back to spreading everything over the whole span.
+    let near_end = if total_m > 1e-3 {
+        (FP_BLEND_LEN_M / total_m).min(ARC_SPAN_END)
+    } else {
+        ARC_SPAN_END
+    };
+    let near_n = FP_NEAR_DOTS.min(n);
+    if i < near_n && near_end > 0.0 {
+        // Dot 0 sits at arc-length ZERO, which after `fp_blend_weight`
+        // is the anchor itself - a dot centred on the arrow head, which
+        // is what makes the trail read as coming OUT of the weapon.
+        // `ARC_SPAN_START_FP` deliberately does not appear here: it is a
+        // FRACTION, and on the 107 m arc measured above a 0.02 fraction
+        // is 2.1 m, which is a third of the way through the blend before
+        // the first dot is even drawn.
+        let u = (i as f32 / near_n as f32).powf(FP_NEAR_BIAS);
+        return near_end * u;
+    }
+    let far_n = n - near_n;
+    if far_n == 0 {
+        return near_end;
+    }
+    let u = (i - near_n) as f32 + 0.5;
+    near_end + (ARC_SPAN_END - near_end).max(0.0) * (u / far_n as f32)
 }
 
 // ---- §10 + the SHARED near-dot fix ---------------------------------------
@@ -1619,5 +1764,95 @@ mod tests {
         assert_eq!(landing_ring_scale(400.0), 2.2);
         // a close ring is never SMALLER than its authored size
         assert!(landing_ring_scale(-5.0) >= 1.0);
+    }
+
+    /// NDC in, NDC out. The whole point of the conversion is that the
+    /// anchor lands on the SAME PIXEL as the weapon point it was read
+    /// from, so the test is written as the round trip rather than as the
+    /// formula - a test that re-derives `k` from the code under test
+    /// could not have caught the inversion that shipped.
+    ///
+    /// Fails on the pre-fix code by a factor of `(tan(w/2)/tan(vm/2))^2`,
+    /// which for the numbers below is 3.5x.
+    #[test]
+    fn the_anchor_lands_on_the_weapon_point_pixel() {
+        let vm_fov = 68.0_f32.to_radians();
+        // the measured arrow head from the run that found the bug
+        let vm_local = Vec3::new(0.263, -0.314, -0.947);
+        let ndc = |p: Vec3, fov: f32| {
+            let t = (fov * 0.5).tan();
+            (p.x / -p.z / t, p.y / -p.z / t)
+        };
+        let want = ndc(vm_local, vm_fov);
+        // a WIDER world lens and a NARROWER one: the inverted ratio is
+        // wrong in opposite directions on these two, so no single fudge
+        // factor passes both.
+        for world_deg in [85.0_f32, 62.0, 31.0] {
+            let world = world_deg.to_radians();
+            let got = vm_point_to_world_cam_space(vm_local, vm_fov, world, VIS_ORIGIN_DEPTH_M)
+                .expect("a point in front of the eye has a screen position");
+            let g = ndc(got, world);
+            assert!(
+                (g.0 - want.0).abs() < 1e-4 && (g.1 - want.1).abs() < 1e-4,
+                "world {world_deg} deg: anchor at NDC {g:?}, arrow head at {want:?}"
+            );
+            // and it is placed at the depth it was asked for
+            assert!((got.z + VIS_ORIGIN_DEPTH_M).abs() < 1e-5);
+        }
+        // behind the eye has no pixel to anchor to
+        assert!(vm_point_to_world_cam_space(Vec3::new(0.1, 0.0, 0.2), vm_fov, 1.0, 1.1).is_none());
+    }
+
+    /// The anchored trail must SPEND dots inside the blend, and its first
+    /// one must be the launch itself - otherwise there is nothing near
+    /// the weapon for the offset to be applied to.
+    ///
+    /// Both halves fail on the fraction-only version: on the 107 m arc it
+    /// put dot 0 at 2.14 m and only one dot inside the 7 m blend.
+    #[test]
+    fn the_anchored_trail_spends_dots_inside_the_blend() {
+        for total in [13.3_f32, 19.0, 107.2] {
+            let n = 24;
+            let s = |i: usize| arc_sample_frac_fp(i, n, total) * total;
+            assert!(s(0) < 1e-3, "total {total}: first dot at {} m", s(0));
+            let inside = (0..n).filter(|i| s(*i) < FP_BLEND_LEN_M).count();
+            assert!(
+                inside >= FP_NEAR_DOTS,
+                "total {total}: only {inside} dots inside the blend"
+            );
+            // monotone, and still short of the impact
+            for i in 1..n {
+                assert!(s(i) > s(i - 1), "total {total}: dot {i} went backwards");
+            }
+            assert!(arc_sample_frac_fp(n - 1, n, total) <= ARC_SPAN_END + 1e-6);
+        }
+        // a flight shorter than the blend must not panic or invert
+        assert!(arc_sample_frac_fp(0, 8, 0.0).is_finite());
+        assert!(arc_sample_frac_fp(3, 8, 2.0) <= ARC_SPAN_END + 1e-6);
+    }
+
+    /// Interpolation, not a snap to the nearest emitted vertex.
+    ///
+    /// The expected values are read off the POLYLINE by hand, not out of
+    /// the function: a snap answers `(10,0,0)` for `s = 4`, this must
+    /// answer `(4,0,0)`.
+    #[test]
+    fn a_trail_point_is_interpolated_between_the_sparse_vertices() {
+        let poly = [
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, -10.0, 0.0),
+        ];
+        let cum = [0.0_f32, 10.0, 20.0];
+        assert_eq!(poly_point_at(&poly, &cum, 0.0), Vec3::ZERO);
+        assert!(poly_point_at(&poly, &cum, 4.0).distance(Vec3::new(4.0, 0.0, 0.0)) < 1e-5);
+        assert!(
+            poly_point_at(&poly, &cum, 15.0).distance(Vec3::new(10.0, -5.0, 0.0)) < 1e-5,
+            "the second segment is not interpolated"
+        );
+        // past the end clamps to the end; degenerate inputs do not panic
+        assert!(poly_point_at(&poly, &cum, 999.0).distance(poly[2]) < 1e-5);
+        assert_eq!(poly_point_at(&[], &[], 1.0), Vec3::ZERO);
+        assert_eq!(poly_point_at(&[Vec3::X], &[0.0], 5.0), Vec3::X);
     }
 }
