@@ -20243,11 +20243,12 @@ fn input_and_step(
     let pod_aim_owns_rmb = cam.first_person
         && game.sim.fighters[game.sim.player].in_mech()
         && game.sim.fighters[game.sim.player].mech_weapon == sim::MechWeapon::Rockets;
-    // §5.2 (Brief VI): scoped-class zoom is a two-stage CYCLE (40° →
-    // 10° → out), and EVERY shot auto-unscopes - the bolt is cycled
-    // out of the glass
+    // §owner (2026-08-14): scoped-class zoom collapsed from the two-stage
+    // 40°/10° cycle to one flat 5x pull (`projectile_aim::AWM_SCOPE_MAG`)
+    // - `zoom_stage` is now a plain hip/scoped toggle, not a 3-way cycle.
+    // EVERY shot still auto-unscopes - the bolt is cycled out of the glass.
     if scoped_gun && !pod_aim_owns_rmb && buttons.just_pressed(aim_btn) {
-        cam.zoom_stage = (cam.zoom_stage + 1) % 3;
+        cam.zoom_stage = (cam.zoom_stage + 1) % 2;
     }
     if !scoped_gun || pod_aim_owns_rmb {
         cam.zoom_stage = 0;
@@ -23236,7 +23237,8 @@ fn camera_system(
     // §3.4: FOV rides ads_t (ease-out, framerate-independent) - never the
     // `+= (target-fov)*k` exponential that stalls and never arrives
     if let Projection::Perspective(persp) = &mut *proj {
-        // §5.2 (Brief VI): scoped-class two-stage zoom - 40° then 10°
+        // §owner (2026-08-14): scoped-class zoom is now one flat 5x pull
+        // (`projectile_aim::AWM_SCOPE_MAG`), not the old 40°/10° cycle.
         //
         // §12 (owner, grenade section): "when preparing a grenade: enter
         // approximately 1.3x zoom if appropriate". A wound throw is
@@ -23251,8 +23253,11 @@ fn camera_system(
         let zoom = if throwing {
             projectile_aim::preaim_fov_deg(settings.fov_deg(), aw)
         } else if p.armed() && !p.shield_up {
-            if gun(p.gun).scoped && cam_ctl.zoom_stage == 2 {
-                10.0
+            if gun(p.gun).scoped && cam_ctl.zoom_stage >= 1 {
+                projectile_aim::magnified_fov_deg(
+                    settings.fov_deg(),
+                    projectile_aim::AWM_SCOPE_MAG,
+                )
             } else if gun(p.gun).projectile.is_some() {
                 // §owner (SUPERSEDED, kept because it is still right
                 // about what it saw): "drawing a bow or cocking a spear
