@@ -561,6 +561,129 @@ pub fn arc_sample_frac(i: usize, n: usize) -> f32 {
     ARC_SPAN_START + (ARC_SPAN_END - ARC_SPAN_START) * u
 }
 
+// ---- §owner PRE-FIRE AIM MUST LEAVE THE BOW ------------------------------
+//
+// "PRE FIRE AIM IS STILL NOT COMING OUT OF THE BOW. IT NEEDS TO COME OUT
+// OF THE BOW AND CONNECT WITH THE CROSSHAIR."
+//
+// The cause is not a bug in any of the trimming above; it is that
+// `sim.muzzle_origin` is the EYE, deliberately and load-bearingly so -
+// `a_first_person_shot_goes_exactly_where_the_crosshair_points` in
+// `main_tests.rs` explains that first-person aim is exact ONLY because
+// the launch point is the camera, and that a barrel offset would put a
+// convergence error into the hit test that grows as targets get closer.
+// So the physics launch point does NOT move. What moves is where the
+// first few DOTS are drawn.
+//
+// In first person the eye is the lens, so the true arc's near end
+// projects onto the centre pixel by construction - it is behind the
+// reticle, not beside the bow. Every downstream defence then removed
+// exactly that end (`ARC_SPAN_START` at 0.30, `dot_is_clear_of_reticle`),
+// which is why the owner sees a short stub hanging under the reticle
+// with nothing joining it to the weapon.
+//
+// The fix is the classic tracer trick: draw the near end from where the
+// WEAPON is on screen and decay that offset to zero over the first few
+// metres, so the trail leaves the bow, bends onto the true trajectory,
+// and runs out to the aim point. The shape past the blend is the sim's
+// `predict_arc` untouched, so the line still arrives where the arrow
+// arrives - it is not a cosmetic straight line bolted onto the reticle.
+
+/// The world-space depth in front of the eye at which the VISUAL launch
+/// point is placed.
+///
+/// Any depth along the correct ray projects to the same pixel, so this
+/// only decides parallax and dot size. It is set just past the near clip
+/// and roughly where the bow itself reads as being.
+pub const VIS_ORIGIN_DEPTH_M: f32 = 1.1;
+
+/// Camera-space visual launch point for a first-person preview.
+///
+/// `vm_local` is the weapon point (arrow head, spear point) expressed in
+/// the VIEWMODEL CAMERA's space. That camera has its own fixed FOV, so a
+/// point cannot simply be reused in world space: the same camera-space
+/// coordinates land on a different pixel under a different lens. The
+/// screen position of a point depends only on `x/-z`, `y/-z` and
+/// `tan(fov/2)`, and the two cameras share an aspect ratio, so the ratio
+/// of tangents converts one lens to the other exactly.
+///
+/// Returns `None` when the weapon point is at or behind the eye - a
+/// couched javelin's butt lives there - because such a point has no
+/// screen position to anchor to.
+pub fn vm_point_to_world_cam_space(
+    vm_local: Vec3,
+    vm_fov_rad: f32,
+    world_fov_rad: f32,
+    depth: f32,
+) -> Option<Vec3> {
+    let vm_depth = -vm_local.z;
+    if vm_depth <= 1e-3 || depth <= 0.0 {
+        return None;
+    }
+    let k = (vm_fov_rad * 0.5).tan() / (world_fov_rad * 0.5).tan().max(1e-6);
+    Some(Vec3::new(
+        vm_local.x / vm_depth * k * depth,
+        vm_local.y / vm_depth * k * depth,
+        -depth,
+    ))
+}
+
+/// Arc length over which the drawn trail returns to the true trajectory.
+///
+/// Long enough that the bend reads as a trajectory leaving the weapon
+/// and not as a kink; short enough that the overwhelming majority of the
+/// trail - everything that tells the player where the arrow DROPS - is
+/// the sim's own prediction at its own position.
+pub const FP_BLEND_LEN_M: f32 = 7.0;
+
+/// How much of the visual-origin offset survives `s_m` metres along the
+/// flight. 1.0 at the launch, 0.0 from `FP_BLEND_LEN_M` on.
+///
+/// Squared rather than linear so the departure from the weapon is quick
+/// and the merge onto the true arc is asymptotic - a linear decay puts a
+/// visible corner where the offset runs out.
+pub fn fp_blend_weight(s_m: f32) -> f32 {
+    let t = (s_m.max(0.0) / FP_BLEND_LEN_M).clamp(0.0, 1.0);
+    (1.0 - t) * (1.0 - t)
+}
+
+/// Where the trail starts when it is anchored to the weapon instead of
+/// to the lens.
+///
+/// `ARC_SPAN_START` is 0.30 because the near 30% used to be a red blob
+/// ON the crosshair. With the offset above, those same samples are drawn
+/// out at the bow rather than at the eye, so they are no longer piling on
+/// the centre pixel and the reason for the trim does not apply to them.
+/// The trim is therefore lifted for this case ONLY - third person still
+/// launches from the character and still gets 0.30.
+///
+/// Not exactly zero: the first sample is the launch point itself, and a
+/// dot centred on the arrow head reads as part of the arrow.
+pub const ARC_SPAN_START_FP: f32 = 0.02;
+
+/// Where a trail dot is DRAWN: on the predicted flight, displaced toward
+/// the weapon by however much of the launch offset survives `s_m` metres
+/// along that flight.
+///
+/// The displacement is added to the sim's own predicted point rather than
+/// interpolated toward a straight line, so the SHAPE - the drop the whole
+/// preview exists to show - is `predict_arc`'s throughout and the aim
+/// point at the far end is exactly where the arrow goes. With
+/// `vis_off == 0` this is the identity, which is how third person stays
+/// bit-identical.
+pub fn anchored_dot(true_pt: Vec3, vis_off: Vec3, s_m: f32) -> Vec3 {
+    true_pt + vis_off * fp_blend_weight(s_m)
+}
+
+/// `arc_sample_frac` for the weapon-anchored first-person trail.
+pub fn arc_sample_frac_fp(i: usize, n: usize) -> f32 {
+    if n == 0 {
+        return ARC_SPAN_START_FP;
+    }
+    let u = (i as f32 + 0.5) / n as f32;
+    ARC_SPAN_START_FP + (ARC_SPAN_END - ARC_SPAN_START_FP) * u
+}
+
 // ---- §10 + the SHARED near-dot fix ---------------------------------------
 
 /// The launch speed the SPEAR preview must draw, given the weapon's base

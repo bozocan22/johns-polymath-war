@@ -4429,20 +4429,31 @@ mod forge_tests {
                  crosshair hide would never fire for it"
             );
             assert!(
-                optic_hides_crosshair(true, true, false),
+                optic_hides_crosshair(true, true, false, true),
                 "{k:?}: focusing an optic must take the crosshair away"
             );
             // ...but only while FOCUSED. Hip-firing, the eye is not
             // behind the tube and the dot is off in the corner.
             assert!(
-                !optic_hides_crosshair(true, false, false),
+                !optic_hides_crosshair(true, false, false, true),
                 "{k:?}: hip fire must keep its crosshair"
             );
             // ...and never in a mech, which fires hull mounts and never
             // the stowed rifle `sight_line_y` is reading.
             assert!(
-                !optic_hides_crosshair(true, true, true),
+                !optic_hides_crosshair(true, true, true, true),
                 "{k:?}: a pilot keeps a crosshair"
+            );
+            // §owner: ...and NEVER IN THIRD PERSON. Over the shoulder
+            // the eye is not behind the tube at all - the dot is a
+            // speck on a gun metres away, pointing somewhere the
+            // camera is not - so taking the crosshair left the player
+            // aiming with no mark on screen. This is the assertion the
+            // owner's report turned into a rule.
+            assert!(
+                !optic_hides_crosshair(true, true, false, false),
+                "{k:?}: third person ALWAYS keeps its crosshair - the red \
+                 dot is not under the camera's eye out there"
             );
         }
 
@@ -4453,11 +4464,13 @@ mod forge_tests {
             );
             for ads in [false, true] {
                 for mech in [false, true] {
-                    assert!(
-                        !optic_hides_crosshair(false, ads, mech),
-                        "{k:?} has no reticle of its own - it must keep the \
-                         crosshair at ads={ads} mech={mech}"
-                    );
+                    for fp in [false, true] {
+                        assert!(
+                            !optic_hides_crosshair(false, ads, mech, fp),
+                            "{k:?} has no reticle of its own - it must keep \
+                             the crosshair at ads={ads} mech={mech} fp={fp}"
+                        );
+                    }
                 }
             }
         }
@@ -4498,7 +4511,7 @@ mod forge_tests {
         // the hip, a crosshair while zoomed.
         assert!(gun(G::Awm).scoped, "the AWM is the scoped-class weapon");
         assert!(
-            !optic_hides_crosshair(sight_line_y(G::Awm).is_some(), true, false),
+            !optic_hides_crosshair(sight_line_y(G::Awm).is_some(), true, false, true),
             "the scoped rifle's overlay draws its own mark - this rule must \
              not be the thing that hides its crosshair"
         );
@@ -4609,7 +4622,7 @@ mod forge_tests {
             let optic = sight_line_y(k).is_some();
             // The whole rule, driven through the PRODUCTION gate rather
             // than a retyped boolean.
-            let aimed = optic_hides_crosshair(optic, true, false);
+            let aimed = optic_hides_crosshair(optic, true, false, true);
             assert_eq!(
                 stability_bracket_shown(true, true, aimed),
                 !optic,
@@ -4622,7 +4635,7 @@ mod forge_tests {
                 stability_bracket_shown(
                     true,
                     true,
-                    optic_hides_crosshair(optic, false, false)
+                    optic_hides_crosshair(optic, false, false, true)
                 ),
                 "{k:?}: hip fire keeps its stability bracket"
             );
@@ -4632,7 +4645,7 @@ mod forge_tests {
                 stability_bracket_shown(
                     true,
                     true,
-                    optic_hides_crosshair(optic, true, true)
+                    optic_hides_crosshair(optic, true, true, true)
                 ),
                 "{k:?}: a pilot keeps the bracket"
             );

@@ -552,6 +552,45 @@ fn bow_nocked_arrow(draw: f32) -> Transform {
     .with_scale(Vec3::splat(BOW_ARROW_LEN))
 }
 
+/// The nocked arrow's POINT in the arrow model's unit envelope: the last
+/// blade flat sits at z 0.470 and is 0.055 long, so the nose is at
+/// 0.4975. Kept next to `ARROW_NOCK_Z`, which is the same measurement
+/// taken off the other end of the same model.
+const ARROW_TIP_Z: f32 = 0.470 + 0.055 * 0.5;
+
+/// The javelin's POINT in the spear model's local space: `spear_profile`
+/// ends its blade taper with a 0.09-long flat centred at 1.545.
+const SPEAR_TIP_Z: f32 = 1.545 + 0.09 * 0.5;
+
+/// Where a projectile VISUALLY leaves the weapon model, in that weapon's
+/// own local space.
+///
+/// §owner "PRE FIRE AIM IS STILL NOT COMING OUT OF THE BOW." This is
+/// PRESENTATION ONLY and is read by nothing but the pre-aim trail. The
+/// sim launches from `muzzle_origin`, which is the EYE, and must keep
+/// doing so - see `a_first_person_shot_goes_exactly_where_the_crosshair_points`.
+/// Nothing here can move a projectile, a hit or a damage number; it moves
+/// where the first few DOTS are drawn.
+///
+/// `None` for anything with no drawn projectile at the ready.
+fn vm_launch_local(kind: GunKind, draw: f32) -> Option<Vec3> {
+    match kind {
+        GunKind::Bow => {
+            // the same arithmetic `bow_nocked_arrow` places the model
+            // with, run to the other end of it - so the dot starts at the
+            // arrow's point rather than at a number retyped beside it.
+            let root_z = bow_nock_local(draw).z - ARROW_NOCK_Z * BOW_ARROW_LEN;
+            Some(Vec3::new(
+                BOW_ARROW_X,
+                0.0,
+                root_z + ARROW_TIP_Z * BOW_ARROW_LEN,
+            ))
+        }
+        GunKind::Spear => Some(Vec3::new(0.0, 0.0, SPEAR_TIP_Z)),
+        _ => None,
+    }
+}
+
 /// Third-person boom: back / up / screen-right of the head pivot (§5.1).
 // §5.1 (Brief VII v2): hip 2.2m back / +0.45m right / +0.12m up.
 const TP_BOOM: f32 = 2.2;
@@ -2082,7 +2121,7 @@ fn crosshair_feedback(
 /// this weapon declare a sight line" is the same question as "does this
 /// weapon have a reticle of its own", and it cannot drift.
 ///
-/// The three exclusions each earn their place:
+/// The four exclusions each earn their place:
 ///   - NOT in a mech. A pilot fires hull mounts, never the stowed
 ///     rifle, so `sight_line_y` is reading a weapon that is not in play
 ///     and the crosshair is the only mark the mech has.
@@ -2095,8 +2134,23 @@ fn crosshair_feedback(
 ///     and optic-less by this predicate, and its scope overlay draws
 ///     the mark, so its long-standing "crosshair while zoomed, none
 ///     while hip" behaviour comes through untouched.
-fn optic_hides_crosshair(has_optic: bool, ads: bool, in_mech: bool) -> bool {
-    has_optic && ads && !in_mech
+///   - §owner: NOT IN THIRD PERSON, and this one was a real bug rather
+///     than a refinement. The rule traded the crosshair for the tube's
+///     red dot, which is only a fair trade when the EYE IS BEHIND THE
+///     TUBE. Over the shoulder it is not: the camera sits back and to
+///     the side, the dot is a speck on a weapon several metres away
+///     pointing somewhere the camera is not, and the player was left
+///     aiming a third-person shot with no mark on screen at all.
+///     Aiming in third person now keeps the crosshair, which is the
+///     owner's rule stated exactly: the mark only ever leaves when you
+///     are down the sights of a gun in FIRST person.
+fn optic_hides_crosshair(
+    has_optic: bool,
+    ads: bool,
+    in_mech: bool,
+    first_person: bool,
+) -> bool {
+    has_optic && ads && !in_mech && first_person
 }
 
 /// The colour to paint the geometry. Only `Idle` uses the player's
@@ -24265,13 +24319,57 @@ fn fp_viewmodel(
 /// piles into a blob on the crosshair, which is why the window moved
 /// instead of widening.
 
+/// The WORLD point the first-person pre-aim trail is drawn from.
+///
+/// The weapon lives on the viewmodel camera, which has its own fixed
+/// `VM_FOV_DEG` lens - that camera is a child of the world camera with an
+/// identity node between them, so a point read out of the weapon's
+/// `GlobalTransform` and pushed through the world camera's inverse IS in
+/// viewmodel-camera space. It cannot be used as a world position
+/// directly: the arc dots render on the WORLD camera, whose FOV zooms,
+/// and the same coordinates would land on a different pixel there.
+/// `vm_point_to_world_cam_space` converts one lens to the other and
+/// returns a point on the correct ray, which is then taken back to world
+/// space for the dots.
+///
+/// `None` whenever there is nothing sensible to anchor to - no
+/// viewmodel, a weapon with no drawn projectile, or a launch point at or
+/// behind the eye - and the caller then falls back to the old
+/// eye-launched trail rather than drawing something wrong.
+fn fp_arc_visual_origin(
+    vm: Option<&VmRig>,
+    gt_q: &Query<&GlobalTransform>,
+    cam_gt: &GlobalTransform,
+    world_fov: f32,
+    kind: GunKind,
+    draw: f32,
+) -> Option<Vec3> {
+    let vm = vm?;
+    let local = vm_launch_local(kind, draw)?;
+    let slot = ALL_WEAPONS.iter().position(|w| *w == kind)?;
+    let gt = gt_q.get(*vm.weapons.get(slot)?).ok()?;
+    let cam_local = cam_gt
+        .affine()
+        .inverse()
+        .transform_point3(gt.transform_point(local));
+    let on_ray = projectile_aim::vm_point_to_world_cam_space(
+        cam_local,
+        VM_FOV_DEG.to_radians(),
+        world_fov,
+        projectile_aim::VIS_ORIGIN_DEPTH_M,
+    )?;
+    Some(cam_gt.affine().transform_point3(on_ray))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn arc_preview(
     game: Res<Game>,
     cam_ctl: Res<CamCtl>,
     arc: Res<ArcVis>,
     mut arc_state: ResMut<ArcState>,
-    cam_q: Query<&Transform, With<MainCam>>,
+    vm: Option<Res<VmRig>>,
+    cam_q: Query<(&Transform, &GlobalTransform, &Projection), With<MainCam>>,
+    gt_q: Query<&GlobalTransform>,
     mut q: Query<(&mut Transform, &mut Visibility), Without<MainCam>>,
 ) {
     let p = &game.sim.fighters[game.sim.player];
@@ -24305,11 +24403,32 @@ fn arc_preview(
         }
         return;
     }
-    let Ok(cam_tf) = cam_q.get_single() else {
+    let Ok((cam_tf, cam_gt, cam_proj)) = cam_q.get_single() else {
         return;
     };
     // the same launch the sim will use: same two-stage aim, same charge
     let eye = Vec3::from_array(game.sim.muzzle_origin(game.sim.player));
+    // §owner PRE-FIRE AIM MUST LEAVE THE BOW. In first person `eye` IS
+    // the lens, so the true arc's near end projects onto the centre pixel
+    // and reads as detached from the weapon held off to one side. The
+    // trail's near end is therefore DRAWN from the arrow's point and
+    // decayed onto the true trajectory over `FP_BLEND_LEN_M`. The
+    // prediction, the impact and the range are untouched - see
+    // `vm_launch_local`. In third person the arc already leaves the
+    // character correctly, so the offset is exactly zero there.
+    let vis_off = if cam_ctl.first_person {
+        let world_fov = match cam_proj {
+            Projection::Perspective(pp) => pp.fov,
+            _ => FOV_HIP_DEG.to_radians(),
+        };
+        let draw = bow_draw_visual(p.bow_draw_t, p.fire_cd, 1.0, true);
+        fp_arc_visual_origin(vm.as_deref(), &gt_q, cam_gt, world_fov, p.gun, draw)
+            .map(|o| o - eye)
+            .unwrap_or(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    };
+    let anchored = vis_off.length_squared() > 1e-8;
     let (d, _) = crosshair_aim_dir(&game.sim, cam_tf);
     let is_spear = p.gun == GunKind::Spear;
     let settled = cam_ctl.ads_t > 0.9;
@@ -24383,10 +24502,25 @@ fn arc_preview(
         // Whether a dot is drawn is a question about the WHOLE trail
         // now, so the sample positions are collected first and
         // `arc_dot_visibility` answers once, with a guaranteed floor.
+        // §owner: when the trail is ANCHORED to the weapon the sampling
+        // window opens back up to the launch. `ARC_SPAN_START` is 0.30
+        // because the near samples used to be a red blob ON the
+        // crosshair; those same samples are now drawn out at the bow, so
+        // the reason for the trim does not apply to them. The far end
+        // and the per-dot reticle cull are unchanged, which is what keeps
+        // the centre pixel clean.
         let sample_at = |i: usize| -> Vec3 {
-            let want = total * projectile_aim::arc_sample_frac(i, ents.len());
+            let frac = if anchored {
+                projectile_aim::arc_sample_frac_fp(i, ents.len())
+            } else {
+                projectile_aim::arc_sample_frac(i, ents.len())
+            };
+            let want = total * frac;
             let k = cum.partition_point(|&c| c < want).min(pts.len() - 1);
-            Vec3::from_array(pts[k])
+            // the tracer bend: full offset at the launch, none of it once
+            // the flight is `FP_BLEND_LEN_M` along. Zero when not
+            // anchored, so third person is bit-identical to before.
+            projectile_aim::anchored_dot(Vec3::from_array(pts[k]), vis_off, want)
         };
         let degenerate = pts.len() < 2 || total < 0.4;
         let positions: Vec<Vec3> = if degenerate {
@@ -26028,8 +26162,12 @@ fn crosshair_render(
     // pixel with nothing in it at all. The grenade's own mark now owns
     // that pixel instead.
     let aw = projectile_aim::aim_weapon(p.gun, p.cook_t > 0.0 && !p.in_mech());
-    let optic_hidden = optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech())
-        || projectile_aim::draws_own_reticle(aw, cam.ads, p.in_mech());
+    let optic_hidden = optic_hides_crosshair(
+        sight_line_y(p.gun).is_some(),
+        cam.ads,
+        p.in_mech(),
+        cam.first_person,
+    ) || projectile_aim::draws_own_reticle(aw, cam.ads, p.in_mech());
     let fb = crosshair_feedback(
         noscope_hidden,
         fresh_kill,
@@ -26186,8 +26324,12 @@ fn stability_bracket(
     // The gate is `optic_hides_crosshair` ITSELF, not a second rule that
     // says the same thing today and drifts tomorrow - the two readouts
     // leave the glass together or not at all.
-    let on_glass =
-        optic_hides_crosshair(sight_line_y(p.gun).is_some(), cam.ads, p.in_mech());
+    let on_glass = optic_hides_crosshair(
+        sight_line_y(p.gun).is_some(),
+        cam.ads,
+        p.in_mech(),
+        cam.first_person,
+    );
     let show = stability_bracket_shown(p.alive(), p.armed(), on_glass);
     for (b, mut node, mut vis) in &mut q {
         *vis = if show {
