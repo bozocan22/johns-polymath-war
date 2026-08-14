@@ -463,6 +463,54 @@ pub const TDM_TARGET_CHOICES: [u32; 2] = [30, 60];
 pub const TRAINING_RESPAWN_S: f32 = 1.2;
 pub const KOTH_TARGET_S: f32 = 90.0;
 pub const HILL_RADIUS: f32 = 4.5;
+
+// ------------------------------------------------------------ §CTF
+// Capture the Flag. Every number here is in FINAL (post-`MAP_SCALE`)
+// metres, like everything else the sim reads.
+
+/// Flag captures needed to win a CTF round.
+///
+/// A FLAT CONSTANT, deliberately, unlike `MatchConfig::tdm_target`. The
+/// per-match target exists for TDM because a kill target is a DIAL - 30
+/// and 60 are the same mode at two lengths. A capture target is not:
+/// three round trips across a 100 m yard is already a long match, and
+/// adding a field to `MatchConfig` would put a new required member on a
+/// struct several callers build by hand. If the rules screen ever wants
+/// to offer a choice, promote it then, the way `tdm_target` was
+/// promoted.
+pub const CTF_TARGET_CAPTURES: u32 = 3;
+
+/// How far in from the wall a flag stand sits. Off the wall far enough
+/// that a carrier can run PAST it rather than into a corner, and inside
+/// `SPAWN_CLEAR_M`'s empty band so the shared infill randomiser can
+/// never build on top of a flag.
+pub const CTF_FLAG_INSET_M: f32 = 6.0;
+
+/// Touch range to take, or to return, a flag. Larger than
+/// `PICKUP_RADIUS`: a pad is walked ONTO, a flag is run PAST, and a
+/// pickup you have to stop dead on is a pickup that reads as broken.
+pub const CTF_FLAG_RADIUS: f32 = 1.8;
+
+/// How close a carrier must get to their OWN stand to cash a capture.
+pub const CTF_CAPTURE_RADIUS: f32 = 3.0;
+
+/// The widest CTF team - "up to 12 players" total.
+///
+/// Not `MAX_PER_TEAM`: a 16v16 on one flag lane is a scrum, and
+/// `ctf_spawn_point` fans a corner along ONE edge, which stops being a
+/// corner past about six men.
+pub const CTF_MAX_PER_TEAM: usize = 6;
+
+/// The cap `TdmSim::new` clamps `MatchConfig::per_team` to for a given
+/// mode. One function, because the roster is laid out in `new` and the
+/// respawn block re-derives the slot from it - two copies of this rule
+/// drifted once already (see the `slot` comment in the respawn block).
+pub fn per_team_cap(mode: Mode) -> usize {
+    match mode {
+        Mode::Ctf => CTF_MAX_PER_TEAM,
+        _ => MAX_PER_TEAM,
+    }
+}
 pub const PICKUP_RADIUS: f32 = 1.1;
 pub const ROBOT_ARMOR_HP: f32 = 100.0;
 // §owner (defect pass): `ROBOT_SPEED_MULT = 1.12` was deleted here. One
@@ -991,6 +1039,11 @@ pub enum MapKind {
     /// Castle gardens: hedge lanes, ruined walls, trees, a stone gazebo.
     /// The showcase map, and the one Extraction runs on.
     Gardens,
+    /// §CTF: a square walled yard with a flag stand at the middle of
+    /// each of two opposite walls. Open down the middle so a flag run is
+    /// a run, broken enough on the flanks that it is not a straight
+    /// line.
+    CtfYard,
 }
 
 impl MapKind {
@@ -999,10 +1052,22 @@ impl MapKind {
             MapKind::Arena => "DUST ARENA",
             MapKind::Bailey => "CASTLE BAILEY",
             MapKind::Gardens => "CASTLE GARDENS",
+            MapKind::CtfYard => "TOURNEY YARD",
         }
     }
-    pub const ALL: [MapKind; 3] = [MapKind::Arena, MapKind::Bailey, MapKind::Gardens];
+    pub const ALL: [MapKind; 4] = [
+        MapKind::Arena,
+        MapKind::Bailey,
+        MapKind::Gardens,
+        MapKind::CtfYard,
+    ];
 }
+
+/// §CTF: the Tourney Yard's AUTHORED half-extent (the expansion below
+/// takes it to `* MAP_SCALE` = 50 m). Between the Arena's 34 and the
+/// Bailey's 52: a 100 m flag run is long enough to be a commitment and
+/// short enough that one gets finished inside a round.
+pub const CTF_YARD_HALF: f32 = 40.0;
 
 /// The height of a stair riser, and the one number that makes a tall
 /// climb walkable by BOTH a player and a bot.
@@ -1847,6 +1912,76 @@ fn build_map(map: MapKind, rng: &mut Pcg32) -> MapLayout {
                     min: [x - 0.3, 0.0, z - 0.3],
                     max: [x + 0.3, 2.8, z + 0.3],
                 }, CoverKind::Tree);
+            }
+        }
+        MapKind::CtfYard => {
+            // §CTF: THE TOURNEY YARD. Authored by hand, not randomised —
+            // a flag map has to be MIRROR-fair on the flag axis or one
+            // team's run is shorter than the other's, and a rejection
+            // sampler cannot promise that. Every piece below is placed
+            // as a ±z pair (and mostly a ±x pair too), so the two halves
+            // are the same walk.
+            //
+            // Three keep-outs the layout respects, all of them defects
+            // this file has shipped once before:
+            //  * the FLAG LANE, |x| < 5 near either end wall — the
+            //    stands sit at (0, ±(half − CTF_FLAG_INSET_M)) and a
+            //    block on a stand is a flag nobody can touch;
+            //  * the PICKUP PADS, whose FINAL coordinates are the fixed
+            //    0 / ±14 / ±19 table in `TdmSim::new` — a pad snapped
+            //    onto a roof is a pad out of the match;
+            //  * the SPAWN BANDS at both |z| = half − 2.5 (rows, if this
+            //    map is played in TDM) and the two corners
+            //    `ctf_spawn_point` uses.
+            half = CTF_YARD_HALF;
+            checkpoints = [[20.0, 0.0], [-20.0, 0.0]];
+            // a low central platform: worth holding, not worth turtling
+            // on — 2.0 m is a storming height, and it is the KOTH hill
+            // if anyone plays this map in that mode.
+            center(&mut cover, &mut kind, 2.0, 4);
+            top = 2.0;
+            // the two FLAG COURTS: a pair of short walls either side of
+            // each stand, so a defender has something to hold and the
+            // approach is not a bare plate. The gap at |x| < 4 authored
+            // is the lane onto the stand and stays open.
+            for sz in [-1.0_f32, 1.0] {
+                for sx in [-1.0_f32, 1.0] {
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [sx * 7.0 - 3.0, 0.0, sz * 32.0 - 0.5],
+                        max: [sx * 7.0 + 3.0, 1.4, sz * 32.0 + 0.5],
+                    }, CoverKind::Stone);
+                    // and a vaultable crate outside each court wall, so
+                    // the flank around it has a beat on it
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [sx * 22.0 - 1.6, 0.0, sz * 26.0 - 1.6],
+                        max: [sx * 22.0 + 1.6, 1.0, sz * 26.0 + 1.6],
+                    }, CoverKind::Crate);
+                }
+            }
+            // the MIDFIELD SPINE: two long walls flanking the centre,
+            // parallel to the flag run. They turn the middle into three
+            // lanes instead of one field, which is what stops a capture
+            // being a straight sprint down the x = 0 line.
+            for sx in [-1.0_f32, 1.0] {
+                push(&mut cover, &mut kind, Aabb {
+                    min: [sx * 13.0 - 0.6, 0.0, -11.0],
+                    max: [sx * 13.0 + 0.6, 1.6, 11.0],
+                }, CoverKind::Stone);
+                // cross-walls set back from the spine, staggered ±z so
+                // the two lanes are not mirror-identical to walk
+                for sz in [-1.0_f32, 1.0] {
+                    push(&mut cover, &mut kind, Aabb {
+                        min: [sx * 25.0 - 4.0, 0.0, sz * 8.0 - 0.6],
+                        max: [sx * 25.0 + 4.0, 1.2, sz * 8.0 + 0.6],
+                    }, CoverKind::Stone);
+                }
+            }
+            // low crates on the diagonals — the half-way beats of a run
+            for (x, z) in [(6.0_f32, 17.0_f32), (-6.0, -17.0), (-9.0, 17.0), (9.0, -17.0)] {
+                push(&mut cover, &mut kind, Aabb {
+                    min: [x - 1.5, 0.0, z - 1.5],
+                    max: [x + 1.5, 1.1, z + 1.5],
+                }, CoverKind::Crate);
             }
         }
     }
@@ -6835,6 +6970,37 @@ pub enum Mode {
     /// player can learn a spray pattern and a sight picture without
     /// dying to someone mid-lesson.
     Training,
+    /// §CTF: CAPTURE THE FLAG. Two stands on opposite walls, corner
+    /// spawns, first to `CTF_TARGET_CAPTURES` round trips.
+    Ctf,
+}
+
+/// §CTF: one team's flag — where it LIVES and where it IS.
+///
+/// Authoritative sim state, not a client display object: `pos` decides
+/// pickups and captures, so it has to be the same number on every
+/// machine and on every replay of a seed. Nothing here is derived from
+/// wall-clock or from anything only a client knows.
+///
+/// It needs no respawn reset. A respawn moves a FIGHTER; a flag is match
+/// state, and the one link it has to a life — `carrier` — is cleared by
+/// `step_ctf` the moment that fighter stops being alive, which happens
+/// long before `respawn_t` runs out. That ordering is the whole reason
+/// the drop is done from the death CHECK rather than from the five
+/// scattered sites that set `respawn_t`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlagState {
+    /// The stand. Fixed for the whole match.
+    pub home: [f32; 3],
+    /// Where the flag is right now: on its stand, on its carrier's
+    /// feet, or on the ground where its carrier died.
+    pub pos: [f32; 3],
+    /// Index into `TdmSim::fighters` of whoever is holding it.
+    pub carrier: Option<usize>,
+    /// `pos == home` and nobody is carrying it. Derived every step
+    /// rather than inferred by the client, so "your flag is out" is one
+    /// answer and not two.
+    pub at_home: bool,
 }
 
 pub struct TdmSim {
@@ -6898,6 +7064,11 @@ pub struct TdmSim {
     pub round_over_t: Option<f32>,
     pub winner: Option<Team>,
     pub hill: [f32; 3],
+    /// §CTF: the two stands, indexed by `team_idx` — `flags[0]` is
+    /// Blue's own flag, `flags[1]` is Red's. Built on every map so the
+    /// field is never an `Option` the client has to branch on, but only
+    /// `Mode::Ctf` steps them.
+    pub flags: [FlagState; 2],
     pub player: usize,
     /// §9.1 broadphase over `cover` — rebuilt with the map, never mutated.
     grid: CoverGrid,
@@ -6930,7 +7101,7 @@ fn fresh_ammo(inv: Loadout) -> [(u32, u32); 3] {
 
 impl TdmSim {
     pub fn new(cfg: MatchConfig) -> Self {
-        let per_team = cfg.per_team.clamp(1, MAX_PER_TEAM);
+        let per_team = cfg.per_team.clamp(1, per_team_cap(cfg.mode));
         let mut rng = Pcg32::new(cfg.seed, 0x7D7D);
         let layout = build_map(cfg.map, &mut rng);
         let (cover, cover_kind, center_top, half, climbs) = (
@@ -7033,7 +7204,7 @@ impl TdmSim {
         for team_i in 0..teams {
             let team = if team_i == 0 { Team::Blue } else { Team::Red };
             for k in 0..per_team {
-                let (pos, yaw) = spawn_point(team, k, half);
+                let (pos, yaw) = spawn_point_for(cfg.mode, team, k, half);
                 let is_player = team_i == 0 && k == 0;
                 let idx = team_i * per_team + k;
                 // v6: everyone spawns with a LOADOUT. The player brings
@@ -7222,6 +7393,29 @@ impl TdmSim {
         if let Some(a) = cfg.armor_pieces {
             fighters[0].armor_pieces = a;
         }
+        // §CTF: the stands. Middle of two OPPOSITE walls on the z axis —
+        // Blue's at −z, Red's at +z, which is the axis `spawn_point`'s
+        // rows already use and the one every map in this file is
+        // authored to be symmetric about. `y` is snapped onto whatever
+        // is under the stand by the same `support_at` the pads use, so a
+        // stand on a plateau is ON it rather than inside it.
+        //
+        // Computed HERE and not inside the struct literal below: the
+        // literal moves `cover` several fields before `flags`, and a
+        // borrow after a move is not a thing.
+        let flags = {
+            let z = half - CTF_FLAG_INSET_M;
+            let mut mk = |zz: f32| {
+                let home = [0.0, support_at(&cover, 0.0, zz), zz];
+                FlagState {
+                    home,
+                    pos: home,
+                    carrier: None,
+                    at_home: true,
+                }
+            };
+            [mk(-z), mk(z)]
+        };
         TdmSim {
             cfg,
             mode: cfg.mode,
@@ -7268,6 +7462,7 @@ impl TdmSim {
             round_over_t: None,
             winner: None,
             hill: [0.0, center_top, 0.0], // the hill IS the center top
+            flags,
             player: 0,
             rng,
             tick: 0,
@@ -7680,8 +7875,8 @@ impl TdmSim {
                     // here indexed a slot the roster never used the
                     // moment anyone asked for more than the cap — the
                     // corpse respawned in a rank that does not exist.
-                    let slot = i % self.cfg.per_team.clamp(1, MAX_PER_TEAM);
-                    let (mut pos, mut yaw) = spawn_point(f.team, slot, self.half);
+                    let slot = i % self.cfg.per_team.clamp(1, per_team_cap(self.mode));
+                    let (mut pos, mut yaw) = spawn_point_for(self.mode, f.team, slot, self.half);
                     // "check back": an owned checkpoint pulls the respawn
                     // forward — you rejoin the fight where your team holds
                     if let Some(cp) = self
@@ -9522,11 +9717,117 @@ impl TdmSim {
             }
         }
 
+        // ---- §CTF flags -------------------------------------------------
+        if self.mode == Mode::Ctf {
+            self.step_ctf();
+        }
+
         // ---- §4 stability bookkeeping: this tick's yaw becomes the
         // baseline for next tick's angular-rate measurement
         for f in &mut self.fighters {
             f.prev_yaw = f.yaw;
         }
+    }
+
+    /// §CTF: one tick of flags — follow, drop, capture, return, take,
+    /// then the win check. In that order, and the order is the rules.
+    ///
+    /// ONE function for both sides. Bots reach the flag through
+    /// `bot_act`'s movement and the player through his command stream,
+    /// but neither of them "picks up" anything: this loop reads
+    /// POSITIONS, which both paths write the same way. That is
+    /// deliberate — the mech turn-rate and the acceleration model both
+    /// shipped bot-broken because the rule lived on the player's path.
+    fn step_ctf(&mut self) {
+        // 1. FOLLOW, or DROP. A carrier who is no longer alive drops the
+        //    flag on the spot: `pos` takes his death location and the
+        //    link is cut. It is NOT auto-returned — a loose flag in the
+        //    open is the whole tension of the mode.
+        for t in 0..2 {
+            if let Some(c) = self.flags[t].carrier {
+                let alive = self.fighters[c].alive();
+                self.flags[t].pos = self.fighters[c].pos;
+                if !alive {
+                    self.flags[t].carrier = None;
+                }
+            }
+        }
+
+        // 2. What each living fighter's position does to a flag.
+        //    Indexed, in roster order, so two men arriving on the same
+        //    flag on the same tick resolve the same way on every replay.
+        for i in 0..self.fighters.len() {
+            if !self.fighters[i].alive() {
+                continue;
+            }
+            let me = Self::team_idx(self.fighters[i].team);
+            let enemy = 1 - me;
+            let p = self.fighters[i].pos;
+
+            // 2a. CAPTURE. Carrying the enemy flag home scores.
+            //
+            // SIMPLIFICATION, stated rather than hidden: strict CTF
+            // also requires your OWN flag to be at_home, and this does
+            // not enforce it. Nothing in `bot_act` plays the objective
+            // yet — bots chase fighters — so a bot who grabs the
+            // player's flag and dies in a field leaves it lying there
+            // with nobody who will ever walk back over it. Under the
+            // strict rule that is a match the player cannot win, which
+            // is worse than a capture that is slightly too easy. Put
+            // the `&& self.flags[me].at_home` back the day flag AI
+            // lands; `at_home` is maintained below precisely so that
+            // day is a one-line change.
+            if self.flags[enemy].carrier == Some(i)
+                && Self::near(p, self.flags[me].home, CTF_CAPTURE_RADIUS)
+            {
+                self.score[me] += 1.0;
+                self.flags[enemy].carrier = None;
+                self.flags[enemy].pos = self.flags[enemy].home;
+                continue;
+            }
+
+            // 2b. RETURN. Touching your OWN flag while it is loose
+            //     sends it straight back to its stand.
+            if self.flags[me].carrier.is_none()
+                && !self.flags[me].at_home
+                && Self::near(p, self.flags[me].pos, CTF_FLAG_RADIUS)
+            {
+                self.flags[me].pos = self.flags[me].home;
+                continue;
+            }
+
+            // 2c. TAKE. Touching the loose ENEMY flag picks it up —
+            //     off its stand or off the ground, same rule.
+            if self.flags[enemy].carrier.is_none()
+                && Self::near(p, self.flags[enemy].pos, CTF_FLAG_RADIUS)
+            {
+                self.flags[enemy].carrier = Some(i);
+                self.flags[enemy].pos = p;
+            }
+        }
+
+        // 3. `at_home` is DERIVED, every tick, from the two things that
+        //    define it. Storing it without recomputing it is how state
+        //    survives a transition it should not.
+        for t in 0..2 {
+            self.flags[t].at_home =
+                self.flags[t].carrier.is_none() && self.flags[t].pos == self.flags[t].home;
+        }
+
+        // 4. The win.
+        if self.score[0] >= CTF_TARGET_CAPTURES as f32 {
+            self.finish(Team::Blue);
+        } else if self.score[1] >= CTF_TARGET_CAPTURES as f32 {
+            self.finish(Team::Red);
+        }
+    }
+
+    /// Horizontal range test with a generous vertical gate — the same
+    /// shape the pickup and checkpoint loops use, so a flag on a
+    /// platform is not reachable from underneath it.
+    fn near(a: [f32; 3], b: [f32; 3], r: f32) -> bool {
+        let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+        dx * dx + dz * dz < r * r && (a[1] - b[1]).abs() < 2.0
     }
 
     fn finish(&mut self, winner: Team) {
@@ -14615,6 +14916,48 @@ fn spawn_point(team: Team, slot: usize, half: f32) -> ([f32; 3], f32) {
     // the row is centred: 8 men at 3.0 m span −10.5 ..= +10.5.
     let x = -(SPAWN_ROW as f32 - 1.0) * 0.5 * SPAWN_PITCH + (col as f32) * SPAWN_PITCH;
     ([x, 0.0, z], yaw)
+}
+
+/// §CTF: where slot `slot` of `team` starts on a flag map.
+///
+/// Boxing-ring corners, not facing rows. The flag stands are at the
+/// MIDDLE of two opposite walls, so a row spawn would put a whole team
+/// standing on its own stand: the corner is what puts the defenders a
+/// short run from their flag and the attackers the full diagonal from
+/// the other one. Blue takes (−, −), Red the diagonally opposite (+, +),
+/// which is the longest line the square has.
+///
+/// The fan-out reuses `SPAWN_PITCH`/`SPAWN_ROW_GAP` so a CTF rank is the
+/// same shape a TDM rank is — men spread ALONG the near wall, rows set
+/// INWARD. `CTF_MAX_PER_TEAM` is six, so the deepest man is
+/// `2.5 + 5 * 3.0 = 17.5` m along the wall and never leaves the band
+/// `SPAWN_CLEAR_M` keeps empty in z.
+fn ctf_spawn_point(team: Team, slot: usize, half: f32) -> ([f32; 3], f32) {
+    let row = slot / SPAWN_ROW;
+    let col = slot % SPAWN_ROW;
+    // sign of the corner this team owns, on both axes
+    let s = match team {
+        Team::Blue => -1.0_f32,
+        Team::Red => 1.0,
+    };
+    let corner = half - 2.5;
+    // fan ALONG x, inward, away from the corner; deeper rows step in on z
+    let x = s * (corner - (col as f32) * SPAWN_PITCH);
+    let z = s * (corner - (row as f32) * SPAWN_ROW_GAP);
+    // face the middle of the yard, which is also the way both flags lie
+    let yaw = (-x).atan2(-z);
+    ([x, 0.0, z], yaw)
+}
+
+/// The spawn rule for a mode. ONE router, called by both the roster
+/// build in `TdmSim::new` and the respawn block, because two call sites
+/// picking their own layout is how a mode ends up spawning its living
+/// men in the corners and its dead ones in a row.
+fn spawn_point_for(mode: Mode, team: Team, slot: usize, half: f32) -> ([f32; 3], f32) {
+    match mode {
+        Mode::Ctf => ctf_spawn_point(team, slot, half),
+        _ => spawn_point(team, slot, half),
+    }
 }
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {
@@ -20443,6 +20786,263 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------- §CTF
+    //
+    // A 1v1 CTF rig with the red bot parked out of the way. `run`/`step`
+    // drive the REAL loop — nothing below reaches into `step_ctf`.
+    fn ctf(seed: u64, per_team: usize) -> TdmSim {
+        let mut s = TdmSim::new(cfg(seed, per_team, Mode::Ctf, MapKind::CtfYard));
+        // park every bot on the far flank so a wandering AI cannot be
+        // the thing that scores, returns, or steals a flag mid-test
+        for i in 1..s.fighters.len() {
+            s.fighters[i].pos = [s.half - 6.0, 0.0, 0.0];
+        }
+        s
+    }
+
+    /// The stands are at the MIDDLE of two OPPOSITE walls, and the
+    /// numbers are hand-computed rather than re-derived from the
+    /// constants the code reads: `CTF_YARD_HALF` 40 × `MAP_SCALE` 1.25 =
+    /// 50 m half-extent, less `CTF_FLAG_INSET_M` 6 = z = ±44, x = 0.
+    #[test]
+    fn ctf_flags_stand_at_opposite_wall_midpoints() {
+        let s = ctf(0xC7F0, 1);
+        assert!((s.half - 50.0).abs() < 1e-4, "yard half: {}", s.half);
+        assert_eq!(s.flags[0].home[0], 0.0);
+        assert_eq!(s.flags[1].home[0], 0.0);
+        assert!((s.flags[0].home[2] + 44.0).abs() < 1e-4, "{:?}", s.flags[0].home);
+        assert!((s.flags[1].home[2] - 44.0).abs() < 1e-4, "{:?}", s.flags[1].home);
+        // opposite walls, and both stand ON the ground rather than in it
+        assert!(s.flags[0].home[2] * s.flags[1].home[2] < 0.0);
+        for f in s.flags {
+            assert!(f.at_home && f.carrier.is_none());
+            for c in &s.cover {
+                let inside = f.home[0] > c.min[0]
+                    && f.home[0] < c.max[0]
+                    && f.home[2] > c.min[2]
+                    && f.home[2] < c.max[2];
+                assert!(!inside, "a stand buried in cover: {:?} in {c:?}", f.home);
+            }
+        }
+    }
+
+    /// Touch the enemy stand to take it, carry it to your own, score.
+    /// The whole loop through the real `step`.
+    #[test]
+    fn ctf_captures_score_on_return_to_home_flag() {
+        let mut s = ctf(0xC7F1, 1);
+        let (mine, theirs) = (s.flags[0].home, s.flags[1].home);
+        s.fighters[0].pos = theirs;
+        s.step(PlayerCmd::default());
+        assert_eq!(s.flags[1].carrier, Some(0), "touching it takes it");
+        assert!(!s.flags[1].at_home, "a carried flag is not at home");
+        // and it FOLLOWS: half way back, the flag is on the carrier
+        s.fighters[0].pos = [4.0, 0.0, 0.0];
+        s.step(PlayerCmd::default());
+        assert!(
+            (s.flags[1].pos[0] - s.fighters[0].pos[0]).abs() < 1e-3
+                && (s.flags[1].pos[2] - s.fighters[0].pos[2]).abs() < 1e-3,
+            "the flag must ride the carrier: {:?} vs {:?}",
+            s.flags[1].pos,
+            s.fighters[0].pos
+        );
+        assert_eq!(s.score[0], 0.0, "no score until it is home");
+        s.fighters[0].pos = mine;
+        s.step(PlayerCmd::default());
+        assert!(s.score[0] >= 1.0, "a capture scores: {:?}", s.score);
+        assert_eq!(s.flags[1].carrier, None, "the capture releases it");
+        assert_eq!(s.flags[1].pos, s.flags[1].home, "and sends it back");
+        assert!(s.flags[1].at_home);
+    }
+
+    /// `CTF_TARGET_CAPTURES` round trips ends the round, and the winner
+    /// is the team that made them. Independent of the constant's VALUE:
+    /// the loop runs one more trip than the target and checks the round
+    /// closes on the target trip, not on a hard-coded third.
+    #[test]
+    fn ctf_ends_the_round_at_the_capture_target() {
+        let mut s = ctf(0xC7F2, 1);
+        let (mine, theirs) = (s.flags[0].home, s.flags[1].home);
+        for trip in 1..=CTF_TARGET_CAPTURES {
+            assert!(s.winner.is_none(), "round closed early on trip {trip}");
+            s.fighters[0].pos = theirs;
+            s.step(PlayerCmd::default());
+            s.fighters[0].pos = mine;
+            s.step(PlayerCmd::default());
+            assert_eq!(s.score[0], trip as f32, "trip {trip}");
+        }
+        assert_eq!(s.winner, Some(Team::Blue), "the target must end it");
+    }
+
+    /// A carrier who dies DROPS the flag where he fell. It does not go
+    /// home by itself, and it does not follow the corpse to its spawn —
+    /// which is the failure this guards, because the respawn block
+    /// teleports that same fighter three seconds later.
+    #[test]
+    fn ctf_a_dead_carrier_drops_the_flag_where_he_fell() {
+        let mut s = ctf(0xC7F3, 1);
+        let theirs = s.flags[1].home;
+        s.fighters[0].pos = theirs;
+        s.step(PlayerCmd::default());
+        assert_eq!(s.flags[1].carrier, Some(0));
+        // carry it into the middle, then die there
+        s.fighters[0].pos = [-6.0, 0.0, 12.0];
+        s.step(PlayerCmd::default());
+        let fell = s.fighters[0].pos;
+        s.fighters[0].health = 0.0;
+        s.fighters[0].respawn_t = RESPAWN_S;
+        s.step(PlayerCmd::default());
+        assert_eq!(s.flags[1].carrier, None, "death cuts the carry");
+        assert!(
+            (s.flags[1].pos[0] - fell[0]).abs() < 1e-3
+                && (s.flags[1].pos[2] - fell[2]).abs() < 1e-3,
+            "the flag stays where he fell: {:?} vs {fell:?}",
+            s.flags[1].pos
+        );
+        assert!(!s.flags[1].at_home, "a dropped flag is not a returned flag");
+        // and it is still lying there after he has respawned in a corner
+        let dropped = s.flags[1].pos;
+        run(&mut s, (RESPAWN_S as usize) + 1, PlayerCmd::default());
+        assert!(s.fighters[0].alive(), "he is back");
+        assert_eq!(s.flags[1].pos, dropped, "the drop does not follow him");
+        assert_eq!(s.flags[1].carrier, None);
+    }
+
+    /// Walking over your OWN loose flag sends it straight home; walking
+    /// over the enemy's picks it up. Same touch, two rules, and which
+    /// one fires is decided by the TEAM of the toucher.
+    #[test]
+    fn ctf_your_own_loose_flag_returns_and_the_enemys_is_taken() {
+        let mut s = ctf(0xC7F4, 1);
+        // stage Blue's own flag loose in mid-field, uncarried
+        s.flags[0].pos = [8.0, 0.0, -4.0];
+        s.flags[0].at_home = false;
+        s.fighters[0].pos = s.flags[0].pos;
+        s.step(PlayerCmd::default());
+        assert_eq!(s.flags[0].pos, s.flags[0].home, "an owner returns it");
+        assert_eq!(s.flags[0].carrier, None, "returning is not carrying");
+        assert!(s.flags[0].at_home);
+        // the enemy's, loose in the same spot, is TAKEN instead
+        s.flags[1].pos = [8.0, 0.0, -4.0];
+        s.flags[1].at_home = false;
+        s.fighters[0].pos = s.flags[1].pos;
+        s.step(PlayerCmd::default());
+        assert_eq!(s.flags[1].carrier, Some(0), "an enemy flag is picked up");
+        assert_ne!(s.flags[1].pos, s.flags[1].home, "picking it up is not returning it");
+    }
+
+    /// §CTF is a TWELVE-man mode. `MatchConfig::per_team` is general to
+    /// `MAX_PER_TEAM`, so the cap has to be applied per mode — and in
+    /// BOTH places, because the respawn block re-derives its slot from
+    /// the raw `cfg` and used to index a rank the roster never built.
+    #[test]
+    fn ctf_caps_the_roster_at_six_a_side() {
+        let s = TdmSim::new(cfg(0xC7F5, MAX_PER_TEAM, Mode::Ctf, MapKind::CtfYard));
+        assert_eq!(
+            s.fighters.len(),
+            CTF_MAX_PER_TEAM * 2,
+            "CTF is capped at {CTF_MAX_PER_TEAM} a side"
+        );
+        assert!(CTF_MAX_PER_TEAM * 2 <= 12, "the mode is twelve players");
+        // ...and the cap is CTF's alone: TDM still fields the full v6 roster
+        let t = TdmSim::new(cfg(0xC7F5, MAX_PER_TEAM, Mode::Tdm, MapKind::CtfYard));
+        assert_eq!(t.fighters.len(), MAX_PER_TEAM * 2);
+        // the respawn block must agree with the roster it walks. Kill the
+        // deepest man and let him come back: a slot past the cap panics
+        // on the index, so simply surviving the round trip is the claim.
+        let mut s = s;
+        let last = s.fighters.len() - 1;
+        s.fighters[last].health = 0.0;
+        s.fighters[last].respawn_t = RESPAWN_S;
+        run(&mut s, (RESPAWN_S as usize) + 1, PlayerCmd::default());
+        assert!(s.fighters[last].alive());
+    }
+
+    /// BOXING-RING CORNERS: the two teams start in diagonally opposite
+    /// inside corners, nobody spawns inside anything, and nobody spawns
+    /// on top of a team-mate. The mirror of "NOBODY SPAWNS INSIDE
+    /// ANYTHING" for the corner layout.
+    #[test]
+    fn ctf_spawns_in_opposite_corners_and_inside_nothing() {
+        let half = CTF_YARD_HALF * MAP_SCALE;
+        let corner = half - 2.5;
+        // slot 0 IS the corner, and the two corners are diagonal
+        let (b0, _) = ctf_spawn_point(Team::Blue, 0, half);
+        let (r0, _) = ctf_spawn_point(Team::Red, 0, half);
+        assert!((b0[0] + corner).abs() < 1e-4 && (b0[2] + corner).abs() < 1e-4, "{b0:?}");
+        assert!((r0[0] - corner).abs() < 1e-4 && (r0[2] - corner).abs() < 1e-4, "{r0:?}");
+        // the diagonal is the longest line the square has — a row spawn
+        // on the same map is strictly shorter
+        let diag = ((r0[0] - b0[0]).powi(2) + (r0[2] - b0[2]).powi(2)).sqrt();
+        let (rb, _) = spawn_point(Team::Blue, 0, half);
+        let (rr, _) = spawn_point(Team::Red, 0, half);
+        let row = ((rr[0] - rb[0]).powi(2) + (rr[2] - rb[2]).powi(2)).sqrt();
+        assert!(diag > row, "corners must be farther apart than rows: {diag:.1} vs {row:.1}");
+        // every man of a full CTF roster: inside the playfield, out of
+        // the cover, and off his team-mates
+        let s = TdmSim::new(cfg(0xC7F6, CTF_MAX_PER_TEAM, Mode::Ctf, MapKind::CtfYard));
+        assert_eq!(s.fighters.len(), CTF_MAX_PER_TEAM * 2);
+        for (i, f) in s.fighters.iter().enumerate() {
+            assert!(
+                f.pos[0].abs() < s.half - 0.5 && f.pos[2].abs() < s.half - 0.5,
+                "{i} spawned outside the yard: {:?}",
+                f.pos
+            );
+            for c in &s.cover {
+                let inside = f.pos[0] > c.min[0] - BODY_RADIUS
+                    && f.pos[0] < c.max[0] + BODY_RADIUS
+                    && f.pos[2] > c.min[2] - BODY_RADIUS
+                    && f.pos[2] < c.max[2] + BODY_RADIUS
+                    && f.pos[1] + 0.5 > c.min[1]
+                    && f.pos[1] + 0.5 < c.max[1];
+                assert!(!inside, "{i} spawned inside {c:?} at {:?}", f.pos);
+            }
+            for (j, g) in s.fighters.iter().enumerate() {
+                if j <= i {
+                    continue;
+                }
+                let d = ((g.pos[0] - f.pos[0]).powi(2) + (g.pos[2] - f.pos[2]).powi(2)).sqrt();
+                assert!(d > BODY_RADIUS * 2.0, "{i} and {j} share a spawn: {d:.2} m");
+            }
+            // and nobody starts standing on a flag stand
+            for fl in s.flags {
+                let d = ((fl.home[0] - f.pos[0]).powi(2) + (fl.home[2] - f.pos[2]).powi(2)).sqrt();
+                assert!(d > CTF_FLAG_RADIUS, "{i} spawned on a stand: {d:.2} m");
+            }
+        }
+    }
+
+    /// §3.3 determinism: CTF is replay state like everything else. Two
+    /// sims off the same seed, driven identically, agree on the flags to
+    /// the bit.
+    #[test]
+    fn ctf_flags_replay_bit_identically() {
+        let play = || {
+            let mut s = ctf(0xC7F7, 3);
+            let theirs = s.flags[1].home;
+            s.fighters[0].pos = theirs;
+            for i in 0..600 {
+                if i == 120 {
+                    s.fighters[0].health = 0.0;
+                    s.fighters[0].respawn_t = RESPAWN_S;
+                }
+                s.step(PlayerCmd {
+                    move_x: 0.4,
+                    move_z: 0.9,
+                    ..Default::default()
+                });
+            }
+            (s.flags, s.score)
+        };
+        let a = play();
+        let b = play();
+        assert_eq!(
+            format!("{:?}", a),
+            format!("{:?}", b),
+            "CTF flag state must replay exactly"
+        );
+    }
+
     #[test]
     fn dodge_roll_dashes_low_and_cools_down() {
         let mut s = TdmSim::new(cfg(11, 5, Mode::Tdm, MapKind::Arena));
@@ -22504,6 +23104,10 @@ mod tests {
             (Mode::Koth, MapKind::Gardens, 3, true, 0xA110),
             // Extraction moved to Gardens with the Battlefield's removal
             (Mode::Extraction, MapKind::Gardens, 6, true, 0xA110),
+            // §CTF on its own yard. The scripted policy has no flag
+            // logic yet, so this is a SANITY run - does a flag match
+            // stay finite and keep moving - not a capture-rate probe.
+            (Mode::Ctf, MapKind::CtfYard, 4, true, 0xA110),
             // bots-only KOTH bias probes: is the Red tilt systemic, or an
             // artifact of the scripted player feeding on Blue?
             (Mode::Koth, MapKind::Arena, 4, false, 0xBEE5),
