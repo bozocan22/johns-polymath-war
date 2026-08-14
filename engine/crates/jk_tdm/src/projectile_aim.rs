@@ -62,16 +62,19 @@ use crate::{CamCtl, Game, GameState, GunKind};
 
 // ---- §5/§14: the pre-aim zoom --------------------------------------------
 
-/// The bow's pre-aim magnification. The owner's spec asks for "roughly
-/// 1.3x" and is explicit that this is NOT a sniper scope: "Keep the zoom
-/// subtle."
-pub const BOW_PREAIM_MAG: f32 = 1.3;
+/// The bow's pre-aim magnification.
+///
+/// §owner (2026-08-14): raised from the original 1.3x to 2x - the owner
+/// asked explicitly for the pre-aim pull to be twice the hip FOV, for
+/// both the bow and the spear. `preaim_fov_deg`'s §15 rule (the zoom must
+/// make the trajectory easier to read, never crop it) still applies; it
+/// is a rule about the ARC staying on screen, not a cap on the number.
+pub const BOW_PREAIM_MAG: f32 = 2.0;
 
-/// The spear's, from §9: "use approximately 1.3x zoom". The same number
-/// the bow asks for, kept as its OWN constant rather than one shared
+/// The spear's. Kept as its OWN constant rather than one shared
 /// `PREAIM_MAG` because the spec states it per weapon and a future
-/// retune of one must not silently move the other.
-pub const SPEAR_PREAIM_MAG: f32 = 1.3;
+/// retune of one must not silently move the other. See `BOW_PREAIM_MAG`.
+pub const SPEAR_PREAIM_MAG: f32 = 2.0;
 
 /// The grenade's, from §12: "enter approximately 1.3x zoom IF
 /// APPROPRIATE". It is appropriate for the same reason it was for the
@@ -1141,22 +1144,24 @@ mod tests {
         assert!((magnified_fov_deg(90.0, 0.5) - 90.0).abs() < 1e-3);
     }
 
-    /// The zoom is SUBTLE, per the owner. Pin the band: a real scope
-    /// pull would be far more than this. If someone retunes
-    /// `BOW_PREAIM_MAG` up to scope territory this fails and makes them
-    /// argue for it.
+    /// Pin the band at the owner's 2x spec (raised 2026-08-14 from the
+    /// original 1.3x "subtle" pull). Still bounded well short of an
+    /// actual sniper scope pull (§5.2's 40deg/10deg two-stage zoom),
+    /// which is what `preaim_fov_deg` must never reach for a bow.
     #[test]
-    fn bow_preaim_zoom_is_subtle_not_a_scope() {
+    fn bow_preaim_zoom_is_2x_not_a_sniper_scope() {
         let hip = 90.0;
         let z = preaim_fov_deg(hip, AimWeapon::Bow);
         assert!(z < hip, "the bow must actually zoom");
-        // narrower than hip, but by less than 20 degrees - the reverted
-        // `zoom_deg` pull was 32 degrees and cropped the arc
-        assert!(hip - z < 20.0, "zoom pulled {} degrees", hip - z);
-        assert!(hip - z > 5.0, "zoom is imperceptible");
+        // 2x magnification, by the same tangent relation - derived
+        // longhand rather than read off the function under test
+        let want = 2.0 * (1.0_f32 / 2.0).atan().to_degrees();
+        assert!((z - want).abs() < 1e-3, "bow pre-aim FOV {z}");
+        // well short of the scoped-class 10deg stage-2 pull
+        assert!(z > 15.0, "zoom pulled into scope territory: {z} deg");
     }
 
-    /// §9: the spear takes the same 1.3x pull the bow does, and it is
+    /// §9: the spear takes the same 2x pull the bow does, and it is
     /// the PROJECTILE weapons only - a rifle's pre-aim is not this.
     ///
     /// FAILS on the pre-change code, where `preaim_fov_deg` returned the
@@ -1166,12 +1171,12 @@ mod tests {
         let hip = 90.0;
         let spear = preaim_fov_deg(hip, AimWeapon::Spear);
         assert!(spear < hip, "the spear must actually zoom, got {spear}");
-        // approximately 1.3x, by the same tangent relation - derived
+        // approximately 2x, by the same tangent relation - derived
         // longhand rather than read off the function under test
-        let want = 2.0 * (1.0_f32 / 1.3).atan().to_degrees();
+        let want = 2.0 * (1.0_f32 / 2.0).atan().to_degrees();
         assert!((spear - want).abs() < 1e-3, "spear pre-aim FOV {spear}");
-        // and subtle, by the same band the bow is held to
-        assert!(hip - spear < 20.0 && hip - spear > 5.0);
+        // same band the bow is held to
+        assert!(spear > 15.0, "zoom pulled into scope territory: {spear} deg");
         // guns are untouched
         let m4 = aim_weapon(GunKind::M4, false);
         assert_eq!(preaim_fov_deg(hip, m4), hip);

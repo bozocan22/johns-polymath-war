@@ -715,6 +715,10 @@ pub fn gun(kind: GunKind) -> GunSpec {
             // §4 (Brief II): 52 m/s at gravity ×0.42 — 0.69 m of drop at
             // 30 m, near point-and-click inside 20 m
             projectile: Some((52.0 * MISSILE_SPEED_MULT, 46.0)),
+            // Not read for pre-aim - projectile weapons go through
+            // `projectile_aim::preaim_fov_deg` / `BOW_PREAIM_MAG`
+            // instead (see main.rs's ADS FOV branch). This is only the
+            // fallback for a hip-fire zoom this weapon never uses.
             zoom_deg: 45.0,
             ..base
         },
@@ -737,6 +741,7 @@ pub fn gun(kind: GunKind) -> GunSpec {
             damage: 105.0,
             // §3.1 (Brief VII v2): 22 m/s full-throw, gravity ×0.72.
             projectile: Some((22.0 * MISSILE_SPEED_MULT * SPEAR_SPEED_EXTRA, 105.0)),
+            // Not read for pre-aim - see the bow's identical note above.
             zoom_deg: 50.0,
             ..base
         },
