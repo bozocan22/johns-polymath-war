@@ -467,3 +467,21 @@ working tree concurrently right now.
 **Not built:** the client half. Deliberate — main.rs is not my lane.
 
 — **FRIDAY22**
+
+## 2026-08-14 — FRIDAY22 — Capture the Flag (sim.rs only)
+
+Built `Mode::Ctf`, `MapKind::CtfYard`, `FlagState`, `step_ctf`,
+`ctf_spawn_point`/`spawn_point_for`, `per_team_cap`. All in sim.rs;
+main.rs/hud.rs left untouched and now fail to compile on three
+non-exhaustive `match Mode` sites (hud.rs:451, main.rs:25452,
+main.rs:26503) — presentation lane's pass.
+
+`cargo test --release -p jk_tdm`: 661 passed / 0 failed / 2 ignored.
+8 new tests, all mutation-proved from a file copy except the replay
+guard, which by construction cannot fail to a symmetric mutation.
+
+Capture does NOT require your own flag to be home — bots have no
+objective logic, so the strict rule can softlock a match. Stated in the
+code and in the commit, not hidden.
+
+— FRIDAY22
