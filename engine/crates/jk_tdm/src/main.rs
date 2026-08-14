@@ -53,6 +53,9 @@ mod branding;
 /// its vibration. Its own module for the reason `branding` is: it wires
 /// in with two lines here, so it costs this file nothing to own.
 mod cockpit;
+/// §CTF: the flag props and the carry banner. Two lines of wiring, the
+/// rest owned by the module (see `branding.rs` for the pattern).
+mod ctf_vis;
 /// §7 (owner spec): the grenade you are holding, and the fist holding
 /// it. Same two-line wiring as `branding` and `cockpit`.
 /// §owner HAND GRAPHICS: the two camera handles a hand needs and this
@@ -7858,6 +7861,7 @@ fn capture_script(name: &str) -> &'static [CapBeat] {
         bailey_capture::SCRIPT => bailey_capture::BEATS,
         loadout_edge::capture::SCRIPT => loadout_edge::capture::BEATS,
         threat_sensor::capture::SCRIPT => threat_sensor::capture::BEATS,
+        ctf_vis::capture::SCRIPT => ctf_vis::capture::BEATS,
         _ => &[],
     }
 }
@@ -7886,7 +7890,7 @@ fn capture_dir(script: &str) -> String {
 /// Populated once at Startup from `JK_CAPTURE`; if unset, every capture
 /// system below is a no-op and the game behaves exactly as launched by a
 /// human.
-const CAPTURE_SCRIPTS: [&str; 52] = [
+const CAPTURE_SCRIPTS: [&str; 53] = [
     // THE EDGE LOADOUT CARD. Its own beats, because no script here
     // could photograph a HUD element that is only up for 1.75 s after
     // a keypress - see loadout_edge::capture.
@@ -7896,6 +7900,10 @@ const CAPTURE_SCRIPTS: [&str; 52] = [
     // enemy at the subject on purpose, which is why "who can see me"
     // was unphotographable.
     threat_sensor::capture::SCRIPT,
+    // §CTF: the flags. No script had ever entered the mode, so its two
+    // props and its carry banner were unphotographable - the instrument
+    // gap that hid the first-person bow for months.
+    ctf_vis::capture::SCRIPT,
     // The CASTLE BAILEY. Every other script here deploys onto
     // `Selected::default().map` (Arena), so the 130 m castle map had
     // never appeared in a single frame this project has taken.
@@ -8184,6 +8192,17 @@ fn capture_quick_deploy(
         Some("muzzle_flash") => {
             sel.loadout = [GunKind::Ak47, GunKind::Glock, GunKind::Awm];
         }
+        // §CTF: the flag script runs on the yard the mode was authored
+        // for. Set here for the same reason `bailey_capture` sets its
+        // map here - `start_match` reads `Selected` after this point.
+        Some(ctf_vis::capture::SCRIPT) => {
+            sel.map = MapKind::CtfYard;
+            // EASY, because this script stages the subject six metres
+            // inside the enemy half and the defenders are real. On
+            // Normal the run to the stand is a coin toss against a
+            // death cam - which is the frame the first attempt got.
+            sel.difficulty = Difficulty::Easy;
+        }
         Some("arrow_flight") => sel.loadout[2] = GunKind::Bow,
         Some("spear_flight") => sel.loadout[2] = GunKind::Spear,
         _ => {}
@@ -8193,6 +8212,7 @@ fn capture_quick_deploy(
     // TDM it has always had.
     let mode = match cap.script.as_deref() {
         Some("mech_gallery") => Mode::Training,
+        Some(ctf_vis::capture::SCRIPT) => Mode::Ctf,
         _ => Mode::Tdm,
     };
     start_match(&sel, mode, &mut game, &mut next);
@@ -8215,6 +8235,32 @@ fn capture_quick_deploy(
         f.pos = stage;
         home.0 = Some(stage);
         f.yaw = 0.0;
+    }
+    if cap.script.as_deref() == Some(ctf_vis::capture::SCRIPT) {
+        // Plant the subject a short walk from the ENEMY stand, looking
+        // at it. The default spawn is next to your OWN flag and 100 m of
+        // yard from theirs, which at MOVE_SPEED is twenty seconds - so
+        // the naive version of this script would have photographed
+        // nothing but a distant pole and then ended.
+        //
+        // Which flag is "theirs" is asked the way the sim asks it:
+        // `flags[i]` is team i's OWN flag, so the takeable one is the
+        // other index. Not hardcoded to 1 - the player is not always
+        // Blue.
+        let mine = TdmSim::team_idx(game.sim.fighters[game.sim.player].team);
+        let target = game.sim.flags[1 - mine].home;
+        // Approach from the middle of the map, so the walk is INTO the
+        // stand rather than into the wall behind it. The stands sit on
+        // the z axis, so the approach is a z offset and the facing is
+        // the yaw that looks back along it. (yaw 0 faces world +Z, the
+        // same convention `mech_gallery` above pins itself to.)
+        let toward_center = if target[2] > 0.0 { -1.0 } else { 1.0 };
+        let stage = [target[0], target[1], target[2] + toward_center * 6.0];
+        let me = game.sim.player;
+        let f = &mut game.sim.fighters[me];
+        f.pos = stage;
+        f.yaw = if toward_center < 0.0 { 0.0 } else { PI };
+        home.0 = Some(stage);
     }
     if matches!(
         cap.script.as_deref(),
@@ -9151,6 +9197,8 @@ enum ModeButton {
     Koth,
     /// §8: co-op zombie extraction.
     Extraction,
+    /// §CTF: their flag, your stand, three times.
+    Ctf,
     // (§owner FRONT END: `Training` was a fourth variant here. The range
     // is entered from the MAIN MENU now, which calls `begin_match` with
     // `training_config()` directly and never touches `Selected` - so a
@@ -9535,6 +9583,9 @@ fn main() {
         // when JK_CAPTURE is set so it never lands in a scripted capture.
         .add_plugins(branding::BrandingPlugin)
         .add_plugins(projectile_aim::PreaimPlugin)
+        // §CTF: the two flag props and the carry banner. Inert in every
+        // other mode - it spawns nothing unless `sim.mode == Mode::Ctf`.
+        .add_plugins(ctf_vis::CtfVisPlugin)
         // §owner FRONT END: the title / learn / main-menu / result
         // screens. Two lines, exactly like `branding` above.
         .add_plugins(frontend::FrontendPlugin)
@@ -25458,6 +25509,10 @@ fn hud_system(
                 "HILL   BLUE {:>3.0}s - {:<3.0}s RED   (hold {:.0}s)",
                 simr.score[0], simr.score[1], KOTH_TARGET_S
             ),
+            Mode::Ctf => format!(
+                "FLAGS  BLUE {:>2} - {:<2} RED   (first to {})",
+                simr.score[0] as u32, simr.score[1] as u32, CTF_TARGET_CAPTURES
+            ),
             Mode::Training => {
                 "TRAINING RANGE   targets reset themselves - nothing shoots back"
                     .to_string()
@@ -26503,6 +26558,8 @@ fn scoreboard_system(
                 match game.sim.mode {
                     Mode::Tdm => format!("{:.0}", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Koth => format!("{:.0}s", game.sim.score[TdmSim::team_idx(team)]),
+                    Mode::Ctf =>
+                        format!("{:.0} captures", game.sim.score[TdmSim::team_idx(team)]),
                     Mode::Extraction => format!("{} horde", game.sim.zombies.len()),
                     // no team score on the range - kills are the readout
                     Mode::Training => "range".to_string(),
@@ -27291,11 +27348,15 @@ fn open_intro(
                 .map(|d| (d.name(), DiffButton(*d)))
                 .collect();
             menu_ui::pill_row(b, "DIFFICULTY", &diffs, mtch);
-            // §owner: 8v8 withdrawn. The battle-size row keeps its
-            // shape for whatever replaces it rather than being deleted
-            // outright - a one-option row still tells the player the
-            // axis exists.
-            let sizes: Vec<(&str, SizeButton)> = vec![("5 v 5", SizeButton(5))];
+            // §owner (2026-08-14): 8 v 8 IS BACK. It was withdrawn, and
+            // the row was kept as a single pill on the argument that a
+            // one-option row still tells the player the axis exists; the
+            // axis now has two ends again. CTF does not get the 16-man
+            // option - `per_team_cap(Mode::Ctf)` is 6 - and that is
+            // enforced in `match_config`, not here, because this row is
+            // built before any mode is chosen.
+            let sizes: Vec<(&str, SizeButton)> =
+                vec![("5 v 5", SizeButton(5)), ("8 v 8", SizeButton(8))];
             menu_ui::pill_row(b, "BATTLE SIZE", &sizes, mtch);
             let targets: Vec<(&str, ScoreButton)> = vec![
                 ("30 KILLS", ScoreButton(30)),
@@ -27320,6 +27381,7 @@ fn open_intro(
             for (name, obj, which) in [
                 ("TEAM DEATHMATCH", "first to your chosen score", ModeButton::Tdm),
                 ("KING OF THE HILL", "hold the center 90 s", ModeButton::Koth),
+                ("CAPTURE THE FLAG", "take their flag home 3 times - 6 a side", ModeButton::Ctf),
             ] {
                 menu_ui::menu_row(
                     b,
@@ -27547,7 +27609,16 @@ fn match_config(sel: &Selected, mode: Mode) -> MatchConfig {
     };
     MatchConfig {
         seed: 0x7EA9,
-        per_team: sel.per_team,
+        // §CTF (2026-08-14): the BATTLE SIZE row is one row for every
+        // mode, and a mode is not chosen until the button that LAUNCHES
+        // is pressed - so there is no moment on the setup page at which
+        // an 8 v 8 pill could be greyed out for CTF. The cap is applied
+        // here instead, at the one funnel every start goes through, and
+        // it is the SIM's `per_team_cap`, not a second client-side `6`.
+        // (`TdmSim::new` clamps again; that is belt-and-braces, not the
+        // reason this line exists - without it the menu would report a
+        // roster the match does not have.)
+        per_team: sel.per_team.clamp(1, per_team_cap(mode)),
         mode,
         map,
         difficulty: sel.difficulty,
@@ -27601,6 +27672,7 @@ fn intro_buttons(
                     ModeButton::Tdm => Mode::Tdm,
                     ModeButton::Koth => Mode::Koth,
                     ModeButton::Extraction => Mode::Extraction,
+                    ModeButton::Ctf => Mode::Ctf,
                 };
                 start_match(&sel, mode, &mut game, &mut next);
             }
@@ -28535,9 +28607,11 @@ fn open_manual(
         .to_string();
     let modes = format!(
         "TDM first to {:.0} - KOTH hold the center {:.0} s -\n\
+         CTF run their flag to your stand {} times, 6 a side -\n\
          {:.0}-min clock, {:.0} s sudden-death overtime.",
         TDM_TARGET,
         KOTH_TARGET_S,
+        CTF_TARGET_CAPTURES,
         MATCH_LEN_S / 60.0,
         OVERTIME_S,
     );

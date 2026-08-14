@@ -453,6 +453,9 @@ fn score_line(mode: Mode, blue: f32, red: f32, horde: usize) -> (String, String)
         Mode::Koth => (format!("{:.0}s", blue), format!("{:.0}s", red)),
         Mode::Training => ("RANGE".to_string(), String::new()),
         Mode::Extraction => (format!("{horde}"), "HORDE".to_string()),
+        // Captures, not kills. The unit rides on the number the way
+        // Koth's `s` does, or a 2-1 CTF board reads like a 2-1 TDM one.
+        Mode::Ctf => (format!("{:.0} CAP", blue), format!("{:.0} CAP", red)),
     }
 }
 
@@ -2282,6 +2285,17 @@ mod tests {
         }
     }
 
+    /// CTF scores are CAPTURES and must say so. A bare `2 - 1` in this
+    /// row reads as kills, which is the one other thing this exact row
+    /// shows. (This arm was a compile hole until the CTF client pass -
+    /// `Mode::Ctf` landed in the sim with no display for it.)
+    #[test]
+    fn ctf_score_is_labelled_as_captures() {
+        let (blue, red) = score_line(Mode::Ctf, 2.0, 1.0, 0);
+        assert!(blue.contains("CAP") && red.contains("CAP"), "{blue:?} / {red:?}");
+        assert!(blue.starts_with('2') && red.starts_with('1'));
+    }
+
     /// The score line carries scores and nothing else. The old one
     /// carried `(first to 30)`, a tutorial sentence, `pressure  63%`,
     /// `HORDE 12` and raw world coordinates.
@@ -2292,6 +2306,7 @@ mod tests {
             (Mode::Koth, 0),
             (Mode::Training, 0),
             (Mode::Extraction, 12),
+            (Mode::Ctf, 0),
         ] {
             let (a, b) = score_line(mode, 12.0, 8.0, horde);
             for s in [&a, &b] {

@@ -5860,3 +5860,96 @@ mod deagle_model_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ctf_menu_tests {
+    use crate::*;
+
+    /// The BATTLE SIZE row is shared by every mode, so an 8 v 8 pill
+    /// picked before CTF was chosen must not smuggle a 16-man roster
+    /// into a mode the sim caps at 6 a side. `match_config` is the one
+    /// funnel every start goes through, so the cap lives there.
+    ///
+    /// Fails on the pre-change code twice over: `ModeButton::Ctf` did
+    /// not exist, and `per_team` was passed through raw.
+    #[test]
+    fn ctf_clamps_the_battle_size_the_other_modes_keep() {
+        let big = Selected { per_team: 8, ..Selected::default() };
+        assert_eq!(
+            match_config(&big, Mode::Tdm).per_team,
+            8,
+            "8 v 8 is back for the ordinary modes - this is the control"
+        );
+        assert_eq!(
+            match_config(&big, Mode::Koth).per_team,
+            8,
+            "the cap is CTF's, not a blanket one"
+        );
+        assert_eq!(
+            match_config(&big, Mode::Ctf).per_team,
+            per_team_cap(Mode::Ctf),
+            "CTF took a roster wider than the sim's own cap"
+        );
+        // ...and the cap is not a client-side literal: it is whatever
+        // the sim says it is, which is the whole point of using
+        // `per_team_cap` rather than writing `6` here a second time.
+        assert!(per_team_cap(Mode::Ctf) < per_team_cap(Mode::Tdm));
+    }
+
+    /// A size that already fits is left exactly alone - the clamp must
+    /// not quietly become "CTF is always 6 a side".
+    #[test]
+    fn a_small_roster_survives_ctf_untouched() {
+        let small = Selected { per_team: 3, ..Selected::default() };
+        assert_eq!(match_config(&small, Mode::Ctf).per_team, 3);
+    }
+
+    /// The mode threads through to the sim, and the sim builds flags for
+    /// it. The menu button maps to `Mode::Ctf`; this asserts the far end
+    /// of that wire rather than the button itself, which needs a World.
+    #[test]
+    fn ctf_selection_reaches_a_sim_with_two_flags() {
+        let sel = Selected { map: MapKind::CtfYard, per_team: 8, ..Selected::default() };
+        let sim = TdmSim::new(match_config(&sel, Mode::Ctf));
+        assert_eq!(sim.mode, Mode::Ctf);
+        assert_eq!(sim.map, MapKind::CtfYard);
+        assert!(sim.fighters.len() <= per_team_cap(Mode::Ctf) * 2);
+        // The two stands are on opposite sides of the same axis, which
+        // is what makes "run it home" a direction rather than a search.
+        assert!(
+            sim.flags[0].home[2] * sim.flags[1].home[2] < 0.0,
+            "both stands ended up on the same side of the map"
+        );
+        for f in &sim.flags {
+            assert!(f.at_home && f.carrier.is_none());
+        }
+    }
+
+    /// The carry banner says the three things it can say and nothing
+    /// else. Off in every non-CTF mode - a permanent line for a mode
+    /// that is not running is the HUD clutter §4 exists to prevent.
+    #[test]
+    fn the_carry_banner_tracks_the_flags() {
+        let sel = Selected { map: MapKind::CtfYard, ..Selected::default() };
+        let mut sim = TdmSim::new(match_config(&sel, Mode::Ctf));
+        assert_eq!(ctf_vis::carry_line(&sim), None, "idle CTF should say nothing");
+
+        let me = sim.player;
+        let my_idx = TdmSim::team_idx(sim.fighters[me].team);
+        sim.flags[1 - my_idx].carrier = Some(me);
+        sim.flags[1 - my_idx].at_home = false;
+        let line = ctf_vis::carry_line(&sim).expect("carrying should announce itself");
+        assert!(line.contains("THEIR FLAG"), "unhelpful carry line: {line:?}");
+
+        // Their flag taken by someone else, mine gone: the defensive
+        // half of the state.
+        sim.flags[1 - my_idx].carrier = None;
+        sim.flags[my_idx].at_home = false;
+        let line = ctf_vis::carry_line(&sim).unwrap();
+        assert!(line.contains("YOUR FLAG"), "unhelpful defence line: {line:?}");
+
+        let tdm = TdmSim::new(match_config(&sel, Mode::Tdm));
+        assert_eq!(ctf_vis::carry_line(&tdm), None, "the banner leaked into TDM");
+    }
+
+}
